@@ -45,6 +45,7 @@ public:
 
     Frame EndFrame() const { return fStart + fLength; }
     bool  Valid() const { return fSource.IsValid(); }
+    float SourceRate() const { return fSource.FrameRate(); }
 
 private:
     void DiskLoop();             // producer thread body
@@ -52,8 +53,8 @@ private:
     std::string fPath;
     Frame       fStart;
     Frame       fLength;
-    float       fGain;
-    float       fPan;            // reserved for M3; unused in M2 mix
+    float       fGainL;         // per-channel gain after equal-power pan
+    float       fGainR;
 
     WavSource   fSource;
     RingBuffer  fRing;

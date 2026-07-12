@@ -42,6 +42,22 @@ private:
     float   fOldGain = 1.0f;
 };
 
+// Change a track's pan (-1 left .. +1 right). Stores previous for Undo().
+class SetTrackPanCommand : public Command {
+public:
+    SetTrackPanCommand(TrackId track, float pan)
+        : fTrack(track), fNewPan(pan) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Pan"; }
+
+private:
+    TrackId fTrack;
+    float   fNewPan;
+    float   fOldPan = 0.0f;
+};
+
 // Add a clip to a track. Allocates a clip id in Do(); Undo() removes it.
 class AddClipCommand : public Command {
 public:

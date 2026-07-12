@@ -35,6 +35,21 @@ void SetTrackGainCommand::Undo(Project& p) {
         t->gain = fOldGain;
 }
 
+// --- SetTrackPanCommand -----------------------------------------------
+
+bool SetTrackPanCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldPan = t->pan;
+    t->pan  = fNewPan;
+    return true;
+}
+
+void SetTrackPanCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->pan = fOldPan;
+}
+
 // --- AddClipCommand ---------------------------------------------------
 
 bool AddClipCommand::Do(Project& p) {

@@ -3,6 +3,7 @@
 #include <MediaDefs.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -18,7 +19,15 @@ static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
 TrackStream::TrackStream(const std::string& path, Frame startFrame,
                          Frame lengthFrames, float gain, float pan)
     : fPath(path), fStart(startFrame), fLength(lengthFrames),
-      fGain(gain), fPan(pan), fRing(kRingFloats) {}
+      fRing(kRingFloats) {
+    // Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each),
+    // +1 = hard right. Fold the track gain into the per-channel gains.
+    if (pan < -1.0f) pan = -1.0f;
+    if (pan >  1.0f) pan =  1.0f;
+    const float theta = (pan * 0.5f + 0.5f) * float(M_PI) * 0.5f;
+    fGainL = gain * std::cos(theta);
+    fGainR = gain * std::sin(theta);
+}
 
 TrackStream::~TrackStream() {
     StopThread();
@@ -84,8 +93,8 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         if (fRing.Read(lr, 2) < 2)
             continue;   // underrun -> silence for this frame
 
-        out[i * 2 + 0] += lr[0] * fGain;
-        out[i * 2 + 1] += lr[1] * fGain;
+        out[i * 2 + 0] += lr[0] * fGainL;
+        out[i * 2 + 1] += lr[1] * fGainR;
     }
 }
 
@@ -114,10 +123,19 @@ status_t Engine::Load(const Project& project) {
     }
     fOutputRate = fPlayer->Format().frame_rate;
 
-    // Build one stream per audio clip.
+    // Solo overrides mute: if any audio track is soloed, only soloed
+    // (non-muted) tracks play.
+    bool anySolo = false;
+    for (const Track& t : project.Tracks())
+        if (t.type == TrackType::Audio && t.soloed && !t.muted)
+            anySolo = true;
+
+    // Build one stream per audio clip on an audible track.
     fEndFrame = 0;
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Audio || t.muted)
+            continue;
+        if (anySolo && !t.soloed)
             continue;
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty())
@@ -129,7 +147,11 @@ status_t Engine::Load(const Project& project) {
                         c.sourcePath.c_str());
                 continue;
             }
-            // Warn on sample-rate mismatch (no resampling in M2).
+            // No resampling yet: warn if a file's rate != the output rate.
+            if (s->SourceRate() != fOutputRate)
+                fprintf(stderr, "Engine: WARNING '%s' is %.0f Hz but output "
+                        "is %.0f Hz (will play at wrong pitch)\n",
+                        c.sourcePath.c_str(), s->SourceRate(), fOutputRate);
             if (s->EndFrame() > fEndFrame)
                 fEndFrame = s->EndFrame();
             fStreams.push_back(std::move(s));

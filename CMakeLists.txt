@@ -42,4 +42,7 @@ if(HAIKU)
 
     add_executable(play_clip prototypes/play_clip/main.cpp)
     target_link_libraries(play_clip PRIVATE daw_engine)
+
+    add_executable(mix_project prototypes/mix_project/main.cpp)
+    target_link_libraries(mix_project PRIVATE daw_engine)
 endif()
