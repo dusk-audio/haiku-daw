@@ -1,0 +1,79 @@
+// Concrete edit commands. Each captures enough state in Do() to reverse
+// itself exactly in Undo(). This starter set proves the pattern across the
+// three mutation shapes: create, delete-implied, and property change.
+#pragma once
+
+#include "Command.h"
+
+namespace daw {
+
+// Add a new track. Allocates a fresh id via Project::NextTrackId in Do()
+// and stores it so Undo() can remove exactly this track.
+class AddTrackCommand : public Command {
+public:
+    AddTrackCommand(TrackType type, std::string name)
+        : fType(type), fName(std::move(name)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Add Track"; }
+
+    TrackId CreatedId() const { return fCreatedId; }
+
+private:
+    TrackType   fType;
+    std::string fName;
+    TrackId     fCreatedId = kInvalidTrackId;
+};
+
+// Change a track's linear gain. Stores the previous value for Undo().
+class SetTrackGainCommand : public Command {
+public:
+    SetTrackGainCommand(TrackId track, float gain)
+        : fTrack(track), fNewGain(gain) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Gain"; }
+
+private:
+    TrackId fTrack;
+    float   fNewGain;
+    float   fOldGain = 1.0f;
+};
+
+// Add a clip to a track. Allocates a clip id in Do(); Undo() removes it.
+class AddClipCommand : public Command {
+public:
+    AddClipCommand(TrackId track, Clip clip)
+        : fTrack(track), fClip(std::move(clip)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Add Clip"; }
+
+    ClipId CreatedId() const { return fClip.id; }
+
+private:
+    TrackId fTrack;
+    Clip    fClip;   // fClip.id is filled in during Do()
+};
+
+// Move a clip to a new start position. Stores the old position for Undo().
+class MoveClipCommand : public Command {
+public:
+    MoveClipCommand(TrackId track, ClipId clip, Frame newStart)
+        : fTrack(track), fClip(clip), fNewStart(newStart) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Move Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewStart;
+    Frame   fOldStart = 0;
+};
+
+} // namespace daw

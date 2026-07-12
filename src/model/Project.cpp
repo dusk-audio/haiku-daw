@@ -1,0 +1,74 @@
+#include "Project.h"
+
+#include <algorithm>
+
+namespace daw {
+
+// --- Track ------------------------------------------------------------
+
+Clip* Track::FindClip(ClipId id) {
+    for (auto& c : clips)
+        if (c.id == id) return &c;
+    return nullptr;
+}
+
+const Clip* Track::FindClip(ClipId id) const {
+    for (const auto& c : clips)
+        if (c.id == id) return &c;
+    return nullptr;
+}
+
+// --- Project ----------------------------------------------------------
+
+Track* Project::FindTrack(TrackId id) {
+    for (auto& t : fTracks)
+        if (t.id == id) return &t;
+    return nullptr;
+}
+
+const Track* Project::FindTrack(TrackId id) const {
+    for (const auto& t : fTracks)
+        if (t.id == id) return &t;
+    return nullptr;
+}
+
+bool Project::AddTrack(const Track& t) {
+    if (t.id == kInvalidTrackId || FindTrack(t.id) != nullptr)
+        return false;
+    fTracks.push_back(t);
+    return true;
+}
+
+bool Project::RemoveTrack(TrackId id) {
+    auto it = std::find_if(fTracks.begin(), fTracks.end(),
+                           [&](const Track& t) { return t.id == id; });
+    if (it == fTracks.end()) return false;
+    fTracks.erase(it);
+    return true;
+}
+
+bool Project::AddClip(TrackId track, const Clip& c) {
+    Track* t = FindTrack(track);
+    if (t == nullptr || c.id == kInvalidClipId || t->FindClip(c.id))
+        return false;
+    // Keep clips sorted by start position so the engine can walk them in
+    // timeline order without re-sorting each playback pass.
+    auto it = std::lower_bound(t->clips.begin(), t->clips.end(), c,
+        [](const Clip& a, const Clip& b) {
+            return a.startFrame < b.startFrame;
+        });
+    t->clips.insert(it, c);
+    return true;
+}
+
+bool Project::RemoveClip(TrackId track, ClipId clip) {
+    Track* t = FindTrack(track);
+    if (t == nullptr) return false;
+    auto it = std::find_if(t->clips.begin(), t->clips.end(),
+                           [&](const Clip& c) { return c.id == clip; });
+    if (it == t->clips.end()) return false;
+    t->clips.erase(it);
+    return true;
+}
+
+} // namespace daw
