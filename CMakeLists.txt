@@ -50,4 +50,13 @@ if(HAIKU)
 
     add_executable(mix_project prototypes/mix_project/main.cpp)
     target_link_libraries(mix_project PRIVATE daw_engine)
+
+    # --- The app: timeline UI (milestone 4) ---------------------------
+    add_executable(daw
+        src/main.cpp
+        src/ui/TimelineView.cpp
+        src/ui/MainWindow.cpp
+    )
+    # -lbe (Application/Interface Kit). daw_engine pulls in daw_model + media.
+    target_link_libraries(daw PRIVATE daw_engine be)
 endif()
