@@ -22,3 +22,19 @@ enable_testing()
 add_executable(model_tests tests/model_tests.cpp)
 target_link_libraries(model_tests PRIVATE daw_model)
 add_test(NAME model_tests COMMAND model_tests)
+
+# --- Haiku-only targets: the Media Kit engine and its driver ----------
+# CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
+# skipped so the model layer + tests still build for fast iteration.
+if(HAIKU)
+    add_library(daw_engine
+        src/engine/WavSource.cpp
+        src/engine/Engine.cpp
+    )
+    target_include_directories(daw_engine PUBLIC src)
+    # -lbe (app/interface), -lmedia (BSoundPlayer/BMediaFile), -lroot.
+    target_link_libraries(daw_engine PUBLIC daw_model be media root)
+
+    add_executable(play_clip prototypes/play_clip/main.cpp)
+    target_link_libraries(play_clip PRIVATE daw_engine)
+endif()
