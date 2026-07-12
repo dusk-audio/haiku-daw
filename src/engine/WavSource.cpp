@@ -1,127 +1,162 @@
 #include "WavSource.h"
 
-#include <Entry.h>          // get_ref_for_path, entry_ref
-#include <MediaDefs.h>
-
 #include <cstdio>
 #include <cstring>
 
 namespace daw {
 
-WavSource::~WavSource() {
-    if (fFile) {
-        if (fTrack)
-            fFile->ReleaseTrack(fTrack);
-        delete fFile;   // BMediaFile owns/closes itself
+namespace {
+// Little-endian readers (WAV is LE; x86 host + Haiku target).
+uint32_t rd_u32(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8)
+         | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+uint16_t rd_u16(const uint8_t* p) {
+    return uint16_t(p[0]) | (uint16_t(p[1]) << 8);
+}
+} // namespace
+
+bool WavSource::Open(const std::string& path) {
+    fFile.open(path, std::ios::binary);
+    if (!fFile) {
+        std::fprintf(stderr, "WavSource: cannot open '%s'\n", path.c_str());
+        return false;
     }
+
+    uint8_t hdr[12];
+    fFile.read(reinterpret_cast<char*>(hdr), 12);
+    if (fFile.gcount() != 12
+        || std::memcmp(hdr, "RIFF", 4) != 0
+        || std::memcmp(hdr + 8, "WAVE", 4) != 0) {
+        std::fprintf(stderr, "WavSource: not a RIFF/WAVE file\n");
+        return false;
+    }
+
+    bool haveFmt = false, haveData = false;
+    // Walk chunks until we have both fmt and data.
+    while (fFile && !(haveFmt && haveData)) {
+        uint8_t ch[8];
+        fFile.read(reinterpret_cast<char*>(ch), 8);
+        if (fFile.gcount() != 8)
+            break;
+        const uint32_t id   = rd_u32(ch);         // fourcc as bytes
+        const uint32_t size = rd_u32(ch + 4);
+        (void)id;
+
+        if (std::memcmp(ch, "fmt ", 4) == 0) {
+            std::vector<uint8_t> f(size);
+            fFile.read(reinterpret_cast<char*>(f.data()), size);
+            if (fFile.gcount() != (std::streamsize)size) break;
+            fAudioFormat    = rd_u16(&f[0]);
+            fChannels       = rd_u16(&f[2]);
+            fSampleRate     = (float)rd_u32(&f[4]);
+            fBitsPerSample  = rd_u16(&f[14]);
+            fBytesPerSample = fBitsPerSample / 8;
+            // WAVE_FORMAT_EXTENSIBLE: real format tag is in the subformat.
+            if (fAudioFormat == 0xFFFE && size >= 26)
+                fAudioFormat = rd_u16(&f[24]);
+            haveFmt = true;
+            if (size & 1) fFile.seekg(1, std::ios::cur);   // pad byte
+        } else if (std::memcmp(ch, "data", 4) == 0) {
+            fDataStart = fFile.tellg();
+            fDataBytes = size;
+            haveData = true;
+            // Don't consume data now; ReadChunk streams it.
+            break;
+        } else {
+            // Skip unknown chunk (+ pad to even boundary).
+            fFile.seekg(size + (size & 1), std::ios::cur);
+        }
+    }
+
+    if (!haveFmt || !haveData) {
+        std::fprintf(stderr, "WavSource: missing fmt or data chunk\n");
+        return false;
+    }
+    if (fChannels < 1 || fBytesPerSample < 1) {
+        std::fprintf(stderr, "WavSource: bad fmt (ch=%d bits=%d)\n",
+                     fChannels, fBitsPerSample);
+        return false;
+    }
+    if (fAudioFormat != 1 && fAudioFormat != 3) {
+        std::fprintf(stderr, "WavSource: unsupported format tag %u "
+                     "(only PCM and float)\n", fAudioFormat);
+        return false;
+    }
+
+    const int frameSize = fBytesPerSample * fChannels;
+    fTotalFrames = fDataBytes / frameSize;
+    fBytesRead = 0;
+
+    fFile.seekg(fDataStart, std::ios::beg);
+    fValid = true;
+    return true;
 }
 
-status_t WavSource::Open(const char* path) {
-    entry_ref ref;
-    status_t err = get_ref_for_path(path, &ref);
-    if (err != B_OK) {
-        fprintf(stderr, "WavSource: bad path '%s': %s\n", path, strerror(err));
-        return err;
+// Convert one source sample at p to float in [-1, 1].
+float WavSource::SampleToFloat(const uint8_t* p) const {
+    if (fAudioFormat == 3) {                 // 32-bit IEEE float
+        float v;
+        std::memcpy(&v, p, 4);
+        return v;
     }
-
-    fFile = new BMediaFile(&ref);
-    err = fFile->InitCheck();
-    if (err != B_OK) {
-        fprintf(stderr, "WavSource: BMediaFile init failed: %s\n", strerror(err));
-        return err;
-    }
-
-    // Find the first audio track in the file.
-    int32 count = fFile->CountTracks();
-    for (int32 i = 0; i < count; i++) {
-        BMediaTrack* t = fFile->TrackAt(i);
-        if (!t) continue;
-        media_format fmt;
-        memset(&fmt, 0, sizeof(fmt));
-        if (t->EncodedFormat(&fmt) == B_OK && fmt.IsAudio()) {
-            fTrack = t;
-            break;
+    switch (fBitsPerSample) {
+        case 8:   // WAV 8-bit is unsigned, midpoint 128
+            return (int(p[0]) - 128) / 128.0f;
+        case 16: {
+            int16_t v = (int16_t)rd_u16(p);
+            return v / 32768.0f;
         }
-        fFile->ReleaseTrack(t);
+        case 24: {
+            int32_t v = (int32_t(p[0]) | (int32_t(p[1]) << 8)
+                        | (int32_t(p[2]) << 16));
+            if (v & 0x800000) v |= ~0xFFFFFF;   // sign-extend
+            return v / 8388608.0f;
+        }
+        case 32: {
+            int32_t v = (int32_t)rd_u32(p);
+            return v / 2147483648.0f;
+        }
     }
-    if (!fTrack) {
-        fprintf(stderr, "WavSource: no audio track in '%s'\n", path);
-        return B_ERROR;
-    }
-
-    // Ask the decoder for raw float in the file's native channel/rate.
-    media_format dec;
-    memset(&dec, 0, sizeof(dec));
-    dec.type = B_MEDIA_RAW_AUDIO;
-    dec.u.raw_audio = media_raw_audio_format::wildcard;
-    dec.u.raw_audio.format     = media_raw_audio_format::B_AUDIO_FLOAT;
-    dec.u.raw_audio.byte_order = B_MEDIA_HOST_ENDIAN;
-
-    err = fTrack->DecodedFormat(&dec);
-    if (err != B_OK) {
-        fprintf(stderr, "WavSource: DecodedFormat failed: %s\n", strerror(err));
-        return err;
-    }
-
-    fFrameRate   = dec.u.raw_audio.frame_rate;
-    fSrcChannels = dec.u.raw_audio.channel_count;
-    fTotalFrames = fTrack->CountFrames();
-
-    if (fSrcChannels < 1) {
-        fprintf(stderr, "WavSource: bad channel count %d\n", fSrcChannels);
-        return B_ERROR;
-    }
-
-    // Size the decode buffer from the decoder's preferred buffer_size, with
-    // a sane fallback. frameSize = channels * sizeof(float).
-    const size_t frameSize = fSrcChannels * sizeof(float);
-    size_t bufBytes = dec.u.raw_audio.buffer_size;
-    if (bufBytes < frameSize)
-        bufBytes = 4096 * frameSize;
-    fDecodeFrameCap = bufBytes / frameSize;
-    fDecodeBuf.resize(fDecodeFrameCap * frameSize);
-    fStereo.resize(fDecodeFrameCap * 2);
-
-    return B_OK;
+    return 0.0f;
 }
 
 bool WavSource::ReadChunk(const float** outStereo, size_t* outFrames) {
-    if (!fTrack || fEnded)
+    if (!fValid)
         return false;
 
-    int64 frameCount = fDecodeFrameCap;
-    media_header mh;
-    status_t err = fTrack->ReadFrames(fDecodeBuf.data(), &frameCount, &mh);
+    const int frameSize = fBytesPerSample * fChannels;
+    const int64_t bytesLeft = fDataBytes - fBytesRead;
+    if (bytesLeft < frameSize)
+        return false;   // end of data
 
-    if (frameCount <= 0) {
-        fEnded = true;
-        return false;
-    }
-    // B_LAST_BUFFER_ERROR: this is the final valid chunk; deliver it, end next.
-    if (err == B_LAST_BUFFER_ERROR)
-        fEnded = true;
-    else if (err != B_OK) {
-        fEnded = true;
-        return false;
-    }
+    const size_t kBlockFrames = 8192;
+    size_t frames = bytesLeft / frameSize;
+    if (frames > kBlockFrames) frames = kBlockFrames;
 
-    // Convert native-channel float -> interleaved stereo float.
-    const float* in = reinterpret_cast<const float*>(fDecodeBuf.data());
-    const int ch = fSrcChannels;
-    for (int64 f = 0; f < frameCount; f++) {
-        float l, r;
-        if (ch == 1) {
-            l = r = in[f];
-        } else {
-            l = in[f * ch + 0];
-            r = in[f * ch + 1];   // ignore channels beyond the first two
-        }
+    const size_t rawBytes = frames * frameSize;
+    if (fRaw.size() < rawBytes) fRaw.resize(rawBytes);
+    if (fStereo.size() < frames * 2) fStereo.resize(frames * 2);
+
+    fFile.read(reinterpret_cast<char*>(fRaw.data()), rawBytes);
+    const std::streamsize got = fFile.gcount();
+    if (got <= 0) return false;
+    frames = (size_t)got / frameSize;   // in case of a short final read
+    fBytesRead += frames * frameSize;
+
+    // Convert each frame's first two channels to stereo float.
+    for (size_t f = 0; f < frames; f++) {
+        const uint8_t* base = fRaw.data() + f * frameSize;
+        float l = SampleToFloat(base);
+        float r = (fChannels == 1)
+                  ? l
+                  : SampleToFloat(base + fBytesPerSample);
         fStereo[f * 2 + 0] = l;
         fStereo[f * 2 + 1] = r;
     }
 
     *outStereo = fStereo.data();
-    *outFrames = static_cast<size_t>(frameCount);
+    *outFrames = frames;
     return true;
 }
 

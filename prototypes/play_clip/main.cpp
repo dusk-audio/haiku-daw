@@ -34,7 +34,7 @@ int main(int argc, char** argv) {
     // Probe the file up front for its length + rate so the clip and the
     // output are sized correctly.
     WavSource probe;
-    if (probe.Open(path) != B_OK) {
+    if (!probe.Open(path)) {
         std::fprintf(stderr, "could not open '%s'\n", path);
         return 1;
     }

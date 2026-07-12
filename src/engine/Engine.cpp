@@ -25,9 +25,8 @@ TrackStream::~TrackStream() {
 }
 
 status_t TrackStream::Prepare() {
-    status_t err = fSource.Open(fPath.c_str());
-    if (err != B_OK)
-        return err;
+    if (!fSource.Open(fPath))
+        return B_ERROR;
 
     fRunning.store(true);
     fDiskThread = std::thread(&TrackStream::DiskLoop, this);

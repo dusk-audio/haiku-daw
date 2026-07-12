@@ -1,22 +1,21 @@
-// WavSource — decodes an audio file to interleaved stereo float via the
-// Media Kit (BMediaFile/BMediaTrack). Any format the installed translators
-// understand works (wav, aiff, ...), not just literal .wav.
+// WavSource — a self-contained RIFF/WAVE reader.
 //
-// Output is always 2-channel interleaved float, regardless of the source
-// channel count (mono is duplicated, >2 is downmixed to the first two),
-// so the ring buffer and mixer downstream stay simple.
+// Parses uncompressed WAV files directly (PCM 8/16/24/32-bit and 32-bit
+// IEEE float) and streams them out as interleaved stereo float. It does
+// NOT use the Haiku Media Kit, on purpose: some Haiku images ship without
+// the media reader/decoder plugins, and a DAW wants to own its core audio
+// file I/O regardless. Compressed formats (mp3/flac/...) are a later job.
 //
-// NOTE: this does NOT sample-rate convert. If the file's rate differs from
-// the engine's output rate, playback pitch/speed shifts. For milestone 2,
-// use a file at the engine rate (48 kHz). Resampling is a later milestone.
+// Kit-free (std C++ only) so it builds and unit-tests on any host.
 //
-// Haiku-only: depends on the Media Kit. Not built on non-Haiku hosts.
+// Output is always 2-channel interleaved float: mono is duplicated,
+// >2 channels are downmixed to the first two. WAV data is little-endian;
+// this reads it as such (fine on x86; both host and Haiku target here).
 #pragma once
 
-#include <MediaFile.h>
-#include <MediaTrack.h>
-
 #include <cstdint>
+#include <fstream>
+#include <string>
 #include <vector>
 
 namespace daw {
@@ -24,34 +23,42 @@ namespace daw {
 class WavSource {
 public:
     WavSource() = default;
-    ~WavSource();
 
-    // Opens and prepares decoding. Returns B_OK on success.
-    status_t Open(const char* path);
+    // Parse the header. Returns true on success.
+    bool Open(const std::string& path);
 
-    bool  IsValid() const { return fTrack != nullptr; }
-    float FrameRate() const { return fFrameRate; }
-    int   SourceChannels() const { return fSrcChannels; }
+    bool    IsValid() const { return fValid; }
+    float   FrameRate() const { return fSampleRate; }
+    int     SourceChannels() const { return fChannels; }
     int64_t TotalFrames() const { return fTotalFrames; }
 
-    // Decode the next chunk. On success sets *outStereo to an internal
+    // Decode the next block. On success sets *outStereo to an internal
     // buffer of *outFrames interleaved stereo frames (2 * frames floats)
-    // and returns true. Returns false at end-of-stream (or error).
+    // and returns true. Returns false at end of the data chunk.
     // The returned pointer is valid until the next ReadChunk call.
     bool ReadChunk(const float** outStereo, size_t* outFrames);
 
 private:
-    BMediaFile*  fFile  = nullptr;
-    BMediaTrack* fTrack = nullptr;
+    std::ifstream fFile;
+    bool     fValid       = false;
 
-    float   fFrameRate   = 0.0f;
-    int     fSrcChannels = 0;
-    int64_t fTotalFrames = 0;
+    // Parsed fmt chunk.
+    uint16_t fAudioFormat = 0;   // 1=PCM, 3=float, 0xFFFE=extensible
+    int      fChannels    = 0;
+    float    fSampleRate  = 0.0f;
+    int      fBitsPerSample = 0;
+    int      fBytesPerSample = 0;
 
-    std::vector<uint8_t> fDecodeBuf;   // native-format decode target
-    std::vector<float>   fStereo;      // converted interleaved stereo out
-    size_t  fDecodeFrameCap = 0;       // frames the decode buffer holds
-    bool    fEnded = false;
+    // data chunk bounds.
+    int64_t  fDataStart   = 0;   // file offset of first sample byte
+    int64_t  fDataBytes   = 0;   // total bytes in the data chunk
+    int64_t  fBytesRead   = 0;   // consumed so far
+    int64_t  fTotalFrames = 0;
+
+    std::vector<uint8_t> fRaw;     // one block of raw file bytes
+    std::vector<float>   fStereo;  // converted interleaved stereo out
+
+    float SampleToFloat(const uint8_t* p) const;   // one sample -> [-1,1]
 };
 
 } // namespace daw
