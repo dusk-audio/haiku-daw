@@ -70,6 +70,20 @@ public:
     TrackId NextTrackId() { return ++fLastTrackId; }
     ClipId  NextClipId()  { return ++fLastClipId; }
 
+    // Reset to an empty session (used before loading a project from disk).
+    void Clear() {
+        fTracks.clear();
+        fLastTrackId = kInvalidTrackId;
+        fLastClipId  = kInvalidClipId;
+    }
+
+    // After loading tracks/clips with explicit ids, bump the allocators so
+    // newly created tracks/clips never reuse a loaded id.
+    void ReserveIds(TrackId maxTrack, ClipId maxClip) {
+        if (maxTrack > fLastTrackId) fLastTrackId = maxTrack;
+        if (maxClip  > fLastClipId)  fLastClipId  = maxClip;
+    }
+
     // Direct mutators — intended to be called by Command objects, not by
     // the UI. Return success so commands can assert their preconditions.
     bool AddTrack(const Track& t);
