@@ -112,7 +112,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     fDrag      = mode;
     fDragTrack = id;
     fDragOrig  = (mode == Drag::Gain) ? t.gain : t.pan;
-    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_FOCUS);
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     PreviewDrag(where);
 }
 
