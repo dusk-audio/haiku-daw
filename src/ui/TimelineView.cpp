@@ -83,28 +83,86 @@ void TimelineView::MouseDown(BPoint where) {
 
 void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     const TrackId id = t.id;
-    std::unique_ptr<Command> cmd;
 
+    // Mute / solo: immediate toggle commands.
     if (MuteRect(lane).Contains(where)) {
-        cmd = std::make_unique<SetTrackMuteCommand>(id, !t.muted);
-    } else if (SoloRect(lane).Contains(where)) {
-        cmd = std::make_unique<SetTrackSoloCommand>(id, !t.soloed);
-    } else if (GainRect(lane).Contains(where)) {
+        fStack->Execute(std::make_unique<SetTrackMuteCommand>(id, !t.muted),
+                        *fProject);
+        Invalidate(lane);
+        return;
+    }
+    if (SoloRect(lane).Contains(where)) {
+        fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
+                        *fProject);
+        Invalidate(lane);
+        return;
+    }
+
+    // Gain / pan: begin a drag. Grab the pointer so we keep getting move/up
+    // events even if the cursor leaves the fader.
+    Drag mode = Drag::None;
+    if (GainRect(lane).Contains(where))     mode = Drag::Gain;
+    else if (PanRect(lane).Contains(where)) mode = Drag::Pan;
+    if (mode == Drag::None)
+        return;
+
+    // TrackIndexAt() matched this lane, so this index is valid.
+    fDragLane  = static_cast<int>((lane.top - kRulerHeight)
+                                  / (kTrackHeight + kTrackGap) + 0.5f);
+    fDrag      = mode;
+    fDragTrack = id;
+    fDragOrig  = (mode == Drag::Gain) ? t.gain : t.pan;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_FOCUS);
+    PreviewDrag(where);
+}
+
+// Compute the dragged value from the cursor x and write it straight into the
+// model for live feedback. This is a transient preview only; the undoable
+// command is pushed in MouseUp.
+void TimelineView::PreviewDrag(BPoint where) {
+    Track* t = fProject->FindTrack(fDragTrack);
+    if (!t) return;
+    BRect lane = LaneRect(fDragLane);
+
+    if (fDrag == Drag::Gain) {
         BRect g = GainRect(lane);
         float v = (where.x - g.left) / g.Width() * kMaxGain;
         if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
-        cmd = std::make_unique<SetTrackGainCommand>(id, v);
-    } else if (PanRect(lane).Contains(where)) {
+        t->gain = v;
+    } else if (fDrag == Drag::Pan) {
         BRect pr = PanRect(lane);
         float v = ((where.x - pr.left) / pr.Width()) * 2.0f - 1.0f;
         if (v < -1) v = -1; if (v > 1) v = 1;
-        cmd = std::make_unique<SetTrackPanCommand>(id, v);
+        t->pan = v;
     }
+    Invalidate(lane);
+}
 
-    if (cmd) {
+void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
+    if (fDrag != Drag::None)
+        PreviewDrag(where);
+}
+
+void TimelineView::MouseUp(BPoint where) {
+    if (fDrag == Drag::None)
+        return;
+    Track* t = fProject->FindTrack(fDragTrack);
+    if (t) {
+        const float finalVal = (fDrag == Drag::Gain) ? t->gain : t->pan;
+        // Restore the pre-drag value so the command records the correct "old",
+        // then apply the whole gesture as one undoable step.
+        std::unique_ptr<Command> cmd;
+        if (fDrag == Drag::Gain) {
+            t->gain = fDragOrig;
+            cmd = std::make_unique<SetTrackGainCommand>(fDragTrack, finalVal);
+        } else {
+            t->pan = fDragOrig;
+            cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, finalVal);
+        }
         fStack->Execute(std::move(cmd), *fProject);
-        Invalidate(lane);   // repaint just this lane's header
     }
+    fDrag = Drag::None;
+    Invalidate(LaneRect(fDragLane));
 }
 
 void TimelineView::DrawPlayhead() {

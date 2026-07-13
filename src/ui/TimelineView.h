@@ -34,6 +34,8 @@ public:
 
     void Draw(BRect updateRect) override;
     void MouseDown(BPoint where) override;
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
+    void MouseUp(BPoint where) override;
 
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;
@@ -62,6 +64,16 @@ private:
     BRect LaneRect(int index) const;
     int   TrackIndexAt(BPoint where) const;   // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
+
+    // Live fader/pan drag. During a drag we preview by writing the model
+    // directly; on release we restore the original and push ONE command, so
+    // the whole gesture is a single clean undo step.
+    enum class Drag { None, Gain, Pan };
+    void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
+    Drag    fDrag      = Drag::None;
+    TrackId fDragTrack = kInvalidTrackId;
+    int     fDragLane  = -1;
+    float   fDragOrig  = 0.0f;         // value at drag start, for undo
 
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning
