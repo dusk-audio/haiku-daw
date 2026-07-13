@@ -83,6 +83,46 @@ shortcut map, better meters, tidy dialogs.
 Internal effect add-on ABI, then LV2 hosting with native generic GUIs
 (ARCHITECTURE §8 stages 2–3). VST is a maybe.
 
+## Ardour-parity gap (what the phases above do NOT yet cover)
+
+Phases A–I give a capable small DAW, not Ardour parity. `ARCHITECTURE.md`
+already declares non-goals (no Pro Tools/Ableton parity, no VST3 GUI at first,
+no video/notation/cloud). Beyond the phases, a pro DAW like Ardour also has:
+
+- **Plugins** — LADSPA/LV2/VST2/VST3/AU hosting, plugin delay compensation
+  (PDC), presets, sidechain, plugin scan/manager. (We have built-in DSP only;
+  hosting is Phase I.)
+- **Latency compensation** — record + plugin PDC across the graph.
+- **Advanced routing** — VCA master faders, a monitor/control-room section
+  (dim/mono/AFL/PFL), an any-to-any routing matrix, external hardware inserts,
+  full sidechain routing.
+- **Metering** — K-system, true-peak, LUFS/loudness, phase/correlation, a
+  meterbridge. (We have simple master peak only.)
+- **Audio editing** — time-stretch / pitch-shift (Rubber Band), transient
+  detection, audio quantize, strip-silence, region normalize/reverse/gain,
+  ripple + slip/slide edit, playlists per track.
+- **Tempo/time** — a real tempo/meter MAP (multiple changes + ramps), BBT,
+  timecode. (We have a single project tempo.)
+- **Sync** — MTC / LTC / MMC, JACK transport, Ableton Link, master/slave.
+- **Control surfaces** — Mackie/OSC/generic MIDI-learn.
+- **MIDI depth** — SMF import/export, CC/controller lanes, step entry, program
+  change/sysex, MIDI clock. (We have an internal piano roll only.)
+- **Comping / cue** — take comping, a clip-launch (cue) page.
+- **Track ops** — freeze/bounce a track, track templates, folder tracks.
+- **Export** — stems, multi-format (FLAC/MP3/Ogg), dithering, loudness
+  normalization, export presets, ranges. (We have one 16-bit WAV bounce.)
+- **Session** — snapshots, templates, archive/bundle, cleanup-unused, autosave,
+  markers / ranges / locations.
+- **Other** — video timeline, Lua scripting, surround/VBAP panning, spectral
+  analysis/spectrogram.
+
+Reaching full Ardour parity is a multi-year effort. The realistic target for
+this project is a **clean, native, genuinely useful Haiku DAW** — the phases
+above — with parity items pulled in selectively where they matter and Haiku
+makes them idiomatic (e.g. BFS browser, native metering). Some Ardour features
+are out of scope by design (video, heavy plugin ecosystems on a plugin-less
+Haiku image, control-surface zoo).
+
 ---
 
 ### Suggested order
