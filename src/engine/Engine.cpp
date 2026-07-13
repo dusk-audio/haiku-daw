@@ -305,15 +305,42 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         }
     }
 
-    // Topological processing order (a node before the node it routes into).
+    // Resolve each node's aux-send destinations to node indices (RT does no id
+    // lookups). Post-fader in the live engine; the offline Exporter honors the
+    // pre/post-fader flag exactly.
+    auto nodeIndexOf = [&](TrackId id) -> long {
+        for (size_t i = 0; i < fBuses.size(); i++)
+            if (fBuses[i].id == id) return (long)i;
+        return -1;
+    };
+    for (Bus& b : fBuses) {
+        const Track* t = project.FindTrack(b.id);
+        if (!t) continue;
+        for (const Send& s : t->sends) {
+            if (s.dest == kInvalidTrackId || s.dest == b.id) continue;
+            const long di = nodeIndexOf(s.dest);
+            if (di >= 0) b.sendTargets.push_back({(size_t)di, s.level});
+        }
+    }
+
+    // Topological processing order: a node before every node it feeds — its
+    // output AND every send destination. Sends add extra edges, so use the
+    // general edge topo (single-output ResolveRoutingOrder can't express them).
     {
-        std::vector<RouteNode> rn;
-        rn.reserve(fBuses.size());
-        for (const Bus& b : fBuses)
-            rn.push_back(RouteNode{b.id, b.output});
+        std::vector<TrackId> nids;
+        std::vector<std::pair<TrackId, TrackId>> edges;
+        nids.reserve(fBuses.size());
+        for (const Bus& b : fBuses) {
+            nids.push_back(b.id);
+            edges.push_back({b.id, b.output});
+            const Track* t = project.FindTrack(b.id);
+            if (t)
+                for (const Send& s : t->sends)
+                    if (s.dest != kInvalidTrackId) edges.push_back({b.id, s.dest});
+        }
         std::vector<TrackId> ord;
         fOrder.clear();
-        if (ResolveRoutingOrder(rn, ord)) {
+        if (ResolveOrderWithEdges(nids, edges, ord)) {
             for (TrackId id : ord)
                 for (size_t i = 0; i < fBuses.size(); i++)
                     if (fBuses[i].id == id) { fOrder.push_back(i); break; }
@@ -423,6 +450,15 @@ void Engine::FillBuffer(float* out, size_t frames) {
         }
         for (auto& fx : b.fx)
             fx->Process(nb, static_cast<int>(frames));
+
+        // Aux sends: add this node's post-FX signal into each dest node buffer.
+        // Topo order guarantees the dest is processed later, so it sees this.
+        for (const auto& st : b.sendTargets) {
+            float* db = fNodeBufs[st.first].data();
+            const float lvl = st.second;
+            for (size_t i = 0; i < nfloats; i++)
+                db[i] += nb[i] * lvl;
+        }
 
         // Route into the output bus, or the master (out).
         float* dst = out;

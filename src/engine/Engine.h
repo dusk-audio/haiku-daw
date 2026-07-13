@@ -28,6 +28,7 @@
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace daw {
@@ -150,6 +151,11 @@ private:
         bool                                  isBus   = false;
         bool                                  audible = true;
         std::vector<std::unique_ptr<IEffect>> fx;
+        // Aux sends: (destination node index into fBuses, linear level). Taps
+        // this node's post-FX output. Dest node indices are resolved at Load,
+        // so the RT callback does no id lookups. The topo order (built over
+        // output + send edges) guarantees each dest is processed after us.
+        std::vector<std::pair<size_t, float>> sendTargets;
     };
 
     std::unique_ptr<BSoundPlayer>             fPlayer;
