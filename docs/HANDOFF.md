@@ -18,9 +18,14 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   plays through `BSoundPlayer`.
 - **M3 multitrack mix** ✅ — solo + equal-power pan, sums N tracks.
   Confirmed working on real Haiku (tracks summed + panned correctly).
-- **M4 timeline UI** ⬅ **NEXT** — first `BWindow`/`BView`: draw clips +
-  waveforms, transport bar, playhead, per-track mute/solo/gain/pan.
-- M5 recording, M6 MIDI, M7 DSP effects — after M4.
+- **M4 timeline UI** ✅ — first `BWindow`/`BView`, confirmed on real Haiku.
+  Timeline with ruler, per-track lanes, clip blocks + waveforms (from a
+  `PeakCache`), transport bar (play/stop + time), sweeping playhead, master
+  stereo meter, track headers (name, mute/solo, drag gain/pan), clip drag,
+  undo/redo, and click-to-seek. See "M4 state" below.
+- **M5 recording** ⬅ **NEXT** — audio in → disk → clip (RecordNode, arm/
+  monitor, input latency).
+- M6 MIDI, M7 DSP effects — after M5.
 
 ## Architecture in one breath
 
@@ -43,11 +48,18 @@ docs/ARCHITECTURE.md   design of record (read after this)
 docs/HANDOFF.md        this file
 CMakeLists.txt         model+tests build on ANY host; engine/UI gated if(HAIKU)
 src/model/             Project/Track/Clip, Command stack, commands  (kit-free)
+  PeakCache.{h,cpp}    min/max waveform envelope (kit-free, host-testable)
 src/engine/
-  WavSource.{h,cpp}    native RIFF/WAVE reader (kit-free, host-testable)
+  WavSource.{h,cpp}    native RIFF/WAVE reader + Seek (kit-free, host-testable)
   RingBuffer.h         lock-free SPSC float ring
   Engine.{h,cpp}       BSoundPlayer output + TrackStream mixing (Haiku-only)
-tests/                 model_tests, wav_tests  (host-buildable)
+src/ui/                Interface Kit (Haiku-only): App in main.cpp
+  UiMetrics.h          layout constants, palette, kMsgSeek
+  MainWindow.{h,cpp}   BWindow: transport bar, engine ownership, playhead poll
+  TimelineView.{h,cpp} custom BView: ruler, lanes, clips, waveforms, headers
+  MeterView.{h,cpp}    stereo master level meter
+src/main.cpp           BApplication; seeds a Project from argv WAVs (Haiku-only)
+tests/                 model_tests, wav_tests, peak_tests  (host-buildable)
 prototypes/
   hello_beep/          M0
   play_clip/           M2 driver: play one WAV
@@ -114,21 +126,50 @@ Helper scripts pattern: commit a script under `scripts/`, then in the VM
 - **Never** add a `Co-Authored-By:` trailer. No AI attribution in history.
 - Conventional-commit style subjects (`feat(engine): ...`, `fix(...)`).
 
-## Next task — M4 timeline UI
+## M4 state (how the UI is built — read before touching it)
 
-Build the first window with the Interface Kit:
-- `BWindow` + a custom timeline `BView` (`Draw()`, mouse handlers).
-- Render clips as blocks; draw **waveforms from a precomputed peak cache**
-  (min/max per pixel column, built on import — never scan full audio on
-  redraw).
-- Transport bar: play/stop, playhead readout, tempo.
-- Track headers: name, mute/solo/arm, gain fader, pan.
-- Meters fed from the engine via a lock-free level queue (UI polls ~30–60 Hz
-  with `BMessageRunner`).
-- Wire the existing `CommandStack` to UI actions (drag clip → `MoveClipCommand`,
-  etc.). The engine already honors solo/mute/gain/pan.
+- **One window, no menu bar.** `MainWindow` stacks a transport `BView` strip
+  (Play/Stop, `mm:ss.mmm` readout, Undo/Redo buttons, `MeterView`) over a
+  `TimelineView` that fills the rest.
+- **TimelineView is fully custom-drawn** (no child `BControl`s). Left gutter
+  (`kHeaderWidth`) is the per-track header (name, M/S boxes, gain fader, pan
+  bar); right of it is time content (ruler + lanes + clip blocks + waveforms
+  + playhead). Frame⇄pixel via `FrameToX`/`XToFrame`; `kDefaultFramesPerPixel`
+  zoom. Geometry lives in `UiMetrics.h`.
+- **All model edits go through `CommandStack`.** Header clicks build
+  `SetTrackMute/Solo/Gain/Pan` and clip drags build `MoveClipCommand`.
+  Fader/clip **drags preview by writing the model directly**, then on
+  `MouseUp` restore the pre-drag value and push ONE command → a drag is a
+  single clean undo. `SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS)`
+  grabs the pointer for the drag.
+- **Playback = rebuild-on-play.** `StartPlayback` makes a fresh `Engine`,
+  `Load`s the model at `transport.playhead`, `Start`s. A ~60 Hz
+  `BMessageRunner` (`MSG_PULSE`) polls `Engine::Playhead()`/`PeakL/R()` and
+  each tick calls `Engine::UpdateMix(model)` so **gain/pan/mute/solo are
+  applied live** (atomics on `TrackStream`, no replay). Seek = click ruler →
+  `kMsgSeek` → restart `Load` at the new frame (per-clip source pre-seek via
+  `WavSource::Seek` aligns audio).
+- **`PeakCache`** (kit-free) is built once per source in `main` and drawn as
+  min/max per pixel column — never scans audio on redraw.
 
-Study Haiku's **Cortex** (Media Kit node-graph editor) and **MediaPlayer**
-in the Haiku source tree for Interface Kit + Media Kit patterns.
+### GOTCHA: `Frame` vs `BView::Frame()` / `BWindow::Frame()`
+`daw::Frame` (int64) is shadowed inside any `BView`/`BWindow` subclass by the
+inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
+such class declares `using Frame = daw::Frame;` to hide the inherited name.
+Do the same in any new view/window that uses model frames.
 
+## Next task — M5 recording
+
+Audio input → disk → a new clip:
+- A capture path off `BSoundPlayer` won't do (it's output only). Options:
+  a record `BMediaNode` (`BBufferConsumer` on `GetAudioInput`), or the
+  lower-level `media_input`/`BMediaRecorder` if available on this image.
+  Verify what the plugin-less VM actually exposes first (mirror the M2 lesson).
+- Arm a track; monitor input; write incoming buffers to a WAV on disk on a
+  low-priority thread (never in the RT callback), then add an `AddClipCommand`
+  for the recorded take when recording stops.
+- Keep the model + file writer kit-free/host-testable where possible; keep the
+  RT capture callback allocation/lock/IO-free, same contract as playback.
+
+Study Haiku's **Cortex** and **MediaPlayer** for Media Kit node patterns.
 Keep every milestone runnable; keep the audio thread real-time-safe.
