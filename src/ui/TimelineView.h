@@ -37,6 +37,12 @@ public:
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void MouseUp(BPoint where) override;
+    void KeyDown(const char* bytes, int32 numBytes) override;
+    void AttachedToWindow() override;
+
+    // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
+    void ZoomBy(double factor);
+    void PanBy(Frame deltaFrames);
 
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;

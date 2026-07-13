@@ -13,7 +13,7 @@ namespace daw {
 
 TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
     : BView(frame, "timeline", B_FOLLOW_ALL_SIDES,
-            B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
+            B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE | B_NAVIGABLE),
       fProject(project),
       fStack(stack),
       fFramesPerPixel(kDefaultFramesPerPixel),
@@ -49,6 +49,38 @@ float TimelineView::FrameToX(Frame f) const {
 Frame TimelineView::XToFrame(float x) const {
     return fScrollFrame
          + static_cast<Frame>((x - kHeaderWidth) * fFramesPerPixel);
+}
+
+void TimelineView::AttachedToWindow() {
+    MakeFocus(true);   // receive arrow/zoom keys
+}
+
+void TimelineView::ZoomBy(double factor) {
+    double fpp = fFramesPerPixel * factor;
+    if (fpp < 16.0)    fpp = 16.0;      // most zoomed-in
+    if (fpp > 65536.0) fpp = 65536.0;   // most zoomed-out
+    fFramesPerPixel = fpp;
+    Invalidate();
+}
+
+void TimelineView::PanBy(Frame deltaFrames) {
+    fScrollFrame += deltaFrames;
+    if (fScrollFrame < 0) fScrollFrame = 0;
+    Invalidate();
+}
+
+void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
+    if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
+    // One page = the visible content width in frames.
+    const Frame page = (Frame)((Bounds().right - kHeaderWidth) * fFramesPerPixel);
+    switch (bytes[0]) {
+        case B_LEFT_ARROW:  PanBy(-page / 4); break;
+        case B_RIGHT_ARROW: PanBy(page / 4);  break;
+        case B_HOME:        fScrollFrame = 0; Invalidate(); break;
+        case '+': case '=': ZoomBy(0.5); break;   // zoom in
+        case '-': case '_': ZoomBy(2.0); break;   // zoom out
+        default: BView::KeyDown(bytes, numBytes);
+    }
 }
 
 Grid TimelineView::GridOf() const {

@@ -33,6 +33,8 @@ enum {
     MSG_SAVE_REF = 'svrf',   // from the save file panel
     MSG_OPEN_REF = 'oprf',   // from the open file panel
     MSG_MASTER   = 'mvol',   // master volume slider moved
+    MSG_ZOOM_IN  = 'zmin',
+    MSG_ZOOM_OUT = 'zmot',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -82,8 +84,16 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(save);
     bar->AddChild(open);
 
+    // Horizontal zoom buttons (keyboard +/- and arrows also work).
+    BButton* zoomOut = new BButton(BRect(618, 5, 646, kTransportH - 5), "zoomout",
+                                   "-", new BMessage(MSG_ZOOM_OUT));
+    BButton* zoomIn  = new BButton(BRect(650, 5, 678, kTransportH - 5), "zoomin",
+                                   "+", new BMessage(MSG_ZOOM_IN));
+    bar->AddChild(zoomOut);
+    bar->AddChild(zoomIn);
+
     // Master volume slider (0..150% -> gain 0..1.5), live/non-undoable.
-    BSlider* master = new BSlider(BRect(618, 4, 758, kTransportH - 4),
+    BSlider* master = new BSlider(BRect(686, 4, 810, kTransportH - 4),
                                   "master", "Vol", new BMessage(MSG_MASTER),
                                   0, 150, B_HORIZONTAL);
     master->SetModificationMessage(new BMessage(MSG_MASTER));
@@ -134,6 +144,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 StartPlayback();
             break;
         }
+        case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
+        case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
         case MSG_MASTER: {
             int32 v = 100;
             if (msg->FindInt32("be:value", &v) != B_OK) {
