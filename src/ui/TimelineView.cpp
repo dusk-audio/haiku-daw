@@ -3,17 +3,27 @@
 #include "UiMetrics.h"
 
 #include <cstdio>
+#include <memory>
 
 namespace daw {
 
-TimelineView::TimelineView(BRect frame, const Project* project)
+TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
     : BView(frame, "timeline", B_FOLLOW_ALL_SIDES,
             B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE),
       fProject(project),
+      fStack(stack),
       fFramesPerPixel(kDefaultFramesPerPixel),
       fScrollFrame(0) {
     SetViewColor(ColBackground());
 }
+
+// --- Header control geometry (relative to a lane's top edge) ----------
+static constexpr float kMaxGain = 1.5f;   // fader top of travel
+
+static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
+static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
+static BRect GainRect(BRect lane)  { return BRect(58, lane.top + 22, 154, lane.top + 34); }
+static BRect PanRect(BRect lane)   { return BRect(58, lane.top + 40, 154, lane.top + 52); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -42,6 +52,59 @@ void TimelineView::SetPlayhead(Frame f) {
     BRect b = Bounds();
     Invalidate(BRect(xOld - 1, kRulerHeight, xOld + 1, b.bottom));
     Invalidate(BRect(xNew - 1, kRulerHeight, xNew + 1, b.bottom));
+}
+
+int TimelineView::TrackIndexAt(BPoint where) const {
+    if (!fProject || where.y < kRulerHeight)
+        return -1;
+    const float rel = where.y - kRulerHeight;
+    const int   idx = static_cast<int>(rel / (kTrackHeight + kTrackGap));
+    if (idx < 0 || idx >= static_cast<int>(fProject->Tracks().size()))
+        return -1;
+    // Reject clicks that land in the gap between lanes.
+    if (where.y > LaneRect(idx).bottom)
+        return -1;
+    return idx;
+}
+
+void TimelineView::MouseDown(BPoint where) {
+    if (!fProject || !fStack)
+        return;
+    const int idx = TrackIndexAt(where);
+    if (idx < 0)
+        return;
+    BRect lane = LaneRect(idx);
+    const Track& t = fProject->Tracks()[idx];
+
+    if (where.x < kHeaderWidth)
+        HandleHeaderClick(t, lane, where);
+    // Content-area clicks (clip drag, click-seek) arrive in later steps.
+}
+
+void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
+    const TrackId id = t.id;
+    std::unique_ptr<Command> cmd;
+
+    if (MuteRect(lane).Contains(where)) {
+        cmd = std::make_unique<SetTrackMuteCommand>(id, !t.muted);
+    } else if (SoloRect(lane).Contains(where)) {
+        cmd = std::make_unique<SetTrackSoloCommand>(id, !t.soloed);
+    } else if (GainRect(lane).Contains(where)) {
+        BRect g = GainRect(lane);
+        float v = (where.x - g.left) / g.Width() * kMaxGain;
+        if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
+        cmd = std::make_unique<SetTrackGainCommand>(id, v);
+    } else if (PanRect(lane).Contains(where)) {
+        BRect pr = PanRect(lane);
+        float v = ((where.x - pr.left) / pr.Width()) * 2.0f - 1.0f;
+        if (v < -1) v = -1; if (v > 1) v = 1;
+        cmd = std::make_unique<SetTrackPanCommand>(id, v);
+    }
+
+    if (cmd) {
+        fStack->Execute(std::move(cmd), *fProject);
+        Invalidate(lane);   // repaint just this lane's header
+    }
 }
 
 void TimelineView::DrawPlayhead() {
@@ -88,14 +151,19 @@ void TimelineView::DrawRuler(BRect update) {
     }
 }
 
+BRect TimelineView::LaneRect(int index) const {
+    const float top = kRulerHeight + index * (kTrackHeight + kTrackGap);
+    return BRect(0, top, const_cast<TimelineView*>(this)->Bounds().right,
+                 top + kTrackHeight);
+}
+
 void TimelineView::DrawLanes(BRect update) {
     if (!fProject)
         return;
 
-    float y = kRulerHeight;
-    int   idx = 0;
+    int idx = 0;
     for (const Track& t : fProject->Tracks()) {
-        BRect lane(0, y, Bounds().right, y + kTrackHeight);
+        BRect lane = LaneRect(idx);
 
         SetHighColor((idx & 1) ? ColLaneAlt() : ColLane());
         FillRect(lane);
@@ -117,9 +185,55 @@ void TimelineView::DrawLanes(BRect update) {
         for (const Clip& c : t.clips)
             DrawClip(c, lane);
 
-        y += kTrackHeight + kTrackGap;
+        DrawTrackHeader(t, lane);   // header gutter on top of the lane
+
         idx++;
     }
+}
+
+// The left gutter for one track: name, mute/solo toggles, gain fader, pan bar.
+// Custom-drawn (not BControls) so it stays pixel-aligned with the lane and
+// needs no per-track child-view bookkeeping.
+void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
+    BRect hdr(0, lane.top, kHeaderWidth, lane.bottom);
+    SetHighColor(ColHeader());
+    FillRect(hdr);
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(kHeaderWidth, lane.top), BPoint(kHeaderWidth, lane.bottom));
+
+    SetHighColor(ColText());
+    DrawString(t.name.c_str(), BPoint(6, lane.top + 14));
+
+    // Mute / Solo toggle boxes: filled when active.
+    BRect m = MuteRect(lane), s = SoloRect(lane);
+    SetHighColor(t.muted ? ColPlayhead() : ColLane());
+    FillRect(m);
+    SetHighColor(t.soloed ? Rgb(210, 190, 70) : ColLane());
+    FillRect(s);
+    SetHighColor(ColGrid());
+    StrokeRect(m); StrokeRect(s);
+    SetHighColor(ColText());
+    DrawString("M", BPoint(m.left + 5, m.bottom - 5));
+    DrawString("S", BPoint(s.left + 6, s.bottom - 5));
+
+    // Gain fader: filled proportion = gain / kMaxGain.
+    BRect g = GainRect(lane);
+    SetHighColor(ColLane());  FillRect(g);
+    float gf = t.gain / kMaxGain; if (gf < 0) gf = 0; if (gf > 1) gf = 1;
+    BRect gfill = g; gfill.right = g.left + (g.Width()) * gf;
+    SetHighColor(ColClip());  FillRect(gfill);
+    SetHighColor(ColGrid());  StrokeRect(g);
+
+    // Pan bar: a marker at the pan position, center line for reference.
+    BRect pr = PanRect(lane);
+    SetHighColor(ColLane());  FillRect(pr);
+    const float cx = (pr.left + pr.right) * 0.5f;
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(cx, pr.top), BPoint(cx, pr.bottom));
+    float px = cx + (t.pan * 0.5f) * pr.Width();
+    SetHighColor(ColClipBorder());
+    FillRect(BRect(px - 2, pr.top, px + 2, pr.bottom));
+    SetHighColor(ColGrid());  StrokeRect(pr);
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane) {

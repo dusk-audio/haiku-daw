@@ -11,6 +11,7 @@
 
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
+#include "../model/Command.h"
 #include "../engine/Engine.h"
 
 #include <Window.h>
@@ -34,7 +35,8 @@ public:
     using Frame = daw::Frame;
 
     using PeakMap = std::map<std::string, PeakCache>;
-    MainWindow(BRect frame, const Project* project, const PeakMap* peaks);
+    MainWindow(BRect frame, Project* project, CommandStack* stack,
+               const PeakMap* peaks);
     ~MainWindow() override;
 
     void MessageReceived(BMessage* msg) override;
@@ -45,7 +47,8 @@ private:
     void StopPlayback();
     void UpdateTimeReadout(Frame playhead);
 
-    const Project*  fProject;        // non-owning (the session)
+    Project*        fProject;        // non-owning (the session)
+    CommandStack*   fStack;          // non-owning
 
     TimelineView*   fTimeline;
     BStringView*    fTimeView;

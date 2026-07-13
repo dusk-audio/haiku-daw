@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
     BuildPeaks(project, peaks);
 
     BRect frame(80, 80, 80 + 1000, 80 + 560);
-    MainWindow* win = new MainWindow(frame, &project, &peaks);
+    MainWindow* win = new MainWindow(frame, &project, &stack, &peaks);
     win->Show();
 
     app.Run();

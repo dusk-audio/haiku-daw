@@ -21,11 +21,11 @@ enum {
 static constexpr float kTransportH = 36.0f;
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
-MainWindow::MainWindow(BRect frame, const Project* project,
+MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                        const PeakMap* peaks)
     : BWindow(frame, "Haiku DAW", B_TITLED_WINDOW,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
-      fProject(project) {
+      fProject(project), fStack(stack) {
     BRect bounds = Bounds();
 
     // --- Transport bar (top strip) ---
@@ -50,7 +50,7 @@ MainWindow::MainWindow(BRect frame, const Project* project,
 
     // --- Timeline (fills the rest) ---
     BRect tlRect(0, kTransportH + 1, bounds.right, bounds.bottom);
-    fTimeline = new TimelineView(tlRect, project);
+    fTimeline = new TimelineView(tlRect, project, stack);
     fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
 }

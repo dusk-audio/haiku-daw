@@ -12,6 +12,7 @@
 
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
+#include "../model/Commands.h"
 
 #include <View.h>
 
@@ -27,15 +28,18 @@ public:
     // of the model's frame type. A member typedef hides the inherited name.
     using Frame = daw::Frame;
 
-    explicit TimelineView(BRect frame, const Project* project);
+    // Mutable project + command stack: header controls edit the model through
+    // the stack (never in place), so every change is undoable.
+    TimelineView(BRect frame, Project* project, CommandStack* stack);
 
     void Draw(BRect updateRect) override;
+    void MouseDown(BPoint where) override;
 
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;
     Frame XToFrame(float x) const;
 
-    void SetProject(const Project* p) { fProject = p; Invalidate(); }
+    void SetProject(Project* p) { fProject = p; Invalidate(); }
 
     // Waveform envelopes, keyed by clip source path. Non-owning; built once
     // on import (M4c) and shared across clips that reference the same file.
@@ -49,11 +53,18 @@ public:
 private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
+    void DrawTrackHeader(const Track& t, BRect lane);
     void DrawClip(const Clip& c, BRect lane);
     void DrawClipWave(const Clip& c, BRect block);
     void DrawPlayhead();
 
-    const Project* fProject;          // non-owning
+    // Lane geometry + header hit-testing.
+    BRect LaneRect(int index) const;
+    int   TrackIndexAt(BPoint where) const;   // -1 if none
+    void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
+
+    Project*       fProject;          // non-owning, mutable via fStack
+    CommandStack*  fStack;            // non-owning
     const PeakMap* fPeaks = nullptr;  // non-owning
     double         fFramesPerPixel;   // horizontal zoom
     Frame          fScrollFrame;      // leftmost visible frame (content x=0)
