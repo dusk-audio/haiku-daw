@@ -130,10 +130,15 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     }
     if (ArmRect(lane).Contains(where)) {
         // Arm is transient transport state, not an undoable document edit:
-        // toggle it directly (like the playhead), not through the stack.
-        if (Track* tr = fProject->FindTrack(id))
-            tr->armed = !tr->armed;
-        Invalidate(lane);
+        // toggle it directly. One input -> arming a track disarms the others
+        // (single-input capture), so recording targets are unambiguous.
+        if (Track* tr = fProject->FindTrack(id)) {
+            const bool nowArmed = !tr->armed;
+            for (Track& other : fProject->Tracks())
+                other.armed = false;
+            tr->armed = nowArmed;
+            Invalidate();   // other lanes' arm boxes changed too
+        }
         return;
     }
 
@@ -219,6 +224,13 @@ void TimelineView::MouseUp(BPoint) {
     Invalidate(LaneRect(fDragLane));
 }
 
+void TimelineView::SetRecording(TrackId track, Frame start, Frame length) {
+    fRecTrack = track;
+    fRecStart = start;
+    fRecLen   = length;
+    Invalidate();   // simplest; the region grows every poll anyway
+}
+
 void TimelineView::DrawPlayhead() {
     const float x = FrameToX(fPlayhead);
     if (x < kHeaderWidth || x > Bounds().right)
@@ -296,6 +308,23 @@ void TimelineView::DrawLanes(BRect update) {
 
         for (const Clip& c : t.clips)
             DrawClip(c, lane);
+
+        // Live recording region on the armed track (grows each poll).
+        if (t.id == fRecTrack && fRecLen > 0) {
+            float rx0 = FrameToX(fRecStart);
+            float rx1 = FrameToX(fRecStart + fRecLen);
+            if (rx0 < kHeaderWidth) rx0 = kHeaderWidth;
+            if (rx1 > lane.right)   rx1 = lane.right;
+            if (rx1 > rx0) {
+                BRect rb(rx0, lane.top + 3, rx1, lane.bottom - 3);
+                SetHighColor(Rgb(150, 50, 50));
+                FillRect(rb);
+                SetHighColor(ColPlayhead());
+                StrokeRect(rb);
+                SetHighColor(ColText());
+                DrawString("\xE2\x97\x8F REC", BPoint(rb.left + 4, rb.top + 14));
+            }
+        }
 
         DrawTrackHeader(t, lane);   // header gutter on top of the lane
 
