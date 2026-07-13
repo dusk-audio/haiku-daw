@@ -62,6 +62,14 @@ public:
     // at the next block. No thread restart, no reallocation.
     void SetMix(float gain, float pan, bool audible);
 
+    // Update only the gain/pan (equal-power), leaving audibility as-is. Called
+    // per block by automation from the RT thread.
+    void SetGainPan(float gain, float pan);
+
+    // Update only audibility, leaving gain/pan as-is (used by UpdateMix for
+    // automated tracks, where automation owns the gain/pan).
+    void SetAudible(bool audible);
+
     TrackId Track() const { return fTrackId; }
     Frame EndFrame() const { return fStart + fLength; }
     bool  Valid() const { return fSource.IsValid(); }
@@ -170,6 +178,15 @@ private:
         // so the RT callback does no id lookups. The topo order (built over
         // output + send edges) guarantees each dest is processed after us.
         std::vector<std::pair<size_t, float>> sendTargets;
+        // Gain/pan automation (RT-owned snapshot, copied from the Track at
+        // Load). When a lane has points, the engine drives this node's gain/pan
+        // per block from the lane (absolute, overriding the static fader);
+        // UpdateMix leaves automated nodes alone.
+        AutomationLane                        gainAuto;
+        AutomationLane                        panAuto;
+        float                                 statGain = 1.0f;  // ValueAt default
+        float                                 statPan  = 0.0f;
+        bool                                  hasAuto  = false;
     };
 
     std::unique_ptr<BSoundPlayer>             fPlayer;

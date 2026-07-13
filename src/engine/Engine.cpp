@@ -52,6 +52,17 @@ void TrackStream::SetMix(float gain, float pan, bool audible) {
     fAudible.store(audible, std::memory_order_relaxed);
 }
 
+void TrackStream::SetGainPan(float gain, float pan) {
+    float gl, gr;
+    EqualPowerGains(gain, pan, &gl, &gr);
+    fGainL.store(gl, std::memory_order_relaxed);
+    fGainR.store(gr, std::memory_order_relaxed);   // audibility untouched
+}
+
+void TrackStream::SetAudible(bool audible) {
+    fAudible.store(audible, std::memory_order_relaxed);   // gain untouched
+}
+
 TrackStream::~TrackStream() {
     StopThread();
 }
@@ -303,6 +314,12 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             fx->Prepare(fOutputRate);
             b.fx.push_back(std::move(fx));
         }
+        // Automation snapshot (RT-owned copy of the lanes).
+        b.statGain = t->gain;
+        b.statPan  = t->pan;
+        b.gainAuto = t->gainAuto;
+        b.panAuto  = t->panAuto;
+        b.hasAuto  = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
     }
 
     // Resolve each node's aux-send destinations to node indices (RT does no id
@@ -388,9 +405,14 @@ void Engine::UpdateMix(const Project& project) {
         if (t.type != TrackType::Audio)
             continue;
         const bool audible = !t.muted && (!anySolo || t.soloed);
+        // Automated tracks: automation owns gain/pan (driven per block in
+        // FillBuffer); only refresh audibility here so live mute/solo still work.
+        const bool automated = t.gainAuto.Count() > 0 || t.panAuto.Count() > 0;
         for (auto& s : fStreams)
-            if (s->Track() == t.id)
-                s->SetMix(t.gain, t.pan, audible);
+            if (s->Track() == t.id) {
+                if (automated) s->SetAudible(audible);
+                else           s->SetMix(t.gain, t.pan, audible);
+            }
     }
 }
 
@@ -441,6 +463,20 @@ void Engine::FillBuffer(float* out, size_t frames) {
         if (!b.audible)
             continue;                       // muted / solo'd out: route nothing
         float* nb = fNodeBufs[idx].data();
+
+        // Automation: drive this node's gain/pan from its lanes at the block
+        // start (absolute, per block). Non-automated nodes keep their live
+        // UpdateMix values. Constant across the block (fine at ~10 ms).
+        if (b.hasAuto) {
+            const float g = b.gainAuto.ValueAt(blockStart, b.statGain);
+            const float p = b.panAuto.ValueAt(blockStart, b.statPan);
+            if (b.isBus)
+                EqualPowerGains(g, p, &b.busGainL, &b.busGainR);
+            else if (!b.notes.empty())
+                EqualPowerGains(g, p, &b.midiGainL, &b.midiGainR);
+            for (TrackStream* s : b.streams)   // audio leaves
+                s->SetGainPan(g, p);
+        }
 
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
             s->Mix(nb, frames, blockStart);
