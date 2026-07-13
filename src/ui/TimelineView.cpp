@@ -114,10 +114,12 @@ Frame TimelineView::Snapped(Frame f) const {
 }
 
 // A tiny Copy/Delete popup for a right-clicked clip or note.
-int TimelineView::ContextMenu(BPoint where) const {
+int TimelineView::ContextMenu(BPoint where, bool withSplit) const {
     BPopUpMenu* m = new BPopUpMenu("ctx", false, false);
-    m->AddItem(new BMenuItem("Copy", NULL));
-    m->AddItem(new BMenuItem("Delete", NULL));
+    m->AddItem(new BMenuItem("Copy", NULL));      // 0
+    m->AddItem(new BMenuItem("Delete", NULL));    // 1
+    if (withSplit)
+        m->AddItem(new BMenuItem("Split here", NULL));  // 2
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const int idx = sel ? m->IndexOf(sel) : -1;
@@ -376,7 +378,7 @@ void TimelineView::MouseDown(BPoint where) {
     for (const Clip& c : t.clips) {
         if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
             if (rightClick) {
-                const int pick = ContextMenu(where);
+                const int pick = ContextMenu(where, /*withSplit=*/true);
                 if (pick == 0) {          // Copy
                     fClipClip = c;
                     fHasClipClip = true; fHasClipNote = false;
@@ -384,6 +386,10 @@ void TimelineView::MouseDown(BPoint where) {
                 } else if (pick == 1) {   // Delete
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
                                     *fProject);
+                } else if (pick == 2) {   // Split here
+                    Frame at = Snapped(XToFrame(where.x));
+                    fStack->Execute(std::make_unique<SplitClipCommand>(
+                        t.id, c.id, at), *fProject);
                 }
                 Invalidate(lane);
                 return;

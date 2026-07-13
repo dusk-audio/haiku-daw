@@ -215,6 +215,28 @@ private:
     Clip    fRemoved;   // saved in Do() for Undo()
 };
 
+// Split a clip at a timeline frame into two adjacent clips. The left keeps the
+// clip's id (shortened, fade-out cleared); the right is a new clip covering the
+// remainder (fade-in cleared, source offset advanced). No-op unless the split
+// falls strictly inside the clip.
+class SplitClipCommand : public Command {
+public:
+    SplitClipCommand(TrackId track, ClipId clip, Frame at)
+        : fTrack(track), fClip(clip), fAt(at) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Split Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fAt;
+    ClipId  fNewClip     = kInvalidClipId;   // right half (allocated in Do)
+    Frame   fOldLen      = 0;                 // left clip's original length
+    Frame   fOldFadeOut  = 0;                 // left clip's original fade-out
+};
+
 // Remove the note at `index` on a track. Stores it + its index for Undo().
 class RemoveNoteCommand : public Command {
 public:

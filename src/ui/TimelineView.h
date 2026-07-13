@@ -126,7 +126,7 @@ private:
     bool     fLoopDragged = false;     // did the pointer move (drag vs click)?
 
     // Clipboard (right-click Copy -> Edit > Paste).
-    int      ContextMenu(BPoint where) const;   // 0=Copy, 1=Delete, -1=none
+    int      ContextMenu(BPoint where, bool withSplit = false) const;   // 0=Copy 1=Delete 2=Split -1=none
     bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
     bool     fHasClipClip = false;

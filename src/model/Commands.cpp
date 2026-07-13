@@ -201,6 +201,46 @@ void RemoveClipCommand::Undo(Project& p) {
     p.AddClip(fTrack, fRemoved);      // re-inserted sorted by start
 }
 
+// --- SplitClipCommand -------------------------------------------------
+
+bool SplitClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    const Frame start = c->startFrame;
+    const Frame end   = c->startFrame + c->lengthFrames;
+    if (fAt <= start || fAt >= end) return false;   // must fall strictly inside
+
+    fOldLen     = c->lengthFrames;
+    fOldFadeOut = c->fadeOutFrames;
+
+    // Right half: remainder, fade-in cleared, source offset advanced.
+    Clip right = *c;
+    right.id            = p.NextClipId();
+    right.startFrame    = fAt;
+    right.lengthFrames  = end - fAt;
+    right.sourceOffset  = c->sourceOffset + (fAt - start);
+    right.fadeInFrames  = 0;
+    fNewClip = right.id;
+
+    // Left half: shorten, drop the fade-out (now an interior cut).
+    c->lengthFrames  = fAt - start;
+    c->fadeOutFrames = 0;
+
+    return p.AddClip(fTrack, right);
+}
+
+void SplitClipCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    p.RemoveClip(fTrack, fNewClip);
+    if (Clip* c = t->FindClip(fClip)) {
+        c->lengthFrames  = fOldLen;
+        c->fadeOutFrames = fOldFadeOut;
+    }
+}
+
 // --- RemoveNoteCommand ------------------------------------------------
 
 bool RemoveNoteCommand::Do(Project& p) {

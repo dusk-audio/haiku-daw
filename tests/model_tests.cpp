@@ -7,6 +7,7 @@
 
 #include "../src/model/Commands.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -109,6 +110,44 @@ static void test_clip_sorted_insert_and_move() {
     CHECK(t->clips.front().startFrame == 0);
 
     (void)cId;
+}
+
+static void test_split_clip() {
+    std::printf("test_split_clip\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr"), p);
+    TrackId tid = p.Tracks().front().id;
+
+    Clip a; a.startFrame = 1000; a.lengthFrames = 4000; a.sourceOffset = 500;
+    a.sourcePath = "a.wav"; a.gain = 0.8f; a.fadeOutFrames = 300;
+    auto ac = std::make_unique<AddClipCommand>(tid, a);
+    ClipId aId = ac->CreatedId();
+    stack.Execute(std::move(ac), p);
+    aId = p.FindTrack(tid)->clips.front().id;
+
+    // Split at frame 3000 (2000 into the 4000-long clip).
+    stack.Execute(std::make_unique<SplitClipCommand>(tid, aId, 3000), p);
+    const Track* t = p.FindTrack(tid);
+    CHECK(t->clips.size() == 2);
+    const Clip& L = t->clips[0];
+    const Clip& R = t->clips[1];
+    CHECK(L.startFrame == 1000 && L.lengthFrames == 2000);
+    CHECK(R.startFrame == 3000 && R.lengthFrames == 2000);
+    CHECK(R.sourceOffset == 500 + 2000);      // offset advanced by the left length
+    CHECK(L.fadeOutFrames == 0);              // interior cut clears left fade-out
+    CHECK(R.fadeOutFrames == 300);            // right keeps the original fade-out
+    CHECK(std::fabs(R.gain - 0.8f) < 1e-4f);  // gain copied
+
+    // Split outside the clip is a no-op.
+    CHECK(!SplitClipCommand(tid, aId, 500).Do(p));
+
+    // Undo restores the single clip.
+    stack.Undo(p);
+    t = p.FindTrack(tid);
+    CHECK(t->clips.size() == 1);
+    CHECK(t->clips[0].lengthFrames == 4000);
+    CHECK(t->clips[0].fadeOutFrames == 300);
 }
 
 static void test_bus_routing() {
@@ -358,6 +397,7 @@ int main() {
     test_mute_solo_undo_redo();
     test_effect_commands();
     test_note_commands();
+    test_split_clip();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
