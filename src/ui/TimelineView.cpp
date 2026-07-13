@@ -75,9 +75,34 @@ int TimelineView::TrackIndexAt(BPoint where) const {
     return idx;
 }
 
+int TimelineView::NoteIndexAt(const Track& t, BRect lane, BPoint where) const {
+    const float h = lane.Height();
+    for (size_t i = 0; i < t.notes.size(); i++) {
+        const MidiNote& n = t.notes[i];
+        float x0 = FrameToX(n.startFrame);
+        float x1 = FrameToX(n.startFrame + n.lengthFrames);
+        int p = n.pitch - kMidiLow;
+        if (p < 0) p = 0;
+        if (p >= kMidiRange) p = kMidiRange - 1;
+        const float ny = lane.bottom - (float)p / kMidiRange * h;
+        const float nh = h / kMidiRange + 1.0f;
+        BRect r(x0, ny - nh, x1, ny);
+        r.InsetBy(-2, -2);   // a little slop for easy clicking
+        if (r.Contains(where))
+            return (int)i;
+    }
+    return -1;
+}
+
 void TimelineView::MouseDown(BPoint where) {
     if (!fProject || !fStack)
         return;
+
+    // Secondary (right) button = delete the thing under the cursor.
+    int32 buttons = 0;
+    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+        m->FindInt32("buttons", &buttons);
+    const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
 
     // Click in the ruler -> move the playhead (seek). Content x only.
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
@@ -101,8 +126,16 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
-    // MIDI track content: click adds a note (pitch from y, fixed length).
+    // MIDI track content: right-click deletes a note, left-click adds one.
     if (t.type == TrackType::Midi) {
+        const int hit = NoteIndexAt(t, lane, where);
+        if (rightClick) {
+            if (hit >= 0)
+                fStack->Execute(std::make_unique<RemoveNoteCommand>(t.id, (size_t)hit),
+                                *fProject);
+            Invalidate(lane);
+            return;
+        }
         Frame time = XToFrame(where.x);
         if (time < 0) time = 0;
         const float rel = (lane.bottom - where.y) / lane.Height();
@@ -119,10 +152,17 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
-    // Content area: start dragging a clip if the cursor is over one.
+    // Content area: right-click deletes the clip under the cursor; otherwise
+    // start dragging it.
     const Frame at = XToFrame(where.x);
     for (const Clip& c : t.clips) {
         if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
+            if (rightClick) {
+                fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
+                                *fProject);
+                Invalidate(lane);
+                return;
+            }
             fDrag           = Drag::Clip;
             fDragTrack      = t.id;
             fDragLane       = idx;

@@ -45,8 +45,13 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   and renders through the same FX chain + master mix + transport clock as
   audio. UI draws a simple piano roll and adds notes on click. Confirmed on
   real Haiku. (External Midi Kit 2 I/O + note edit/velocity still to do.)
-- **NEXT** — options below (external MIDI I/O, MIDI/effect UI polish, or
-  project save/load M8).
+- **M8 project save/load** ✅ — kit-free `ProjectIO` text serializer over the
+  whole model (round-trip host-tested), wired to Save/Open `BFilePanel` +
+  Cmd-S/Cmd-O; load clears history, rebuilds peaks, refreshes the timeline.
+  Confirmed on real Haiku. (Media paths are stored as-given/relative — bundle
+  + absolute-path handling is a later refinement.)
+- **NEXT** — editing polish (delete/move notes + clips), then the options
+  below.
 
 ## Architecture in one breath
 
@@ -190,21 +195,24 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — pick one (M0–M7 + resampler all done)
+## Next task — the full ladder (M0–M8 + resampler + DSP) is done
 
-**A. M8 project save/load.** Serialize the `Project` (tracks, clips, notes, fx,
-transport) to a bundle + reload; the model is the single source of truth and
-already funnels through the command stack, so this is mostly a
-serializer/deserializer. Lean into BFS attributes for the sample browser
-(ARCHITECTURE §5.2). Highest value — nothing persists yet.
+Remaining work is polish + reach, not core milestones. In rough priority:
 
-**B. MIDI / effect UI polish.** Note delete + drag + length/velocity edit;
-per-track effect picker (choose type, edit params, reorder) instead of the
-one-shot demo low-pass; live MIDI/FX param push (currently rebuild-on-play).
+**A. Editing polish (in progress).** Delete + move/resize notes and clips
+(right-click delete, drag); per-track effect picker (choose type/params,
+reorder) instead of the demo low-pass; velocity editing.
+
+**B. Media handling.** Store clip/take paths relative to the project file and
+resolve on load; optionally bundle recorded takes next to the `.dawproj`.
 
 **C. External Midi Kit 2 I/O.** `BMidiRoster` / `BMidiLocalProducer/Consumer`
 for hardware keyboards + ports and recording MIDI. Probe VM MIDI availability
 first (mirror `record_probe.sh`).
+
+**D. BFS sample browser.** Tag audio with BPM/Key/Duration attributes; a live
+`BQuery` becomes an instant sample browser (ARCHITECTURE §5.2) — the native
+Haiku superpower.
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.

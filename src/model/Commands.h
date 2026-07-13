@@ -151,6 +151,38 @@ private:
     std::vector<EffectDesc> fOld;
 };
 
+// Remove a clip from a track. Stores the removed clip for Undo().
+class RemoveClipCommand : public Command {
+public:
+    RemoveClipCommand(TrackId track, ClipId clip)
+        : fTrack(track), fClip(clip) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Remove Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Clip    fRemoved;   // saved in Do() for Undo()
+};
+
+// Remove the note at `index` on a track. Stores it + its index for Undo().
+class RemoveNoteCommand : public Command {
+public:
+    RemoveNoteCommand(TrackId track, size_t index)
+        : fTrack(track), fIndex(index) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Remove Note"; }
+
+private:
+    TrackId  fTrack;
+    size_t   fIndex;
+    MidiNote fRemoved;
+};
+
 // Move a clip to a new start position. Stores the old position for Undo().
 class MoveClipCommand : public Command {
 public:

@@ -68,7 +68,8 @@ private:
 
     // Lane geometry + header hit-testing.
     BRect LaneRect(int index) const;
-    int   TrackIndexAt(BPoint where) const;   // -1 if none
+    int   TrackIndexAt(BPoint where) const;             // -1 if none
+    int   NoteIndexAt(const Track& t, BRect lane, BPoint where) const;  // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
 
     // Live fader/pan drag. During a drag we preview by writing the model

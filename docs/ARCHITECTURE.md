@@ -318,7 +318,7 @@ haiku-daw/
 | 6 | MIDI playback + internal synth ✅ | kit-free Synth, transport sync | 3 |
 | 7 | Built-in DSP effects in EffectChainNode ✅ | IEffect chain, RT-safe processing | 3 |
 | — | Resampler (per-stream SRC to output rate) ✅ | correct pitch across rates | 2 |
-| 8 | Project save/load (bundle + BFS attrs) | Serialization, sample browser query | 4 |
+| 8 | Project save/load (text serializer + BFilePanel) ✅ | Serialization round-trip | 4 |
 
 Ship each milestone runnable. Milestone 0 is the gate: if BSoundPlayer
 latency in your VM is unusable, that decides "VM for dev, real hardware for

@@ -137,6 +137,38 @@ void ClearEffectsCommand::Undo(Project& p) {
         t->fx = fOld;
 }
 
+// --- RemoveClipCommand ------------------------------------------------
+
+bool RemoveClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fRemoved = *c;                    // save for Undo
+    return p.RemoveClip(fTrack, fClip);
+}
+
+void RemoveClipCommand::Undo(Project& p) {
+    p.AddClip(fTrack, fRemoved);      // re-inserted sorted by start
+}
+
+// --- RemoveNoteCommand ------------------------------------------------
+
+bool RemoveNoteCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || fIndex >= t->notes.size()) return false;
+    fRemoved = t->notes[fIndex];
+    t->notes.erase(t->notes.begin() + fIndex);
+    return true;
+}
+
+void RemoveNoteCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    size_t i = fIndex <= t->notes.size() ? fIndex : t->notes.size();
+    t->notes.insert(t->notes.begin() + i, fRemoved);
+}
+
 // --- MoveClipCommand --------------------------------------------------
 
 // Moving changes startFrame, which is the sort key. To preserve the

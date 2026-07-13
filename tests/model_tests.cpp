@@ -133,6 +133,41 @@ static void test_mute_solo_undo_redo() {
     CHECK(!p.FindTrack(id)->soloed);
 }
 
+static void test_remove_clip_and_note() {
+    std::printf("test_remove_clip_and_note\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "A"), p);
+    TrackId ta = p.Tracks().front().id;
+    Clip c; c.startFrame = 100; c.lengthFrames = 50; c.sourcePath = "x.wav";
+    auto add = std::make_unique<AddClipCommand>(ta, c);
+    AddClipCommand* addPtr = add.get();
+    stack.Execute(std::move(add), p);
+    ClipId cid = addPtr->CreatedId();
+    CHECK(p.FindTrack(ta)->clips.size() == 1);
+
+    stack.Execute(std::make_unique<RemoveClipCommand>(ta, cid), p);
+    CHECK(p.FindTrack(ta)->clips.empty());
+    stack.Undo(p);   // clip comes back
+    CHECK(p.FindTrack(ta)->clips.size() == 1);
+    CHECK(p.FindTrack(ta)->clips[0].startFrame == 100);
+
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "M"), p);
+    TrackId tm = p.Tracks().back().id;
+    MidiNote n1; n1.pitch = 60; n1.startFrame = 0;
+    MidiNote n2; n2.pitch = 64; n2.startFrame = 480;
+    stack.Execute(std::make_unique<AddNoteCommand>(tm, n1), p);
+    stack.Execute(std::make_unique<AddNoteCommand>(tm, n2), p);
+    CHECK(p.FindTrack(tm)->notes.size() == 2);
+
+    stack.Execute(std::make_unique<RemoveNoteCommand>(tm, 0), p);   // remove n1
+    CHECK(p.FindTrack(tm)->notes.size() == 1);
+    CHECK(p.FindTrack(tm)->notes[0].pitch == 64);
+    stack.Undo(p);   // n1 restored at index 0
+    CHECK(p.FindTrack(tm)->notes.size() == 2);
+    CHECK(p.FindTrack(tm)->notes[0].pitch == 60);
+}
+
 static void test_effect_commands() {
     std::printf("test_effect_commands\n");
     Project p;
@@ -190,6 +225,7 @@ int main() {
     test_add_and_undo_track();
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
+    test_remove_clip_and_note();
     test_mute_solo_undo_redo();
     test_effect_commands();
     test_note_commands();
