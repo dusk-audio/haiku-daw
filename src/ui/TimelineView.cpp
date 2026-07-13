@@ -45,6 +45,7 @@ static BRect ArmRect(BRect lane)   { return BRect(54, lane.top + 20, 74,  lane.t
 static BRect GainRect(BRect lane)  { return BRect(80, lane.top + 22, 154, lane.top + 34); }
 static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.top + 52); }
 static BRect SndRect(BRect lane)   { return BRect(6,  lane.top + 54, 60,  lane.top + 69); }
+static BRect AutoRect(BRect lane)  { return BRect(64, lane.top + 54, 118, lane.top + 69); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -302,6 +303,16 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
+    // Automation mode: the content area edits the active gain/pan curve instead
+    // of clips/notes. Cycle the header "Auto" box back to Off to edit clips.
+    {
+        auto am = fAutoMode.find(t.id);
+        if (am != fAutoMode.end() && am->second != 0) {
+            HandleAutoMouseDown(t, lane, idx, where, rightClick);
+            return;
+        }
+    }
+
     // MIDI track content: right-click deletes; on a note, drag to move or
     // (near its right edge) resize; on empty space, add a note.
     if (t.type == TrackType::Midi) {
@@ -475,6 +486,13 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         w->Show();
         return;
     }
+    if (AutoRect(lane).Contains(where)) {
+        // Cycle the automation edit mode: Off -> Gain -> Pan -> Off.
+        int& m = fAutoMode[id];
+        m = (m + 1) % 3;
+        Invalidate(lane);
+        return;
+    }
     if (ArmRect(lane).Contains(where)) {
         // Arm is transient transport state, not an undoable document edit:
         // toggle it directly. Multiple tracks may be armed; recording writes
@@ -597,11 +615,44 @@ void TimelineView::PreviewDrag(BPoint where) {
 }
 
 void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
+    if (fAutoDragging) {
+        Track* t = fProject->FindTrack(fAutoTrack);
+        if (!t) return;
+        const int mode = (fAutoKind == AutoLaneKind::Pan) ? 2 : 1;
+        AutomationLane& live = (mode == 2) ? t->panAuto : t->gainAuto;
+        int i = -1;
+        for (size_t k = 0; k < live.Count(); k++)
+            if (live.At(k).frame == fAutoDragFrame) { i = (int)k; break; }
+        if (i < 0) return;
+        const BRect lane = LaneRect(fDragLane);
+        Frame nf = Snapped(XToFrame(where.x));
+        if (nf < 0) nf = 0;
+        const float nv = AutoYToValue(lane, mode, where.y);
+        live.RemovePoint((size_t)i);
+        live.AddPoint(nf, nv);        // re-sorts; frame-key stays unique
+        fAutoDragFrame = nf;
+        Invalidate(lane);
+        return;
+    }
     if (fDrag != Drag::None)
         PreviewDrag(where);
 }
 
 void TimelineView::MouseUp(BPoint where) {
+    if (fAutoDragging) {
+        fAutoDragging = false;
+        Track* t = fProject->FindTrack(fAutoTrack);
+        if (t) {
+            AutomationLane& live = (fAutoKind == AutoLaneKind::Pan) ? t->panAuto
+                                                                    : t->gainAuto;
+            AutomationLane edited = live;  // edited result
+            live = fAutoOrig;              // restore pre-gesture state
+            fStack->Execute(std::make_unique<SetAutoLaneCommand>(
+                fAutoTrack, fAutoKind, edited), *fProject);
+        }
+        Invalidate();
+        return;
+    }
     if (fDrag == Drag::None)
         return;
 
@@ -812,6 +863,11 @@ void TimelineView::DrawLanes(BRect update) {
             }
         }
 
+        // Automation curve overlay when this track's Auto mode is on.
+        if (auto am = fAutoMode.find(t.id);
+            am != fAutoMode.end() && am->second != 0)
+            DrawAutomation(t, lane, am->second);
+
         DrawTrackHeader(t, lane);   // header gutter on top of the lane
 
         idx++;
@@ -893,6 +949,114 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     char sl[16];
     std::snprintf(sl, sizeof(sl), "Snd %d", (int)t.sends.size());
     DrawString(sl, BPoint(sr.left + 4, sr.bottom - 4));
+
+    // Automation mode box: Off / Gain / Pan (lit when editing).
+    BRect ar = AutoRect(lane);
+    int amode = 0;
+    if (auto it = fAutoMode.find(t.id); it != fAutoMode.end()) amode = it->second;
+    SetHighColor(amode == 0 ? ColLane() : Rgb(90, 130, 90));
+    FillRect(ar);
+    SetHighColor(ColGrid());  StrokeRect(ar);
+    SetHighColor(ColText());
+    const char* an = amode == 1 ? "Auto:Gain" : amode == 2 ? "Auto:Pan"
+                                                           : "Auto: -";
+    DrawString(an, BPoint(ar.left + 4, ar.bottom - 4));
+}
+
+// --- Automation editing --------------------------------------------------
+
+float TimelineView::AutoValueToY(BRect lane, int mode, float v) const {
+    const float top = lane.top + 4, bot = lane.bottom - 4;
+    float t = (mode == 2) ? (v + 1.0f) * 0.5f    // pan -1..1
+                          : v / kMaxGain;        // gain 0..max
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    return bot - t * (bot - top);
+}
+
+float TimelineView::AutoYToValue(BRect lane, int mode, float y) const {
+    const float top = lane.top + 4, bot = lane.bottom - 4;
+    float t = (bot - y) / (bot - top);
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    return (mode == 2) ? t * 2.0f - 1.0f : t * kMaxGain;
+}
+
+int TimelineView::AutoPointAt(const Track& t, BRect lane, int mode,
+                              BPoint where) const {
+    const AutomationLane& al = (mode == 2) ? t.panAuto : t.gainAuto;
+    for (size_t i = 0; i < al.Count(); i++) {
+        const float x = FrameToX(al.At(i).frame);
+        const float y = AutoValueToY(lane, mode, al.At(i).value);
+        if (std::fabs(x - where.x) <= 5.0f && std::fabs(y - where.y) <= 5.0f)
+            return (int)i;
+    }
+    return -1;
+}
+
+void TimelineView::DrawAutomation(const Track& t, BRect lane, int mode) {
+    const AutomationLane& al = (mode == 2) ? t.panAuto : t.gainAuto;
+    const float staticV = (mode == 2) ? t.pan : t.gain;
+    const float x0 = kHeaderWidth, x1 = lane.right;
+
+    // Sampled polyline (uniform hold/lerp handling straight from ValueAt).
+    SetHighColor(Rgb(230, 200, 90));
+    float px = x0, py = AutoValueToY(lane, mode, al.ValueAt(XToFrame(x0), staticV));
+    for (float x = x0 + 2.0f; x <= x1; x += 2.0f) {
+        const float y = AutoValueToY(lane, mode, al.ValueAt(XToFrame(x), staticV));
+        StrokeLine(BPoint(px, py), BPoint(x, y));
+        px = x; py = y;
+    }
+    // Breakpoint handles.
+    SetHighColor(Rgb(255, 232, 120));
+    for (size_t i = 0; i < al.Count(); i++) {
+        const float x = FrameToX(al.At(i).frame);
+        if (x < x0 || x > x1) continue;
+        const float y = AutoValueToY(lane, mode, al.At(i).value);
+        FillRect(BRect(x - 3, y - 3, x + 3, y + 3));
+    }
+}
+
+void TimelineView::HandleAutoMouseDown(const Track& t, BRect lane, int idx,
+                                       BPoint where, bool rightClick) {
+    const int mode = fAutoMode[t.id];                 // 1 gain / 2 pan
+    const AutoLaneKind kind = (mode == 2) ? AutoLaneKind::Pan
+                                          : AutoLaneKind::Gain;
+    const AutomationLane& al = (mode == 2) ? t.panAuto : t.gainAuto;
+    int hit = AutoPointAt(t, lane, mode, where);
+
+    // Right-click a handle: delete it (one command).
+    if (rightClick) {
+        if (hit >= 0) {
+            AutomationLane nl = al;
+            nl.RemovePoint((size_t)hit);
+            fStack->Execute(std::make_unique<SetAutoLaneCommand>(t.id, kind, nl),
+                            *fProject);
+            Invalidate(lane);
+        }
+        return;
+    }
+
+    // Snapshot the lane for undo, then begin a live-edit gesture on the model.
+    fAutoOrig = al;
+    Track* tm = fProject->FindTrack(t.id);
+    if (!tm) return;
+    AutomationLane& live = (mode == 2) ? tm->panAuto : tm->gainAuto;
+
+    if (hit < 0) {                                    // empty: add a point
+        Frame f = Snapped(XToFrame(where.x));
+        if (f < 0) f = 0;
+        const float v = AutoYToValue(lane, mode, where.y);
+        live.AddPoint(f, v);
+        fAutoDragFrame = f;
+    } else {
+        fAutoDragFrame = al.At((size_t)hit).frame;    // track by frame-key
+    }
+
+    fAutoDragging = true;
+    fAutoTrack    = t.id;
+    fAutoKind     = kind;
+    fDragLane     = idx;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    Invalidate(lane);
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane) {

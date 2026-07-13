@@ -135,6 +135,21 @@ private:
     MidiNote fClipNote;                // copied MIDI note
     TrackType fClipType = TrackType::Audio;  // source track type (paste target)
 
+    // Automation editing. fAutoMode[track] = 0 off / 1 gain / 2 pan; toggled by
+    // the header "Auto" box. When on, the lane's content area edits that curve.
+    void  DrawAutomation(const Track& t, BRect lane, int mode);
+    void  HandleAutoMouseDown(const Track& t, BRect lane, int idx, BPoint where,
+                              bool rightClick);
+    int   AutoPointAt(const Track& t, BRect lane, int mode, BPoint where) const;
+    float AutoValueToY(BRect lane, int mode, float v) const;
+    float AutoYToValue(BRect lane, int mode, float y) const;
+    std::map<TrackId, int> fAutoMode;
+    bool           fAutoDragging = false;
+    TrackId        fAutoTrack = kInvalidTrackId;
+    AutoLaneKind   fAutoKind  = AutoLaneKind::Gain;
+    Frame          fAutoDragFrame = 0;      // frame-key of the dragged breakpoint
+    AutomationLane fAutoOrig;               // lane at drag start (for undo)
+
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning
     const PeakMap* fPeaks = nullptr;  // non-owning
