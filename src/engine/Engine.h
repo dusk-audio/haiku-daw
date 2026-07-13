@@ -32,10 +32,11 @@ namespace daw {
 class TrackStream {
 public:
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
-                Frame lengthFrames, float gain, float pan, bool audible);
+                Frame lengthFrames, float gain, float pan, bool audible,
+                Frame srcSeekFrame);
     ~TrackStream();
 
-    status_t Prepare();          // open file, start disk thread, prime ring
+    status_t Prepare();          // open file, seek, start disk thread, prime
     void     StopThread();
 
     // Called from the RT callback. Adds this stream's contribution for the
@@ -62,6 +63,7 @@ private:
     std::string fPath;
     Frame       fStart;
     Frame       fLength;
+    Frame       fSrcSeek;       // source frame to seek to before streaming
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
@@ -78,7 +80,9 @@ public:
     ~Engine();
 
     // Build streams from the project's audio clips and open the output.
-    status_t Load(const Project& project);
+    // Playback (and each clip's source) is aligned to start at `startFrame`,
+    // so seeking is just a reload at a new start.
+    status_t Load(const Project& project, Frame startFrame = 0);
 
     void Start();
     void Stop();
@@ -112,6 +116,7 @@ private:
     std::atomic<bool>  fFinished{false};
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
+    Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;
 };

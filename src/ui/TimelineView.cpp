@@ -2,6 +2,8 @@
 
 #include "UiMetrics.h"
 
+#include <Window.h>
+
 #include <cstdio>
 #include <memory>
 
@@ -70,6 +72,18 @@ int TimelineView::TrackIndexAt(BPoint where) const {
 void TimelineView::MouseDown(BPoint where) {
     if (!fProject || !fStack)
         return;
+
+    // Click in the ruler -> move the playhead (seek). Content x only.
+    if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
+        Frame f = XToFrame(where.x);
+        if (f < 0) f = 0;
+        fProject->transport.playhead = f;
+        SetPlayhead(f);
+        if (BWindow* w = Window())
+            w->PostMessage(kMsgSeek);
+        return;
+    }
+
     const int idx = TrackIndexAt(where);
     if (idx < 0)
         return;

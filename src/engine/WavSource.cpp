@@ -93,6 +93,20 @@ bool WavSource::Open(const std::string& path) {
     return true;
 }
 
+bool WavSource::Seek(int64_t frame) {
+    if (!fValid)
+        return false;
+    if (frame < 0) frame = 0;
+    if (frame > fTotalFrames) frame = fTotalFrames;
+
+    const int frameSize = fBytesPerSample * fChannels;
+    const int64_t byteOffset = frame * frameSize;
+    fFile.clear();   // drop any prior EOF/fail state before repositioning
+    fFile.seekg(fDataStart + byteOffset, std::ios::beg);
+    fBytesRead = byteOffset;
+    return true;
+}
+
 // Convert one source sample at p to float in [-1, 1].
 float WavSource::SampleToFloat(const uint8_t* p) const {
     if (fAudioFormat == 3) {                 // 32-bit IEEE float

@@ -32,6 +32,11 @@ public:
     int     SourceChannels() const { return fChannels; }
     int64_t TotalFrames() const { return fTotalFrames; }
 
+    // Reposition the read cursor to source frame `frame` (clamped to
+    // [0, TotalFrames]). The next ReadChunk decodes from there. Returns false
+    // if the source is invalid. Used to align a clip to a seeked playhead.
+    bool Seek(int64_t frame);
+
     // Decode the next block. On success sets *outStereo to an internal
     // buffer of *outFrames interleaved stereo frames (2 * frames floats)
     // and returns true. Returns false at end of the data chunk.

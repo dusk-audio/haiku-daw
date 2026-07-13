@@ -28,9 +28,10 @@ static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
 
 TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
-                         float gain, float pan, bool audible)
+                         float gain, float pan, bool audible,
+                         Frame srcSeekFrame)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
-      fRing(kRingFloats) {
+      fSrcSeek(srcSeekFrame), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -53,6 +54,8 @@ TrackStream::~TrackStream() {
 status_t TrackStream::Prepare() {
     if (!fSource.Open(fPath))
         return B_ERROR;
+    if (fSrcSeek > 0)
+        fSource.Seek(fSrcSeek);   // align source to the seeked playhead
 
     fRunning.store(true);
     fDiskThread = std::thread(&TrackStream::DiskLoop, this);
@@ -132,7 +135,8 @@ Engine::~Engine() {
     fPlayer.reset();
 }
 
-status_t Engine::Load(const Project& project) {
+status_t Engine::Load(const Project& project, Frame startFrame) {
+    fStartFrame = startFrame;
     // Open the output first so we know the real output rate.
     media_raw_audio_format format = media_raw_audio_format::wildcard;
     format.frame_rate    = project.sampleRate;
@@ -167,9 +171,14 @@ status_t Engine::Load(const Project& project) {
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty())
                 continue;
+            // Align this clip's source to the start playhead: if the playhead
+            // is inside the clip, skip that many source frames.
+            Frame srcSeek = c.sourceOffset;
+            if (startFrame > c.startFrame)
+                srcSeek += startFrame - c.startFrame;
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
-                t.gain, t.pan, audible);
+                t.gain, t.pan, audible, srcSeek);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
@@ -210,8 +219,8 @@ void Engine::UpdateMix(const Project& project) {
 }
 
 void Engine::Start() {
-    fPlayhead.store(0);
-    fFinished.store(false);
+    fPlayhead.store(fStartFrame);
+    fFinished.store(fStartFrame >= fEndFrame);
     fPlaying.store(true);
     fPlayer->SetHasData(true);
     fPlayer->Start();

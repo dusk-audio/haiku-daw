@@ -83,6 +83,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_PLAY:  StartPlayback(); break;
         case MSG_STOP:  StopPlayback();  break;
+        case kMsgSeek: {
+            const Frame ph = fProject->transport.playhead;
+            UpdateTimeReadout(ph);
+            if (fPulse)          // playing -> restart from the new position
+                StartPlayback();
+            break;
+        }
         case MSG_UNDO:
             if (fStack->CanUndo()) { fStack->Undo(*fProject); fTimeline->Invalidate(); }
             break;
@@ -108,9 +115,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
 
 void MainWindow::StartPlayback() {
     // Rebuild the engine from the current model each time (RT-safe: no live
-    // mutation of a running graph). A fresh Engine starts its playhead at 0.
+    // mutation of a running graph). Playback begins at the current playhead.
+    const Frame start = fProject->transport.playhead;
     fEngine.reset(new Engine());
-    if (fEngine->Load(*fProject) != B_OK) {
+    if (fEngine->Load(*fProject, start) != B_OK) {
         std::fprintf(stderr, "MainWindow: nothing to play\n");
         fEngine.reset();
         return;

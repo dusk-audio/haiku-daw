@@ -76,6 +76,19 @@ int main() {
     CHECK(near(got[6], 32767/32768.0f));   // ~1.0
     CHECK(near(got[7], -1.0f));            // -32768/32768
 
+    // Seek back to frame 1 and re-read: first frame out should be frame 1
+    // (L=0.5, R=-0.5), proving the cursor repositioned.
+    CHECK(w.Seek(1));
+    const float* sblk = nullptr; size_t sn = 0;
+    CHECK(w.ReadChunk(&sblk, &sn));
+    CHECK(sn == 3);                        // frames 1..3 remain
+    CHECK(near(sblk[0], 16384/32768.0f));  // frame 1 L = 0.5
+    CHECK(near(sblk[1], -16384/32768.0f)); // frame 1 R = -0.5
+    // Seek past end -> next read returns false (no data).
+    CHECK(w.Seek(4));
+    const float* eblk = nullptr; size_t en = 0;
+    CHECK(!w.ReadChunk(&eblk, &en));
+
     std::remove(path);
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
