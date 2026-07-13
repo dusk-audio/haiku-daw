@@ -122,7 +122,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     const double ratio = fProject->sampleRate / recRate;
                     const Frame len = (Frame)(fRecorder->FramesWritten() * ratio);
                     const Frame pos = fRecStart + len;
-                    fTimeline->SetRecording(fRecTrack, fRecStart, len);
+                    fTimeline->SetRecording(true, fRecStart, len);
                     fTimeline->SetPlayhead(pos);
                     UpdateTimeReadout(pos);
                 }
@@ -184,11 +184,12 @@ void MainWindow::StartRecording() {
     if (fPlaying || (fRecorder && fRecorder->IsRecording()))
         return;
 
-    // Record onto the first armed audio track.
-    TrackId target = kInvalidTrackId;
+    // Record onto every armed audio track (one input take, dropped on each).
+    fRecTracks.clear();
     for (const Track& t : fProject->Tracks())
-        if (t.type == TrackType::Audio && t.armed) { target = t.id; break; }
-    if (target == kInvalidTrackId) {
+        if (t.type == TrackType::Audio && t.armed)
+            fRecTracks.push_back(t.id);
+    if (fRecTracks.empty()) {
         std::fprintf(stderr, "MainWindow: arm a track (R) before recording\n");
         return;
     }
@@ -202,7 +203,6 @@ void MainWindow::StartRecording() {
         fRecorder.reset();
         return;
     }
-    fRecTrack = target;
     fRecStart = fProject->transport.playhead;
     UpdatePulse();
 }
@@ -216,34 +216,36 @@ void MainWindow::StopRecording() {
     const double  recRate = fRecorder->SampleRate();
     const std::string path = std::string("take-") + std::to_string(fTakeCounter)
                            + ".wav";
-    const TrackId target = fRecTrack;
+    std::vector<TrackId> targets = fRecTracks;
 
     // Clear the live REC region and stop the poll.
-    fTimeline->SetRecording(kInvalidTrackId, 0, 0);
-    fRecTrack = kInvalidTrackId;
+    fTimeline->SetRecording(false, 0, 0);
+    fRecTracks.clear();
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
 
-    if (frames <= 0 || target == kInvalidTrackId) {
+    if (frames <= 0 || targets.empty()) {
         std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
         fRecorder.reset();
         return;
     }
 
-    // Drop the take as a clip where recording began. lengthFrames is timeline
-    // (project-rate) frames, converted from the recorder-rate frame count.
-    const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
-    Clip clip;
-    clip.startFrame   = fRecStart;
-    clip.lengthFrames = (int64_t)llround(frames * ratio);
-    clip.sourceOffset = 0;
-    clip.sourcePath   = path;
-    fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);
-
-    // Build the waveform envelope for the new take so it draws.
+    // Build the waveform envelope once; the take drops on every armed track.
     WavSource src;
     if (src.Open(path))
         (*fPeaks)[path].Build(src);
+
+    // lengthFrames is timeline (project-rate) frames, converted from the
+    // recorder-rate frame count.
+    const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
+    for (TrackId target : targets) {
+        Clip clip;
+        clip.startFrame   = fRecStart;
+        clip.lengthFrames = (int64_t)llround(frames * ratio);
+        clip.sourceOffset = 0;
+        clip.sourcePath   = path;
+        fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);
+    }
 
     fRecorder.reset();
     fTimeline->Invalidate();

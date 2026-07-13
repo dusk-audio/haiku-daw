@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 class BButton;
 class BStringView;
@@ -65,8 +66,8 @@ private:
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;
-    TrackId                   fRecTrack = kInvalidTrackId;  // armed target
-    Frame                     fRecStart = 0;                // playhead at rec start
+    std::vector<TrackId>      fRecTracks;   // all armed targets for the take
+    Frame                     fRecStart = 0; // playhead at rec start
 };
 
 } // namespace daw

@@ -52,10 +52,10 @@ public:
     // poll doesn't repaint the whole view each tick.
     void SetPlayhead(Frame f);
 
-    // Live recording region drawn as a growing block on `track` while a take
-    // is being captured (before the real clip exists). Pass kInvalidTrackId
-    // to clear it.
-    void SetRecording(TrackId track, Frame start, Frame length);
+    // Live recording region drawn as a growing block on every armed track
+    // while a take is being captured (before the real clips exist). Pass
+    // active=false to clear it.
+    void SetRecording(bool active, Frame start, Frame length);
 
 private:
     void DrawRuler(BRect update);
@@ -92,10 +92,10 @@ private:
     Frame          fScrollFrame;      // leftmost visible frame (content x=0)
     Frame          fPlayhead = 0;     // in project frames
 
-    // Live recording region (no clip yet); drawn on fRecTrack while capturing.
-    TrackId        fRecTrack = kInvalidTrackId;
-    Frame          fRecStart = 0;
-    Frame          fRecLen   = 0;
+    // Live recording region (no clips yet); drawn on every armed track.
+    bool           fRecording = false;
+    Frame          fRecStart  = 0;
+    Frame          fRecLen    = 0;
 };
 
 } // namespace daw
