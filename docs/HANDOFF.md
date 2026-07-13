@@ -33,8 +33,14 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   the RT mixer stays 1:1 and any source rate plays at correct pitch (44.1 k /
   96 k, incl. recorded takes). Clip lengths stored in timeline frames; source
   seek + waveform mapping are rate-corrected. Confirmed on real Haiku.
-- **NEXT** — **M6 MIDI** or **M7 DSP effects** (both build on M3). See
-  "Next task" below.
+- **M7 DSP effects** ✅ — `IEffect` (Biquad, Delay) + `EffectFactory`; model
+  Track carries an ordered `EffectDesc` chain (Add/ClearEffects commands);
+  engine mixes each track's clips into a bus, runs the chain, sums to master.
+  UI: header FX box toggles a demo low-pass (applies on next Play). Confirmed
+  audible on real Haiku. (Chain is per-track post-mix; effect picker / param
+  editing / reorder UI still to do.)
+- **NEXT** — **M6 MIDI** (internal-synth path first; external Midi Kit 2 I/O
+  later). See "Next task" below.
 
 ## Architecture in one breath
 
@@ -63,15 +69,22 @@ src/engine/
   WavWriter.{h,cpp}    native RIFF/WAVE writer for takes (kit-free, host-test)
   Resampler.{h,cpp}    streaming linear SRC (kit-free, host-testable)
   RingBuffer.h         lock-free SPSC float ring
-  Engine.{h,cpp}       BSoundPlayer output + TrackStream mixing + SRC (Haiku)
+  Engine.{h,cpp}       output + per-track bus mixing + SRC + FX (Haiku-only)
   Recorder.{h,cpp}     BMediaRecorder capture -> ring -> WavWriter (Haiku-only)
+src/dsp/               kit-free, host-testable DSP
+  IEffect.h            effect interface (Prepare/Process/Reset)
+  Biquad.{h,cpp}       RBJ low/high/peaking filter
+  Delay.{h,cpp}        feedback delay
+  EffectFactory.{h,cpp} EffectDesc -> IEffect
 src/ui/                Interface Kit (Haiku-only): App in main.cpp
   UiMetrics.h          layout constants, palette, kMsgSeek
   MainWindow.{h,cpp}   BWindow: transport bar, engine ownership, playhead poll
   TimelineView.{h,cpp} custom BView: ruler, lanes, clips, waveforms, headers
   MeterView.{h,cpp}    stereo master level meter
 src/main.cpp           BApplication; seeds a Project from argv WAVs (Haiku-only)
-tests/                 model_tests, wav_tests, peak_tests, wavwriter_tests
+src/model/Effect.h     kit-free EffectDesc (serializable effect params)
+tests/                 model_tests, wav_tests, peak_tests, wavwriter_tests,
+                       resampler_tests, effect_tests  (all host-buildable)
 prototypes/record_clip/ M5 driver: capture N seconds to a WAV
 prototypes/
   hello_beep/          M0
@@ -171,16 +184,22 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — M6 MIDI or M7 DSP (M0–M5 + resampler all done)
+## Next task — M6 MIDI (in progress)
 
-**A. M6 MIDI.** Midi Kit 2: `BMidiRoster`, a `BMidiLocalProducer` sequencer,
-an internal wavetable/sample synth node so MIDI makes sound with no external
-gear. MIDI clips = delta-timed event lists; transport frame-clock schedules
-them. Slave audio+MIDI to the same transport (see ARCHITECTURE §7).
+Internal-synth path first (makes sound with no external gear, all kit-free /
+host-testable), then external Midi Kit 2 I/O:
 
-**B. M7 DSP effects.** `IEffect { process(float** io, int frames) }` chain per
-track (ARCHITECTURE §8 stage 1): gain, pan, a biquad EQ, delay. RT-safe,
-kit-free, host-testable — apply in the mix path.
+- **Model:** a MIDI clip = a list of notes (pitch, startFrame, lengthFrames,
+  velocity), on a `TrackType::Midi` track. Kit-free; note-edit commands.
+- **Synth:** a kit-free polyphonic oscillator/wavetable that renders a clip's
+  notes to interleaved-stereo float at a sample rate. Host-testable (render a
+  note, assert energy during it, silence outside).
+- **Engine:** MIDI tracks render via the synth into their bus (alongside audio
+  streams), sharing the same transport frame clock and the FX chain.
+- **UI:** draw MIDI clips (blocks now, piano-roll later); basic note entry.
+- **Later:** Midi Kit 2 (`BMidiRoster` / `BMidiLocalProducer/Consumer`) for
+  external keyboards + ports. Probe VM MIDI availability before that (mirror
+  the record-probe discipline).
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.
