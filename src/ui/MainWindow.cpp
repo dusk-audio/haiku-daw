@@ -248,7 +248,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 int32 type = 0;
                 for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                     EffectDesc d;
-                    d.type = (type >= 0 && type <= 3) ? (EffectType)type
+                    d.type = (type >= 0 && type <= 4) ? (EffectType)type
                                                       : EffectType::Biquad;
                     msg->FindFloat("e0", i, &d.p0);
                     msg->FindFloat("e1", i, &d.p1);

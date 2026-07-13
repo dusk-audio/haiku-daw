@@ -84,6 +84,7 @@ void EffectsWindow::Rebuild() {
         if (d.type == EffectType::Delay)           tname = "Delay";
         else if (d.type == EffectType::Reverb)     tname = "Reverb";
         else if (d.type == EffectType::Compressor) tname = "Compressor";
+        else if (d.type == EffectType::Eq)         tname = "EQ (5-band)";
 
         BStringView* title = new BStringView(BRect(8, y, w - 150, y + 16),
             "title", tname);
@@ -130,6 +131,13 @@ void EffectsWindow::Rebuild() {
                 add("Release ms", 3, 5.0f, 1000.0f);
                 add("Makeup dB", 4, 0.0f, 24.0f);
                 break;
+            case EffectType::Eq:
+                add("80 Hz",   0, -18.0f, 18.0f);
+                add("240 Hz",  1, -18.0f, 18.0f);
+                add("750 Hz",  2, -18.0f, 18.0f);
+                add("2.2 kHz", 3, -18.0f, 18.0f);
+                add("6.5 kHz", 4, -18.0f, 18.0f);
+                break;
             case EffectType::Biquad:
             default:
                 add("Freq", 1, 20.0f, 16000.0f);
@@ -140,9 +148,9 @@ void EffectsWindow::Rebuild() {
         y += 8;
     }
 
-    const char* names[5] = { "Add Low-pass", "Add High-pass", "Add Delay",
-                             "Add Reverb", "Add Compressor" };
-    for (int k = 0; k < 5; k++) {
+    const char* names[4] = { "Add EQ", "Add Delay", "Add Reverb",
+                             "Add Compressor" };
+    for (int k = 0; k < 4; k++) {
         BButton* b = new BButton(BRect(8, y, w - 8, y + 22), "add",
                                  names[k], new BMessage(MSG_EADD));
         b->Message()->AddInt32("kind", k);
@@ -195,11 +203,10 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
             int32 kind = 0;
             msg->FindInt32("kind", &kind);
             switch (kind) {
-                case 0: fChain.push_back(LowPassDesc(800.0f)); break;
-                case 1: fChain.push_back(HighPassDesc(200.0f)); break;
-                case 2: fChain.push_back(DelayDesc()); break;
-                case 3: fChain.push_back(ReverbDesc()); break;
-                case 4: fChain.push_back(CompressorDesc()); break;
+                case 0: fChain.push_back(EqDesc()); break;
+                case 1: fChain.push_back(DelayDesc()); break;
+                case 2: fChain.push_back(ReverbDesc()); break;
+                case 3: fChain.push_back(CompressorDesc()); break;
             }
             Rebuild();
             Apply();

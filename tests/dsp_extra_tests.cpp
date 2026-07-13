@@ -5,6 +5,7 @@
 
 #include "../src/dsp/Reverb.h"
 #include "../src/dsp/Compressor.h"
+#include "../src/dsp/Eq.h"
 
 #include <cmath>
 #include <cstdio>
@@ -105,6 +106,31 @@ int main() {
         comp.Process(buf.data(), N);
         // ~ +6 dB => ~2x; below threshold so only makeup applies.
         CHECK(buf[2 * (N - 1)] > 0.03f);
+    }
+
+    // 3. EQ: the low-shelf band (80 Hz) lifts DC; a flat EQ is a near no-op;
+    // the high-shelf band leaves DC ~unchanged.
+    {
+        // Low-shelf +12 dB on band 0 -> DC (0 Hz) rises ~4x (10^(12/20)=3.98).
+        Eq low(12.0f, 0, 0, 0, 0);
+        low.Prepare(SR);
+        std::vector<float> buf(4000 * 2, 1.0f);      // DC
+        low.Process(buf.data(), 4000);
+        CHECK(std::fabs(buf[2 * 3999] - 3.98f) < 0.3f);
+
+        // Flat EQ: DC passes through ~unity.
+        Eq flat;
+        flat.Prepare(SR);
+        std::vector<float> b2(4000 * 2, 1.0f);
+        flat.Process(b2.data(), 4000);
+        CHECK(std::fabs(b2[2 * 3999] - 1.0f) < 1e-3f);
+
+        // High-shelf +12 dB (band 4): DC (well below 6.5 kHz) ~unchanged.
+        Eq high(0, 0, 0, 0, 12.0f);
+        high.Prepare(SR);
+        std::vector<float> b3(4000 * 2, 1.0f);
+        high.Process(b3.data(), 4000);
+        CHECK(std::fabs(b3[2 * 3999] - 1.0f) < 0.1f);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

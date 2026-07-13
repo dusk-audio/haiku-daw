@@ -4,6 +4,7 @@
 #include "Delay.h"
 #include "Reverb.h"
 #include "Compressor.h"
+#include "Eq.h"
 
 namespace daw {
 
@@ -23,6 +24,9 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
         case EffectType::Compressor:
             return std::unique_ptr<IEffect>(
                 new Compressor(d.p0, d.p1, d.p2, d.p3, d.p4));
+        case EffectType::Eq:
+            return std::unique_ptr<IEffect>(
+                new Eq(d.p0, d.p1, d.p2, d.p3, d.p4));
     }
     return nullptr;
 }

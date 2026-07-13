@@ -9,9 +9,10 @@
 
 namespace daw {
 
-// Order is the serialized id (0..3); do not reorder without bumping the file
-// format (see ProjectIO).
-enum class EffectType { Biquad, Delay, Reverb, Compressor };
+// Order is the serialized id (0..4); do not reorder without bumping the file
+// format (see ProjectIO). Biquad is kept for loading older projects; new tone
+// shaping uses the 5-band Eq.
+enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq };
 
 struct EffectDesc {
     EffectType type = EffectType::Biquad;
@@ -22,6 +23,7 @@ struct EffectDesc {
     //   Reverb:     p0 = roomSize [0,1], p1 = mix [0,1]
     //   Compressor: p0 = threshold dB, p1 = ratio, p2 = attack ms,
     //               p3 = release ms, p4 = makeup dB
+    //   Eq:         p0..p4 = per-band gain dB (80/240/750/2200/6500 Hz)
     float p0 = 0.0f;
     float p1 = 0.0f;
     float p2 = 0.0f;
@@ -47,6 +49,9 @@ inline EffectDesc CompressorDesc(float thrDb = -20.0f, float ratio = 4.0f,
                                  float makeupDb = 0.0f) {
     return EffectDesc{EffectType::Compressor, thrDb, ratio, attackMs, releaseMs,
                       makeupDb};
+}
+inline EffectDesc EqDesc() {   // 5 flat bands
+    return EffectDesc{EffectType::Eq, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 }
 
 } // namespace daw

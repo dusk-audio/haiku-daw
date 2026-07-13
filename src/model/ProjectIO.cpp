@@ -169,7 +169,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             int type = 0;
             iss >> type >> e.p0 >> e.p1 >> e.p2 >> e.p3;
             iss >> e.p4;   // optional 5th param; absent in older records -> 0
-            if (type < 0 || type > 3) type = 0;
+            if (type < 0 || type > 4) type = 0;
             e.type = (EffectType)type;
             cur.fx.push_back(e);
         }

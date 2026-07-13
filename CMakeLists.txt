@@ -25,6 +25,7 @@ add_library(daw_model
     src/dsp/Delay.cpp           # kit-free feedback delay effect
     src/dsp/Reverb.cpp          # kit-free Schroeder reverb
     src/dsp/Compressor.cpp      # kit-free dynamics compressor
+    src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
 )
