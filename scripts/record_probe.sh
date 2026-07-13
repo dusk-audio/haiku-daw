@@ -72,6 +72,8 @@ fi
 # --- Probe B: BMediaRecorder end-to-end capture (the M5 recipe) -------------
 cat > "$TMP/probe_recorder.cpp" <<'EOF'
 #include <MediaRecorder.h>
+#include <MediaRoster.h>
+#include <MediaNode.h>
 #include <MediaDefs.h>
 #include <OS.h>
 #include <cstdio>
@@ -102,8 +104,25 @@ int main() {
     fmt.u.raw_audio.byte_order = B_MEDIA_HOST_ENDIAN;
 
     rec.SetHooks(RecordHook, NULL, NULL);
-    status_t c = rec.Connect(fmt);
-    printf("Connect(float, rate/ch wildcard): %s\n", strerror(c));
+
+    // The source-less Connect(format) returns "Bad source" on this image, so
+    // connect to the explicit physical input node (GetAudioInput / node 3).
+    BMediaRoster* roster = BMediaRoster::Roster();
+    media_node inNode;
+    status_t gi = roster ? roster->GetAudioInput(&inNode) : B_ERROR;
+    printf("GetAudioInput for connect: %s\n", strerror(gi));
+
+    status_t c = B_ERROR;
+    if (gi == B_OK) {
+        c = rec.Connect(inNode, NULL, &fmt);
+        printf("Connect(inputNode, NULL, &fmt): %s\n", strerror(c));
+    }
+    // Fall back to the source-less form just to record its status too.
+    if (c != B_OK) {
+        status_t c2 = rec.Connect(fmt);
+        printf("Connect(format only): %s\n", strerror(c2));
+        c = c2;
+    }
     if (c != B_OK) return 1;
 
     printf("Start: %s\n", strerror(rec.Start()));
