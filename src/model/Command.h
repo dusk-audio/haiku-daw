@@ -43,6 +43,10 @@ public:
     bool CanUndo() const { return !fUndo.empty(); }
     bool CanRedo() const { return !fRedo.empty(); }
 
+    // Drop all history (e.g. after loading a different project, whose edits
+    // these commands could no longer correctly reverse).
+    void Clear() { fUndo.clear(); fRedo.clear(); }
+
     bool Undo(Project& p) {
         if (fUndo.empty()) return false;
         std::unique_ptr<Command> cmd = std::move(fUndo.back());

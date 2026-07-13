@@ -5,14 +5,17 @@
 #include "UiMetrics.h"
 
 #include "../engine/WavSource.h"
+#include "../model/ProjectIO.h"
 
 #include <Application.h>
-
-#include <cmath>
 #include <Button.h>
+#include <Entry.h>
+#include <FilePanel.h>
 #include <MessageRunner.h>
+#include <Path.h>
 #include <StringView.h>
 
+#include <cmath>
 #include <cstdio>
 
 namespace daw {
@@ -24,6 +27,10 @@ enum {
     MSG_PULSE = 'puls',
     MSG_UNDO  = 'undo',
     MSG_REDO  = 'redo',
+    MSG_SAVE  = 'save',
+    MSG_OPEN  = 'open',
+    MSG_SAVE_REF = 'svrf',   // from the save file panel
+    MSG_OPEN_REF = 'oprf',   // from the open file panel
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -66,14 +73,23 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(undo);
     bar->AddChild(redo);
 
+    BButton* save = new BButton(BRect(478, 5, 542, kTransportH - 5), "save",
+                                "Save", new BMessage(MSG_SAVE));
+    BButton* open = new BButton(BRect(546, 5, 610, kTransportH - 5), "open",
+                                "Open", new BMessage(MSG_OPEN));
+    bar->AddChild(save);
+    bar->AddChild(open);
+
     // Master output meter, pinned to the right of the transport bar.
     fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
                                  kTransportH - 5));
     bar->AddChild(fMeter);
 
-    // Keyboard: Cmd-Z / Cmd-Shift-Z.
+    // Keyboard: Cmd-Z / Cmd-Shift-Z / Cmd-S / Cmd-O.
     AddShortcut('Z', B_COMMAND_KEY, new BMessage(MSG_UNDO));
     AddShortcut('Z', B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_REDO));
+    AddShortcut('S', B_COMMAND_KEY, new BMessage(MSG_SAVE));
+    AddShortcut('O', B_COMMAND_KEY, new BMessage(MSG_OPEN));
 
     // --- Timeline (fills the rest) ---
     BRect tlRect(0, kTransportH + 1, bounds.right, bounds.bottom);
@@ -84,6 +100,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
 MainWindow::~MainWindow() {
     delete fPulse;
+    delete fSavePanel;
+    delete fOpenPanel;
     // fEngine / fRecorder destructors stop their threads.
 }
 
@@ -112,6 +130,40 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_REDO:
             if (fStack->CanRedo()) { fStack->Redo(*fProject); fTimeline->Invalidate(); }
             break;
+        case MSG_SAVE:
+            if (!fSavePanel) {
+                BMessenger to(this);
+                fSavePanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
+                                            new BMessage(MSG_SAVE_REF));
+            }
+            fSavePanel->Show();
+            break;
+        case MSG_OPEN:
+            if (!fOpenPanel) {
+                BMessenger to(this);
+                fOpenPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0, false,
+                                            new BMessage(MSG_OPEN_REF));
+            }
+            fOpenPanel->Show();
+            break;
+        case MSG_SAVE_REF: {
+            entry_ref dir; const char* name = nullptr;
+            if (msg->FindRef("directory", &dir) == B_OK
+                && msg->FindString("name", &name) == B_OK) {
+                BPath path(&dir);
+                path.Append(name);
+                SaveTo(path.Path());
+            }
+            break;
+        }
+        case MSG_OPEN_REF: {
+            entry_ref ref;
+            if (msg->FindRef("refs", &ref) == B_OK) {
+                BPath path(&ref);
+                LoadFrom(path.Path());
+            }
+            break;
+        }
         case MSG_PULSE: {
             if (fRecorder && fRecorder->IsRecording()) {
                 fMeter->SetLevels(fRecorder->PeakL(), fRecorder->PeakR());
@@ -266,6 +318,38 @@ void MainWindow::StopRecording() {
 
     fRecorder.reset();
     fTimeline->Invalidate();
+}
+
+void MainWindow::SaveTo(const char* path) {
+    if (!ProjectIO::Save(*fProject, path))
+        std::fprintf(stderr, "MainWindow: save failed: %s\n", path);
+}
+
+void MainWindow::LoadFrom(const char* path) {
+    StopPlayback();
+    StopRecording();
+    if (!ProjectIO::Load(*fProject, path)) {
+        std::fprintf(stderr, "MainWindow: load failed: %s\n", path);
+        return;
+    }
+    fStack->Clear();          // history from the previous project is invalid
+    RebuildPeaks();           // waveform envelopes for the loaded clips
+    fTimeline->SetProject(fProject);
+    fTimeline->SetPlayhead(fProject->transport.playhead);
+    UpdateTimeReadout(fProject->transport.playhead);
+    fTimeline->Invalidate();
+}
+
+void MainWindow::RebuildPeaks() {
+    fPeaks->clear();
+    for (const Track& t : fProject->Tracks())
+        for (const Clip& c : t.clips) {
+            if (c.sourcePath.empty() || fPeaks->count(c.sourcePath))
+                continue;
+            WavSource src;
+            if (src.Open(c.sourcePath))
+                (*fPeaks)[c.sourcePath].Build(src);
+        }
 }
 
 void MainWindow::UpdateTimeReadout(Frame playhead) {

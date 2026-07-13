@@ -25,6 +25,7 @@
 class BButton;
 class BStringView;
 class BMessageRunner;
+class BFilePanel;
 
 namespace daw {
 
@@ -52,6 +53,9 @@ private:
     void StopRecording();
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
+    void SaveTo(const char* path);
+    void LoadFrom(const char* path);
+    void RebuildPeaks();             // rebuild waveform envelopes after load
 
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
@@ -64,6 +68,8 @@ private:
     std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
     std::unique_ptr<Recorder> fRecorder;  // active while recording
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
+    BFilePanel*               fSavePanel = nullptr;
+    BFilePanel*               fOpenPanel = nullptr;
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
