@@ -39,7 +39,8 @@ public:
     // outputRate on its disk thread, so the ring is at the output rate.
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
-                bool audible, Frame seekProjectDelta, float outputRate);
+                bool audible, Frame seekProjectDelta, float outputRate,
+                Frame fadeIn, Frame fadeOut);
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -72,6 +73,8 @@ private:
     Frame       fSourceOffset;  // source-frame offset into the file
     Frame       fSeekDelta;     // output frames into the clip to skip on start
     float       fOutputRate;    // engine output rate to resample to
+    Frame       fFadeIn;        // fade-in length (timeline frames)
+    Frame       fFadeOut;       // fade-out length (timeline frames)
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};

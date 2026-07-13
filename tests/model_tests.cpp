@@ -148,6 +148,48 @@ static void test_resize_clip_and_edit_note() {
     CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 100);
 }
 
+static void test_track_manage_and_fade() {
+    std::printf("test_track_manage_and_fade\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "One"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Two"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Three"), p);
+    TrackId t2 = p.Tracks()[1].id;
+    CHECK(p.Tracks().size() == 3);
+
+    // Rename middle track.
+    stack.Execute(std::make_unique<SetTrackNameCommand>(t2, "Bass"), p);
+    CHECK(p.FindTrack(t2)->name == "Bass");
+    stack.Undo(p);
+    CHECK(p.FindTrack(t2)->name == "Two");
+    stack.Redo(p);
+    CHECK(p.FindTrack(t2)->name == "Bass");
+
+    // Remove middle track; undo restores it in the same position.
+    stack.Execute(std::make_unique<RemoveTrackCommand>(t2), p);
+    CHECK(p.Tracks().size() == 2);
+    CHECK(p.FindTrack(t2) == nullptr);
+    stack.Undo(p);
+    CHECK(p.Tracks().size() == 3);
+    CHECK(p.Tracks()[1].id == t2);           // back in the middle
+    CHECK(p.FindTrack(t2)->name == "Bass");  // with its edited name
+
+    // Clip fades.
+    TrackId t1 = p.Tracks().front().id;
+    Clip c; c.startFrame = 0; c.lengthFrames = 1000; c.sourcePath = "x.wav";
+    auto add = std::make_unique<AddClipCommand>(t1, c);
+    AddClipCommand* ap = add.get();
+    stack.Execute(std::move(add), p);
+    ClipId cid = ap->CreatedId();
+    stack.Execute(std::make_unique<SetClipFadeCommand>(t1, cid, 100, 200), p);
+    CHECK(p.FindTrack(t1)->clips[0].fadeInFrames == 100);
+    CHECK(p.FindTrack(t1)->clips[0].fadeOutFrames == 200);
+    stack.Undo(p);
+    CHECK(p.FindTrack(t1)->clips[0].fadeInFrames == 0);
+    CHECK(p.FindTrack(t1)->clips[0].fadeOutFrames == 0);
+}
+
 static void test_mute_solo_undo_redo() {
     std::printf("test_mute_solo_undo_redo\n");
     Project p;
@@ -264,6 +306,7 @@ int main() {
     test_clip_sorted_insert_and_move();
     test_remove_clip_and_note();
     test_resize_clip_and_edit_note();
+    test_track_manage_and_fade();
     test_mute_solo_undo_redo();
     test_effect_commands();
     test_note_commands();

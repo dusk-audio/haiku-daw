@@ -26,6 +26,38 @@ private:
     TrackId     fCreatedId = kInvalidTrackId;
 };
 
+// Remove a track. Stores the whole track + its index so Undo restores it in
+// place.
+class RemoveTrackCommand : public Command {
+public:
+    explicit RemoveTrackCommand(TrackId track) : fTrack(track) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Remove Track"; }
+
+private:
+    TrackId fTrack;
+    Track   fRemoved;    // saved in Do()
+    int     fIndex = -1;
+};
+
+// Rename a track. Stores the previous name for Undo().
+class SetTrackNameCommand : public Command {
+public:
+    SetTrackNameCommand(TrackId track, std::string name)
+        : fTrack(track), fNewName(std::move(name)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Rename Track"; }
+
+private:
+    TrackId     fTrack;
+    std::string fNewName;
+    std::string fOldName;
+};
+
 // Change a track's linear gain. Stores the previous value for Undo().
 class SetTrackGainCommand : public Command {
 public:
@@ -215,6 +247,23 @@ private:
     ClipId  fClip;
     Frame   fNewLength;
     Frame   fOldLength = 0;
+};
+
+// Set a clip's fade-in / fade-out lengths (frames). Stores old for Undo().
+class SetClipFadeCommand : public Command {
+public:
+    SetClipFadeCommand(TrackId track, ClipId clip, Frame fadeIn, Frame fadeOut)
+        : fTrack(track), fClip(clip), fIn(fadeIn), fOut(fadeOut) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Clip Fade"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fIn, fOut;
+    Frame   fOldIn = 0, fOldOut = 0;
 };
 
 // Replace a note (move, resize, or velocity edit). Stores old for Undo().

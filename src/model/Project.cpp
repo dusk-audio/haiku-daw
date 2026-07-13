@@ -39,12 +39,26 @@ bool Project::AddTrack(const Track& t) {
     return true;
 }
 
+bool Project::InsertTrack(size_t index, const Track& t) {
+    if (t.id == kInvalidTrackId || FindTrack(t.id) != nullptr)
+        return false;
+    if (index > fTracks.size()) index = fTracks.size();
+    fTracks.insert(fTracks.begin() + index, t);
+    return true;
+}
+
 bool Project::RemoveTrack(TrackId id) {
     auto it = std::find_if(fTracks.begin(), fTracks.end(),
                            [&](const Track& t) { return t.id == id; });
     if (it == fTracks.end()) return false;
     fTracks.erase(it);
     return true;
+}
+
+int Project::IndexOfTrack(TrackId id) const {
+    for (size_t i = 0; i < fTracks.size(); i++)
+        if (fTracks[i].id == id) return (int)i;
+    return -1;
 }
 
 bool Project::AddClip(TrackId track, const Clip& c) {

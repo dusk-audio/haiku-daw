@@ -31,10 +31,12 @@ static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
 TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
                          Frame sourceOffset, float gain, float pan,
-                         bool audible, Frame seekProjectDelta, float outputRate)
+                         bool audible, Frame seekProjectDelta, float outputRate,
+                         Frame fadeIn, Frame fadeOut)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
-      fOutputRate(outputRate), fRing(kRingFloats) {
+      fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
+      fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -143,8 +145,17 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         // Always consume the ring above; only sum when audible so an unmute
         // resumes in sample-sync rather than replaying buffered audio.
         if (aud) {
-            out[i * 2 + 0] += lr[0] * gl;
-            out[i * 2 + 1] += lr[1] * gr;
+            // Linear fade-in/out envelope (combined as a min).
+            float fade = 1.0f;
+            const Frame rel = ph - fStart;
+            if (fFadeIn > 0 && rel < fFadeIn)
+                fade = (float)rel / (float)fFadeIn;
+            if (fFadeOut > 0 && rel >= fLength - fFadeOut) {
+                float fo = (float)(fLength - rel) / (float)fFadeOut;
+                if (fo < fade) fade = fo;
+            }
+            out[i * 2 + 0] += lr[0] * gl * fade;
+            out[i * 2 + 1] += lr[1] * gr * fade;
         }
     }
 }
@@ -201,7 +212,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 (startFrame > c.startFrame) ? startFrame - c.startFrame : 0;
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
-                c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate);
+                c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate,
+                c.fadeInFrames, c.fadeOutFrames);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());

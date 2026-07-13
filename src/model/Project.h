@@ -88,7 +88,9 @@ public:
     // Direct mutators — intended to be called by Command objects, not by
     // the UI. Return success so commands can assert their preconditions.
     bool AddTrack(const Track& t);
+    bool InsertTrack(size_t index, const Track& t);   // for faithful undo
     bool RemoveTrack(TrackId id);
+    int  IndexOfTrack(TrackId id) const;              // -1 if not found
     bool AddClip(TrackId track, const Clip& c);
     bool RemoveClip(TrackId track, ClipId clip);
 

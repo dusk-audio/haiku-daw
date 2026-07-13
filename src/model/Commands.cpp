@@ -20,6 +20,38 @@ void AddTrackCommand::Undo(Project& p) {
     p.RemoveTrack(fCreatedId);
 }
 
+// --- RemoveTrackCommand -----------------------------------------------
+
+bool RemoveTrackCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fRemoved = *t;
+    fIndex   = p.IndexOfTrack(fTrack);
+    return p.RemoveTrack(fTrack);
+}
+
+void RemoveTrackCommand::Undo(Project& p) {
+    if (fIndex >= 0)
+        p.InsertTrack((size_t)fIndex, fRemoved);
+    else
+        p.AddTrack(fRemoved);
+}
+
+// --- SetTrackNameCommand ----------------------------------------------
+
+bool SetTrackNameCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldName = t->name;
+    t->name  = fNewName;
+    return true;
+}
+
+void SetTrackNameCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->name = fOldName;
+}
+
 // --- SetTrackGainCommand ----------------------------------------------
 
 bool SetTrackGainCommand::Do(Project& p) {
@@ -215,6 +247,29 @@ void ResizeClipCommand::Undo(Project& p) {
     if (!t) return;
     if (Clip* c = t->FindClip(fClip))
         c->lengthFrames = fOldLength;
+}
+
+// --- SetClipFadeCommand -----------------------------------------------
+
+bool SetClipFadeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldIn = c->fadeInFrames;
+    fOldOut = c->fadeOutFrames;
+    c->fadeInFrames  = fIn  < 0 ? 0 : fIn;
+    c->fadeOutFrames = fOut < 0 ? 0 : fOut;
+    return true;
+}
+
+void SetClipFadeCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fClip)) {
+        c->fadeInFrames  = fOldIn;
+        c->fadeOutFrames = fOldOut;
+    }
 }
 
 // --- NoteEditCommand --------------------------------------------------
