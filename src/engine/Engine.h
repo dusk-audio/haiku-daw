@@ -114,6 +114,12 @@ public:
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
 
+    // Monitor section (RT-safe atomics). These affect only what is played out,
+    // NOT the peak meters (which reflect the true mix). Dim drops the monitor
+    // ~20 dB; Mono sums L+R to both channels for mono/phase checking.
+    void SetMonitorDim(bool on)  { fMonitorDim.store(on); }
+    void SetMonitorMono(bool on) { fMonitorMono.store(on); }
+
     // Output buffer size in frames (per channel); applied at the next Load.
     // Smaller = lower latency, higher xrun risk. Call before Load().
     void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
@@ -168,6 +174,8 @@ private:
     Synth                                     fSynth;     // MIDI voice renderer
     Metronome                                 fMetronome; // click generator
     std::atomic<bool>                         fMetronomeOn{false};
+    std::atomic<bool>                         fMonitorDim{false};
+    std::atomic<bool>                         fMonitorMono{false};
 
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};

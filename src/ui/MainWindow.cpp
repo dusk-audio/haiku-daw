@@ -58,6 +58,8 @@ enum {
     MSG_TEMPO     = 'tmpo',
     MSG_BUFFER    = 'bufs',
     MSG_MASTER_FX = 'mfx ',
+    MSG_MON_DIM   = 'mdim',
+    MSG_MON_MONO  = 'mmon',
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -100,6 +102,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(fMetItem);
     viewMenu->AddItem(new BMenuItem("Master Effects" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_MASTER_FX)));
+    viewMenu->AddSeparatorItem();
+    fDimItem = new BMenuItem("Monitor: Dim", new BMessage(MSG_MON_DIM));
+    viewMenu->AddItem(fDimItem);
+    fMonoItem = new BMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
+    viewMenu->AddItem(fMonoItem);
     menuBar->AddItem(viewMenu);
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
@@ -213,6 +220,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
+        case MSG_MON_DIM:
+            fMonDim = !fMonDim;
+            if (fDimItem) fDimItem->SetMarked(fMonDim);
+            if (fEngine) fEngine->SetMonitorDim(fMonDim);
+            break;
+        case MSG_MON_MONO:
+            fMonMono = !fMonMono;
+            if (fMonoItem) fMonoItem->SetMarked(fMonMono);
+            if (fEngine) fEngine->SetMonitorMono(fMonMono);
+            break;
         case MSG_METRONOME:
             fMetronome = !fMetronome;
             if (fMetItem) fMetItem->SetMarked(fMetronome);
@@ -528,6 +545,8 @@ void MainWindow::StartPlayback() {
     }
     fEngine->Start();
     fEngine->SetMetronome(fMetronome);
+    fEngine->SetMonitorDim(fMonDim);
+    fEngine->SetMonitorMono(fMonMono);
     fPlaying = true;
     UpdatePulse();
 }

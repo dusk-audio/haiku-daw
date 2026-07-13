@@ -80,9 +80,13 @@ private:
     BFilePanel*               fExportPanel = nullptr;
     BFilePanel*               fImportPanel = nullptr;
     BMenuItem*                fMetItem = nullptr;   // metronome toggle
+    BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
+    BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
     BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
     size_t                    fBufferFrames = 512;  // output buffer frames/channel
     bool                      fMetronome = false;
+    bool                      fMonDim = false;
+    bool                      fMonMono = false;
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take

@@ -496,6 +496,16 @@ void Engine::FillBuffer(float* out, size_t frames) {
     fPeakL.store(pl);
     fPeakR.store(pr);
 
+    // Monitor section: applied AFTER metering so the meters show the true mix.
+    if (fMonitorMono.load(std::memory_order_relaxed))
+        for (size_t i = 0; i < frames; i++) {
+            const float m = 0.5f * (out[i * 2 + 0] + out[i * 2 + 1]);
+            out[i * 2 + 0] = out[i * 2 + 1] = m;
+        }
+    if (fMonitorDim.load(std::memory_order_relaxed))
+        for (size_t i = 0; i < nfloats; i++)
+            out[i] *= 0.1f;   // ~-20 dB
+
     fPlayhead.store(blockStart + static_cast<Frame>(frames));
 }
 
