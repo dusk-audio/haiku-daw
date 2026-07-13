@@ -78,9 +78,15 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   Dim/Mono, RT-safe, applied post-metering (A4); BS.1770-4 master loudness meter
   — momentary/short LUFS + true-peak dBTP live readout, integrated disabled on
   the audio thread for RT-safety (A5). See `docs/ROADMAP.md` Phase A.
-- **NEXT** — Phase T (tempo/meter map) or Phase B (automation — `AutomationLane`
-  model already built + tested, needs wiring). Also pending: external Midi Kit 2
-  I/O (run midi_probe.sh first), BFS sample browser.
+- **Phase B — automation** ✅ (gain + pan; host-tested where kit-free): per-track
+  `gainAuto`/`panAuto` lanes + `SetAutoLaneCommand` + IO (B1); Exporter
+  per-sample envelope, RT engine per-block lane-driven fader (B2); header "Auto"
+  box + breakpoint editing on the lane (B3). Effect-param/send-level automation
+  deferred. See `docs/ROADMAP.md` Phase B.
+- **NEXT** — Phase T (tempo/meter map) or Phase C (editing depth: clip split,
+  crossfade, per-clip gain, multi-select, track reorder). Also pending: external
+  Midi Kit 2 I/O (class-compliant USB only; run midi_probe.sh on real hardware),
+  BFS sample browser.
 
 ## Architecture in one breath
 

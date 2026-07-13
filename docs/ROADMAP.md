@@ -43,13 +43,19 @@ sort, with sends, a monitor section, and BS.1770 metering.
   short-term LUFS + true-peak dBTP, live readout in the transport bar. Integrated
   disabled on the audio thread (RT-safe); available offline.
 
-## Phase B — Automation (model already built + tested)
+## Phase B — Automation  ✅ DONE (gain + pan)
 
-- **B1.** Wire `AutomationLane` into `Track`: per-track gain/pan lanes and
-  per-effect-param lanes; serialize in `ProjectIO`.
-- **B2.** Engine reads the lane value at the playhead each block and applies it
-  (RT-safe; the model owns the breakpoints, the engine reads a snapshot).
-- **B3.** UI automation lanes under a track: draw + add/move/delete breakpoints.
+- **B1.** ✅ `gainAuto`/`panAuto` `AutomationLane` on `Track` (absolute
+  envelopes; empty = static fader). `SetAutoLaneCommand` (snapshot gesture,
+  undoable). `ProjectIO` serializes `auto gain|pan` lines. Host-tested.
+- **B2.** ✅ Node-level fader: the offline Exporter applies a per-sample
+  gain*pan envelope (host-tested ramp); the RT engine drives the gain path per
+  block from an RT-owned lane snapshot (`ValueAt(blockStart)`), UpdateMix
+  refreshes only audibility for automated tracks.
+- **B3.** ✅ Header "Auto" box (Off/Gain/Pan); the lane content area draws the
+  curve and edits breakpoints (click add / drag move / right-click delete),
+  one undoable gesture per drag.
+- *Deferred:* per-effect-param + send-level lanes (model generalizes cleanly).
 
 ## Phase C — Editing depth
 
