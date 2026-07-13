@@ -314,7 +314,7 @@ haiku-daw/
 | 2 | Single-track WAV playback (BSoundPlayer + WavSource) ✅ | Disk streaming, transport clock | 0,1 |
 | 3 | Multitrack mix + gain/pan/mute/solo ✅ | MixerNode, per-track control, metering | 2 |
 | 4 | Timeline UI: clips + waveforms, drag/move, transport, meter, live params, seek ✅ | Interface Kit, peak cache, command stack ↔ UI | 1,3 |
-| 5 | Recording (audio in → disk → clip) | RecordNode, input latency, arm/monitor | 3 |
+| 5 | Recording (audio in → disk → clip) ✅ | BMediaRecorder capture, arm, WAV take | 3 |
 | 6 | MIDI playback + internal synth | Midi Kit 2, transport sync | 3 |
 | 7 | Built-in DSP effects in EffectChainNode | IEffect chain, RT-safe processing | 3 |
 | 8 | Project save/load (bundle + BFS attrs) | Serialization, sample browser query | 4 |

@@ -23,9 +23,15 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   `PeakCache`), transport bar (play/stop + time), sweeping playhead, master
   stereo meter, track headers (name, mute/solo, drag gain/pan), clip drag,
   undo/redo, and click-to-seek. See "M4 state" below.
-- **M5 recording** ⬅ **NEXT** — audio in → disk → clip (RecordNode, arm/
-  monitor, input latency).
-- M6 MIDI, M7 DSP effects — after M5.
+- **M5 recording** ✅ — capture the system audio input to a WAV take and
+  drop it as a clip. `BMediaRecorder` (recipe: `GetAudioInput` +
+  `Connect(node, NULL, wildcard)`; device negotiates native format — 96 kHz
+  int16 stereo on the VM's HD Audio) → RT record hook → lock-free ring →
+  disk-writer thread → `WavWriter`. UI: arm (R) + Rec, take dropped via
+  `AddClipCommand` at the playhead. Proven end-to-end on real Haiku.
+- **NEXT** — pick one: **resampler** (playback assumes source rate == output
+  rate; 44.1 k / 96 k sources play at wrong pitch — now visible on recorded
+  96 k takes), **M6 MIDI**, or **M7 DSP effects**. See "Next task" below.
 
 ## Architecture in one breath
 
@@ -51,15 +57,18 @@ src/model/             Project/Track/Clip, Command stack, commands  (kit-free)
   PeakCache.{h,cpp}    min/max waveform envelope (kit-free, host-testable)
 src/engine/
   WavSource.{h,cpp}    native RIFF/WAVE reader + Seek (kit-free, host-testable)
+  WavWriter.{h,cpp}    native RIFF/WAVE writer for takes (kit-free, host-test)
   RingBuffer.h         lock-free SPSC float ring
   Engine.{h,cpp}       BSoundPlayer output + TrackStream mixing (Haiku-only)
+  Recorder.{h,cpp}     BMediaRecorder capture -> ring -> WavWriter (Haiku-only)
 src/ui/                Interface Kit (Haiku-only): App in main.cpp
   UiMetrics.h          layout constants, palette, kMsgSeek
   MainWindow.{h,cpp}   BWindow: transport bar, engine ownership, playhead poll
   TimelineView.{h,cpp} custom BView: ruler, lanes, clips, waveforms, headers
   MeterView.{h,cpp}    stereo master level meter
 src/main.cpp           BApplication; seeds a Project from argv WAVs (Haiku-only)
-tests/                 model_tests, wav_tests, peak_tests  (host-buildable)
+tests/                 model_tests, wav_tests, peak_tests, wavwriter_tests
+prototypes/record_clip/ M5 driver: capture N seconds to a WAV
 prototypes/
   hello_beep/          M0
   play_clip/           M2 driver: play one WAV
@@ -158,18 +167,26 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — M5 recording
+## Next task — pick one (M0–M5 all done)
 
-Audio input → disk → a new clip:
-- A capture path off `BSoundPlayer` won't do (it's output only). Options:
-  a record `BMediaNode` (`BBufferConsumer` on `GetAudioInput`), or the
-  lower-level `media_input`/`BMediaRecorder` if available on this image.
-  Verify what the plugin-less VM actually exposes first (mirror the M2 lesson).
-- Arm a track; monitor input; write incoming buffers to a WAV on disk on a
-  low-priority thread (never in the RT callback), then add an `AddClipCommand`
-  for the recorded take when recording stops.
-- Keep the model + file writer kit-free/host-testable where possible; keep the
-  RT capture callback allocation/lock/IO-free, same contract as playback.
+**A. Resampler (recommended first — a real bug now).** Playback assumes each
+source's sample rate equals the output rate. `Engine::Load` only warns on a
+mismatch; `TrackStream::Mix` reads the ring 1:1. So 44.1 k and 96 k sources
+(including every recorded take, which is 96 k) play at the wrong pitch/speed.
+Fix: resample each stream to the output rate. Cleanest spot is the disk
+thread (`TrackStream::DiskLoop`) or a wrapper around `WavSource` output —
+keep the RT `Mix` doing 1:1 reads. A linear or windowed-sinc SRC on the disk
+side is kit-free and host-testable. This unblocks recording actually sounding
+right and mixing sources of different rates.
 
-Study Haiku's **Cortex** and **MediaPlayer** for Media Kit node patterns.
-Keep every milestone runnable; keep the audio thread real-time-safe.
+**B. M6 MIDI.** Midi Kit 2: `BMidiRoster`, a `BMidiLocalProducer` sequencer,
+an internal wavetable/sample synth node so MIDI makes sound with no external
+gear. MIDI clips = delta-timed event lists; transport frame-clock schedules
+them. Slave audio+MIDI to the same transport (see ARCHITECTURE §7).
+
+**C. M7 DSP effects.** `IEffect { process(float** io, int frames) }` chain per
+track (ARCHITECTURE §8 stage 1): gain, pan, a biquad EQ, delay. RT-safe,
+kit-free, host-testable — apply in the mix path.
+
+Keep every milestone runnable; keep the audio thread real-time-safe; commit as
+`marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.
