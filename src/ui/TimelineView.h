@@ -18,6 +18,11 @@ namespace daw {
 
 class TimelineView : public BView {
 public:
+    // BView already has a Frame() method; without this typedef every
+    // unqualified `Frame` in this class would bind to BView::Frame() instead
+    // of the model's frame type. A member typedef hides the inherited name.
+    using Frame = daw::Frame;
+
     explicit TimelineView(BRect frame, const Project* project);
 
     void Draw(BRect updateRect) override;
