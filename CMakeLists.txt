@@ -89,6 +89,7 @@ if(HAIKU)
         src/ui/MainWindow.cpp
         src/ui/MeterView.cpp
     )
-    # -lbe (Application/Interface Kit). daw_engine pulls in daw_model + media.
-    target_link_libraries(daw PRIVATE daw_engine be)
+    # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
+    # pulls in daw_model + media.
+    target_link_libraries(daw PRIVATE daw_engine be tracker)
 endif()
