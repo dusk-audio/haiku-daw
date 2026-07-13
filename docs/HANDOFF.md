@@ -70,8 +70,17 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   - **Menu bar** — File (Open/Save/Export/Quit), Edit (Undo/Redo), Track,
     View (Mixer); Save/Open/Undo/Redo buttons removed from the transport bar.
   - **MIDI probe** — `scripts/midi_probe.sh` (run on VM before external MIDI).
-- **NEXT** — external Midi Kit 2 I/O (after running midi_probe.sh), automation,
-  BFS sample browser, copy/paste, metronome.
+- **Phase A — mixer routing** ✅ (host-tested where kit-free; engine/UI build on
+  VM): master-bus FX (A1); bus tracks + per-track `output`, topo-sorted graph in
+  both the RT engine and offline Exporter (A2); aux `sends[]` with a general
+  edge topo `ResolveOrderWithEdges` — Exporter honors pre/post-fader exactly,
+  RT engine does post-fader, SendsWindow + "Snd" header box (A3); monitor
+  Dim/Mono, RT-safe, applied post-metering (A4); BS.1770-4 master loudness meter
+  — momentary/short LUFS + true-peak dBTP live readout, integrated disabled on
+  the audio thread for RT-safety (A5). See `docs/ROADMAP.md` Phase A.
+- **NEXT** — Phase T (tempo/meter map) or Phase B (automation — `AutomationLane`
+  model already built + tested, needs wiring). Also pending: external Midi Kit 2
+  I/O (run midi_probe.sh first), BFS sample browser.
 
 ## Architecture in one breath
 

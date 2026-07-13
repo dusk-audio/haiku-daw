@@ -23,18 +23,25 @@ See `HANDOFF.md` for current state detail and `ARCHITECTURE.md` for the design.
   (horizontal + cross-track ghost), copy/paste, import audio, zoom/pan, snap,
   tempo field, master volume, buffer-size menu.
 
-## Phase A — Mixer routing  ← recommended next
+## Phase A — Mixer routing  ✅ DONE
 
-The biggest architectural gap: routing is flat (every track → master sum; the
-"master" is just a gain + meter).
+Routing is now a real graph (tracks → buses → master) resolved by topological
+sort, with sends, a monitor section, and BS.1770 metering.
 
-- **A1. Master-bus FX** — give the master its own `EffectDesc` chain between the
-  sum and output, plus its meter/gain. Reuses the effects editor. *Small.*
-- **A2. Group / bus tracks** — a bus track type + per-track `output` routing
-  (master or a bus id); engine sums in dependency order (tracks → bus →
-  master). Model + engine + mixer UI. *Large.*
-- **A3. Aux sends** — per-track send levels to aux buses (pre/post-fader); an
-  aux bus carries shared FX (e.g. one reverb) → master. *Medium.*
+- **A1. Master-bus FX** ✅ — master `EffectDesc` chain between the sum and
+  output, edited via the effects editor (master sentinel target).
+- **A2. Group / bus tracks** ✅ — `TrackType::Bus` + per-track `output`; engine
+  and offline Exporter both process nodes in dependency order (RoutingGraph
+  topo). New Bus menu item + header routing popup.
+- **A3. Aux sends** ✅ — per-track `sends[]` (dest bus, level, pre/post-fader);
+  `ResolveOrderWithEdges` adds send edges to the topo. Exporter honors pre/post
+  exactly; the RT engine does post-fader (live). SendsWindow editor + "Snd"
+  header box. Host-tested.
+- **A4. Monitor section** ✅ — master Dim (~-20 dB) + Mono, RT-safe atomics
+  applied after metering (meters show the true mix). View menu toggles.
+- **A5. Master metering** ✅ — BS.1770-4 loudness meter on the mix: momentary /
+  short-term LUFS + true-peak dBTP, live readout in the transport bar. Integrated
+  disabled on the audio thread (RT-safe); available offline.
 
 ## Phase B — Automation (model already built + tested)
 
