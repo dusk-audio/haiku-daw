@@ -134,14 +134,14 @@ void TimelineView::MouseDown(BPoint where) {
         m->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
 
-    // Click in the ruler -> move the playhead (seek). Content x only.
+    // Ruler: click seeks, drag sets a loop region. Begin a ruler drag; on
+    // release we decide seek-vs-loop by how far it moved.
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fProject->transport.playhead = f;
-        SetPlayhead(f);
-        if (BWindow* w = Window())
-            w->PostMessage(kMsgSeek);
+        fDrag       = Drag::RulerLoop;
+        fLoopAnchor = f;
+        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;
     }
 
@@ -304,6 +304,18 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
 // model for live feedback. This is a transient preview only; the undoable
 // command is pushed in MouseUp.
 void TimelineView::PreviewDrag(BPoint where) {
+    // Ruler loop drag isn't tied to a track.
+    if (fDrag == Drag::RulerLoop) {
+        Frame f = Snapped(XToFrame(where.x));
+        if (f < 0) f = 0;
+        Transport& tr = fProject->transport;
+        tr.loopStart = fLoopAnchor < f ? fLoopAnchor : f;
+        tr.loopEnd   = fLoopAnchor < f ? f : fLoopAnchor;
+        tr.loopEnabled = (tr.loopEnd > tr.loopStart);
+        Invalidate(BRect(0, 0, Bounds().right, kRulerHeight));
+        return;
+    }
+
     Track* t = fProject->FindTrack(fDragTrack);
     if (!t) return;
     BRect lane = LaneRect(fDragLane);
@@ -358,9 +370,26 @@ void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
         PreviewDrag(where);
 }
 
-void TimelineView::MouseUp(BPoint) {
+void TimelineView::MouseUp(BPoint where) {
     if (fDrag == Drag::None)
         return;
+
+    // Ruler drag: a real drag left a loop region; a bare click (anchor
+    // unchanged) is a seek that clears the loop.
+    if (fDrag == Drag::RulerLoop) {
+        Transport& tr = fProject->transport;
+        if (!tr.loopEnabled || tr.loopEnd <= tr.loopStart) {
+            tr.loopEnabled = false;
+            tr.playhead = fLoopAnchor;
+            SetPlayhead(fLoopAnchor);
+            if (BWindow* w = Window())
+                w->PostMessage(kMsgSeek);
+        }
+        fDrag = Drag::None;
+        Invalidate();
+        return;
+    }
+
     Track* t = fProject->FindTrack(fDragTrack);
     if (t) {
         // Restore the pre-drag value, then apply the whole gesture as one
@@ -437,6 +466,18 @@ void TimelineView::DrawRuler(BRect update) {
 
     if (!fProject)
         return;
+
+    // Loop region highlight.
+    const Transport& tr = fProject->transport;
+    if (tr.loopEnabled && tr.loopEnd > tr.loopStart) {
+        float lx0 = FrameToX(tr.loopStart);
+        float lx1 = FrameToX(tr.loopEnd);
+        if (lx0 < kHeaderWidth) lx0 = kHeaderWidth;
+        if (lx1 > lx0) {
+            SetHighColor(Rgb(70, 110, 90));
+            FillRect(BRect(lx0, 0, lx1, kRulerHeight));
+        }
+    }
 
     // Bar/beat ticks. Beats are drawn only when there's room; bars always,
     // with a "bar" number label.

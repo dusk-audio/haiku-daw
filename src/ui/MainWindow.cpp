@@ -181,6 +181,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             } else if (fPlaying && fEngine) {
                 fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
                 const Frame ph = fEngine->Playhead();
+                const Transport& tr = fProject->transport;
+                // Loop: when the playhead passes the loop end, restart at the
+                // loop start (rebuild-on-play seek; a small gap at the seam).
+                if (tr.loopEnabled && tr.loopEnd > tr.loopStart
+                    && ph >= tr.loopEnd) {
+                    fProject->transport.playhead = tr.loopStart;
+                    StartPlayback();
+                    break;
+                }
                 fTimeline->SetPlayhead(ph);
                 UpdateTimeReadout(ph);
                 fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
