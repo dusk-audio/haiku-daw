@@ -286,6 +286,15 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         }
     }
 
+    // Master bus effect chain (applied to the summed output).
+    fMasterFx.clear();
+    for (const EffectDesc& d : project.masterFx) {
+        auto fx = MakeEffect(d);
+        if (!fx) continue;
+        fx->Prepare(fOutputRate);
+        fMasterFx.push_back(std::move(fx));
+    }
+
     // Per-bus mix scratch, sized to the output buffer (generous floor).
     size_t maxFrames = (size_t)(fPlayer->Format().buffer_size
                                 / (sizeof(float) * 2));
@@ -370,6 +379,10 @@ void Engine::FillBuffer(float* out, size_t frames) {
         for (size_t i = 0; i < nfloats; i++)
             out[i] += sc[i];
     }
+
+    // Master bus FX on the summed output (before gain/metering).
+    for (auto& fx : fMasterFx)
+        fx->Process(out, static_cast<int>(frames));
 
     // Master gain on the summed output (before metering so the meter reflects
     // what actually leaves the engine).

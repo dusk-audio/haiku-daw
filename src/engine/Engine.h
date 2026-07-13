@@ -146,6 +146,7 @@ private:
     std::unique_ptr<BSoundPlayer>             fPlayer;
     std::vector<std::unique_ptr<TrackStream>> fStreams;
     std::vector<Bus>                          fBuses;
+    std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<float>                        fScratch;   // per-bus mix buffer
     Synth                                     fSynth;     // MIDI voice renderer
     Metronome                                 fMetronome; // click generator

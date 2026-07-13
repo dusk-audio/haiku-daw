@@ -55,7 +55,11 @@ enum {
     MSG_PASTE     = 'past',
     MSG_TEMPO     = 'tmpo',
     MSG_BUFFER    = 'bufs',
+    MSG_MASTER_FX = 'mfx ',
 };
+
+// Sentinel "track id" the effects editor uses to target the master FX chain.
+static const TrackId kMasterFxTarget = ~(TrackId)0;
 
 static constexpr float kTransportH = 36.0f;
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
@@ -91,6 +95,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
     fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
     viewMenu->AddItem(fMetItem);
+    viewMenu->AddItem(new BMenuItem("Master Effects" B_UTF8_ELLIPSIS,
+                                    new BMessage(MSG_MASTER_FX)));
     menuBar->AddItem(viewMenu);
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
@@ -241,6 +247,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();
             break;
         }
+        case MSG_MASTER_FX: {
+            BRect wr(160, 160, 460, 720);
+            (new EffectsWindow(wr, fProject->masterFx, kMasterFxTarget,
+                               BMessenger(this)))->Show();
+            break;
+        }
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips;
             for (const Track& t : fProject->Tracks())
@@ -279,8 +291,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // the model is mutated only on this (main) thread.
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                t->fx.clear();
+            // The chain goes to a track, or to the master when tid is the
+            // master sentinel.
+            std::vector<EffectDesc>* dst = nullptr;
+            if ((TrackId)tid == kMasterFxTarget)
+                dst = &fProject->masterFx;
+            else if (Track* t = fProject->FindTrack((TrackId)tid))
+                dst = &t->fx;
+            if (dst) {
+                dst->clear();
                 int32 type = 0, epIdx = 0;
                 for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                     EffectDesc d;
@@ -293,7 +312,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         msg->FindFloat("ep", epIdx++, &v);
                         d.params.push_back(v);
                     }
-                    t->fx.push_back(d);
+                    dst->push_back(d);
                 }
                 fTimeline->Invalidate();
             }

@@ -89,6 +89,10 @@ add_executable(automation_tests tests/automation_tests.cpp)
 target_link_libraries(automation_tests PRIVATE daw_model)
 add_test(NAME automation_tests COMMAND automation_tests)
 
+add_executable(routing_tests tests/routing_tests.cpp)
+target_link_libraries(routing_tests PRIVATE daw_model)
+add_test(NAME routing_tests COMMAND routing_tests)
+
 add_executable(saturator_tests tests/saturator_tests.cpp)
 target_link_libraries(saturator_tests PRIVATE daw_model)
 add_test(NAME saturator_tests COMMAND saturator_tests)

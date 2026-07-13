@@ -196,6 +196,27 @@ bool ExportWav(const Project& project, const std::string& outPath,
             master[i] += trackBuf[i];
     }
 
+    // Master bus FX chain (applied to the summed mix before master gain).
+    {
+        std::vector<std::unique_ptr<IEffect>> masterFx;
+        for (const EffectDesc& d : project.masterFx) {
+            auto fx = MakeEffect(d);
+            if (!fx) continue;
+            fx->Prepare(outRate);
+            masterFx.push_back(std::move(fx));
+        }
+        if (!masterFx.empty()) {
+            const int64_t kBlock = 8192;
+            for (int64_t off = 0; off < totalOut; off += kBlock) {
+                int64_t n = totalOut - off;
+                if (n > kBlock) n = kBlock;
+                float* pm = master.data() + off * 2;
+                for (auto& fx : masterFx)
+                    fx->Process(pm, static_cast<int>(n));
+            }
+        }
+    }
+
     // Master gain, clamp to [-1,1], convert to interleaved int16.
     const float mg = project.masterGain;
     std::vector<int16_t> pcm(nfloats);

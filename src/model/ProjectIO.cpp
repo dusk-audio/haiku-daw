@@ -60,6 +60,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
       << (long long)p.transport.loopStart << " "
       << (long long)p.transport.loopEnd << "\n";
 
+    for (const EffectDesc& e : p.masterFx) {
+        f << "masterfx " << (int)e.type << " " << e.params.size();
+        for (float v : e.params) f << " " << v;
+        f << "\n";
+    }
+
     for (const Track& t : p.Tracks()) {
         f << "track " << t.id << " "
           << (t.type == TrackType::Midi ? "midi" : "audio") << " "
@@ -125,6 +131,15 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         if (kw == "sampleRate") { iss >> p.sampleRate; }
         else if (kw == "tempo") { iss >> p.tempoBPM; }
         else if (kw == "master") { iss >> p.masterGain; }
+        else if (kw == "masterfx") {
+            EffectDesc e;
+            int type = 0, count = 0;
+            iss >> type >> count;
+            if (type < 0 || type > 7) type = 0;
+            e.type = (EffectType)type;
+            for (int i = 0; i < count; i++) { float v = 0.0f; iss >> v; e.params.push_back(v); }
+            p.masterFx.push_back(e);
+        }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "transport") {
             long long ph, ls, le; int loop;

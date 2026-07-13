@@ -57,6 +57,7 @@ public:
     double        sampleRate = 48000.0;
     double        tempoBPM   = 120.0;
     float         masterGain = 1.0f;   // linear, applied to the summed output
+    std::vector<EffectDesc> masterFx;  // master bus effect chain (post-sum)
     TimeSignature timeSig;
     Transport     transport;
 
