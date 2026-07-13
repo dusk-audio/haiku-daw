@@ -24,7 +24,7 @@ using ClipId  = uint64_t;
 constexpr TrackId kInvalidTrackId = 0;
 constexpr ClipId  kInvalidClipId  = 0;
 
-enum class TrackType { Audio, Midi };
+enum class TrackType { Audio, Midi, Bus };
 
 struct TimeSignature {
     int numerator   = 4;

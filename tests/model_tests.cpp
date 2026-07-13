@@ -111,6 +111,27 @@ static void test_clip_sorted_insert_and_move() {
     (void)cId;
 }
 
+static void test_bus_routing() {
+    std::printf("test_bus_routing\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Bus, "Drum Bus"), p);
+    TrackId gtr = p.Tracks()[0].id, bus = p.Tracks()[1].id;
+    CHECK(p.Tracks()[1].type == TrackType::Bus);
+    CHECK(p.FindTrack(gtr)->output == kInvalidTrackId);   // master by default
+
+    stack.Execute(std::make_unique<SetTrackOutputCommand>(gtr, bus), p);
+    CHECK(p.FindTrack(gtr)->output == bus);
+    stack.Undo(p);
+    CHECK(p.FindTrack(gtr)->output == kInvalidTrackId);
+    stack.Redo(p);
+    CHECK(p.FindTrack(gtr)->output == bus);
+
+    // Self-route is rejected.
+    CHECK(!stack.Execute(std::make_unique<SetTrackOutputCommand>(gtr, gtr), p));
+}
+
 static void test_move_clip_to_track() {
     std::printf("test_move_clip_to_track\n");
     Project p;
@@ -330,6 +351,7 @@ int main() {
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
     test_move_clip_to_track();
+    test_bus_routing();
     test_remove_clip_and_note();
     test_resize_clip_and_edit_note();
     test_track_manage_and_fade();

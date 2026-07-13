@@ -52,6 +52,23 @@ void SetTrackNameCommand::Undo(Project& p) {
         t->name = fOldName;
 }
 
+// --- SetTrackOutputCommand --------------------------------------------
+
+bool SetTrackOutputCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    // Reject a self-route; the engine's routing resolver rejects cycles too.
+    if (fNewOutput == fTrack) return false;
+    fOldOutput = t->output;
+    t->output = fNewOutput;
+    return true;
+}
+
+void SetTrackOutputCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->output = fOldOutput;
+}
+
 // --- SetTrackGainCommand ----------------------------------------------
 
 bool SetTrackGainCommand::Do(Project& p) {

@@ -44,6 +44,7 @@ struct Track {
     bool              muted = false;
     bool              soloed = false;
     bool              armed  = false;
+    TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     std::vector<Clip>       clips;    // audio clips, kept sorted by startFrame
     std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain

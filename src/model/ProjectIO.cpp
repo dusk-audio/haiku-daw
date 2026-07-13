@@ -67,11 +67,13 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     }
 
     for (const Track& t : p.Tracks()) {
-        f << "track " << t.id << " "
-          << (t.type == TrackType::Midi ? "midi" : "audio") << " "
+        const char* ty = t.type == TrackType::Midi ? "midi"
+                       : t.type == TrackType::Bus  ? "bus" : "audio";
+        f << "track " << t.id << " " << ty << " "
           << t.gain << " " << t.pan << " "
           << (t.muted ? 1 : 0) << " " << (t.soloed ? 1 : 0) << " "
-          << (t.armed ? 1 : 0) << " \"" << t.name << "\"\n";
+          << (t.armed ? 1 : 0) << " " << t.output
+          << " \"" << t.name << "\"\n";
 
         for (const Clip& c : t.clips)
             f << "clip " << c.id << " "
@@ -155,10 +157,12 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             std::string type;
             int mute, solo, arm;
             iss >> cur.id >> type >> cur.gain >> cur.pan >> mute >> solo >> arm;
-            cur.type   = (type == "midi") ? TrackType::Midi : TrackType::Audio;
+            cur.type   = (type == "midi") ? TrackType::Midi
+                       : (type == "bus")  ? TrackType::Bus : TrackType::Audio;
             cur.muted  = (mute != 0);
             cur.soloed = (solo != 0);
             cur.armed  = (arm != 0);
+            iss >> cur.output;   // routing target; absent in older files -> 0 (master)
             cur.name   = Unquote(line);
             if (cur.id > maxTrack) maxTrack = cur.id;
             haveTrack = true;

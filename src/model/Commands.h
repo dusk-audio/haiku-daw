@@ -58,6 +58,22 @@ private:
     std::string fOldName;
 };
 
+// Route a track's output to a bus (or master = kInvalidTrackId). Stores old.
+class SetTrackOutputCommand : public Command {
+public:
+    SetTrackOutputCommand(TrackId track, TrackId output)
+        : fTrack(track), fNewOutput(output) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Route Track"; }
+
+private:
+    TrackId fTrack;
+    TrackId fNewOutput;
+    TrackId fOldOutput = kInvalidTrackId;
+};
+
 // Change a track's linear gain. Stores the previous value for Undo().
 class SetTrackGainCommand : public Command {
 public:
