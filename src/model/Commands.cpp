@@ -330,4 +330,26 @@ void NoteEditCommand::Undo(Project& p) {
         t->notes[fIndex] = fOld;
 }
 
+// --- SetSendsCommand --------------------------------------------------
+
+bool SetSendsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    // Drop invalid sends: a send to nothing, or a self-send (would loop).
+    std::vector<Send> clean;
+    clean.reserve(fNew.size());
+    for (const Send& s : fNew)
+        if (s.dest != kInvalidTrackId && s.dest != fTrack)
+            clean.push_back(s);
+    fNew.swap(clean);
+    fOld = t->sends;
+    t->sends = fNew;
+    return true;
+}
+
+void SetSendsCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->sends = fOld;
+}
+
 } // namespace daw

@@ -103,6 +103,48 @@ int main() {
         CHECK(order.empty());
     }
 
+    // --- ResolveOrderWithEdges (aux sends add extra edges) ---
+    auto posOf = [](const std::vector<TrackId>& o, TrackId id) {
+        return std::find(o.begin(), o.end(), id) - o.begin();
+    };
+
+    // Track 1 routes to master AND sends to aux bus 2 (also -> master).
+    // The send edge forces 1 before 2.
+    {
+        std::vector<TrackId> nodes = {1, 2};
+        std::vector<std::pair<TrackId, TrackId>> edges = {
+            {1, kRoutingMaster}, {2, kRoutingMaster}, {1, 2}};
+        std::vector<TrackId> order;
+        CHECK(ResolveOrderWithEdges(nodes, edges, order));
+        CHECK(order.size() == 2);
+        CHECK(posOf(order, 1) < posOf(order, 2));
+    }
+
+    // A send cycle (1 sends to 2, 2 sends to 1) -> false.
+    {
+        std::vector<TrackId> nodes = {1, 2};
+        std::vector<std::pair<TrackId, TrackId>> edges = {{1, 2}, {2, 1}};
+        std::vector<TrackId> order;
+        CHECK(!ResolveOrderWithEdges(nodes, edges, order));
+        CHECK(order.empty());
+    }
+
+    // Self-send -> false. Edge into master / unknown node is ignored.
+    {
+        std::vector<TrackId> nodes = {1};
+        std::vector<std::pair<TrackId, TrackId>> edges = {{1, 1}};
+        std::vector<TrackId> order;
+        CHECK(!ResolveOrderWithEdges(nodes, edges, order));
+    }
+    {
+        std::vector<TrackId> nodes = {1, 2};
+        std::vector<std::pair<TrackId, TrackId>> edges = {
+            {1, kRoutingMaster}, {2, 99 /*unknown*/}};
+        std::vector<TrackId> order;
+        CHECK(ResolveOrderWithEdges(nodes, edges, order));
+        CHECK(order.size() == 2);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

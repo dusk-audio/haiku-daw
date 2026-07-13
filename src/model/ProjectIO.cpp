@@ -92,6 +92,10 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "\n";
         }
 
+        for (const Send& s : t.sends)
+            f << "send " << s.dest << " " << s.level << " "
+              << (s.preFader ? 1 : 0) << "\n";
+
         f << "endtrack\n";
     }
     return f.good();
@@ -196,6 +200,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
                 e.params.push_back(v);
             }
             cur.fx.push_back(e);
+        }
+        else if (kw == "send" && haveTrack) {
+            Send s;
+            int pre = 0;
+            iss >> s.dest >> s.level >> pre;
+            s.preFader = (pre != 0);
+            if (s.dest != kInvalidTrackId) cur.sends.push_back(s);
         }
         // "endtrack" and unknown keywords: ignored (commit happens on next
         // track / EOF).

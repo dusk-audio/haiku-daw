@@ -45,6 +45,10 @@ int main() {
     MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500; n.lengthFrames = 480;
     stack.Execute(std::make_unique<AddNoteCommand>(t2, n), a);
 
+    // Aux send from track 1 to a bus (id t2 stands in as a dest here).
+    { std::vector<Send> s = {{t2, 0.4f, true}};
+      stack.Execute(std::make_unique<SetSendsCommand>(t1, s), a); }
+
     CHECK(ProjectIO::Save(a, path));
 
     Project b;
@@ -71,6 +75,10 @@ int main() {
     CHECK(bt1.fx[0].type == EffectType::Biquad);
     CHECK(bt1.fx[1].type == EffectType::Compressor);
     CHECK(std::abs(bt1.fx[1].p(4) - 6.0f) < 1e-4f);   // makeup persisted
+    CHECK(bt1.sends.size() == 1);
+    CHECK(bt1.sends[0].dest == t2);
+    CHECK(std::abs(bt1.sends[0].level - 0.4f) < 1e-4f);
+    CHECK(bt1.sends[0].preFader == true);
 
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);

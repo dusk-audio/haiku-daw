@@ -12,6 +12,7 @@
 #include "types.h"
 
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace daw {
@@ -81,6 +82,61 @@ inline bool ResolveRoutingOrder(const std::vector<RouteNode>& nodes,
 
     // If not every node was emitted, the leftovers form a cycle.
     if (outOrder.size() != nodes.size()) {
+        outOrder.clear();
+        return false;
+    }
+    return true;
+}
+
+// Generalized topo sort over an arbitrary edge list. `nodeIds` lists every real
+// node; `edges` are directed dependencies (from -> to) meaning `to` depends on
+// `from`, so `from` must appear BEFORE `to` in the result. An edge whose `to`
+// is kRoutingMaster (or any id not in `nodeIds`) is treated as feeding the
+// implicit sink and imposes no ordering constraint on a real node. This lets a
+// node have MANY outgoing edges (its output plus every aux send), which the
+// single-output ResolveRoutingOrder cannot express.
+//
+// Returns false (and clears `outOrder`) on a duplicate id, a self-edge
+// (from == to on a real node), or a cycle. Edges into the master sink and
+// edges from unknown nodes are ignored.
+inline bool ResolveOrderWithEdges(
+        const std::vector<TrackId>& nodeIds,
+        const std::vector<std::pair<TrackId, TrackId>>& edges,
+        std::vector<TrackId>& outOrder) {
+    outOrder.clear();
+
+    std::unordered_map<TrackId, size_t> indexOf;
+    indexOf.reserve(nodeIds.size() * 2);
+    for (size_t i = 0; i < nodeIds.size(); ++i)
+        if (!indexOf.emplace(nodeIds[i], i).second) return false; // duplicate
+
+    std::vector<std::vector<size_t>> adj(nodeIds.size());
+    std::vector<size_t> indegree(nodeIds.size(), 0);
+    for (const auto& e : edges) {
+        auto from = indexOf.find(e.first);
+        if (from == indexOf.end()) continue;         // edge from unknown node
+        auto to = indexOf.find(e.second);
+        if (to == indexOf.end()) continue;           // feeds master / unknown
+        if (from->second == to->second) return false;// self-edge
+        adj[from->second].push_back(to->second);
+        ++indegree[to->second];
+    }
+
+    std::vector<TrackId> ready;
+    ready.reserve(nodeIds.size());
+    for (size_t i = 0; i < nodeIds.size(); ++i)
+        if (indegree[i] == 0) ready.push_back(nodeIds[i]);
+
+    outOrder.reserve(nodeIds.size());
+    while (!ready.empty()) {
+        const TrackId id = ready.back();
+        ready.pop_back();
+        outOrder.push_back(id);
+        for (size_t oi : adj[indexOf[id]])
+            if (--indegree[oi] == 0) ready.push_back(nodeIds[oi]);
+    }
+
+    if (outOrder.size() != nodeIds.size()) {         // leftovers = cycle
         outOrder.clear();
         return false;
     }

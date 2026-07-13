@@ -35,6 +35,15 @@ struct MidiNote {
     Frame lengthFrames = 0;
 };
 
+// An aux send: taps a track's signal and adds `level` * signal into `dest`
+// (an aux Bus). Post-fader (the default) taps after the track's fader+fx;
+// pre-fader taps the raw pre-fader signal. `dest == kInvalidTrackId` is unused.
+struct Send {
+    TrackId dest     = kInvalidTrackId;
+    float   level    = 1.0f;    // linear send gain
+    bool    preFader = false;   // false = post-fader (typical for reverb/delay)
+};
+
 struct Track {
     TrackId           id    = kInvalidTrackId;
     TrackType         type  = TrackType::Audio;
@@ -48,6 +57,7 @@ struct Track {
     std::vector<Clip>       clips;    // audio clips, kept sorted by startFrame
     std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
+    std::vector<Send>       sends;    // aux sends into buses
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;

@@ -317,4 +317,22 @@ private:
     MidiNote fOld;    // saved in Do()
 };
 
+// Replace a track's whole aux-send list. The sends editor edits a snapshot and
+// applies it wholesale (same pattern as the effects/mixer windows). Stores the
+// old list for Undo().
+class SetSendsCommand : public Command {
+public:
+    SetSendsCommand(TrackId track, std::vector<Send> sends)
+        : fTrack(track), fNew(std::move(sends)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Sends"; }
+
+private:
+    TrackId           fTrack;
+    std::vector<Send> fNew;
+    std::vector<Send> fOld;
+};
+
 } // namespace daw
