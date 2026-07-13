@@ -42,16 +42,22 @@ public:
     using PeakMap = std::map<std::string, PeakCache>;
     void SetPeaks(const PeakMap* peaks) { fPeaks = peaks; Invalidate(); }
 
+    // Move the playhead. Invalidates only the old + new columns, so the 60 Hz
+    // poll doesn't repaint the whole view each tick.
+    void SetPlayhead(Frame f);
+
 private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
     void DrawClip(const Clip& c, BRect lane);
     void DrawClipWave(const Clip& c, BRect block);
+    void DrawPlayhead();
 
     const Project* fProject;          // non-owning
     const PeakMap* fPeaks = nullptr;  // non-owning
     double         fFramesPerPixel;   // horizontal zoom
     Frame          fScrollFrame;      // leftmost visible frame (content x=0)
+    Frame          fPlayhead = 0;     // in project frames
 };
 
 } // namespace daw

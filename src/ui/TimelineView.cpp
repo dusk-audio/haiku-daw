@@ -27,7 +27,29 @@ Frame TimelineView::XToFrame(float x) const {
 
 void TimelineView::Draw(BRect updateRect) {
     DrawLanes(updateRect);
+    DrawPlayhead();          // over lanes, under the ruler
     DrawRuler(updateRect);   // ruler last so it sits above lane content
+}
+
+void TimelineView::SetPlayhead(Frame f) {
+    if (f == fPlayhead)
+        return;
+    const float xOld = FrameToX(fPlayhead);
+    const float xNew = FrameToX(f);
+    fPlayhead = f;
+    // Repaint the two 1-px columns (a hair wide for the AA'd line) from the
+    // ruler bottom to the view bottom.
+    BRect b = Bounds();
+    Invalidate(BRect(xOld - 1, kRulerHeight, xOld + 1, b.bottom));
+    Invalidate(BRect(xNew - 1, kRulerHeight, xNew + 1, b.bottom));
+}
+
+void TimelineView::DrawPlayhead() {
+    const float x = FrameToX(fPlayhead);
+    if (x < kHeaderWidth || x > Bounds().right)
+        return;
+    SetHighColor(ColPlayhead());
+    StrokeLine(BPoint(x, kRulerHeight), BPoint(x, Bounds().bottom));
 }
 
 void TimelineView::DrawRuler(BRect update) {
