@@ -22,6 +22,10 @@ TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
 // --- Header control geometry (relative to a lane's top edge) ----------
 static constexpr float kMaxGain = 1.5f;   // fader top of travel
 
+// MIDI piano-roll vertical range: pitches [kMidiLow, kMidiLow+kMidiRange).
+static constexpr int kMidiLow   = 36;
+static constexpr int kMidiRange = 48;
+
 static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
 static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
@@ -94,6 +98,24 @@ void TimelineView::MouseDown(BPoint where) {
 
     if (where.x < kHeaderWidth) {
         HandleHeaderClick(t, lane, where);
+        return;
+    }
+
+    // MIDI track content: click adds a note (pitch from y, fixed length).
+    if (t.type == TrackType::Midi) {
+        Frame time = XToFrame(where.x);
+        if (time < 0) time = 0;
+        const float rel = (lane.bottom - where.y) / lane.Height();
+        int pitch = kMidiLow + (int)(rel * kMidiRange + 0.5f);
+        if (pitch < 0) pitch = 0;
+        if (pitch > 127) pitch = 127;
+        MidiNote n;
+        n.pitch = pitch;
+        n.velocity = 100;
+        n.startFrame = time;
+        n.lengthFrames = (Frame)(fProject->sampleRate * 0.25);   // 1/4 s
+        fStack->Execute(std::make_unique<AddNoteCommand>(t.id, n), *fProject);
+        Invalidate(lane);
         return;
     }
 
@@ -317,6 +339,9 @@ void TimelineView::DrawLanes(BRect update) {
         for (const Clip& c : t.clips)
             DrawClip(c, lane);
 
+        if (t.type == TrackType::Midi)
+            DrawMidiNotes(t, lane);
+
         // Live recording region on each armed track (grows each poll).
         if (fRecording && t.armed && fRecLen > 0) {
             float rx0 = FrameToX(fRecStart);
@@ -419,6 +444,25 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
     std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
     SetHighColor(ColText());
     DrawString(name.c_str(), BPoint(block.left + 4, block.top + 14));
+}
+
+// Draw a Midi track's notes as a simple piano roll: time across, pitch up.
+void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
+    const float h = lane.Height();
+    SetHighColor(Rgb(120, 200, 140));
+    for (const MidiNote& n : t.notes) {
+        float x0 = FrameToX(n.startFrame);
+        float x1 = FrameToX(n.startFrame + n.lengthFrames);
+        if (x1 < kHeaderWidth || x0 > lane.right)
+            continue;
+        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+        int p = n.pitch - kMidiLow;
+        if (p < 0) p = 0;
+        if (p >= kMidiRange) p = kMidiRange - 1;
+        const float ny = lane.bottom - (float)p / kMidiRange * h;
+        const float nh = h / kMidiRange + 1.0f;
+        FillRect(BRect(x0, ny - nh, x1, ny));
+    }
 }
 
 // Paint the min/max envelope inside a clip block: one vertical line per pixel

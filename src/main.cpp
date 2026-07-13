@@ -27,8 +27,9 @@ using namespace daw;
 // Build a demo/session project. Each WAV path becomes its own audio track with
 // a single clip starting at frame 0; length comes from the file's frame count.
 static void SeedDemoTracks(Project& project, CommandStack& stack) {
-    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 1"), project);
-    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 2"), project);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Audio 1"), project);
+    // A MIDI track so the synth is reachable: click its lane to add notes.
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), project);
 }
 
 static void SeedProject(Project& project, CommandStack& stack,

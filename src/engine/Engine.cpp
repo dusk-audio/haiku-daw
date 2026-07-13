@@ -174,12 +174,13 @@ status_t Engine::Load(const Project& project, Frame startFrame) {
         return err;
     }
     fOutputRate = fPlayer->Format().frame_rate;
+    fSynth.SetSampleRate(fOutputRate);
 
-    // Solo overrides mute: if any audio track is soloed, only soloed
-    // (non-muted) tracks play.
+    // Solo overrides mute: if any track (audio or MIDI) is soloed, only
+    // soloed (non-muted) tracks play.
     bool anySolo = false;
     for (const Track& t : project.Tracks())
-        if (t.type == TrackType::Audio && t.soloed && !t.muted)
+        if (t.soloed && !t.muted)
             anySolo = true;
 
     // Build one stream per audio clip. All clips get a stream (even muted /
@@ -211,23 +212,44 @@ status_t Engine::Load(const Project& project, Frame startFrame) {
         }
     }
 
-    if (fStreams.empty()) {
-        fprintf(stderr, "Engine: no playable clips\n");
-        return B_ERROR;
-    }
-
-    // Group streams into per-track buses and build each track's effect chain.
+    // Group audio streams into per-track buses.
     fBuses.clear();
     for (auto& s : fStreams) {
         Bus* bus = nullptr;
         for (Bus& b : fBuses)
             if (b.id == s->Track()) { bus = &b; break; }
         if (!bus) {
-            fBuses.push_back(Bus{s->Track(), {}, {}});
+            fBuses.push_back(Bus{});
+            fBuses.back().id = s->Track();
             bus = &fBuses.back();
         }
         bus->streams.push_back(s.get());
     }
+
+    // Add a bus per audible MIDI track: snapshot its notes for the synth to
+    // render (rebuild-on-play, so MIDI edits apply on the next Start).
+    for (const Track& t : project.Tracks()) {
+        if (t.type != TrackType::Midi || t.notes.empty())
+            continue;
+        const bool audible = !t.muted && (!anySolo || t.soloed);
+        if (!audible)
+            continue;
+        Bus b;
+        b.id       = t.id;
+        b.notes    = t.notes;
+        b.midiGain = t.gain;
+        fBuses.push_back(std::move(b));
+        for (const MidiNote& n : t.notes)
+            if (n.startFrame + n.lengthFrames > fEndFrame)
+                fEndFrame = n.startFrame + n.lengthFrames;
+    }
+
+    if (fBuses.empty()) {
+        fprintf(stderr, "Engine: nothing to play\n");
+        return B_ERROR;
+    }
+
+    // Build each bus's effect chain from its track's descriptors.
     for (Bus& b : fBuses) {
         const Track* t = project.FindTrack(b.id);
         if (!t) continue;
@@ -307,6 +329,8 @@ void Engine::FillBuffer(float* out, size_t frames) {
         std::memset(sc, 0, nfloats * sizeof(float));
         for (TrackStream* s : b.streams)
             s->Mix(sc, frames, blockStart);
+        if (!b.notes.empty())
+            fSynth.Render(b.notes, sc, frames, blockStart, b.midiGain);
         for (auto& fx : b.fx)
             fx->Process(sc, static_cast<int>(frames));
         for (size_t i = 0; i < nfloats; i++)

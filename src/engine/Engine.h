@@ -19,6 +19,7 @@
 #include "Resampler.h"
 #include "../model/Project.h"
 #include "../dsp/IEffect.h"
+#include "../synth/Synth.h"
 
 #include <SoundPlayer.h>
 
@@ -121,7 +122,9 @@ private:
     // buffer, then the track's effect chain applied, then added to master.
     struct Bus {
         TrackId                               id;
-        std::vector<TrackStream*>             streams;   // owned by fStreams
+        std::vector<TrackStream*>             streams;   // audio, owned by fStreams
+        std::vector<MidiNote>                 notes;     // MIDI (empty for audio)
+        float                                 midiGain = 1.0f;
         std::vector<std::unique_ptr<IEffect>> fx;
     };
 
@@ -129,6 +132,7 @@ private:
     std::vector<std::unique_ptr<TrackStream>> fStreams;
     std::vector<Bus>                          fBuses;
     std::vector<float>                        fScratch;   // per-bus mix buffer
+    Synth                                     fSynth;     // MIDI voice renderer
 
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};

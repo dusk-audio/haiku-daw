@@ -61,6 +61,7 @@ private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
     void DrawTrackHeader(const Track& t, BRect lane);
+    void DrawMidiNotes(const Track& t, BRect lane);
     void DrawClip(const Clip& c, BRect lane);
     void DrawClipWave(const Clip& c, BRect block);
     void DrawPlayhead();
