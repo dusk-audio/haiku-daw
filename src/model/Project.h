@@ -56,6 +56,8 @@ struct Track {
     bool              soloed = false;
     bool              armed  = false;
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
+    int               colorIndex = 0;   // index into the UI track-color palette
+    int               height     = 72;  // lane height in pixels (UI)
     std::vector<Clip>       clips;    // audio clips, kept sorted by startFrame
     std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain

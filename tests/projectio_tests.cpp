@@ -37,6 +37,8 @@ int main() {
     c.sourcePath = "takes/one two.wav";   // note the space
     c.gain = 0.6f;                         // per-clip gain
     stack.Execute(std::make_unique<AddClipCommand>(t1, c), a);
+    a.FindTrack(t1)->colorIndex = 3;   // per-track color + height
+    a.FindTrack(t1)->height     = 104;
     stack.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(700.0f)), a);
     stack.Execute(std::make_unique<AddEffectCommand>(t1,
         CompressorDesc(-18.0f, 3.0f, 5.0f, 80.0f, 6.0f)), a);   // p4 = makeup
@@ -91,6 +93,8 @@ int main() {
     CHECK(std::abs(bt1.gainAuto.At(1).value - 0.25f) < 1e-4f);
     CHECK(bt1.gainAuto.At(1).frame == 96000);
     CHECK(bt1.panAuto.Count() == 0);   // untouched lane stays empty
+    CHECK(bt1.colorIndex == 3);
+    CHECK(bt1.height == 104);
 
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);

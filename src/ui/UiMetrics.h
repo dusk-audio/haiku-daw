@@ -35,4 +35,20 @@ inline rgb_color ColText()       { return Rgb(210, 214, 220); }
 inline rgb_color ColPlayhead()   { return Rgb(230, 90, 70); }
 inline rgb_color ColHeader()     { return Rgb(44, 47, 53); }
 
+// Per-track color palette (Track::colorIndex). Index 0 = the default clip blue.
+inline rgb_color TrackColor(int i) {
+    static const rgb_color pal[] = {
+        Rgb(64, 108, 160),   // blue (default)
+        Rgb(160, 84, 84),    // red
+        Rgb(84, 150, 90),    // green
+        Rgb(150, 120, 70),   // amber
+        Rgb(120, 90, 160),   // purple
+        Rgb(70, 140, 150),   // teal
+    };
+    const int n = (int)(sizeof(pal) / sizeof(pal[0]));
+    if (i < 0) i = 0;
+    return pal[i % n];
+}
+constexpr int kTrackColorCount = 6;
+
 } // namespace daw

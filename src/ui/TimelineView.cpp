@@ -217,14 +217,16 @@ void TimelineView::SetPlayhead(Frame f) {
 int TimelineView::TrackIndexAt(BPoint where) const {
     if (!fProject || where.y < kRulerHeight)
         return -1;
-    const float rel = where.y - kRulerHeight;
-    const int   idx = static_cast<int>(rel / (kTrackHeight + kTrackGap));
-    if (idx < 0 || idx >= static_cast<int>(fProject->Tracks().size()))
-        return -1;
-    // Reject clicks that land in the gap between lanes.
-    if (where.y > LaneRect(idx).bottom)
-        return -1;
-    return idx;
+    // Walk cumulative lane heights (variable per track).
+    float y = kRulerHeight;
+    const auto& tracks = fProject->Tracks();
+    for (int i = 0; i < (int)tracks.size(); i++) {
+        const float h = LaneHeightOf(tracks[i]);
+        if (where.y >= y && where.y <= y + h)
+            return i;
+        y += h + kTrackGap;   // clicks in the gap fall through -> -1
+    }
+    return -1;
 }
 
 int TimelineView::PitchAt(BRect lane, float y) const {
@@ -289,17 +291,31 @@ void TimelineView::MouseDown(BPoint where) {
                 BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
                 mm->AddItem(new BMenuItem("Move Up", NULL));     // 0
                 mm->AddItem(new BMenuItem("Move Down", NULL));   // 1
-                mm->AddItem(new BMenuItem("Delete", NULL));      // 2
+                mm->AddItem(new BMenuItem("Next Color", NULL));  // 2
+                mm->AddItem(new BMenuItem("Taller", NULL));      // 3
+                mm->AddItem(new BMenuItem("Shorter", NULL));     // 4
+                mm->AddItem(new BMenuItem("Delete", NULL));      // 5
                 BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
                 const int pick = sel ? mm->IndexOf(sel) : -1;
                 delete mm;
+                // Color/height are view properties (serialized): mutate directly,
+                // like the arm toggle, rather than through the undo stack.
                 if (pick == 0)
                     fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, -1),
                                     *fProject);
                 else if (pick == 1)
                     fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, +1),
                                     *fProject);
-                else if (pick == 2)
+                else if (pick == 2) {
+                    if (Track* tr = fProject->FindTrack(t.id))
+                        tr->colorIndex = (tr->colorIndex + 1) % kTrackColorCount;
+                } else if (pick == 3) {
+                    if (Track* tr = fProject->FindTrack(t.id))
+                        tr->height = tr->height + 24 > 300 ? 300 : tr->height + 24;
+                } else if (pick == 4) {
+                    if (Track* tr = fProject->FindTrack(t.id))
+                        tr->height = tr->height - 24 < 72 ? 72 : tr->height - 24;
+                } else if (pick == 5)
                     fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
                                     *fProject);
                 Invalidate();
@@ -535,9 +551,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     if (mode == Drag::None)
         return;
 
-    // TrackIndexAt() matched this lane, so this index is valid.
-    fDragLane  = static_cast<int>((lane.top - kRulerHeight)
-                                  / (kTrackHeight + kTrackGap) + 0.5f);
+    fDragLane  = fProject->IndexOfTrack(id);   // stable across variable heights
     fDrag      = mode;
     fDragTrack = id;
     fDragOrig  = (mode == Drag::Gain) ? t.gain : t.pan;
@@ -858,10 +872,26 @@ void TimelineView::ForEachGridLine(
     }
 }
 
+// Lane height for a track (clamped), falling back to the default.
+static float LaneHeightOf(const Track& t) {
+    // Floor at the default so the header controls always fit; taller lanes just
+    // add waveform room.
+    float h = (float)t.height;
+    if (h < kTrackHeight) h = kTrackHeight;
+    if (h > 300.0f)       h = 300.0f;
+    return h;
+}
+
 BRect TimelineView::LaneRect(int index) const {
-    const float top = kRulerHeight + index * (kTrackHeight + kTrackGap);
+    // Sum the heights of all lanes above `index` (variable per-track heights).
+    float top = kRulerHeight;
+    const auto& tracks = fProject->Tracks();
+    for (int i = 0; i < index && i < (int)tracks.size(); i++)
+        top += LaneHeightOf(tracks[i]) + kTrackGap;
+    const float h = (index >= 0 && index < (int)tracks.size())
+                    ? LaneHeightOf(tracks[index]) : kTrackHeight;
     return BRect(0, top, const_cast<TimelineView*>(this)->Bounds().right,
-                 top + kTrackHeight);
+                 top + h);
 }
 
 void TimelineView::DrawLanes(BRect update) {
@@ -882,7 +912,7 @@ void TimelineView::DrawLanes(BRect update) {
         });
 
         for (const Clip& c : t.clips)
-            DrawClip(c, lane);
+            DrawClip(c, lane, TrackColor(t.colorIndex));
 
         if (t.type == TrackType::Midi)
             DrawMidiNotes(t, lane);
@@ -1100,7 +1130,7 @@ void TimelineView::HandleAutoMouseDown(const Track& t, BRect lane, int idx,
     Invalidate(lane);
 }
 
-void TimelineView::DrawClip(const Clip& c, BRect lane) {
+void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
     if (x1 < kHeaderWidth || x0 > lane.right)
@@ -1108,7 +1138,7 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
     if (x0 < kHeaderWidth) x0 = kHeaderWidth;
 
     BRect block(x0, lane.top + 3, x1, lane.bottom - 3);
-    SetHighColor(ColClip());
+    SetHighColor(base);
     FillRect(block);
 
     DrawClipWave(c, block);

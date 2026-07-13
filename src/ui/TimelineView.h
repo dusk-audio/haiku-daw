@@ -81,7 +81,7 @@ private:
     void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
     void DrawTrackHeader(const Track& t, BRect lane);
     void DrawMidiNotes(const Track& t, BRect lane);
-    void DrawClip(const Clip& c, BRect lane);
+    void DrawClip(const Clip& c, BRect lane, rgb_color base);
     void DrawClipWave(const Clip& c, BRect block);
     void DrawPlayhead();
     void DrawDragGhost();   // clip-move preview rectangle
