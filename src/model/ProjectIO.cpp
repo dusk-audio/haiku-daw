@@ -79,7 +79,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)n.startFrame << " " << (long long)n.lengthFrames << "\n";
 
         for (const EffectDesc& e : t.fx)
-            f << "fx " << (e.type == EffectType::Delay ? 1 : 0) << " "
+            f << "fx " << (int)e.type << " "
               << e.p0 << " " << e.p1 << " " << e.p2 << " " << e.p3 << "\n";
 
         f << "endtrack\n";
@@ -160,9 +160,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         }
         else if (kw == "fx" && haveTrack) {
             EffectDesc e;
-            int type;
+            int type = 0;
             iss >> type >> e.p0 >> e.p1 >> e.p2 >> e.p3;
-            e.type = (type == 1) ? EffectType::Delay : EffectType::Biquad;
+            if (type < 0 || type > 3) type = 0;
+            e.type = (EffectType)type;
             cur.fx.push_back(e);
         }
         // "endtrack" and unknown keywords: ignored (commit happens on next

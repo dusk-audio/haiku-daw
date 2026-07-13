@@ -19,8 +19,11 @@ add_library(daw_model
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
+    src/engine/Exporter.cpp     # kit-free offline mix -> WAV, host-testable
     src/dsp/Biquad.cpp          # kit-free biquad filter effect
     src/dsp/Delay.cpp           # kit-free feedback delay effect
+    src/dsp/Reverb.cpp          # kit-free Schroeder reverb
+    src/dsp/Compressor.cpp      # kit-free dynamics compressor
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
 )
@@ -64,6 +67,14 @@ add_executable(grid_tests tests/grid_tests.cpp)
 target_link_libraries(grid_tests PRIVATE daw_model)
 add_test(NAME grid_tests COMMAND grid_tests)
 
+add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
+target_link_libraries(dsp_extra_tests PRIVATE daw_model)
+add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)
+
+add_executable(exporter_tests tests/exporter_tests.cpp)
+target_link_libraries(exporter_tests PRIVATE daw_model)
+add_test(NAME exporter_tests COMMAND exporter_tests)
+
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
 # skipped so the model layer + tests still build for fast iteration.
@@ -93,6 +104,8 @@ if(HAIKU)
         src/ui/MainWindow.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
+        src/ui/MixerWindow.cpp
+        src/ui/RenameWindow.cpp
     )
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.

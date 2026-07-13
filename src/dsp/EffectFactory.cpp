@@ -2,6 +2,8 @@
 
 #include "Biquad.h"
 #include "Delay.h"
+#include "Reverb.h"
+#include "Compressor.h"
 
 namespace daw {
 
@@ -15,8 +17,12 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
                 new Biquad(mode, d.p1, d.p2, d.p3));
         }
         case EffectType::Delay:
+            return std::unique_ptr<IEffect>(new Delay(d.p0, d.p1, d.p2));
+        case EffectType::Reverb:
+            return std::unique_ptr<IEffect>(new Reverb(d.p0, d.p1));
+        case EffectType::Compressor:
             return std::unique_ptr<IEffect>(
-                new Delay(d.p0, d.p1, d.p2));
+                new Compressor(d.p0, d.p1, d.p2, d.p3));
     }
     return nullptr;
 }
