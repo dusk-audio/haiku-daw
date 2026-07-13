@@ -169,7 +169,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             EffectDesc e;
             int type = 0, count = 0;
             iss >> type >> count;
-            if (type < 0 || type > 4) type = 0;
+            if (type < 0 || type > 7) type = 0;
             e.type = (EffectType)type;
             for (int i = 0; i < count; i++) {
                 float v = 0.0f;

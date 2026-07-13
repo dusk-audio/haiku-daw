@@ -5,6 +5,9 @@
 #include "Reverb.h"
 #include "Compressor.h"
 #include "Eq.h"
+#include "Saturator.h"
+#include "Gate.h"
+#include "Widener.h"
 
 namespace daw {
 
@@ -30,6 +33,13 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
                 eq->SetBand(b, d.p(b * 3 + 0), d.p(b * 3 + 1), d.p(b * 3 + 2));
             return eq;
         }
+        case EffectType::Saturator:
+            return std::unique_ptr<IEffect>(new Saturator(d.p(0), d.p(1), d.p(2)));
+        case EffectType::Gate:
+            return std::unique_ptr<IEffect>(
+                new Gate(d.p(0), d.p(1), d.p(2), d.p(3), d.p(4)));
+        case EffectType::Widener:
+            return std::unique_ptr<IEffect>(new Widener(d.p(0), d.p(1), d.p(2)));
     }
     return nullptr;
 }

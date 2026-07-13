@@ -16,6 +16,7 @@ add_library(daw_model
     src/model/Commands.cpp
     src/model/PeakCache.cpp     # kit-free min/max waveform envelope
     src/model/ProjectIO.cpp     # kit-free project save/load
+    src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -26,6 +27,9 @@ add_library(daw_model
     src/dsp/Reverb.cpp          # kit-free Schroeder reverb
     src/dsp/Compressor.cpp      # kit-free dynamics compressor
     src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
+    src/dsp/Saturator.cpp       # kit-free tape saturation (tape-echo port)
+    src/dsp/Gate.cpp            # kit-free noise gate / expander
+    src/dsp/Widener.cpp         # kit-free M/S stereo widener
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
 )
@@ -80,6 +84,22 @@ add_test(NAME exporter_tests COMMAND exporter_tests)
 add_executable(metronome_tests tests/metronome_tests.cpp)
 target_link_libraries(metronome_tests PRIVATE daw_model)
 add_test(NAME metronome_tests COMMAND metronome_tests)
+
+add_executable(automation_tests tests/automation_tests.cpp)
+target_link_libraries(automation_tests PRIVATE daw_model)
+add_test(NAME automation_tests COMMAND automation_tests)
+
+add_executable(saturator_tests tests/saturator_tests.cpp)
+target_link_libraries(saturator_tests PRIVATE daw_model)
+add_test(NAME saturator_tests COMMAND saturator_tests)
+
+add_executable(gate_tests tests/gate_tests.cpp)
+target_link_libraries(gate_tests PRIVATE daw_model)
+add_test(NAME gate_tests COMMAND gate_tests)
+
+add_executable(widener_tests tests/widener_tests.cpp)
+target_link_libraries(widener_tests PRIVATE daw_model)
+add_test(NAME widener_tests COMMAND widener_tests)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are

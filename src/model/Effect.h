@@ -13,10 +13,11 @@
 
 namespace daw {
 
-// Order is the serialized id (0..4); do not reorder without bumping the file
+// Order is the serialized id (0..7); do not reorder without bumping the file
 // format (see ProjectIO). Biquad is kept for loading older projects; new tone
 // shaping uses the parametric Eq.
-enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq };
+enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq,
+                        Saturator, Gate, Widener };
 
 struct EffectDesc {
     EffectType         type = EffectType::Biquad;
@@ -28,6 +29,9 @@ struct EffectDesc {
     //   Compressor: [threshold dB, ratio, attack ms, release ms, makeup dB]
     //   Eq:         5 bands of [freq Hz, gain dB, Q] (band 0 = low shelf,
     //               bands 1-3 = peaks, band 4 = high shelf)
+    //   Saturator:  [drive [0,1], mix [0,1], output trim dB]
+    //   Gate:       [threshold dB, ratio, attack ms, release ms, range dB]
+    //   Widener:    [width [0,2], pan [-1,1], gain]
 
     // Read a param with a safe default for missing slots.
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
@@ -55,6 +59,20 @@ inline EffectDesc CompressorDesc(float thrDb = -20.0f, float ratio = 4.0f,
                                  float makeupDb = 0.0f) {
     return EffectDesc{EffectType::Compressor,
                       {thrDb, ratio, attackMs, releaseMs, makeupDb}};
+}
+inline EffectDesc SaturatorDesc(float drive = 0.5f, float mix = 1.0f,
+                                float trimDb = 0.0f) {
+    return EffectDesc{EffectType::Saturator, {drive, mix, trimDb}};
+}
+inline EffectDesc GateDesc(float thrDb = -40.0f, float ratio = 4.0f,
+                           float attackMs = 1.0f, float releaseMs = 100.0f,
+                           float rangeDb = 60.0f) {
+    return EffectDesc{EffectType::Gate,
+                      {thrDb, ratio, attackMs, releaseMs, rangeDb}};
+}
+inline EffectDesc WidenerDesc(float width = 1.0f, float pan = 0.0f,
+                              float gain = 1.0f) {
+    return EffectDesc{EffectType::Widener, {width, pan, gain}};
 }
 // Default parametric EQ: low shelf, three peaks, high shelf, all flat.
 inline EffectDesc EqDesc() {

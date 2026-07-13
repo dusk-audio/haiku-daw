@@ -255,7 +255,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 int32 type = 0, epIdx = 0;
                 for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                     EffectDesc d;
-                    d.type = (type >= 0 && type <= 4) ? (EffectType)type
+                    d.type = (type >= 0 && type <= 7) ? (EffectType)type
                                                       : EffectType::Biquad;
                     int32 count = 0;
                     msg->FindInt32("ec", i, &count);

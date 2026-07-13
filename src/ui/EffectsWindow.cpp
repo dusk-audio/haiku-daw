@@ -81,6 +81,9 @@ void EffectsWindow::Rebuild() {
         else if (d.type == EffectType::Reverb)     tname = "Reverb";
         else if (d.type == EffectType::Compressor) tname = "Compressor";
         else if (d.type == EffectType::Eq)         tname = "EQ (5-band)";
+        else if (d.type == EffectType::Saturator)  tname = "Saturator";
+        else if (d.type == EffectType::Gate)       tname = "Gate";
+        else if (d.type == EffectType::Widener)    tname = "Widener";
 
         BStringView* title = new BStringView(BRect(8, y, w - 150, y + 16),
             "title", tname);
@@ -127,6 +130,23 @@ void EffectsWindow::Rebuild() {
                 add("Release ms", 3, 5.0f, 1000.0f);
                 add("Makeup dB", 4, 0.0f, 24.0f);
                 break;
+            case EffectType::Saturator:
+                add("Drive", 0, 0.0f, 1.0f);
+                add("Mix", 1, 0.0f, 1.0f);
+                add("Output dB", 2, -24.0f, 24.0f);
+                break;
+            case EffectType::Gate:
+                add("Threshold dB", 0, -80.0f, 0.0f);
+                add("Ratio", 1, 1.0f, 20.0f);
+                add("Attack ms", 2, 0.1f, 100.0f);
+                add("Release ms", 3, 5.0f, 1000.0f);
+                add("Range dB", 4, 0.0f, 80.0f);
+                break;
+            case EffectType::Widener:
+                add("Width", 0, 0.0f, 2.0f);
+                add("Pan", 1, -1.0f, 1.0f);
+                add("Gain", 2, 0.0f, 2.0f);
+                break;
             case EffectType::Eq: {
                 const char* bn[5] = { "Low", "LoMid", "Mid", "HiMid", "High" };
                 for (int bnd = 0; bnd < 5; bnd++) {
@@ -150,9 +170,10 @@ void EffectsWindow::Rebuild() {
         y += 8;
     }
 
-    const char* names[4] = { "Add EQ", "Add Delay", "Add Reverb",
-                             "Add Compressor" };
-    for (int k = 0; k < 4; k++) {
+    const char* names[7] = { "Add EQ", "Add Delay", "Add Reverb",
+                             "Add Compressor", "Add Saturator", "Add Gate",
+                             "Add Widener" };
+    for (int k = 0; k < 7; k++) {
         BButton* b = new BButton(BRect(8, y, w - 8, y + 22), "add",
                                  names[k], new BMessage(MSG_EADD));
         b->Message()->AddInt32("kind", k);
@@ -209,6 +230,9 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
                 case 1: fChain.push_back(DelayDesc()); break;
                 case 2: fChain.push_back(ReverbDesc()); break;
                 case 3: fChain.push_back(CompressorDesc()); break;
+                case 4: fChain.push_back(SaturatorDesc()); break;
+                case 5: fChain.push_back(GateDesc()); break;
+                case 6: fChain.push_back(WidenerDesc()); break;
             }
             Rebuild();
             Apply();
