@@ -2,6 +2,7 @@
 
 #include "TimelineView.h"
 #include "MeterView.h"
+#include "EffectsWindow.h"
 #include "UiMetrics.h"
 
 #include "../engine/WavSource.h"
@@ -146,6 +147,27 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
+        case kMsgApplyFx: {
+            // An EffectsWindow (its own thread) sends the edited chain here;
+            // the model is mutated only on this (main) thread.
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                t->fx.clear();
+                int32 type = 0;
+                for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
+                    EffectDesc d;
+                    d.type = (type == 1) ? EffectType::Delay : EffectType::Biquad;
+                    msg->FindFloat("e0", i, &d.p0);
+                    msg->FindFloat("e1", i, &d.p1);
+                    msg->FindFloat("e2", i, &d.p2);
+                    msg->FindFloat("e3", i, &d.p3);
+                    t->fx.push_back(d);
+                }
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case MSG_MASTER:
             // Live; the engine reads project.masterGain each poll (and at Load).
             fProject->masterGain = fMaster->Value() / 100.0f;

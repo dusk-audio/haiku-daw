@@ -92,6 +92,7 @@ if(HAIKU)
         src/ui/TimelineView.cpp
         src/ui/MainWindow.cpp
         src/ui/MeterView.cpp
+        src/ui/EffectsWindow.cpp
     )
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.

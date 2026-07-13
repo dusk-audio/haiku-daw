@@ -1,9 +1,8 @@
 #include "TimelineView.h"
 
 #include "UiMetrics.h"
+#include "EffectsWindow.h"
 
-#include <MenuItem.h>
-#include <PopUpMenu.h>
 #include <Window.h>
 
 #include <cstdio>
@@ -291,29 +290,13 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         return;
     }
     if (FxRect(lane).Contains(where)) {
-        // Effect picker. Effects apply on the next Play (chain built at Load).
-        BPopUpMenu* menu = new BPopUpMenu("fx", false, false);
-        menu->AddItem(new BMenuItem("Add Low-pass", NULL));
-        menu->AddItem(new BMenuItem("Add High-pass", NULL));
-        menu->AddItem(new BMenuItem("Add Delay", NULL));
-        menu->AddSeparatorItem();
-        menu->AddItem(new BMenuItem("Clear Effects", NULL));
-        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-        const int32 pick = sel ? menu->IndexOf(sel) : -1;
-        delete menu;
-
-        std::unique_ptr<Command> cmd;
-        switch (pick) {
-            case 0: cmd = std::make_unique<AddEffectCommand>(id, LowPassDesc(800.0f)); break;
-            case 1: cmd = std::make_unique<AddEffectCommand>(id, HighPassDesc(200.0f)); break;
-            case 2: cmd = std::make_unique<AddEffectCommand>(id, DelayDesc()); break;
-            case 4: if (!t.fx.empty()) cmd = std::make_unique<ClearEffectsCommand>(id); break;
-            default: break;
-        }
-        if (cmd) {
-            fStack->Execute(std::move(cmd), *fProject);
-            Invalidate(lane);
-        }
+        // Open the per-track effects editor. It runs on its own thread with a
+        // snapshot of the chain and posts edits back to the window (main
+        // thread) via kMsgApplyFx. Effects apply on the next Play.
+        BPoint p = ConvertToScreen(where);
+        BRect  wr(p.x, p.y, p.x + 300, p.y + 360);
+        EffectsWindow* w = new EffectsWindow(wr, t.fx, id, BMessenger(Window()));
+        w->Show();
         return;
     }
     if (ArmRect(lane).Contains(where)) {
