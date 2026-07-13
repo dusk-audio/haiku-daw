@@ -27,6 +27,7 @@ class BMessageRunner;
 namespace daw {
 
 class TimelineView;
+class MeterView;
 
 class MainWindow : public BWindow {
 public:
@@ -52,6 +53,7 @@ private:
 
     TimelineView*   fTimeline;
     BStringView*    fTimeView;
+    MeterView*      fMeter;
 
     std::unique_ptr<Engine> fEngine;         // rebuilt each Play
     BMessageRunner*         fPulse = nullptr; // playhead poll, deleted on stop

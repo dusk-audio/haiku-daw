@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "TimelineView.h"
+#include "MeterView.h"
 #include "UiMetrics.h"
 
 #include <Application.h>
@@ -57,6 +58,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(undo);
     bar->AddChild(redo);
 
+    // Master output meter, pinned to the right of the transport bar.
+    fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
+                                 kTransportH - 5));
+    bar->AddChild(fMeter);
+
     // Keyboard: Cmd-Z / Cmd-Shift-Z.
     AddShortcut('Z', B_COMMAND_KEY, new BMessage(MSG_UNDO));
     AddShortcut('Z', B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_REDO));
@@ -88,6 +94,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             const Frame ph = fEngine->Playhead();
             fTimeline->SetPlayhead(ph);
             UpdateTimeReadout(ph);
+            fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
             if (fEngine->IsFinished())
                 StopPlayback();
             break;
@@ -118,6 +125,7 @@ void MainWindow::StopPlayback() {
     fPulse = nullptr;
     if (fEngine)
         fEngine->Stop();
+    fMeter->SetLevels(0.0f, 0.0f);
     // Leave the playhead where it stopped; the readout keeps its last value.
 }
 

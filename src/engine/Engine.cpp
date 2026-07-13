@@ -189,17 +189,31 @@ void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
 void Engine::FillBuffer(float* out, size_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));   // stereo silence
 
-    if (!fPlaying.load())
+    if (!fPlaying.load()) {
+        fPeakL.store(0.0f); fPeakR.store(0.0f);
         return;
+    }
 
     const Frame blockStart = fPlayhead.load();
     if (blockStart >= fEndFrame) {
         fFinished.store(true);   // main thread will Stop(); RT stays silent
+        fPeakL.store(0.0f); fPeakR.store(0.0f);
         return;
     }
 
     for (auto& s : fStreams)
         s->Mix(out, frames, blockStart);
+
+    // Block peak per channel for the UI meters (arithmetic only, RT-safe).
+    float pl = 0.0f, pr = 0.0f;
+    for (size_t i = 0; i < frames; i++) {
+        const float l = std::fabs(out[i * 2 + 0]);
+        const float r = std::fabs(out[i * 2 + 1]);
+        if (l > pl) pl = l;
+        if (r > pr) pr = r;
+    }
+    fPeakL.store(pl);
+    fPeakR.store(pr);
 
     fPlayhead.store(blockStart + static_cast<Frame>(frames));
 }

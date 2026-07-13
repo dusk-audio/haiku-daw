@@ -77,6 +77,11 @@ public:
     bool  IsFinished() const { return fFinished.load(); }
     Frame Playhead() const { return fPlayhead.load(); }
 
+    // Master output peak (abs) of the last mixed block, per channel, in
+    // [0, 1+]. Written by the RT callback, read by the UI meter poll.
+    float PeakL() const { return fPeakL.load(); }
+    float PeakR() const { return fPeakR.load(); }
+
     float OutputRate() const { return fOutputRate; }
 
 private:
@@ -90,6 +95,8 @@ private:
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};
     std::atomic<bool>  fFinished{false};
+    std::atomic<float> fPeakL{0.0f};
+    std::atomic<float> fPeakR{0.0f};
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;
 };

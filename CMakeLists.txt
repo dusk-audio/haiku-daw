@@ -56,6 +56,7 @@ if(HAIKU)
         src/main.cpp
         src/ui/TimelineView.cpp
         src/ui/MainWindow.cpp
+        src/ui/MeterView.cpp
     )
     # -lbe (Application/Interface Kit). daw_engine pulls in daw_model + media.
     target_link_libraries(daw PRIVATE daw_engine be)
