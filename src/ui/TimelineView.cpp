@@ -2,6 +2,7 @@
 
 #include "UiMetrics.h"
 #include "EffectsWindow.h"
+#include "SendsWindow.h"
 #include "RenameWindow.h"
 
 #include <MenuItem.h>
@@ -43,6 +44,7 @@ static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.t
 static BRect ArmRect(BRect lane)   { return BRect(54, lane.top + 20, 74,  lane.top + 38); }
 static BRect GainRect(BRect lane)  { return BRect(80, lane.top + 22, 154, lane.top + 34); }
 static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.top + 52); }
+static BRect SndRect(BRect lane)   { return BRect(6,  lane.top + 54, 60,  lane.top + 69); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -459,6 +461,20 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         w->Show();
         return;
     }
+    if (SndRect(lane).Contains(where)) {
+        // Open the aux-sends editor: snapshot of this track's sends + the list
+        // of bus targets. Edits post back via kMsgApplySends.
+        std::vector<std::pair<TrackId, std::string>> buses;
+        for (const Track& bt : fProject->Tracks())
+            if (bt.type == TrackType::Bus && bt.id != id)
+                buses.push_back({bt.id, bt.name});
+        BPoint p = ConvertToScreen(where);
+        BRect  wr(p.x, p.y, p.x + 340, p.y + 320);
+        SendsWindow* w = new SendsWindow(wr, t.sends, buses, id,
+                                         BMessenger(Window()));
+        w->Show();
+        return;
+    }
     if (ArmRect(lane).Contains(where)) {
         // Arm is transient transport state, not an undoable document edit:
         // toggle it directly. Multiple tracks may be armed; recording writes
@@ -867,6 +883,16 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     SetHighColor(ColClipBorder());
     FillRect(BRect(px - 2, pr.top, px + 2, pr.bottom));
     SetHighColor(ColGrid());  StrokeRect(pr);
+
+    // Sends box: lit amber when the track has aux sends, shows the count.
+    BRect sr = SndRect(lane);
+    SetHighColor(t.sends.empty() ? ColLane() : Rgb(180, 140, 60));
+    FillRect(sr);
+    SetHighColor(ColGrid());  StrokeRect(sr);
+    SetHighColor(ColText());
+    char sl[16];
+    std::snprintf(sl, sizeof(sl), "Snd %d", (int)t.sends.size());
+    DrawString(sl, BPoint(sr.left + 4, sr.bottom - 4));
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane) {

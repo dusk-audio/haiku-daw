@@ -139,6 +139,7 @@ if(HAIKU)
         src/ui/MainWindow.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
+        src/ui/SendsWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
     )

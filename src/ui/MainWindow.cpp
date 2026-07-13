@@ -3,6 +3,7 @@
 #include "TimelineView.h"
 #include "MeterView.h"
 #include "EffectsWindow.h"
+#include "SendsWindow.h"
 #include "MixerWindow.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
@@ -319,6 +320,30 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         d.params.push_back(v);
                     }
                     dst->push_back(d);
+                }
+                fTimeline->Invalidate();
+            }
+            break;
+        }
+        case kMsgApplySends: {
+            // A SendsWindow (its own thread) posts the edited send list here.
+            // Direct mutation (like kMsgApplyFx) so dragging a level slider
+            // doesn't flood the undo stack. Sends take effect on the next Play.
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                t->sends.clear();
+                int64 dest = 0;
+                for (int32 i = 0; msg->FindInt64("sd", i, &dest) == B_OK; i++) {
+                    Send s;
+                    s.dest = (TrackId)dest;
+                    float lvl = 1.0f; int32 pre = 0;
+                    msg->FindFloat("sl", i, &lvl);
+                    msg->FindInt32("sp", i, &pre);
+                    s.level = lvl;
+                    s.preFader = (pre != 0);
+                    if (s.dest != kInvalidTrackId && s.dest != (TrackId)tid)
+                        t->sends.push_back(s);
                 }
                 fTimeline->Invalidate();
             }
