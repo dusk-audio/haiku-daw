@@ -300,6 +300,23 @@ private:
     Frame   fOldIn = 0, fOldOut = 0;
 };
 
+// Set a clip's per-clip linear gain. Stores the old value for Undo().
+class SetClipGainCommand : public Command {
+public:
+    SetClipGainCommand(TrackId track, ClipId clip, float gain)
+        : fTrack(track), fClip(clip), fGain(gain) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Clip Gain"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    float   fGain;
+    float   fOld = 1.0f;
+};
+
 // Replace a note (move, resize, or velocity edit). Stores old for Undo().
 class NoteEditCommand : public Command {
 public:

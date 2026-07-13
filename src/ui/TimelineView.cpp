@@ -9,6 +9,7 @@
 #include <PopUpMenu.h>
 #include <Window.h>
 
+#include <cmath>
 #include <cstdio>
 #include <memory>
 
@@ -398,7 +399,10 @@ void TimelineView::MouseDown(BPoint where) {
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
             const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
             const bool  topBand = where.y <= lane.top + 14;
-            if (topBand && where.x <= xStart + 12) {
+            if (modifiers() & B_CONTROL_KEY) {
+                fDrag = Drag::ClipGain;        // Ctrl-drag vertical = clip gain
+                fDragOrig = c.gain;
+            } else if (topBand && where.x <= xStart + 12) {
                 fDrag = Drag::ClipFadeIn;      // top-left corner = fade in
             } else if (topBand && where.x >= xEnd - 12) {
                 fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
@@ -586,6 +590,15 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (f > c->lengthFrames) f = c->lengthFrames;
             c->fadeOutFrames = f;
         }
+    } else if (fDrag == Drag::ClipGain) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            // Vertical position over the lane maps to 0..kMaxGain (top = max).
+            float f = (lane.bottom - where.y) / lane.Height();
+            float v = f * kMaxGain;
+            if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
+            c->gain = v;
+        }
     } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
                || fDrag == Drag::NoteVelocity) {
         if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
@@ -709,6 +722,14 @@ void TimelineView::MouseUp(BPoint where) {
                 c->lengthFrames = fDragClipOrigLen;
                 if (v != fDragClipOrigLen)
                     cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
+            }
+        } else if (fDrag == Drag::ClipGain) {
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const float v = c->gain;
+                c->gain = fDragOrig;
+                if (v != fDragOrig)
+                    cmd = std::make_unique<SetClipGainCommand>(fDragTrack,
+                            fDragClip, v);
             }
         } else if (fDrag == Drag::ClipFadeIn || fDrag == Drag::ClipFadeOut) {
             if (Clip* c = t->FindClip(fDragClip)) {
@@ -1085,6 +1106,22 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
         if (fx < block.right)
             StrokeLine(BPoint(fx > block.left ? fx : block.left, block.top),
                        BPoint(block.right, block.bottom));
+    }
+
+    // Per-clip gain: a horizontal line across the block at the gain level
+    // (top = kMaxGain, bottom = 0), plus a dB label when not at unity.
+    if (block.Width() > 24) {
+        float gf = c.gain / kMaxGain; if (gf < 0) gf = 0; if (gf > 1) gf = 1;
+        const float gy = block.bottom - gf * block.Height();
+        SetHighColor(Rgb(255, 232, 120));
+        StrokeLine(BPoint(block.left, gy), BPoint(block.right, gy));
+        if (std::fabs(c.gain - 1.0f) > 0.01f) {
+            char db[16];
+            const float dB = c.gain > 0.0001f ? 20.0f * std::log10(c.gain)
+                                              : -99.0f;
+            std::snprintf(db, sizeof(db), "%+.1f dB", dB);
+            DrawString(db, BPoint(block.left + 4, block.bottom - 4));
+        }
     }
 
     SetHighColor(ColClipBorder());

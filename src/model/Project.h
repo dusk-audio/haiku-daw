@@ -24,6 +24,7 @@ struct Clip {
     std::string sourcePath;         // audio/MIDI file this clip plays
     Frame       fadeInFrames  = 0;
     Frame       fadeOutFrames = 0;
+    float       gain          = 1.0f;   // per-clip linear gain (1.0 = unity)
 };
 
 // A single MIDI note placed on a track's timeline. Positions are in project

@@ -44,7 +44,7 @@ public:
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
                 bool audible, Frame seekProjectDelta, float outputRate,
-                Frame fadeIn, Frame fadeOut);
+                Frame fadeIn, Frame fadeOut, float clipGain = 1.0f);
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -87,6 +87,7 @@ private:
     float       fOutputRate;    // engine output rate to resample to
     Frame       fFadeIn;        // fade-in length (timeline frames)
     Frame       fFadeOut;       // fade-out length (timeline frames)
+    float       fClipGain = 1.0f;  // per-clip linear gain
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};

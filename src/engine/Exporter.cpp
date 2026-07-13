@@ -90,6 +90,7 @@ void PlaceClip(const Clip& c, double scale, double outRate,
             if (f < 0.0f) f = 0.0f;
             if (f < env)  env = f;   // combine as min so overlapping fades behave
         }
+        env *= c.gain;   // per-clip gain, after the [0,1] fade envelope
 
         trackBuf[dst * 2 + 0] += decoded[i * 2 + 0] * gainLR[0] * env;
         trackBuf[dst * 2 + 1] += decoded[i * 2 + 1] * gainLR[1] * env;

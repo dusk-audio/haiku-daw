@@ -32,11 +32,11 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
                          Frame sourceOffset, float gain, float pan,
                          bool audible, Frame seekProjectDelta, float outputRate,
-                         Frame fadeIn, Frame fadeOut)
+                         Frame fadeIn, Frame fadeOut, float clipGain)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
-      fRing(kRingFloats) {
+      fClipGain(clipGain), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -165,8 +165,8 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
                 float fo = (float)(fLength - rel) / (float)fFadeOut;
                 if (fo < fade) fade = fo;
             }
-            out[i * 2 + 0] += lr[0] * gl * fade;
-            out[i * 2 + 1] += lr[1] * gr * fade;
+            out[i * 2 + 0] += lr[0] * gl * fade * fClipGain;
+            out[i * 2 + 1] += lr[1] * gr * fade * fClipGain;
         }
     }
 }
@@ -229,7 +229,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate,
-                c.fadeInFrames, c.fadeOutFrames);
+                c.fadeInFrames, c.fadeOutFrames, c.gain);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());

@@ -80,7 +80,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)c.startFrame << " " << (long long)c.lengthFrames << " "
               << (long long)c.sourceOffset << " "
               << (long long)c.fadeInFrames << " " << (long long)c.fadeOutFrames
-              << " \"" << Relativize(c.sourcePath, baseDir) << "\"\n";
+              << " \"" << Relativize(c.sourcePath, baseDir) << "\" "
+              << c.gain << "\n";
 
         for (const MidiNote& n : t.notes)
             f << "note " << n.pitch << " " << n.velocity << " "
@@ -188,6 +189,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             c.startFrame = start; c.lengthFrames = len; c.sourceOffset = off;
             c.fadeInFrames = fi; c.fadeOutFrames = fo;
             c.sourcePath = Resolve(Unquote(line), baseDir);
+            // Optional per-clip gain after the closing quote (absent in older
+            // files -> 1.0).
+            if (size_t q = line.rfind('"'); q != std::string::npos) {
+                std::istringstream tail(line.substr(q + 1));
+                float g = 1.0f;
+                if (tail >> g) c.gain = g;
+            }
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);
         }

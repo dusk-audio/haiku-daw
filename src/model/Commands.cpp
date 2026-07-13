@@ -309,6 +309,25 @@ void SetClipFadeCommand::Undo(Project& p) {
     }
 }
 
+// --- SetClipGainCommand -----------------------------------------------
+
+bool SetClipGainCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOld = c->gain;
+    c->gain = fGain < 0.0f ? 0.0f : fGain;
+    return true;
+}
+
+void SetClipGainCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t)
+        if (Clip* c = t->FindClip(fClip))
+            c->gain = fOld;
+}
+
 // --- NoteEditCommand --------------------------------------------------
 
 bool NoteEditCommand::Do(Project& p) {
