@@ -35,6 +35,8 @@ int main() {
     c.sourcePath = "takes/one two.wav";   // note the space
     stack.Execute(std::make_unique<AddClipCommand>(t1, c), a);
     stack.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(700.0f)), a);
+    stack.Execute(std::make_unique<AddEffectCommand>(t1,
+        CompressorDesc(-18.0f, 3.0f, 5.0f, 80.0f, 6.0f)), a);   // p4 = makeup
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), a);
     TrackId t2 = a.Tracks().back().id;
@@ -61,8 +63,10 @@ int main() {
     CHECK(bt1.clips[0].startFrame == 1000);
     CHECK(bt1.clips[0].lengthFrames == 2000);
     CHECK(bt1.clips[0].sourcePath == "takes/one two.wav");
-    CHECK(bt1.fx.size() == 1);
+    CHECK(bt1.fx.size() == 2);
     CHECK(bt1.fx[0].type == EffectType::Biquad);
+    CHECK(bt1.fx[1].type == EffectType::Compressor);
+    CHECK(std::abs(bt1.fx[1].p4 - 6.0f) < 1e-4f);   // makeup persisted
 
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);

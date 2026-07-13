@@ -16,11 +16,13 @@ enum {
 
 static void SetSlot(EffectDesc& d, int slot, float v) {
     switch (slot) { case 0: d.p0=v; break; case 1: d.p1=v; break;
-                    case 2: d.p2=v; break; case 3: d.p3=v; break; }
+                    case 2: d.p2=v; break; case 3: d.p3=v; break;
+                    case 4: d.p4=v; break; }
 }
 static float GetSlot(const EffectDesc& d, int slot) {
     switch (slot) { case 0: return d.p0; case 1: return d.p1;
-                    case 2: return d.p2; case 3: return d.p3; }
+                    case 2: return d.p2; case 3: return d.p3;
+                    case 4: return d.p4; }
     return 0.0f;
 }
 
@@ -44,6 +46,7 @@ void EffectsWindow::Apply() {
         m.AddFloat("e1", d.p1);
         m.AddFloat("e2", d.p2);
         m.AddFloat("e3", d.p3);
+        m.AddFloat("e4", d.p4);
     }
     fApply.SendMessage(&m);
 }
@@ -110,6 +113,7 @@ void EffectsWindow::Rebuild() {
                 add("Ratio", 1, 1.0f, 20.0f);
                 add("Attack ms", 2, 0.1f, 100.0f);
                 add("Release ms", 3, 5.0f, 1000.0f);
+                add("Makeup dB", 4, 0.0f, 24.0f);
                 break;
             case EffectType::Biquad:
             default:

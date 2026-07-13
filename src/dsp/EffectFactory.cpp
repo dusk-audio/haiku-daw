@@ -22,7 +22,7 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
             return std::unique_ptr<IEffect>(new Reverb(d.p0, d.p1));
         case EffectType::Compressor:
             return std::unique_ptr<IEffect>(
-                new Compressor(d.p0, d.p1, d.p2, d.p3));
+                new Compressor(d.p0, d.p1, d.p2, d.p3, d.p4));
     }
     return nullptr;
 }

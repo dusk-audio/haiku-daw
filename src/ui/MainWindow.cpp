@@ -246,6 +246,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     msg->FindFloat("e1", i, &d.p1);
                     msg->FindFloat("e2", i, &d.p2);
                     msg->FindFloat("e3", i, &d.p3);
+                    msg->FindFloat("e4", i, &d.p4);
                     t->fx.push_back(d);
                 }
                 fTimeline->Invalidate();

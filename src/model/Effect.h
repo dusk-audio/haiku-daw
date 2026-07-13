@@ -20,11 +20,13 @@ struct EffectDesc {
     //               p2 = Q, p3 = gain dB (peaking only)
     //   Delay:      p0 = time s, p1 = feedback [0,1), p2 = mix [0,1]
     //   Reverb:     p0 = roomSize [0,1], p1 = mix [0,1]
-    //   Compressor: p0 = threshold dB, p1 = ratio, p2 = attack ms, p3 = release ms
+    //   Compressor: p0 = threshold dB, p1 = ratio, p2 = attack ms,
+    //               p3 = release ms, p4 = makeup dB
     float p0 = 0.0f;
     float p1 = 0.0f;
     float p2 = 0.0f;
     float p3 = 0.0f;
+    float p4 = 0.0f;   // extra slot (compressor makeup); 0 for older records
 };
 
 // Convenience builders for the common presets the UI drops in.
@@ -41,8 +43,10 @@ inline EffectDesc ReverbDesc(float roomSize = 0.5f, float mix = 0.3f) {
     return EffectDesc{EffectType::Reverb, roomSize, mix, 0.0f, 0.0f};
 }
 inline EffectDesc CompressorDesc(float thrDb = -20.0f, float ratio = 4.0f,
-                                 float attackMs = 10.0f, float releaseMs = 100.0f) {
-    return EffectDesc{EffectType::Compressor, thrDb, ratio, attackMs, releaseMs};
+                                 float attackMs = 10.0f, float releaseMs = 100.0f,
+                                 float makeupDb = 0.0f) {
+    return EffectDesc{EffectType::Compressor, thrDb, ratio, attackMs, releaseMs,
+                      makeupDb};
 }
 
 } // namespace daw

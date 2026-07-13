@@ -80,7 +80,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 
         for (const EffectDesc& e : t.fx)
             f << "fx " << (int)e.type << " "
-              << e.p0 << " " << e.p1 << " " << e.p2 << " " << e.p3 << "\n";
+              << e.p0 << " " << e.p1 << " " << e.p2 << " " << e.p3
+              << " " << e.p4 << "\n";
 
         f << "endtrack\n";
     }
@@ -162,6 +163,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             EffectDesc e;
             int type = 0;
             iss >> type >> e.p0 >> e.p1 >> e.p2 >> e.p3;
+            iss >> e.p4;   // optional 5th param; absent in older records -> 0
             if (type < 0 || type > 3) type = 0;
             e.type = (EffectType)type;
             cur.fx.push_back(e);

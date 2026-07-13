@@ -161,18 +161,14 @@ bool ExportWav(const Project& project, const std::string& outPath,
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
             }
-            // Synth applies gain but not pan; render then pan the track buffer.
+            // Render dry (unity), then apply the same equal-power gain/pan the
+            // audio path uses — always, so a centered MIDI track gets the same
+            // -3 dB center attenuation as a centered audio track.
             synth.Render(notes, trackBuf.data(),
-                         static_cast<size_t>(totalOut), 0, t.gain);
-            if (t.pan != 0.0f) {
-                float pl, pr;
-                EqualPowerGains(1.0f, t.pan, &pl, &pr);
-                // Undo the equal-power center attenuation the synth path did not
-                // apply, then apply the true pan gains.
-                for (int64_t i = 0; i < totalOut; ++i) {
-                    trackBuf[i * 2 + 0] *= pl;
-                    trackBuf[i * 2 + 1] *= pr;
-                }
+                         static_cast<size_t>(totalOut), 0, 1.0f);
+            for (int64_t i = 0; i < totalOut; ++i) {
+                trackBuf[i * 2 + 0] *= gainLR[0];
+                trackBuf[i * 2 + 1] *= gainLR[1];
             }
         }
 

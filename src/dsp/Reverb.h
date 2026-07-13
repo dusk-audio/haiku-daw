@@ -18,6 +18,7 @@
 
 #include "IEffect.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <vector>
 

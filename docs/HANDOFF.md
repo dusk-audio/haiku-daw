@@ -36,20 +36,22 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
 - **M7 DSP effects** ✅ — `IEffect` (Biquad, Delay) + `EffectFactory`; model
   Track carries an ordered `EffectDesc` chain (Add/ClearEffects commands);
   engine mixes each track's clips into a bus, runs the chain, sums to master.
-  UI: header FX box toggles a demo low-pass (applies on next Play). Confirmed
-  audible on real Haiku. (Chain is per-track post-mix; effect picker / param
-  editing / reorder UI still to do.)
+  UI: FX box opens a per-track effects editor (add/remove + param sliders).
+  Confirmed audible on real Haiku. (Chain is per-track post-mix; effect
+  reordering is the only editor gap left.)
 - **M6 MIDI** ✅ (internal-synth path) — `Track` carries a `MidiNote` list
   (`AddNoteCommand`); kit-free `Synth` (polyphonic sine, AR envelope,
   deterministic phase) renders notes; engine adds a bus per audible MIDI track
   and renders through the same FX chain + master mix + transport clock as
-  audio. UI draws a simple piano roll and adds notes on click. Confirmed on
-  real Haiku. (External Midi Kit 2 I/O + note edit/velocity still to do.)
+  audio. UI draws a simple piano roll; notes can be added, moved, resized, and
+  velocity-edited (see the editing entry). Confirmed on real Haiku. (External
+  Midi Kit 2 I/O still to do.)
 - **M8 project save/load** ✅ — kit-free `ProjectIO` text serializer over the
   whole model (round-trip host-tested), wired to Save/Open `BFilePanel` +
   Cmd-S/Cmd-O; load clears history, rebuilds peaks, refreshes the timeline.
-  Confirmed on real Haiku. (Media paths are stored as-given/relative — bundle
-  + absolute-path handling is a later refinement.)
+  Confirmed on real Haiku. Media paths are stored **relative to the project
+  file** and resolved on load, so a project + co-located media are portable.
+  (Bundling recorded takes next to the `.dawproj` is a later refinement.)
 - **Editing + musical grid + loop** ✅ — delete/move/resize notes+clips,
   velocity (Ctrl-drag), clip fades (drag top corners), snap to 16ths (Shift =
   free), bar/beat ruler, loop (drag ruler), zoom (+/- , arrows pan), master
@@ -218,22 +220,22 @@ Do the same in any new view/window that uses model frames.
 
 ## Next task — the full ladder (M0–M8 + resampler + DSP) is done
 
-Remaining work is polish + reach, not core milestones. In rough priority:
+Editing (delete/move/resize/velocity/fades), the effects editor, portable
+relative media paths, offline export, the mixer, and track management are all
+**done** (see the status list above). Remaining work is reach, not core:
 
-**A. Editing polish (in progress).** Delete + move/resize notes and clips
-(right-click delete, drag); per-track effect picker (choose type/params,
-reorder) instead of the demo low-pass; velocity editing.
+**A. External Midi Kit 2 I/O.** `BMidiRoster` / `BMidiLocalProducer/Consumer`
+for hardware keyboards + ports and recording MIDI. Run `scripts/midi_probe.sh`
+on the VM first (mirrors `record_probe.sh`).
 
-**B. Media handling.** Store clip/take paths relative to the project file and
-resolve on load; optionally bundle recorded takes next to the `.dawproj`.
+**B. Automation.** Gain/pan/effect-param lanes over time.
 
-**C. External Midi Kit 2 I/O.** `BMidiRoster` / `BMidiLocalProducer/Consumer`
-for hardware keyboards + ports and recording MIDI. Probe VM MIDI availability
-first (mirror `record_probe.sh`).
-
-**D. BFS sample browser.** Tag audio with BPM/Key/Duration attributes; a live
+**C. BFS sample browser.** Tag audio with BPM/Key/Duration attributes; a live
 `BQuery` becomes an instant sample browser (ARCHITECTURE §5.2) — the native
 Haiku superpower.
+
+**D. Smaller items.** Effect reordering in the editor, copy/paste of clips +
+notes, a metronome/click, and bundling recorded takes next to the `.dawproj`.
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.
