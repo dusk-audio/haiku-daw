@@ -50,8 +50,13 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   Cmd-S/Cmd-O; load clears history, rebuilds peaks, refreshes the timeline.
   Confirmed on real Haiku. (Media paths are stored as-given/relative — bundle
   + absolute-path handling is a later refinement.)
-- **NEXT** — editing polish (delete/move notes + clips), then the options
-  below.
+- **Editing + musical grid + loop** ✅ — delete (right-click) / move / resize
+  notes and clips (undoable: `RemoveClip/Note`, `ResizeClip`, `NoteEdit`);
+  per-track effect **picker** (LP/HP/Delay/Clear); bar/beat ruler + gridlines
+  with **snap** to 16ths (Shift = free); **loop** region set by dragging the
+  ruler, playback wraps at loop end; portable relative media paths in
+  `ProjectIO`. Kit-free parts host-tested (`grid_tests`, `model_tests` now 66).
+- **NEXT** — options below.
 
 ## Architecture in one breath
 
@@ -94,8 +99,11 @@ src/ui/                Interface Kit (Haiku-only): App in main.cpp
   MeterView.{h,cpp}    stereo master level meter
 src/main.cpp           BApplication; seeds a Project from argv WAVs (Haiku-only)
 src/model/Effect.h     kit-free EffectDesc (serializable effect params)
+src/model/Grid.h       kit-free bars/beats math + snap (header-only)
+src/model/ProjectIO.*  kit-free text save/load (portable relative media paths)
 tests/                 model_tests, wav_tests, peak_tests, wavwriter_tests,
-                       resampler_tests, effect_tests  (all host-buildable)
+                       resampler_tests, effect_tests, synth_tests,
+                       projectio_tests, grid_tests  (all host-buildable)
 prototypes/record_clip/ M5 driver: capture N seconds to a WAV
 prototypes/
   hello_beep/          M0
