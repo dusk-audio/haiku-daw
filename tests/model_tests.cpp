@@ -111,6 +111,31 @@ static void test_clip_sorted_insert_and_move() {
     (void)cId;
 }
 
+static void test_move_clip_to_track() {
+    std::printf("test_move_clip_to_track\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "A"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "B"), p);
+    TrackId ta = p.Tracks()[0].id, tb = p.Tracks()[1].id;
+    Clip c; c.startFrame = 100; c.lengthFrames = 50; c.sourcePath = "x.wav";
+    auto add = std::make_unique<AddClipCommand>(ta, c);
+    AddClipCommand* ap = add.get();
+    stack.Execute(std::move(add), p);
+    ClipId cid = ap->CreatedId();
+
+    stack.Execute(std::make_unique<MoveClipToTrackCommand>(ta, cid, tb, 400), p);
+    CHECK(p.FindTrack(ta)->clips.empty());
+    CHECK(p.FindTrack(tb)->clips.size() == 1);
+    CHECK(p.FindTrack(tb)->clips[0].id == cid);
+    CHECK(p.FindTrack(tb)->clips[0].startFrame == 400);
+
+    stack.Undo(p);   // back to track A at its old start
+    CHECK(p.FindTrack(tb)->clips.empty());
+    CHECK(p.FindTrack(ta)->clips.size() == 1);
+    CHECK(p.FindTrack(ta)->clips[0].startFrame == 100);
+}
+
 static void test_resize_clip_and_edit_note() {
     std::printf("test_resize_clip_and_edit_note\n");
     Project p;
@@ -304,6 +329,7 @@ int main() {
     test_add_and_undo_track();
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
+    test_move_clip_to_track();
     test_remove_clip_and_note();
     test_resize_clip_and_edit_note();
     test_track_manage_and_fade();

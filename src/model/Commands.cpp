@@ -230,6 +230,26 @@ void MoveClipCommand::Undo(Project& p) {
     p.AddClip(fTrack, moved);
 }
 
+// --- MoveClipToTrackCommand -------------------------------------------
+
+bool MoveClipToTrackCommand::Do(Project& p) {
+    Track* src = p.FindTrack(fSrc);
+    Track* dst = p.FindTrack(fDst);
+    if (!src || !dst) return false;
+    Clip* c = src->FindClip(fClip);
+    if (!c) return false;
+    fMoved = *c;                       // save original (incl. its start) for undo
+    Clip moved = fMoved;
+    moved.startFrame = fNewStart;
+    if (!p.RemoveClip(fSrc, fClip)) return false;
+    return p.AddClip(fDst, moved);     // keeps the same clip id
+}
+
+void MoveClipToTrackCommand::Undo(Project& p) {
+    p.RemoveClip(fDst, fClip);
+    p.AddClip(fSrc, fMoved);           // back on the source track at its old start
+}
+
 // --- ResizeClipCommand ------------------------------------------------
 
 bool ResizeClipCommand::Do(Project& p) {

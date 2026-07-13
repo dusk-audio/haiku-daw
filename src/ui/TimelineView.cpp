@@ -120,6 +120,31 @@ int TimelineView::ContextMenu(BPoint where) const {
     return idx;
 }
 
+bool TimelineView::PastePopup(BPoint where) const {
+    BPopUpMenu* m = new BPopUpMenu("paste", false, false);
+    m->AddItem(new BMenuItem("Paste here", NULL));
+    BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
+                           false, true);
+    const bool ok = (sel != NULL);
+    delete m;
+    return ok;
+}
+
+void TimelineView::PasteToTrack(TrackId track, Frame at, TrackType type) {
+    if (type == TrackType::Audio && fHasClipClip) {
+        Clip c = fClipClip;
+        c.id = kInvalidClipId;
+        c.startFrame = at;
+        fStack->Execute(std::make_unique<AddClipCommand>(track, c), *fProject);
+        Invalidate();
+    } else if (type == TrackType::Midi && fHasClipNote) {
+        MidiNote n = fClipNote;
+        n.startFrame = at;
+        fStack->Execute(std::make_unique<AddNoteCommand>(track, n), *fProject);
+        Invalidate();
+    }
+}
+
 void TimelineView::PasteAtPlayhead() {
     const Frame at = fProject->transport.playhead;
     if (fHasClipClip) {
@@ -273,6 +298,9 @@ void TimelineView::MouseDown(BPoint where) {
                     fStack->Execute(std::make_unique<RemoveNoteCommand>(
                         t.id, (size_t)hit), *fProject);
                 }
+            } else if (fHasClipNote) {     // empty lane: offer paste
+                if (PastePopup(where))
+                    PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Midi);
             }
             Invalidate(lane);
             return;
@@ -353,6 +381,12 @@ void TimelineView::MouseDown(BPoint where) {
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             break;
         }
+    }
+
+    // Right-click on an empty part of an audio lane: offer paste here.
+    if (fDrag == Drag::None && rightClick && fHasClipClip) {
+        if (PastePopup(where))
+            PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Audio);
     }
 }
 
@@ -544,8 +578,17 @@ void TimelineView::MouseUp(BPoint where) {
         } else if (fDrag == Drag::Clip) {
             if (Clip* c = t->FindClip(fDragClip)) {
                 const Frame v = c->startFrame;
-                c->startFrame = fDragClipOrig;
-                if (v != fDragClipOrig)
+                c->startFrame = fDragClipOrig;   // restore the source track
+                // Drop onto whichever audio track is under the cursor.
+                const int dstIdx = TrackIndexAt(where);
+                TrackId dstId = fDragTrack;
+                if (dstIdx >= 0
+                    && fProject->Tracks()[dstIdx].type == TrackType::Audio)
+                    dstId = fProject->Tracks()[dstIdx].id;
+                if (dstId != fDragTrack)
+                    cmd = std::make_unique<MoveClipToTrackCommand>(
+                        fDragTrack, fDragClip, dstId, v);
+                else if (v != fDragClipOrig)
                     cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
             }
         } else if (fDrag == Drag::ClipResize) {
@@ -583,7 +626,7 @@ void TimelineView::MouseUp(BPoint where) {
     }
     fDrag = Drag::None;
     fDragNote = -1;
-    Invalidate(LaneRect(fDragLane));
+    Invalidate();   // a clip may have moved to another lane
 }
 
 void TimelineView::SetRecording(bool active, Frame start, Frame length) {

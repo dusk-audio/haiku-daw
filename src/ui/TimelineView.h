@@ -122,6 +122,8 @@ private:
 
     // Clipboard (right-click Copy -> Edit > Paste).
     int      ContextMenu(BPoint where) const;   // 0=Copy, 1=Delete, -1=none
+    bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
+    void     PasteToTrack(TrackId track, Frame at, TrackType type);
     bool     fHasClipClip = false;
     Clip     fClipClip;                // copied audio clip
     bool     fHasClipNote = false;

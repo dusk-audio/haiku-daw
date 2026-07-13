@@ -232,6 +232,24 @@ private:
     Frame   fOldStart = 0;
 };
 
+// Move a clip to a different track (and new start). Stores enough to reverse.
+class MoveClipToTrackCommand : public Command {
+public:
+    MoveClipToTrackCommand(TrackId srcTrack, ClipId clip, TrackId dstTrack,
+                           Frame newStart)
+        : fSrc(srcTrack), fClip(clip), fDst(dstTrack), fNewStart(newStart) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Move Clip To Track"; }
+
+private:
+    TrackId fSrc, fDst;
+    ClipId  fClip;
+    Frame   fNewStart;
+    Clip    fMoved;      // the clip as it was on the source track (saved in Do)
+};
+
 // Change a clip's length (right-edge trim/extend). Stores old for Undo().
 class ResizeClipCommand : public Command {
 public:
