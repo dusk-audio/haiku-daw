@@ -145,6 +145,40 @@ int main() {
     CHECK(pDirect > 0.01f);
     CHECK(std::fabs(pSend - pDirect * (1.0f + kBusPan)) < pDirect * 0.05f);
 
+    // --- Gain automation: a full-scale note with a 1.0 -> 0.0 gain ramp over
+    // the buffer should leave the second half much quieter than the first.
+    {
+        Project pr;
+        pr.sampleRate = SR;
+        pr.masterGain = 1.0f;
+        Track m;
+        m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        MidiNote n2 = note;
+        n2.startFrame = 0; n2.lengthFrames = (Frame)SR;   // 1 s sustained
+        m.notes.push_back(n2);
+        m.gainAuto.AddPoint(0, 1.0f);
+        m.gainAuto.AddPoint((Frame)SR, 0.0f);             // ramp to silence
+        pr.AddTrack(m);
+
+        const std::string p = "/tmp/haiku_daw_export_auto.wav";
+        std::remove(p.c_str());
+        CHECK(ExportWav(pr, p, SR));
+        WavSource s;
+        CHECK(s.Open(p));
+        std::vector<float> all;
+        const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f * 2; ++i) all.push_back(c[i]);
+        std::remove(p.c_str());
+        const size_t half = all.size() / 2;
+        float pEarly = 0.0f, pLate = 0.0f;
+        for (size_t i = 0; i < half; ++i)          pEarly = std::max(pEarly, std::fabs(all[i]));
+        for (size_t i = half; i < all.size(); ++i) pLate  = std::max(pLate,  std::fabs(all[i]));
+        CHECK(pEarly > 0.05f);
+        CHECK(pLate < pEarly * 0.65f);             // ramp made the tail quiet
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

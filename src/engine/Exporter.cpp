@@ -200,15 +200,14 @@ bool ExportWav(const Project& project, const std::string& outPath,
             continue;   // muted/solo'd out: render + route nothing downstream
 
         float* nb = nodeBuf[it->second].data();
-        // Split the channel strip into pan (equal-power) then a scalar gain
-        // fader, so a pre-fader send can tap the panned-but-pre-fader signal.
-        float panLR[2];
-        EqualPowerGains(1.0f, t.pan, &panLR[0], &panLR[1]);
+        const float kUnity[2] = { 1.0f, 1.0f };
 
+        // Build the node DRY (no pan / gain yet), so a pre-fader send taps the
+        // raw signal and the gain+pan fader can be a time-varying envelope.
         if (t.type == TrackType::Audio) {
             for (const Clip& c : t.clips) {
                 if (c.sourcePath.empty()) continue;
-                PlaceClip(c, scale, outRate, totalOut, panLR, nodeBuf[it->second]);
+                PlaceClip(c, scale, outRate, totalOut, kUnity, nodeBuf[it->second]);
             }
         } else if (t.type == TrackType::Midi) {
             std::vector<MidiNote> notes = t.notes;
@@ -218,20 +217,32 @@ bool ExportWav(const Project& project, const std::string& outPath,
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
             synth.Render(notes, nb, static_cast<size_t>(totalOut), 0, 1.0f);
+        }   // Bus: nb already holds the summed upstream (dry).
+
+        addSends(t, /*pre=*/true, nb);          // pre-fader taps (dry)
+
+        // Fader = gain * equal-power pan. Automated per sample when a lane has
+        // points; otherwise a single constant multiply (fast path).
+        const bool automated = t.gainAuto.Count() > 0 || t.panAuto.Count() > 0;
+        if (!automated) {
+            float gLR[2];
+            EqualPowerGains(t.gain, t.pan, &gLR[0], &gLR[1]);
             for (int64_t i = 0; i < totalOut; ++i) {
-                nb[i * 2 + 0] *= panLR[0];
-                nb[i * 2 + 1] *= panLR[1];
+                nb[i * 2 + 0] *= gLR[0];
+                nb[i * 2 + 1] *= gLR[1];
             }
-        } else {   // Bus: nb already holds the summed upstream; apply its pan.
+        } else {
             for (int64_t i = 0; i < totalOut; ++i) {
-                nb[i * 2 + 0] *= panLR[0];
-                nb[i * 2 + 1] *= panLR[1];
+                const Frame pf = static_cast<Frame>(i / scale);   // project frame
+                const float g = t.gainAuto.ValueAt(pf, t.gain);
+                const float p = t.panAuto.ValueAt(pf, t.pan);
+                float gLR[2];
+                EqualPowerGains(g, p, &gLR[0], &gLR[1]);
+                nb[i * 2 + 0] *= gLR[0];
+                nb[i * 2 + 1] *= gLR[1];
             }
         }
 
-        addSends(t, /*pre=*/true, nb);          // pre-fader taps
-        for (size_t i = 0; i < nfloats; ++i)    // scalar gain fader
-            nb[i] *= t.gain;
         applyFx(t.fx, nb);
         addSends(t, /*pre=*/false, nb);         // post-fader taps
 
