@@ -91,8 +91,8 @@ private:
     // Live fader/pan drag. During a drag we preview by writing the model
     // directly; on release we restore the original and push ONE command, so
     // the whole gesture is a single clean undo step.
-    enum class Drag { None, Gain, Pan, Clip, ClipResize, Note, NoteResize,
-                      NoteVelocity, RulerLoop };
+    enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipFadeIn, ClipFadeOut,
+                      Note, NoteResize, NoteVelocity, RulerLoop };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -105,6 +105,8 @@ private:
     Frame   fDragClipOrig    = 0;      // clip startFrame at drag start
     Frame   fDragClipOrigLen = 0;      // clip lengthFrames at drag start
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
+    Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)
+    Frame   fDragFadeOutOrig = 0;
 
     // Note drag state.
     int      fDragNote        = -1;    // index into the track's notes

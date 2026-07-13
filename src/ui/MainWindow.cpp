@@ -3,15 +3,22 @@
 #include "TimelineView.h"
 #include "MeterView.h"
 #include "EffectsWindow.h"
+#include "MixerWindow.h"
+#include "RenameWindow.h"
 #include "UiMetrics.h"
 
 #include "../engine/WavSource.h"
+#include "../engine/Exporter.h"
 #include "../model/ProjectIO.h"
+#include "../model/Commands.h"
 
 #include <Application.h>
 #include <Button.h>
 #include <Entry.h>
 #include <FilePanel.h>
+#include <Menu.h>
+#include <MenuBar.h>
+#include <MenuItem.h>
 #include <MessageRunner.h>
 #include <Path.h>
 #include <Slider.h>
@@ -36,6 +43,11 @@ enum {
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',
+    MSG_EXPORT   = 'expt',
+    MSG_EXPORT_REF = 'exrf',
+    MSG_NEW_AUDIO = 'naud',
+    MSG_NEW_MIDI  = 'nmid',
+    MSG_MIXER     = 'mixr',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -48,8 +60,33 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
       fProject(project), fStack(stack), fPeaks(peaks) {
     BRect bounds = Bounds();
 
-    // --- Transport bar (top strip) ---
-    BRect barRect(0, 0, bounds.right, kTransportH);
+    // --- Menu bar ---
+    BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
+    BMenu* fileMenu = new BMenu("File");
+    fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
+    fileMenu->AddItem(new BMenuItem("Save" B_UTF8_ELLIPSIS, new BMessage(MSG_SAVE), 'S'));
+    fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
+    fileMenu->AddSeparatorItem();
+    fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
+    menuBar->AddItem(fileMenu);
+    BMenu* editMenu = new BMenu("Edit");
+    editMenu->AddItem(new BMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
+    editMenu->AddItem(new BMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
+    menuBar->AddItem(editMenu);
+    BMenu* trackMenu = new BMenu("Track");
+    trackMenu->AddItem(new BMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
+    trackMenu->AddItem(new BMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
+    menuBar->AddItem(trackMenu);
+    BMenu* viewMenu = new BMenu("View");
+    viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
+    menuBar->AddItem(viewMenu);
+    AddChild(menuBar);
+    float menuH = menuBar->Bounds().Height();
+    if (menuH < 1) menuH = 19;
+
+    // --- Transport bar (below the menu) ---
+    const float barTop = menuH + 1;
+    BRect barRect(0, barTop, bounds.right, barTop + kTransportH);
     BView* bar = new BView(barRect, "transport",
                            B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW);
     bar->SetViewColor(ColHeader());
@@ -71,30 +108,16 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fTimeView->SetHighColor(ColText());
     bar->AddChild(fTimeView);
 
-    BButton* undo = new BButton(BRect(340, 5, 404, kTransportH - 5), "undo",
-                                "Undo", new BMessage(MSG_UNDO));
-    BButton* redo = new BButton(BRect(408, 5, 472, kTransportH - 5), "redo",
-                                "Redo", new BMessage(MSG_REDO));
-    bar->AddChild(undo);
-    bar->AddChild(redo);
-
-    BButton* save = new BButton(BRect(478, 5, 542, kTransportH - 5), "save",
-                                "Save", new BMessage(MSG_SAVE));
-    BButton* open = new BButton(BRect(546, 5, 610, kTransportH - 5), "open",
-                                "Open", new BMessage(MSG_OPEN));
-    bar->AddChild(save);
-    bar->AddChild(open);
-
     // Horizontal zoom buttons (keyboard +/- and arrows also work).
-    BButton* zoomOut = new BButton(BRect(618, 5, 646, kTransportH - 5), "zoomout",
+    BButton* zoomOut = new BButton(BRect(346, 5, 374, kTransportH - 5), "zoomout",
                                    "-", new BMessage(MSG_ZOOM_OUT));
-    BButton* zoomIn  = new BButton(BRect(650, 5, 678, kTransportH - 5), "zoomin",
+    BButton* zoomIn  = new BButton(BRect(378, 5, 406, kTransportH - 5), "zoomin",
                                    "+", new BMessage(MSG_ZOOM_IN));
     bar->AddChild(zoomOut);
     bar->AddChild(zoomIn);
 
     // Master volume slider (0..150% -> gain 0..1.5), live/non-undoable.
-    fMaster = new BSlider(BRect(686, 4, 810, kTransportH - 4),
+    fMaster = new BSlider(BRect(414, 4, 538, kTransportH - 4),
                           "master", "Vol", new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
@@ -106,14 +129,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                  kTransportH - 5));
     bar->AddChild(fMeter);
 
-    // Keyboard: Cmd-Z / Cmd-Shift-Z / Cmd-S / Cmd-O.
-    AddShortcut('Z', B_COMMAND_KEY, new BMessage(MSG_UNDO));
-    AddShortcut('Z', B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_REDO));
-    AddShortcut('S', B_COMMAND_KEY, new BMessage(MSG_SAVE));
-    AddShortcut('O', B_COMMAND_KEY, new BMessage(MSG_OPEN));
-
     // --- Timeline (fills the rest) ---
-    BRect tlRect(0, kTransportH + 1, bounds.right, bounds.bottom);
+    BRect tlRect(0, barTop + kTransportH + 1, bounds.right, bounds.bottom);
     fTimeline = new TimelineView(tlRect, project, stack);
     fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
@@ -123,6 +140,7 @@ MainWindow::~MainWindow() {
     delete fPulse;
     delete fSavePanel;
     delete fOpenPanel;
+    delete fExportPanel;
     // fEngine / fRecorder destructors stop their threads.
 }
 
@@ -147,6 +165,71 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
+        case MSG_EXPORT:
+            if (!fExportPanel) {
+                BMessenger to(this);
+                fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
+                                              new BMessage(MSG_EXPORT_REF));
+            }
+            fExportPanel->Show();
+            break;
+        case MSG_EXPORT_REF: {
+            entry_ref dir; const char* name = nullptr;
+            if (msg->FindRef("directory", &dir) == B_OK
+                && msg->FindString("name", &name) == B_OK) {
+                BPath path(&dir);
+                path.Append(name);
+                StopPlayback();
+                if (!ExportWav(*fProject, path.Path(), fProject->sampleRate))
+                    std::fprintf(stderr, "MainWindow: export failed: %s\n",
+                                 path.Path());
+            }
+            break;
+        }
+        case MSG_NEW_AUDIO:
+        case MSG_NEW_MIDI: {
+            const bool midi = (msg->what == MSG_NEW_MIDI);
+            char nm[32];
+            std::snprintf(nm, sizeof(nm), "%s %d", midi ? "MIDI" : "Audio",
+                          (int)fProject->Tracks().size() + 1);
+            fStack->Execute(std::make_unique<AddTrackCommand>(
+                midi ? TrackType::Midi : TrackType::Audio, nm), *fProject);
+            fTimeline->Invalidate();
+            break;
+        }
+        case MSG_MIXER: {
+            std::vector<MixerStripInfo> strips;
+            for (const Track& t : fProject->Tracks())
+                strips.push_back(MixerStripInfo{ (uint64)t.id, t.name,
+                    t.gain, t.pan, t.muted, t.soloed });
+            const float ww = 16 + strips.size() * 84;
+            BRect wr(140, 140, 140 + ww, 140 + 260);
+            (new MixerWindow(wr, strips, BMessenger(this)))->Show();
+            break;
+        }
+        case kMsgRenameTrack: {
+            int64 tid = 0; const char* name = nullptr;
+            msg->FindInt64("track", &tid);
+            if (msg->FindString("name", &name) == B_OK && name && name[0]) {
+                fStack->Execute(std::make_unique<SetTrackNameCommand>(
+                    (TrackId)tid, name), *fProject);
+                fTimeline->Invalidate();
+            }
+            break;
+        }
+        case kMsgApplyMix: {
+            int64 tid = 0; float g = 1, p = 0; bool mu = false, so = false;
+            msg->FindInt64("track", &tid);
+            msg->FindFloat("gain", &g);
+            msg->FindFloat("pan", &p);
+            msg->FindBool("mute", &mu);
+            msg->FindBool("solo", &so);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                t->gain = g; t->pan = p; t->muted = mu; t->soloed = so;
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgApplyFx: {
             // An EffectsWindow (its own thread) sends the edited chain here;
             // the model is mutated only on this (main) thread.
@@ -157,7 +240,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 int32 type = 0;
                 for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                     EffectDesc d;
-                    d.type = (type == 1) ? EffectType::Delay : EffectType::Biquad;
+                    d.type = (type >= 0 && type <= 3) ? (EffectType)type
+                                                      : EffectType::Biquad;
                     msg->FindFloat("e0", i, &d.p0);
                     msg->FindFloat("e1", i, &d.p1);
                     msg->FindFloat("e2", i, &d.p2);

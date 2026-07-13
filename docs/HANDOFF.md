@@ -50,13 +50,26 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   Cmd-S/Cmd-O; load clears history, rebuilds peaks, refreshes the timeline.
   Confirmed on real Haiku. (Media paths are stored as-given/relative — bundle
   + absolute-path handling is a later refinement.)
-- **Editing + musical grid + loop** ✅ — delete (right-click) / move / resize
-  notes and clips (undoable: `RemoveClip/Note`, `ResizeClip`, `NoteEdit`);
-  per-track effect **picker** (LP/HP/Delay/Clear); bar/beat ruler + gridlines
-  with **snap** to 16ths (Shift = free); **loop** region set by dragging the
-  ruler, playback wraps at loop end; portable relative media paths in
-  `ProjectIO`. Kit-free parts host-tested (`grid_tests`, `model_tests` now 66).
-- **NEXT** — options below.
+- **Editing + musical grid + loop** ✅ — delete/move/resize notes+clips,
+  velocity (Ctrl-drag), clip fades (drag top corners), snap to 16ths (Shift =
+  free), bar/beat ruler, loop (drag ruler), zoom (+/- , arrows pan), master
+  volume, per-track effects editor window. Portable relative media paths.
+- **Big batch (agents + integration)** ✅ (host-tested where kit-free):
+  - **Track management** — menu New Audio/MIDI Track, right-click track name to
+    delete, double-click to rename (RenameWindow). Commands: RemoveTrack,
+    SetTrackName.
+  - **Clip fades** — `SetClipFadeCommand`; engine `TrackStream::Mix` +
+    Exporter apply linear fade-in/out; drag a clip's top corners to set them.
+  - **Offline export** — kit-free `ExportWav(project, path, outRate)` bounces
+    the whole project to a 16-bit WAV (File ▸ Export WAV). Host-tested.
+  - **Mixer window** — channel strips (gain/pan/M/S), snapshot+post pattern.
+  - **New DSP effects** — Reverb + Compressor (ported from the user's
+    ~/projects/plugins), wired into EffectFactory/EffectsWindow. Host-tested.
+  - **Menu bar** — File (Open/Save/Export/Quit), Edit (Undo/Redo), Track,
+    View (Mixer); Save/Open/Undo/Redo buttons removed from the transport bar.
+  - **MIDI probe** — `scripts/midi_probe.sh` (run on VM before external MIDI).
+- **NEXT** — external Midi Kit 2 I/O (after running midi_probe.sh), automation,
+  BFS sample browser, copy/paste, metronome.
 
 ## Architecture in one breath
 

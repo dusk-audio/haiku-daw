@@ -2,6 +2,7 @@
 
 #include "UiMetrics.h"
 #include "EffectsWindow.h"
+#include "RenameWindow.h"
 
 #include <Window.h>
 
@@ -193,6 +194,25 @@ void TimelineView::MouseDown(BPoint where) {
     const Track& t = fProject->Tracks()[idx];
 
     if (where.x < kHeaderWidth) {
+        // Track name strip: right-click deletes the track, double-click renames.
+        if (where.y <= lane.top + 18 && where.x < 114) {
+            if (rightClick) {
+                fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
+                                *fProject);
+                Invalidate();
+                return;
+            }
+            int32 clicks = 1;
+            if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+                m->FindInt32("clicks", &clicks);
+            if (clicks >= 2) {
+                BPoint sp = ConvertToScreen(where);
+                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                (new RenameWindow(wr, t.id, t.name.c_str(),
+                                  BMessenger(Window())))->Show();
+                return;
+            }
+        }
         HandleHeaderClick(t, lane, where);
         return;
     }
@@ -258,10 +278,17 @@ void TimelineView::MouseDown(BPoint where) {
             fDragClip        = c.id;
             fDragClipOrig    = c.startFrame;
             fDragClipOrigLen = c.lengthFrames;
+            fDragFadeInOrig  = c.fadeInFrames;
+            fDragFadeOutOrig = c.fadeOutFrames;
             const float xStart = FrameToX(c.startFrame);
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
             const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
-            if (wide && where.x >= xEnd - kEdgeGrab) {
+            const bool  topBand = where.y <= lane.top + 14;
+            if (topBand && where.x <= xStart + 12) {
+                fDrag = Drag::ClipFadeIn;      // top-left corner = fade in
+            } else if (topBand && where.x >= xEnd - 12) {
+                fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
+            } else if (wide && where.x >= xEnd - kEdgeGrab) {
                 fDrag = Drag::ClipResize;
             } else {
                 fDrag = Drag::Clip;
@@ -372,6 +399,22 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (len < 1) len = 1;
             c->lengthFrames = len;
         }
+    } else if (fDrag == Drag::ClipFadeIn) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            Frame f = XToFrame(where.x) - c->startFrame;
+            if (f < 0) f = 0;
+            if (f > c->lengthFrames) f = c->lengthFrames;
+            c->fadeInFrames = f;
+        }
+    } else if (fDrag == Drag::ClipFadeOut) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            Frame f = (c->startFrame + c->lengthFrames) - XToFrame(where.x);
+            if (f < 0) f = 0;
+            if (f > c->lengthFrames) f = c->lengthFrames;
+            c->fadeOutFrames = f;
+        }
     } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
                || fDrag == Drag::NoteVelocity) {
         if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
@@ -455,6 +498,15 @@ void TimelineView::MouseUp(BPoint where) {
                 c->lengthFrames = fDragClipOrigLen;
                 if (v != fDragClipOrigLen)
                     cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
+            }
+        } else if (fDrag == Drag::ClipFadeIn || fDrag == Drag::ClipFadeOut) {
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame fin = c->fadeInFrames, fout = c->fadeOutFrames;
+                c->fadeInFrames = fDragFadeInOrig;
+                c->fadeOutFrames = fDragFadeOutOrig;
+                if (fin != fDragFadeInOrig || fout != fDragFadeOutOrig)
+                    cmd = std::make_unique<SetClipFadeCommand>(fDragTrack,
+                            fDragClip, fin, fout);
             }
         } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
                    || fDrag == Drag::NoteVelocity) {
@@ -674,6 +726,21 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
     FillRect(block);
 
     DrawClipWave(c, block);
+
+    // Fade ramps: a diagonal from the block corner up to where the fade ends.
+    SetHighColor(ColClipBorder());
+    if (c.fadeInFrames > 0) {
+        float fx = FrameToX(c.startFrame + c.fadeInFrames);
+        if (fx > block.left)
+            StrokeLine(BPoint(block.left, block.bottom),
+                       BPoint(fx < block.right ? fx : block.right, block.top));
+    }
+    if (c.fadeOutFrames > 0) {
+        float fx = FrameToX(c.startFrame + c.lengthFrames - c.fadeOutFrames);
+        if (fx < block.right)
+            StrokeLine(BPoint(fx > block.left ? fx : block.left, block.top),
+                       BPoint(block.right, block.bottom));
+    }
 
     SetHighColor(ColClipBorder());
     StrokeRect(block);

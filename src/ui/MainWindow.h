@@ -72,6 +72,7 @@ private:
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
+    BFilePanel*               fExportPanel = nullptr;
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
