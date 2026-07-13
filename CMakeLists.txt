@@ -27,6 +27,7 @@ add_library(daw_model
     src/dsp/Reverb.cpp          # kit-free Schroeder reverb
     src/dsp/Compressor.cpp      # kit-free dynamics compressor
     src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
+    src/dsp/Loudness.cpp        # kit-free BS.1770 LUFS + true-peak meter
     src/dsp/Saturator.cpp       # kit-free tape saturation (tape-echo port)
     src/dsp/Gate.cpp            # kit-free noise gate / expander
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
@@ -92,6 +93,10 @@ add_test(NAME automation_tests COMMAND automation_tests)
 add_executable(routing_tests tests/routing_tests.cpp)
 target_link_libraries(routing_tests PRIVATE daw_model)
 add_test(NAME routing_tests COMMAND routing_tests)
+
+add_executable(loudness_tests tests/loudness_tests.cpp)
+target_link_libraries(loudness_tests PRIVATE daw_model)
+add_test(NAME loudness_tests COMMAND loudness_tests)
 
 add_executable(saturator_tests tests/saturator_tests.cpp)
 target_link_libraries(saturator_tests PRIVATE daw_model)
