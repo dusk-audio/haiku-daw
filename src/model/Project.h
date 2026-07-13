@@ -25,6 +25,16 @@ struct Clip {
     Frame       fadeOutFrames = 0;
 };
 
+// A single MIDI note placed on a track's timeline. Positions are in project
+// (timeline) frames, same unit as audio clips, so audio and MIDI share the
+// one transport clock. Pitch is a MIDI note number (60 = middle C).
+struct MidiNote {
+    int   pitch        = 60;    // 0..127
+    int   velocity     = 100;   // 1..127
+    Frame startFrame   = 0;
+    Frame lengthFrames = 0;
+};
+
 struct Track {
     TrackId           id    = kInvalidTrackId;
     TrackType         type  = TrackType::Audio;
@@ -34,7 +44,8 @@ struct Track {
     bool              muted = false;
     bool              soloed = false;
     bool              armed  = false;
-    std::vector<Clip>       clips;    // kept sorted by startFrame
+    std::vector<Clip>       clips;    // audio clips, kept sorted by startFrame
+    std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
 
     Clip*       FindClip(ClipId id);

@@ -90,6 +90,21 @@ private:
     bool    fOldSoloed = false;
 };
 
+// Add a MIDI note to a track. Undo removes the note it appended.
+class AddNoteCommand : public Command {
+public:
+    AddNoteCommand(TrackId track, MidiNote note)
+        : fTrack(track), fNote(note) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Add Note"; }
+
+private:
+    TrackId  fTrack;
+    MidiNote fNote;
+};
+
 // Add a clip to a track. Allocates a clip id in Do(); Undo() removes it.
 class AddClipCommand : public Command {
 public:

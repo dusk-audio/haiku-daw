@@ -21,6 +21,7 @@ add_library(daw_model
     src/dsp/Biquad.cpp          # kit-free biquad filter effect
     src/dsp/Delay.cpp           # kit-free feedback delay effect
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
+    src/synth/Synth.cpp         # kit-free polyphonic sine synth
 )
 target_include_directories(daw_model PUBLIC src)
 
@@ -49,6 +50,10 @@ add_test(NAME resampler_tests COMMAND resampler_tests)
 add_executable(effect_tests tests/effect_tests.cpp)
 target_link_libraries(effect_tests PRIVATE daw_model)
 add_test(NAME effect_tests COMMAND effect_tests)
+
+add_executable(synth_tests tests/synth_tests.cpp)
+target_link_libraries(synth_tests PRIVATE daw_model)
+add_test(NAME synth_tests COMMAND synth_tests)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are

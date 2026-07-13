@@ -80,6 +80,21 @@ void SetTrackSoloCommand::Undo(Project& p) {
         t->soloed = fOldSoloed;
 }
 
+// --- AddNoteCommand ---------------------------------------------------
+
+bool AddNoteCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    t->notes.push_back(fNote);
+    return true;
+}
+
+void AddNoteCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (!t->notes.empty())
+            t->notes.pop_back();
+}
+
 // --- AddClipCommand ---------------------------------------------------
 
 bool AddClipCommand::Do(Project& p) {

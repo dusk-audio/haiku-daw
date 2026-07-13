@@ -159,6 +159,26 @@ static void test_effect_commands() {
     CHECK(p.FindTrack(id)->fx.size() == 2);
 }
 
+static void test_note_commands() {
+    std::printf("test_note_commands\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), p);
+    TrackId id = p.Tracks().front().id;
+    CHECK(p.FindTrack(id)->notes.empty());
+
+    MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 1000; n.lengthFrames = 500;
+    stack.Execute(std::make_unique<AddNoteCommand>(id, n), p);
+    CHECK(p.FindTrack(id)->notes.size() == 1);
+    CHECK(p.FindTrack(id)->notes[0].pitch == 64);
+    CHECK(p.FindTrack(id)->notes[0].startFrame == 1000);
+
+    stack.Undo(p);
+    CHECK(p.FindTrack(id)->notes.empty());
+    stack.Redo(p);
+    CHECK(p.FindTrack(id)->notes.size() == 1);
+}
+
 static void test_frame_seconds_roundtrip() {
     std::printf("test_frame_seconds_roundtrip\n");
     CHECK(SecondsToFrames(1.0, 48000.0) == 48000);
@@ -172,6 +192,7 @@ int main() {
     test_clip_sorted_insert_and_move();
     test_mute_solo_undo_redo();
     test_effect_commands();
+    test_note_commands();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
