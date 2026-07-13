@@ -28,6 +28,7 @@ class BMessageRunner;
 class BFilePanel;
 class BSlider;
 class BMenuItem;
+class BTextControl;
 
 namespace daw {
 
@@ -68,6 +69,7 @@ private:
     BStringView*    fTimeView;
     MeterView*      fMeter;
     BSlider*        fMaster;
+    BTextControl*   fTempo;
 
     std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
     std::unique_ptr<Recorder> fRecorder;  // active while recording

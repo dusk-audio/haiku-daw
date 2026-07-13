@@ -23,6 +23,7 @@
 #include <Path.h>
 #include <Slider.h>
 #include <StringView.h>
+#include <TextControl.h>
 
 #include <cmath>
 #include <cstdio>
@@ -52,6 +53,7 @@ enum {
     MSG_IMPORT    = 'impt',
     MSG_IMPORT_REF = 'imrf',
     MSG_PASTE     = 'past',
+    MSG_TEMPO     = 'tmpo',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -132,6 +134,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
     bar->AddChild(fMaster);
+
+    // Tempo (BPM) — affects the grid/snap and the metronome (next Play).
+    char bpm[16];
+    std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
+    fTempo = new BTextControl(BRect(548, 6, 664, kTransportH - 6),
+                              "tempo", "BPM", bpm, new BMessage(MSG_TEMPO));
+    fTempo->SetDivider(32.0f);
+    bar->AddChild(fTempo);
 
     // Master output meter, pinned to the right of the transport bar.
     fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
@@ -283,6 +293,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_PASTE:
             fTimeline->PasteAtPlayhead();
             break;
+        case MSG_TEMPO: {
+            double bpm = atof(fTempo->Text());
+            if (bpm < 20.0)  bpm = 20.0;
+            if (bpm > 300.0) bpm = 300.0;
+            fProject->tempoBPM = bpm;
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%.0f", bpm);
+            fTempo->SetText(buf);
+            fTimeline->Invalidate();   // grid + ruler follow tempo
+            // Metronome/engine pick up the new tempo on the next Play (rebuild).
+            break;
+        }
         case MSG_SAVE:
             if (!fSavePanel) {
                 BMessenger to(this);

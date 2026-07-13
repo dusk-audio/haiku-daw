@@ -16,6 +16,9 @@ namespace daw {
 static constexpr size_t kRingFramesPerStream = 48000 * 2;   // frames
 static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
 
+// Output buffer size in frames (per channel). ~10.7 ms at 48 kHz.
+static constexpr size_t kBufferFrames = 512;
+
 // Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each), +1 = hard
 // right. Folds the track gain into the returned per-channel gains.
 static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
@@ -177,6 +180,10 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     format.channel_count = 2;
     format.format        = media_raw_audio_format::B_AUDIO_FLOAT;
     format.byte_order    = B_MEDIA_HOST_ENDIAN;
+    // Request an explicit buffer size (frames * channels * 4 bytes) instead of
+    // letting media_server suggest one. 512 frames stereo float = ~10.7 ms at
+    // 48 kHz; smaller = lower latency but more xrun risk on the VM.
+    format.buffer_size   = kBufferFrames * 2 * sizeof(float);
 
     fPlayer.reset(new BSoundPlayer(&format, "haiku_daw", PlayTrampoline,
                                    nullptr, this));

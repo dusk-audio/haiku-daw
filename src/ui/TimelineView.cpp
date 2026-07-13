@@ -174,8 +174,24 @@ void TimelineView::PasteAtPlayhead() {
 
 void TimelineView::Draw(BRect updateRect) {
     DrawLanes(updateRect);
+    if (fDrag == Drag::Clip && fDragCurLane >= 0)
+        DrawDragGhost();     // clip-move preview
     DrawPlayhead();          // over lanes, under the ruler
     DrawRuler(updateRect);   // ruler last so it sits above lane content
+}
+
+void TimelineView::DrawDragGhost() {
+    if (fDragCurLane >= (int)fProject->Tracks().size())
+        return;
+    BRect lane = LaneRect(fDragCurLane);
+    float x0 = FrameToX(fDragCurStart);
+    float x1 = FrameToX(fDragCurStart + fDragClipOrigLen);
+    if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+    if (x1 <= x0) return;
+    BRect g(x0, lane.top + 3, x1, lane.bottom - 3);
+    SetHighColor(Rgb(210, 225, 255));
+    StrokeRect(g);
+    StrokeLine(BPoint(g.left, g.top + 1), BPoint(g.right, g.top + 1));
 }
 
 void TimelineView::SetPlayhead(Frame f) {
@@ -377,6 +393,8 @@ void TimelineView::MouseDown(BPoint where) {
             } else {
                 fDrag = Drag::Clip;
                 fDragGrabOffset = at - c.startFrame;
+                fDragCurLane  = idx;
+                fDragCurStart = c.startFrame;
             }
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             break;
@@ -476,12 +494,16 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
     } else if (fDrag == Drag::Clip) {
-        Clip* c = t->FindClip(fDragClip);
-        if (c) {
-            Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
-            if (start < 0) start = 0;
-            c->startFrame = start;   // preview only; sort fixed up on release
-        }
+        // Ghost preview: track the position + target lane; don't touch the
+        // model until drop.
+        Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
+        if (start < 0) start = 0;
+        fDragCurStart = start;
+        const int dstIdx = TrackIndexAt(where);
+        if (dstIdx >= 0 && fProject->Tracks()[dstIdx].type == TrackType::Audio)
+            fDragCurLane = dstIdx;
+        Invalidate();
+        return;   // ghost is drawn in Draw(); no per-lane model change
     } else if (fDrag == Drag::ClipResize) {
         Clip* c = t->FindClip(fDragClip);
         if (c) {
@@ -576,21 +598,19 @@ void TimelineView::MouseUp(BPoint where) {
             if (v != fDragOrig)
                 cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
         } else if (fDrag == Drag::Clip) {
-            if (Clip* c = t->FindClip(fDragClip)) {
-                const Frame v = c->startFrame;
-                c->startFrame = fDragClipOrig;   // restore the source track
-                // Drop onto whichever audio track is under the cursor.
-                const int dstIdx = TrackIndexAt(where);
-                TrackId dstId = fDragTrack;
-                if (dstIdx >= 0
-                    && fProject->Tracks()[dstIdx].type == TrackType::Audio)
-                    dstId = fProject->Tracks()[dstIdx].id;
-                if (dstId != fDragTrack)
-                    cmd = std::make_unique<MoveClipToTrackCommand>(
-                        fDragTrack, fDragClip, dstId, v);
-                else if (v != fDragClipOrig)
-                    cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
-            }
+            // Model was never mutated during the drag (ghost preview). Apply
+            // the drop: same lane -> reposition; different lane -> move track.
+            const Frame v = fDragCurStart;
+            TrackId dstId = fDragTrack;
+            if (fDragCurLane >= 0
+                && fDragCurLane < (int)fProject->Tracks().size()
+                && fProject->Tracks()[fDragCurLane].type == TrackType::Audio)
+                dstId = fProject->Tracks()[fDragCurLane].id;
+            if (dstId != fDragTrack)
+                cmd = std::make_unique<MoveClipToTrackCommand>(
+                    fDragTrack, fDragClip, dstId, v);
+            else if (v != fDragClipOrig)
+                cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
         } else if (fDrag == Drag::ClipResize) {
             if (Clip* c = t->FindClip(fDragClip)) {
                 const Frame v = c->lengthFrames;
@@ -626,6 +646,7 @@ void TimelineView::MouseUp(BPoint where) {
     }
     fDrag = Drag::None;
     fDragNote = -1;
+    fDragCurLane = -1;
     Invalidate();   // a clip may have moved to another lane
 }
 

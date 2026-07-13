@@ -84,6 +84,7 @@ private:
     void DrawClip(const Clip& c, BRect lane);
     void DrawClipWave(const Clip& c, BRect block);
     void DrawPlayhead();
+    void DrawDragGhost();   // clip-move preview rectangle
 
     // Lane geometry + header hit-testing.
     BRect LaneRect(int index) const;
@@ -110,6 +111,10 @@ private:
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
     Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)
     Frame   fDragFadeOutOrig = 0;
+    // Clip-move ghost (follows the cursor across lanes; model isn't touched
+    // until drop).
+    int     fDragCurLane  = -1;        // target lane under the cursor
+    Frame   fDragCurStart = 0;         // previewed start frame
 
     // Note drag state.
     int      fDragNote        = -1;    // index into the track's notes
