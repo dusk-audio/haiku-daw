@@ -144,7 +144,7 @@ void EffectsWindow::Rebuild() {
             default:
                 add("Freq", 1, 20.0f, 16000.0f);
                 add("Q", 2, 0.1f, 10.0f);
-                if (d.p0 == 2.0f) add("Gain dB", 3, -24.0f, 24.0f);
+                if (d.p(0) == 2.0f) add("Gain dB", 3, -24.0f, 24.0f);
                 break;
         }
         y += 8;
