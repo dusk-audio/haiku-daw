@@ -76,9 +76,25 @@ void TimelineView::MouseDown(BPoint where) {
     BRect lane = LaneRect(idx);
     const Track& t = fProject->Tracks()[idx];
 
-    if (where.x < kHeaderWidth)
+    if (where.x < kHeaderWidth) {
         HandleHeaderClick(t, lane, where);
-    // Content-area clicks (clip drag, click-seek) arrive in later steps.
+        return;
+    }
+
+    // Content area: start dragging a clip if the cursor is over one.
+    const Frame at = XToFrame(where.x);
+    for (const Clip& c : t.clips) {
+        if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
+            fDrag           = Drag::Clip;
+            fDragTrack      = t.id;
+            fDragLane       = idx;
+            fDragClip       = c.id;
+            fDragClipOrig   = c.startFrame;
+            fDragGrabOffset = at - c.startFrame;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            break;
+        }
+    }
 }
 
 void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
@@ -134,6 +150,13 @@ void TimelineView::PreviewDrag(BPoint where) {
         float v = ((where.x - pr.left) / pr.Width()) * 2.0f - 1.0f;
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
+    } else if (fDrag == Drag::Clip) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            Frame start = XToFrame(where.x) - fDragGrabOffset;
+            if (start < 0) start = 0;
+            c->startFrame = start;   // preview only; sort fixed up on release
+        }
     }
     Invalidate(lane);
 }
@@ -143,23 +166,31 @@ void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
         PreviewDrag(where);
 }
 
-void TimelineView::MouseUp(BPoint where) {
+void TimelineView::MouseUp(BPoint) {
     if (fDrag == Drag::None)
         return;
     Track* t = fProject->FindTrack(fDragTrack);
     if (t) {
-        const float finalVal = (fDrag == Drag::Gain) ? t->gain : t->pan;
-        // Restore the pre-drag value so the command records the correct "old",
-        // then apply the whole gesture as one undoable step.
+        // Restore the pre-drag value, then apply the whole gesture as one
+        // undoable command (which records the correct "old" value itself).
         std::unique_ptr<Command> cmd;
         if (fDrag == Drag::Gain) {
+            const float v = t->gain;
             t->gain = fDragOrig;
-            cmd = std::make_unique<SetTrackGainCommand>(fDragTrack, finalVal);
-        } else {
+            cmd = std::make_unique<SetTrackGainCommand>(fDragTrack, v);
+        } else if (fDrag == Drag::Pan) {
+            const float v = t->pan;
             t->pan = fDragOrig;
-            cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, finalVal);
+            cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
+        } else if (fDrag == Drag::Clip) {
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame v = c->startFrame;
+                c->startFrame = fDragClipOrig;
+                cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
+            }
         }
-        fStack->Execute(std::move(cmd), *fProject);
+        if (cmd)
+            fStack->Execute(std::move(cmd), *fProject);
     }
     fDrag = Drag::None;
     Invalidate(LaneRect(fDragLane));

@@ -16,6 +16,8 @@ enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
     MSG_PULSE = 'puls',
+    MSG_UNDO  = 'undo',
+    MSG_REDO  = 'redo',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -42,11 +44,22 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(play);
     bar->AddChild(stop);
 
-    fTimeView = new BStringView(BRect(170, 8, 320, kTransportH - 6),
+    fTimeView = new BStringView(BRect(170, 8, 300, kTransportH - 6),
                                 "time", "0:00.000");
     fTimeView->SetViewColor(ColHeader());
     fTimeView->SetHighColor(ColText());
     bar->AddChild(fTimeView);
+
+    BButton* undo = new BButton(BRect(310, 5, 380, kTransportH - 5), "undo",
+                                "Undo", new BMessage(MSG_UNDO));
+    BButton* redo = new BButton(BRect(386, 5, 456, kTransportH - 5), "redo",
+                                "Redo", new BMessage(MSG_REDO));
+    bar->AddChild(undo);
+    bar->AddChild(redo);
+
+    // Keyboard: Cmd-Z / Cmd-Shift-Z.
+    AddShortcut('Z', B_COMMAND_KEY, new BMessage(MSG_UNDO));
+    AddShortcut('Z', B_COMMAND_KEY | B_SHIFT_KEY, new BMessage(MSG_REDO));
 
     // --- Timeline (fills the rest) ---
     BRect tlRect(0, kTransportH + 1, bounds.right, bounds.bottom);
@@ -64,6 +77,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_PLAY:  StartPlayback(); break;
         case MSG_STOP:  StopPlayback();  break;
+        case MSG_UNDO:
+            if (fStack->CanUndo()) { fStack->Undo(*fProject); fTimeline->Invalidate(); }
+            break;
+        case MSG_REDO:
+            if (fStack->CanRedo()) { fStack->Redo(*fProject); fTimeline->Invalidate(); }
+            break;
         case MSG_PULSE: {
             if (!fEngine) break;
             const Frame ph = fEngine->Playhead();

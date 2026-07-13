@@ -68,12 +68,17 @@ private:
     // Live fader/pan drag. During a drag we preview by writing the model
     // directly; on release we restore the original and push ONE command, so
     // the whole gesture is a single clean undo step.
-    enum class Drag { None, Gain, Pan };
+    enum class Drag { None, Gain, Pan, Clip };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     Drag    fDrag      = Drag::None;
     TrackId fDragTrack = kInvalidTrackId;
     int     fDragLane  = -1;
-    float   fDragOrig  = 0.0f;         // value at drag start, for undo
+    float   fDragOrig  = 0.0f;         // gain/pan value at drag start, for undo
+
+    // Clip-move drag state.
+    ClipId  fDragClip       = kInvalidClipId;
+    Frame   fDragClipOrig   = 0;       // clip startFrame at drag start
+    Frame   fDragGrabOffset = 0;       // grabbed-frame - clip.startFrame
 
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning
