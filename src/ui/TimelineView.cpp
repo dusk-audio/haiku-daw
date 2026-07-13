@@ -838,7 +838,7 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     SetHighColor(ColGrid());
     StrokeRect(rr);
     SetHighColor(ColText());
-    DrawString(t.output == kInvalidTrackId ? "\xE2\x86\x92M" : "\xE2\x86\x92B",
+    DrawString(t.output == kInvalidTrackId ? "\xE2\x86\x92" "M" : "\xE2\x86\x92" "B",
                BPoint(rr.left + 4, rr.bottom - 4));
 
     // FX toggle box: lit green when the track has an effect chain.

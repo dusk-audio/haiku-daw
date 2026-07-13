@@ -83,11 +83,11 @@ void SendsWindow::Rebuild() {
             mm->AddInt64("dest", (int64)p.first);
             BMenuItem* it = new BMenuItem(p.second.c_str(), mm);
             it->SetMarked(p.first == s.dest);
+            it->SetTarget(this);   // items route to this window (menu has no SetTarget)
             menu->AddItem(it);
         }
         BMenuField* field = new BMenuField(BRect(8, y, w - 210, y + 20),
             "dest", "To:", menu);
-        field->SetTarget(this);
         fRoot->AddChild(field);
 
         BCheckBox* pre = new BCheckBox(BRect(w - 200, y, w - 96, y + 20),
