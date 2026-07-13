@@ -16,6 +16,7 @@ add_library(daw_model
     src/model/Commands.cpp
     src/model/PeakCache.cpp     # kit-free min/max waveform envelope
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
+    src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
 )
 target_include_directories(daw_model PUBLIC src)
 
@@ -32,6 +33,10 @@ add_test(NAME wav_tests COMMAND wav_tests)
 add_executable(peak_tests tests/peak_tests.cpp)
 target_link_libraries(peak_tests PRIVATE daw_model)
 add_test(NAME peak_tests COMMAND peak_tests)
+
+add_executable(wavwriter_tests tests/wavwriter_tests.cpp)
+target_link_libraries(wavwriter_tests PRIVATE daw_model)
+add_test(NAME wavwriter_tests COMMAND wavwriter_tests)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
