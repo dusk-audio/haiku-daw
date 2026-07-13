@@ -60,6 +60,10 @@ add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
 add_test(NAME projectio_tests COMMAND projectio_tests)
 
+add_executable(grid_tests tests/grid_tests.cpp)
+target_link_libraries(grid_tests PRIVATE daw_model)
+add_test(NAME grid_tests COMMAND grid_tests)
+
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
 # skipped so the model layer + tests still build for fast iteration.

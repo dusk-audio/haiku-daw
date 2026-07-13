@@ -13,6 +13,7 @@
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
 #include "../model/Commands.h"
+#include "../model/Grid.h"
 
 #include <View.h>
 
@@ -40,6 +41,11 @@ public:
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;
     Frame XToFrame(float x) const;
+
+    // Musical grid built from the project; Snapped() snaps a frame to it
+    // unless Shift is held (free placement).
+    Grid  GridOf() const;
+    Frame Snapped(Frame f) const;
 
     void SetProject(Project* p) { fProject = p; Invalidate(); }
 

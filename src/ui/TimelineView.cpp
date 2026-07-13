@@ -31,6 +31,9 @@ static constexpr int kMidiRange = 48;
 // How close (px) to a block's right edge counts as a resize grab.
 static constexpr float kEdgeGrab = 5.0f;
 
+// Edits snap to this grid resolution (16th notes) unless Shift is held.
+static constexpr int kSnapDivision = 4;
+
 static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
 static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
@@ -46,6 +49,20 @@ float TimelineView::FrameToX(Frame f) const {
 Frame TimelineView::XToFrame(float x) const {
     return fScrollFrame
          + static_cast<Frame>((x - kHeaderWidth) * fFramesPerPixel);
+}
+
+Grid TimelineView::GridOf() const {
+    Grid g;
+    g.sampleRate  = fProject->sampleRate;
+    g.tempoBPM    = fProject->tempoBPM;
+    g.beatsPerBar = fProject->timeSig.numerator;
+    return g;
+}
+
+Frame TimelineView::Snapped(Frame f) const {
+    if (modifiers() & B_SHIFT_KEY)   // hold Shift for free placement
+        return f;
+    return GridOf().Snap(f, kSnapDivision);
 }
 
 void TimelineView::Draw(BRect updateRect) {
@@ -119,7 +136,7 @@ void TimelineView::MouseDown(BPoint where) {
 
     // Click in the ruler -> move the playhead (seek). Content x only.
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
-        Frame f = XToFrame(where.x);
+        Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
         fProject->transport.playhead = f;
         SetPlayhead(f);
@@ -169,13 +186,14 @@ void TimelineView::MouseDown(BPoint where) {
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
-        Frame time = XToFrame(where.x);
+        Frame time = Snapped(XToFrame(where.x));
         if (time < 0) time = 0;
         MidiNote n;
         n.pitch = PitchAt(lane, where.y);
         n.velocity = 100;
         n.startFrame = time;
-        n.lengthFrames = (Frame)(fProject->sampleRate * 0.25);   // 1/4 s
+        // Default length = one beat, so added notes land on the grid.
+        n.lengthFrames = (Frame)GridOf().FramesPerBeat();
         fStack->Execute(std::make_unique<AddNoteCommand>(t.id, n), *fProject);
         Invalidate(lane);
         return;
@@ -303,14 +321,14 @@ void TimelineView::PreviewDrag(BPoint where) {
     } else if (fDrag == Drag::Clip) {
         Clip* c = t->FindClip(fDragClip);
         if (c) {
-            Frame start = XToFrame(where.x) - fDragGrabOffset;
+            Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
             if (start < 0) start = 0;
             c->startFrame = start;   // preview only; sort fixed up on release
         }
     } else if (fDrag == Drag::ClipResize) {
         Clip* c = t->FindClip(fDragClip);
         if (c) {
-            Frame len = XToFrame(where.x) - c->startFrame;
+            Frame len = Snapped(XToFrame(where.x)) - c->startFrame;
             if (len < 1) len = 1;
             c->lengthFrames = len;
         }
@@ -318,7 +336,7 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
             MidiNote& n = t->notes[(size_t)fDragNote];
             if (fDrag == Drag::Note) {
-                Frame start = XToFrame(where.x) - fDragGrabOffset;
+                Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
                 if (start < 0) start = 0;
                 n.startFrame = start;
                 int pitch = PitchAt(lane, where.y) + fDragPitchOffset;
@@ -326,7 +344,7 @@ void TimelineView::PreviewDrag(BPoint where) {
                 if (pitch > 127) pitch = 127;
                 n.pitch = pitch;
             } else {
-                Frame len = XToFrame(where.x) - n.startFrame;
+                Frame len = Snapped(XToFrame(where.x)) - n.startFrame;
                 if (len < 1) len = 1;
                 n.lengthFrames = len;
             }
@@ -420,29 +438,35 @@ void TimelineView::DrawRuler(BRect update) {
     if (!fProject)
         return;
 
-    // Tick marks every second along the visible span. Convert the content's
-    // left/right pixels back to frames, then step in one-second increments.
-    const double rate = fProject->sampleRate;
-    const Frame  secFrames = static_cast<Frame>(rate);
-    const Frame  leftFrame  = XToFrame(kHeaderWidth);
-    const Frame  rightFrame = XToFrame(Bounds().right);
+    // Bar/beat ticks. Beats are drawn only when there's room; bars always,
+    // with a "bar" number label.
+    const Grid   grid = GridOf();
+    const double fpb   = grid.FramesPerBeat();
+    const double fbar  = grid.FramesPerBar();
+    if (fpb < 1.0) return;
+    const bool drawBeats = (fpb / fFramesPerPixel) >= 8.0;
 
-    Frame firstSec = (leftFrame / secFrames) * secFrames;
-    if (firstSec < 0) firstSec = 0;
+    const Frame rightFrame = XToFrame(Bounds().right);
+    long firstBeat = (long)(XToFrame(kHeaderWidth) / fpb);
+    if (firstBeat < 0) firstBeat = 0;
 
-    SetHighColor(ColGrid());
-    SetLowColor(ColRuler());
-    for (Frame f = firstSec; f <= rightFrame; f += secFrames) {
+    for (long beat = firstBeat; ; beat++) {
+        const Frame f = (Frame)(beat * fpb);
+        if (f > rightFrame) break;
         const float x = FrameToX(f);
         if (x < kHeaderWidth) continue;
-        StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
+        const bool isBar = ((Frame)(beat * fpb) % (Frame)fbar) < fpb;
 
-        char label[16];
-        std::snprintf(label, sizeof(label), "%lld s",
-                      static_cast<long long>(f / secFrames));
-        SetHighColor(ColText());
-        DrawString(label, BPoint(x + 3, kRulerHeight - 8));
-        SetHighColor(ColGrid());
+        if (!isBar && !drawBeats) continue;
+        SetHighColor(isBar ? ColText() : ColGrid());
+        StrokeLine(BPoint(x, isBar ? 0 : kRulerHeight - 8),
+                   BPoint(x, kRulerHeight));
+        if (isBar) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%ld",
+                          (long)(f / (Frame)fbar) + 1);
+            DrawString(label, BPoint(x + 3, kRulerHeight - 9));
+        }
     }
 }
 
@@ -463,18 +487,25 @@ void TimelineView::DrawLanes(BRect update) {
         SetHighColor((idx & 1) ? ColLaneAlt() : ColLane());
         FillRect(lane);
 
-        // Second-grid lines through the lane content area.
-        const double rate = fProject->sampleRate;
-        const Frame  secFrames = static_cast<Frame>(rate);
-        const Frame  leftFrame  = XToFrame(kHeaderWidth);
-        const Frame  rightFrame = XToFrame(Bounds().right);
-        Frame firstSec = (leftFrame / secFrames) * secFrames;
-        if (firstSec < 0) firstSec = 0;
-        SetHighColor(ColGrid());
-        for (Frame f = firstSec; f <= rightFrame; f += secFrames) {
-            const float x = FrameToX(f);
-            if (x < kHeaderWidth) continue;
-            StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
+        // Bar/beat grid lines through the lane content area (bars brighter).
+        const Grid   grid = GridOf();
+        const double fpb  = grid.FramesPerBeat();
+        const double fbar = grid.FramesPerBar();
+        if (fpb >= 1.0) {
+            const bool drawBeats = (fpb / fFramesPerPixel) >= 8.0;
+            const Frame rightFrame = XToFrame(Bounds().right);
+            long firstBeat = (long)(XToFrame(kHeaderWidth) / fpb);
+            if (firstBeat < 0) firstBeat = 0;
+            for (long beat = firstBeat; ; beat++) {
+                const Frame f = (Frame)(beat * fpb);
+                if (f > rightFrame) break;
+                const float x = FrameToX(f);
+                if (x < kHeaderWidth) continue;
+                const bool isBar = ((Frame)(beat * fpb) % (Frame)fbar) < fpb;
+                if (!isBar && !drawBeats) continue;
+                SetHighColor(isBar ? ColGrid() : ColLaneAlt());
+                StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
+            }
         }
 
         for (const Clip& c : t.clips)
