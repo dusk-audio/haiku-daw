@@ -29,6 +29,10 @@ class TimelineView;
 
 class MainWindow : public BWindow {
 public:
+    // Like TimelineView: BWindow::Frame() would shadow the model's frame type
+    // for every unqualified `Frame` in this class. A member typedef hides it.
+    using Frame = daw::Frame;
+
     using PeakMap = std::map<std::string, PeakCache>;
     MainWindow(BRect frame, const Project* project, const PeakMap* peaks);
     ~MainWindow() override;
