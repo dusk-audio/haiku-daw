@@ -6,11 +6,13 @@
 
 namespace daw {
 
-MainWindow::MainWindow(BRect frame, const Project* project)
+MainWindow::MainWindow(BRect frame, const Project* project,
+                       const PeakMap* peaks)
     : BWindow(frame, "Haiku DAW", B_TITLED_WINDOW,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE) {
     BRect bounds = Bounds();
     fTimeline = new TimelineView(bounds, project);
+    fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
 }
 

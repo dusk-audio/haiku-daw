@@ -6,8 +6,12 @@
 #pragma once
 
 #include "../model/Project.h"
+#include "../model/PeakCache.h"
 
 #include <Window.h>
+
+#include <map>
+#include <string>
 
 namespace daw {
 
@@ -15,7 +19,8 @@ class TimelineView;
 
 class MainWindow : public BWindow {
 public:
-    MainWindow(BRect frame, const Project* project);
+    using PeakMap = std::map<std::string, PeakCache>;
+    MainWindow(BRect frame, const Project* project, const PeakMap* peaks);
 
     bool QuitRequested() override;   // quit the app when the window closes
 

@@ -110,6 +110,9 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
     BRect block(x0, lane.top + 3, x1, lane.bottom - 3);
     SetHighColor(ColClip());
     FillRect(block);
+
+    DrawClipWave(c, block);
+
     SetHighColor(ColClipBorder());
     StrokeRect(block);
 
@@ -119,6 +122,40 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
     std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
     SetHighColor(ColText());
     DrawString(name.c_str(), BPoint(block.left + 4, block.top + 14));
+}
+
+// Paint the min/max envelope inside a clip block: one vertical line per pixel
+// column, from the column's min sample to its max. Reads a handful of peak
+// buckets per column (never scans the audio). No cache for this clip's source
+// -> just the flat filled block.
+void TimelineView::DrawClipWave(const Clip& c, BRect block) {
+    if (!fPeaks)
+        return;
+    auto it = fPeaks->find(c.sourcePath);
+    if (it == fPeaks->end() || !it->second.IsValid())
+        return;
+    const PeakCache& pc = it->second;
+
+    const float mid  = (block.top + block.bottom) * 0.5f;
+    const float half = (block.bottom - block.top) * 0.5f - 1.0f;
+
+    SetHighColor(ColWave());
+    const int xL = static_cast<int>(block.left);
+    const int xR = static_cast<int>(block.right);
+    for (int x = xL; x <= xR; x++) {
+        // Timeline frames this column spans -> source frames within the clip.
+        const Frame tf0 = XToFrame(static_cast<float>(x));
+        const Frame tf1 = XToFrame(static_cast<float>(x + 1));
+        const Frame s0 = c.sourceOffset + (tf0 - c.startFrame);
+        const Frame s1 = c.sourceOffset + (tf1 - c.startFrame);
+        if (s1 <= 0)
+            continue;
+
+        Peak pk = pc.Range(s0 < 0 ? 0 : s0, s1);
+        const float yMax = mid - pk.max * half;   // max amplitude -> up
+        const float yMin = mid - pk.min * half;   // min amplitude -> down
+        StrokeLine(BPoint(x, yMin), BPoint(x, yMax));
+    }
 }
 
 } // namespace daw

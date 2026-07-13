@@ -11,8 +11,12 @@
 #pragma once
 
 #include "../model/Project.h"
+#include "../model/PeakCache.h"
 
 #include <View.h>
+
+#include <map>
+#include <string>
 
 namespace daw {
 
@@ -33,12 +37,19 @@ public:
 
     void SetProject(const Project* p) { fProject = p; Invalidate(); }
 
+    // Waveform envelopes, keyed by clip source path. Non-owning; built once
+    // on import (M4c) and shared across clips that reference the same file.
+    using PeakMap = std::map<std::string, PeakCache>;
+    void SetPeaks(const PeakMap* peaks) { fPeaks = peaks; Invalidate(); }
+
 private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
     void DrawClip(const Clip& c, BRect lane);
+    void DrawClipWave(const Clip& c, BRect block);
 
     const Project* fProject;          // non-owning
+    const PeakMap* fPeaks = nullptr;  // non-owning
     double         fFramesPerPixel;   // horizontal zoom
     Frame          fScrollFrame;      // leftmost visible frame (content x=0)
 };

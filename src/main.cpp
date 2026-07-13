@@ -10,12 +10,14 @@
 
 #include "model/Project.h"
 #include "model/Commands.h"
+#include "model/PeakCache.h"
 #include "engine/WavSource.h"
 #include "ui/MainWindow.h"
 
 #include <Application.h>
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -23,12 +25,15 @@ using namespace daw;
 
 // Build a demo/session project. Each WAV path becomes its own audio track with
 // a single clip starting at frame 0; length comes from the file's frame count.
+static void SeedDemoTracks(Project& project, CommandStack& stack) {
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 1"), project);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 2"), project);
+}
+
 static void SeedProject(Project& project, CommandStack& stack,
                         const std::vector<std::string>& wavs) {
     if (wavs.empty()) {
-        // No files: two empty tracks so the timeline has something to show.
-        stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 1"), project);
-        stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Track 2"), project);
+        SeedDemoTracks(project, stack);   // nothing on the command line
         return;
     }
 
@@ -54,6 +59,27 @@ static void SeedProject(Project& project, CommandStack& stack,
         clip.sourcePath   = path;
         stack.Execute(std::make_unique<AddClipCommand>(tid, clip), project);
     }
+
+    // Every path failed to open: don't leave a blank window.
+    if (project.Tracks().empty())
+        SeedDemoTracks(project, stack);
+}
+
+// Build a min/max waveform envelope for every distinct clip source in the
+// project. Done once, up front (on "import"), so the timeline never scans
+// audio at paint time. Keyed by path so shared sources build only once.
+static void BuildPeaks(const Project& project,
+                       std::map<std::string, PeakCache>& out) {
+    for (const Track& t : project.Tracks()) {
+        for (const Clip& c : t.clips) {
+            if (c.sourcePath.empty() || out.count(c.sourcePath))
+                continue;
+            WavSource src;
+            if (!src.Open(c.sourcePath))
+                continue;
+            out[c.sourcePath].Build(src);
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -68,8 +94,11 @@ int main(int argc, char** argv) {
     static CommandStack stack;
     SeedProject(project, stack, wavs);
 
+    static std::map<std::string, PeakCache> peaks;
+    BuildPeaks(project, peaks);
+
     BRect frame(80, 80, 80 + 1000, 80 + 560);
-    MainWindow* win = new MainWindow(frame, &project);
+    MainWindow* win = new MainWindow(frame, &project, &peaks);
     win->Show();
 
     app.Run();
