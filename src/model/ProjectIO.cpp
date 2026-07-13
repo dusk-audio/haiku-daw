@@ -96,6 +96,16 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "send " << s.dest << " " << s.level << " "
               << (s.preFader ? 1 : 0) << "\n";
 
+        auto writeLane = [&](const char* which, const AutomationLane& lane) {
+            if (lane.Count() == 0) return;
+            f << "auto " << which << " " << lane.Count();
+            for (size_t i = 0; i < lane.Count(); i++)
+                f << " " << (long long)lane.At(i).frame << " " << lane.At(i).value;
+            f << "\n";
+        };
+        writeLane("gain", t.gainAuto);
+        writeLane("pan",  t.panAuto);
+
         f << "endtrack\n";
     }
     return f.good();
@@ -207,6 +217,17 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             iss >> s.dest >> s.level >> pre;
             s.preFader = (pre != 0);
             if (s.dest != kInvalidTrackId) cur.sends.push_back(s);
+        }
+        else if (kw == "auto" && haveTrack) {
+            std::string which;
+            int count = 0;
+            iss >> which >> count;
+            AutomationLane& lane = (which == "pan") ? cur.panAuto : cur.gainAuto;
+            for (int i = 0; i < count; i++) {
+                long long fr = 0; float v = 0.0f;
+                iss >> fr >> v;
+                lane.AddPoint((Frame)fr, v);
+            }
         }
         // "endtrack" and unknown keywords: ignored (commit happens on next
         // track / EOF).

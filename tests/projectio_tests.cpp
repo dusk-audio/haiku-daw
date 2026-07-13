@@ -49,6 +49,11 @@ int main() {
     { std::vector<Send> s = {{t2, 0.4f, true}};
       stack.Execute(std::make_unique<SetSendsCommand>(t1, s), a); }
 
+    // Gain automation on track 1 (two breakpoints).
+    { AutomationLane g; g.AddPoint(0, 1.0f); g.AddPoint(96000, 0.25f);
+      stack.Execute(std::make_unique<SetAutoLaneCommand>(
+          t1, AutoLaneKind::Gain, g), a); }
+
     CHECK(ProjectIO::Save(a, path));
 
     Project b;
@@ -79,6 +84,11 @@ int main() {
     CHECK(bt1.sends[0].dest == t2);
     CHECK(std::abs(bt1.sends[0].level - 0.4f) < 1e-4f);
     CHECK(bt1.sends[0].preFader == true);
+    CHECK(bt1.gainAuto.Count() == 2);
+    CHECK(bt1.gainAuto.At(0).frame == 0);
+    CHECK(std::abs(bt1.gainAuto.At(1).value - 0.25f) < 1e-4f);
+    CHECK(bt1.gainAuto.At(1).frame == 96000);
+    CHECK(bt1.panAuto.Count() == 0);   // untouched lane stays empty
 
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);

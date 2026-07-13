@@ -7,6 +7,7 @@
 
 #include "types.h"
 #include "Effect.h"
+#include "Automation.h"
 
 #include <string>
 #include <vector>
@@ -58,6 +59,8 @@ struct Track {
     std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
     std::vector<Send>       sends;    // aux sends into buses
+    AutomationLane          gainAuto; // volume envelope (absolute gain; empty = static)
+    AutomationLane          panAuto;  // pan envelope (absolute pan; empty = static)
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;

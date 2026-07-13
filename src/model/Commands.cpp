@@ -352,4 +352,22 @@ void SetSendsCommand::Undo(Project& p) {
         t->sends = fOld;
 }
 
+// --- SetAutoLaneCommand -----------------------------------------------
+
+bool SetAutoLaneCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    AutomationLane& lane = (fKind == AutoLaneKind::Gain) ? t->gainAuto
+                                                         : t->panAuto;
+    fOld = lane;
+    lane = fNew;
+    return true;
+}
+
+void SetAutoLaneCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    ((fKind == AutoLaneKind::Gain) ? t->gainAuto : t->panAuto) = fOld;
+}
+
 } // namespace daw

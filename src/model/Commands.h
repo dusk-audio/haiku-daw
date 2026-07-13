@@ -335,4 +335,23 @@ private:
     std::vector<Send> fOld;
 };
 
+// Replace a track's whole gain or pan automation lane. The timeline edits a
+// local copy during a drag gesture and applies the result on mouse-up (one
+// undo entry per gesture; avoids breakpoint-index churn). Stores the old lane.
+class SetAutoLaneCommand : public Command {
+public:
+    SetAutoLaneCommand(TrackId track, AutoLaneKind kind, AutomationLane lane)
+        : fTrack(track), fKind(kind), fNew(std::move(lane)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Automation"; }
+
+private:
+    TrackId        fTrack;
+    AutoLaneKind   fKind;
+    AutomationLane fNew;
+    AutomationLane fOld;
+};
+
 } // namespace daw

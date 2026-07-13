@@ -19,6 +19,9 @@
 
 namespace daw {
 
+// Which per-track automation lane a command / UI targets.
+enum class AutoLaneKind { Gain, Pan };
+
 // One breakpoint: a value at a timeline frame. Values are unitless here; the
 // caller decides what the range means (e.g. 0..1 gain, -1..1 pan).
 struct AutoPoint {
