@@ -92,6 +92,36 @@ void AddClipCommand::Undo(Project& p) {
     p.RemoveClip(fTrack, fClip.id);
 }
 
+// --- AddEffectCommand -------------------------------------------------
+
+bool AddEffectCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    t->fx.push_back(fDesc);
+    return true;
+}
+
+void AddEffectCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (!t->fx.empty())
+            t->fx.pop_back();
+}
+
+// --- ClearEffectsCommand ----------------------------------------------
+
+bool ClearEffectsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->fx;
+    t->fx.clear();
+    return true;
+}
+
+void ClearEffectsCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->fx = fOld;
+}
+
 // --- MoveClipCommand --------------------------------------------------
 
 // Moving changes startFrame, which is the sort key. To preserve the

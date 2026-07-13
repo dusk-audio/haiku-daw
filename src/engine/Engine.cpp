@@ -1,5 +1,7 @@
 #include "Engine.h"
 
+#include "../dsp/EffectFactory.h"
+
 #include <MediaDefs.h>
 
 #include <chrono>
@@ -213,6 +215,36 @@ status_t Engine::Load(const Project& project, Frame startFrame) {
         fprintf(stderr, "Engine: no playable clips\n");
         return B_ERROR;
     }
+
+    // Group streams into per-track buses and build each track's effect chain.
+    fBuses.clear();
+    for (auto& s : fStreams) {
+        Bus* bus = nullptr;
+        for (Bus& b : fBuses)
+            if (b.id == s->Track()) { bus = &b; break; }
+        if (!bus) {
+            fBuses.push_back(Bus{s->Track(), {}, {}});
+            bus = &fBuses.back();
+        }
+        bus->streams.push_back(s.get());
+    }
+    for (Bus& b : fBuses) {
+        const Track* t = project.FindTrack(b.id);
+        if (!t) continue;
+        for (const EffectDesc& d : t->fx) {
+            auto fx = MakeEffect(d);
+            if (!fx) continue;
+            fx->Prepare(fOutputRate);
+            b.fx.push_back(std::move(fx));
+        }
+    }
+
+    // Per-bus mix scratch, sized to the output buffer (generous floor).
+    size_t maxFrames = (size_t)(fPlayer->Format().buffer_size
+                                / (sizeof(float) * 2));
+    if (maxFrames < 8192) maxFrames = 8192;
+    fScratch.assign(maxFrames * 2, 0.0f);
+
     return B_OK;
 }
 
@@ -268,8 +300,18 @@ void Engine::FillBuffer(float* out, size_t frames) {
         return;
     }
 
-    for (auto& s : fStreams)
-        s->Mix(out, frames, blockStart);
+    // Mix each bus into scratch, run its effect chain, sum into master.
+    const size_t nfloats = frames * 2;
+    float* sc = fScratch.data();
+    for (Bus& b : fBuses) {
+        std::memset(sc, 0, nfloats * sizeof(float));
+        for (TrackStream* s : b.streams)
+            s->Mix(sc, frames, blockStart);
+        for (auto& fx : b.fx)
+            fx->Process(sc, static_cast<int>(frames));
+        for (size_t i = 0; i < nfloats; i++)
+            out[i] += sc[i];
+    }
 
     // Block peak per channel for the UI meters (arithmetic only, RT-safe).
     float pl = 0.0f, pr = 0.0f;

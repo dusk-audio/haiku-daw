@@ -133,6 +133,32 @@ static void test_mute_solo_undo_redo() {
     CHECK(!p.FindTrack(id)->soloed);
 }
 
+static void test_effect_commands() {
+    std::printf("test_effect_commands\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Ld"), p);
+    TrackId id = p.Tracks().front().id;
+    CHECK(p.FindTrack(id)->fx.empty());
+
+    stack.Execute(std::make_unique<AddEffectCommand>(id, LowPassDesc(500.0f)), p);
+    stack.Execute(std::make_unique<AddEffectCommand>(id, DelayDesc()), p);
+    CHECK(p.FindTrack(id)->fx.size() == 2);
+    CHECK(p.FindTrack(id)->fx[0].type == EffectType::Biquad);
+    CHECK(p.FindTrack(id)->fx[1].type == EffectType::Delay);
+
+    stack.Undo(p);   // remove the delay
+    CHECK(p.FindTrack(id)->fx.size() == 1);
+
+    stack.Execute(std::make_unique<AddEffectCommand>(id, HighPassDesc()), p);
+    CHECK(p.FindTrack(id)->fx.size() == 2);
+
+    stack.Execute(std::make_unique<ClearEffectsCommand>(id), p);
+    CHECK(p.FindTrack(id)->fx.empty());
+    stack.Undo(p);   // restore the cleared chain
+    CHECK(p.FindTrack(id)->fx.size() == 2);
+}
+
 static void test_frame_seconds_roundtrip() {
     std::printf("test_frame_seconds_roundtrip\n");
     CHECK(SecondsToFrames(1.0, 48000.0) == 48000);
@@ -145,6 +171,7 @@ int main() {
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
     test_mute_solo_undo_redo();
+    test_effect_commands();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

@@ -6,6 +6,7 @@
 #pragma once
 
 #include "types.h"
+#include "Effect.h"
 
 #include <string>
 #include <vector>
@@ -33,7 +34,8 @@ struct Track {
     bool              muted = false;
     bool              soloed = false;
     bool              armed  = false;
-    std::vector<Clip> clips;          // kept sorted by startFrame
+    std::vector<Clip>       clips;    // kept sorted by startFrame
+    std::vector<EffectDesc> fx;       // ordered per-track effect chain
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;

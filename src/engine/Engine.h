@@ -18,6 +18,7 @@
 #include "WavSource.h"
 #include "Resampler.h"
 #include "../model/Project.h"
+#include "../dsp/IEffect.h"
 
 #include <SoundPlayer.h>
 
@@ -116,8 +117,18 @@ private:
                                const media_raw_audio_format& format);
     void FillBuffer(float* out, size_t frames);
 
+    // One mix bus per audio track: its clips' streams summed into a scratch
+    // buffer, then the track's effect chain applied, then added to master.
+    struct Bus {
+        TrackId                               id;
+        std::vector<TrackStream*>             streams;   // owned by fStreams
+        std::vector<std::unique_ptr<IEffect>> fx;
+    };
+
     std::unique_ptr<BSoundPlayer>             fPlayer;
     std::vector<std::unique_ptr<TrackStream>> fStreams;
+    std::vector<Bus>                          fBuses;
+    std::vector<float>                        fScratch;   // per-bus mix buffer
 
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};

@@ -20,6 +20,7 @@ add_library(daw_model
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
     src/dsp/Biquad.cpp          # kit-free biquad filter effect
     src/dsp/Delay.cpp           # kit-free feedback delay effect
+    src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
 )
 target_include_directories(daw_model PUBLIC src)
 

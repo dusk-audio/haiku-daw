@@ -107,6 +107,35 @@ private:
     Clip    fClip;   // fClip.id is filled in during Do()
 };
 
+// Append an effect to a track's chain. Undo removes the one it added.
+class AddEffectCommand : public Command {
+public:
+    AddEffectCommand(TrackId track, EffectDesc desc)
+        : fTrack(track), fDesc(desc) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Add Effect"; }
+
+private:
+    TrackId    fTrack;
+    EffectDesc fDesc;
+};
+
+// Remove all effects from a track. Stores the old chain for Undo().
+class ClearEffectsCommand : public Command {
+public:
+    explicit ClearEffectsCommand(TrackId track) : fTrack(track) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Clear Effects"; }
+
+private:
+    TrackId                 fTrack;
+    std::vector<EffectDesc> fOld;
+};
+
 // Move a clip to a new start position. Stores the old position for Undo().
 class MoveClipCommand : public Command {
 public:

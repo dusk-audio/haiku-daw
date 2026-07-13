@@ -22,6 +22,7 @@ TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
 // --- Header control geometry (relative to a lane's top edge) ----------
 static constexpr float kMaxGain = 1.5f;   // fader top of travel
 
+static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
 static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
 static BRect ArmRect(BRect lane)   { return BRect(54, lane.top + 20, 74,  lane.top + 38); }
@@ -125,6 +126,17 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     if (SoloRect(lane).Contains(where)) {
         fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
                         *fProject);
+        Invalidate(lane);
+        return;
+    }
+    if (FxRect(lane).Contains(where)) {
+        // Toggle a demo low-pass: add it if the chain is empty, else clear.
+        // Takes effect on the next Play (the FX chain is built at Load).
+        if (t.fx.empty())
+            fStack->Execute(std::make_unique<AddEffectCommand>(id, LowPassDesc(800.0f)),
+                            *fProject);
+        else
+            fStack->Execute(std::make_unique<ClearEffectsCommand>(id), *fProject);
         Invalidate(lane);
         return;
     }
@@ -340,6 +352,15 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
 
     SetHighColor(ColText());
     DrawString(t.name.c_str(), BPoint(6, lane.top + 14));
+
+    // FX toggle box: lit green when the track has an effect chain.
+    BRect fxr = FxRect(lane);
+    SetHighColor(t.fx.empty() ? ColLane() : Rgb(80, 170, 110));
+    FillRect(fxr);
+    SetHighColor(ColGrid());
+    StrokeRect(fxr);
+    SetHighColor(ColText());
+    DrawString("FX", BPoint(fxr.left + 9, fxr.bottom - 4));
 
     // Mute / Solo / Arm toggle boxes: filled when active.
     BRect m = MuteRect(lane), s = SoloRect(lane), a = ArmRect(lane);

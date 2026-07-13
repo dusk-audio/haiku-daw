@@ -4,6 +4,7 @@
 
 #include "../src/dsp/Biquad.h"
 #include "../src/dsp/Delay.h"
+#include "../src/dsp/EffectFactory.h"
 
 #include <cmath>
 #include <cstdio>
@@ -79,6 +80,18 @@ int main() {
         d.Process(buf.data(), 16);
         CHECK(std::fabs(buf[2 * 4] - 1.0f) < 1e-4f);   // first echo
         CHECK(std::fabs(buf[2 * 8] - 0.5f) < 1e-4f);   // second echo * feedback
+    }
+
+    // 6. Factory builds the right effects from descriptors and they run.
+    {
+        auto lp = MakeEffect(LowPassDesc(1000.0f));
+        CHECK(lp != nullptr);
+        auto dl = MakeEffect(DelayDesc());
+        CHECK(dl != nullptr);
+        lp->Prepare(SR);
+        auto buf = dc(2000, 1.0f);
+        lp->Process(buf.data(), 2000);
+        CHECK(std::fabs(buf[2 * 1999] - 1.0f) < 0.01f);   // low-pass passes DC
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

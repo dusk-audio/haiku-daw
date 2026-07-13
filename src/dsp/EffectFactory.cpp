@@ -1,0 +1,24 @@
+#include "EffectFactory.h"
+
+#include "Biquad.h"
+#include "Delay.h"
+
+namespace daw {
+
+std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
+    switch (d.type) {
+        case EffectType::Biquad: {
+            Biquad::Type mode = Biquad::Type::LowPass;
+            if (d.p0 == 1.0f) mode = Biquad::Type::HighPass;
+            else if (d.p0 == 2.0f) mode = Biquad::Type::Peaking;
+            return std::unique_ptr<IEffect>(
+                new Biquad(mode, d.p1, d.p2, d.p3));
+        }
+        case EffectType::Delay:
+            return std::unique_ptr<IEffect>(
+                new Delay(d.p0, d.p1, d.p2));
+    }
+    return nullptr;
+}
+
+} // namespace daw
