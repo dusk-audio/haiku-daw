@@ -29,6 +29,7 @@ class BFilePanel;
 class BSlider;
 class BMenuItem;
 class BTextControl;
+class BMenu;
 
 namespace daw {
 
@@ -79,6 +80,8 @@ private:
     BFilePanel*               fExportPanel = nullptr;
     BFilePanel*               fImportPanel = nullptr;
     BMenuItem*                fMetItem = nullptr;   // metronome toggle
+    BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
+    size_t                    fBufferFrames = 512;  // output buffer frames/channel
     bool                      fMetronome = false;
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;

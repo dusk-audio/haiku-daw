@@ -54,6 +54,7 @@ enum {
     MSG_IMPORT_REF = 'imrf',
     MSG_PASTE     = 'past',
     MSG_TEMPO     = 'tmpo',
+    MSG_BUFFER    = 'bufs',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -91,6 +92,24 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
     viewMenu->AddItem(fMetItem);
     menuBar->AddItem(viewMenu);
+
+    // Audio > Buffer Size (latency vs xrun; applies on the next Play).
+    BMenu* audioMenu = new BMenu("Audio");
+    fBufMenu = new BMenu("Buffer Size");
+    fBufMenu->SetRadioMode(true);
+    const int bufOpts[] = { 128, 256, 512, 1024, 2048 };
+    for (int n : bufOpts) {
+        char lbl[32];
+        std::snprintf(lbl, sizeof(lbl), "%d frames (~%.1f ms)", n,
+                      1000.0 * n / fProject->sampleRate);
+        BMessage* m = new BMessage(MSG_BUFFER);
+        m->AddInt32("frames", n);
+        BMenuItem* it = new BMenuItem(lbl, m);
+        if ((size_t)n == fBufferFrames) it->SetMarked(true);
+        fBufMenu->AddItem(it);
+    }
+    audioMenu->AddItem(fBufMenu);
+    menuBar->AddItem(audioMenu);
     AddChild(menuBar);
     float menuH = menuBar->Bounds().Height();
     if (menuH < 1) menuH = 19;
@@ -293,6 +312,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_PASTE:
             fTimeline->PasteAtPlayhead();
             break;
+        case MSG_BUFFER: {
+            int32 frames = 512;
+            msg->FindInt32("frames", &frames);
+            fBufferFrames = (size_t)frames;   // applied at the next Play
+            break;
+        }
         case MSG_TEMPO: {
             double bpm = atof(fTempo->Text());
             if (bpm < 20.0)  bpm = 20.0;
@@ -445,6 +470,7 @@ void MainWindow::StartPlayback() {
         if (ten > minEnd) minEnd = ten;
     }
     fEngine.reset(new Engine());
+    fEngine->SetBufferFrames(fBufferFrames);
     if (fEngine->Load(*fProject, start, minEnd) != B_OK) {
         std::fprintf(stderr, "MainWindow: nothing to play\n");
         fEngine.reset();

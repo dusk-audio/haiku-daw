@@ -112,6 +112,10 @@ public:
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
 
+    // Output buffer size in frames (per channel); applied at the next Load.
+    // Smaller = lower latency, higher xrun risk. Call before Load().
+    void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
+
     // True once the playhead has passed the end of all clips.
     bool  IsFinished() const { return fFinished.load(); }
     Frame Playhead() const { return fPlayhead.load(); }
@@ -156,6 +160,7 @@ private:
     Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;
+    size_t fBufferFrames = 512;   // output buffer frames/channel (~10.7ms@48k)
 };
 
 } // namespace daw
