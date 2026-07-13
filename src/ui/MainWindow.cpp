@@ -239,6 +239,12 @@ void MainWindow::StartPlayback() {
         fProject->transport.playhead = 0;
         fTimeline->SetPlayhead(0);
     }
+    // When looping, begin at the loop start unless already inside the loop.
+    if (looping && (fProject->transport.playhead < tr.loopStart
+                    || fProject->transport.playhead >= tr.loopEnd)) {
+        fProject->transport.playhead = tr.loopStart;
+        fTimeline->SetPlayhead(tr.loopStart);
+    }
     const Frame start   = fProject->transport.playhead;
     const Frame minEnd  = looping ? tr.loopEnd : 0;   // run through silence to loop end
     fEngine.reset(new Engine());
