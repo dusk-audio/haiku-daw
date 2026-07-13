@@ -91,8 +91,11 @@ public:
 
     // Build streams from the project's audio clips and open the output.
     // Playback (and each clip's source) is aligned to start at `startFrame`,
-    // so seeking is just a reload at a new start.
-    status_t Load(const Project& project, Frame startFrame = 0);
+    // so seeking is just a reload at a new start. `minEndFrame` extends the
+    // playback end past the last clip/note (used for looping past content, so
+    // the playhead keeps advancing through silence up to the loop point).
+    status_t Load(const Project& project, Frame startFrame = 0,
+                  Frame minEndFrame = 0);
 
     void Start();
     void Stop();

@@ -232,14 +232,17 @@ void MainWindow::StartPlayback() {
         return;   // no play-while-record in this milestone
     // Rebuild the engine from the current model each time (RT-safe: no live
     // mutation of a running graph). Playback begins at the current playhead;
-    // if it's already at/after the end, rewind to the start first.
-    if (fProject->transport.playhead >= ProjectEndFrame(*fProject)) {
+    // if it's already at/after the end (and not looping), rewind first.
+    const Transport& tr = fProject->transport;
+    const bool looping = tr.loopEnabled && tr.loopEnd > tr.loopStart;
+    if (!looping && fProject->transport.playhead >= ProjectEndFrame(*fProject)) {
         fProject->transport.playhead = 0;
         fTimeline->SetPlayhead(0);
     }
-    const Frame start = fProject->transport.playhead;
+    const Frame start   = fProject->transport.playhead;
+    const Frame minEnd  = looping ? tr.loopEnd : 0;   // run through silence to loop end
     fEngine.reset(new Engine());
-    if (fEngine->Load(*fProject, start) != B_OK) {
+    if (fEngine->Load(*fProject, start, minEnd) != B_OK) {
         std::fprintf(stderr, "MainWindow: nothing to play\n");
         fEngine.reset();
         return;

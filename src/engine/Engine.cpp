@@ -157,7 +157,8 @@ Engine::~Engine() {
     fPlayer.reset();
 }
 
-status_t Engine::Load(const Project& project, Frame startFrame) {
+status_t Engine::Load(const Project& project, Frame startFrame,
+                      Frame minEndFrame) {
     fStartFrame = startFrame;
     // Open the output first so we know the real output rate.
     media_raw_audio_format format = media_raw_audio_format::wildcard;
@@ -248,6 +249,10 @@ status_t Engine::Load(const Project& project, Frame startFrame) {
         fprintf(stderr, "Engine: nothing to play\n");
         return B_ERROR;
     }
+
+    // Extend the play range past content for looping past the last clip/note.
+    if (minEndFrame > fEndFrame)
+        fEndFrame = minEndFrame;
 
     // Build each bus's effect chain from its track's descriptors.
     for (Bus& b : fBuses) {
