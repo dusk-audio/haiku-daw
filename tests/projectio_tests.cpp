@@ -24,6 +24,7 @@ int main() {
     CommandStack stack;
     a.sampleRate = 44100.0;
     a.tempoBPM   = 90.0;
+    a.masterGain = 0.75f;
     a.transport.playhead = 12345;
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr L"), a);
@@ -46,6 +47,7 @@ int main() {
     CHECK(ProjectIO::Load(b, path));
     CHECK(b.sampleRate == 44100.0);
     CHECK(b.tempoBPM == 90.0);
+    CHECK(std::abs(b.masterGain - 0.75f) < 1e-4f);
     CHECK(b.transport.playhead == 12345);
     CHECK(b.Tracks().size() == 2);
 

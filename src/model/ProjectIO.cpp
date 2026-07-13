@@ -52,6 +52,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     f << "DAW 1\n";
     f << "sampleRate " << p.sampleRate << "\n";
     f << "tempo " << p.tempoBPM << "\n";
+    f << "master " << p.masterGain << "\n";
     f << "timesig " << p.timeSig.numerator << " " << p.timeSig.denominator << "\n";
     f << "transport "
       << (long long)p.transport.playhead << " "
@@ -116,6 +117,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
 
         if (kw == "sampleRate") { iss >> p.sampleRate; }
         else if (kw == "tempo") { iss >> p.tempoBPM; }
+        else if (kw == "master") { iss >> p.masterGain; }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "transport") {
             long long ph, ls, le; int loop;

@@ -142,6 +142,7 @@ private:
     std::atomic<bool>  fFinished{false};
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
+    std::atomic<float> fMasterGain{1.0f};
     Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;

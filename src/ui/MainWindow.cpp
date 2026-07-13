@@ -13,6 +13,7 @@
 #include <FilePanel.h>
 #include <MessageRunner.h>
 #include <Path.h>
+#include <Slider.h>
 #include <StringView.h>
 
 #include <cmath>
@@ -31,6 +32,7 @@ enum {
     MSG_OPEN  = 'open',
     MSG_SAVE_REF = 'svrf',   // from the save file panel
     MSG_OPEN_REF = 'oprf',   // from the open file panel
+    MSG_MASTER   = 'mvol',   // master volume slider moved
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -80,6 +82,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(save);
     bar->AddChild(open);
 
+    // Master volume slider (0..150% -> gain 0..1.5), live/non-undoable.
+    BSlider* master = new BSlider(BRect(618, 4, 758, kTransportH - 4),
+                                  "master", "Vol", new BMessage(MSG_MASTER),
+                                  0, 150, B_HORIZONTAL);
+    master->SetModificationMessage(new BMessage(MSG_MASTER));
+    master->SetValue((int32)(fProject->masterGain * 100.0f));
+    bar->AddChild(master);
+
     // Master output meter, pinned to the right of the transport bar.
     fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
                                  kTransportH - 5));
@@ -122,6 +132,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             UpdateTimeReadout(ph);
             if (fPlaying)        // restart from the new position
                 StartPlayback();
+            break;
+        }
+        case MSG_MASTER: {
+            int32 v = 100;
+            if (msg->FindInt32("be:value", &v) != B_OK) {
+                // Fall back to querying the slider if the value isn't attached.
+                if (BSlider* s = dynamic_cast<BSlider*>(FindView("master")))
+                    v = s->Value();
+            }
+            fProject->masterGain = v / 100.0f;   // live; engine reads it each poll
             break;
         }
         case MSG_UNDO:

@@ -176,6 +176,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     }
     fOutputRate = fPlayer->Format().frame_rate;
     fSynth.SetSampleRate(fOutputRate);
+    fMasterGain.store(project.masterGain);
 
     // Solo overrides mute: if any track (audio or MIDI) is soloed, only
     // soloed (non-muted) tracks play.
@@ -276,6 +277,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
 }
 
 void Engine::UpdateMix(const Project& project) {
+    fMasterGain.store(project.masterGain, std::memory_order_relaxed);
     bool anySolo = false;
     for (const Track& t : project.Tracks())
         if (t.type == TrackType::Audio && t.soloed && !t.muted)
@@ -341,6 +343,13 @@ void Engine::FillBuffer(float* out, size_t frames) {
         for (size_t i = 0; i < nfloats; i++)
             out[i] += sc[i];
     }
+
+    // Master gain on the summed output (before metering so the meter reflects
+    // what actually leaves the engine).
+    const float mg = fMasterGain.load(std::memory_order_relaxed);
+    if (mg != 1.0f)
+        for (size_t i = 0; i < nfloats; i++)
+            out[i] *= mg;
 
     // Block peak per channel for the UI meters (arithmetic only, RT-safe).
     float pl = 0.0f, pr = 0.0f;
