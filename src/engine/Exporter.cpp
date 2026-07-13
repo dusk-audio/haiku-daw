@@ -6,11 +6,13 @@
 #include "../synth/Synth.h"
 #include "../dsp/EffectFactory.h"
 #include "../dsp/IEffect.h"
+#include "../model/RoutingGraph.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace daw {
@@ -131,69 +133,94 @@ bool ExportWav(const Project& project, const std::string& outPath,
 
     const size_t nfloats = static_cast<size_t>(totalOut) * 2;
     std::vector<float> master(nfloats, 0.0f);
-    std::vector<float> trackBuf(nfloats, 0.0f);
-
     Synth synth(outRate);
 
-    for (const Track& t : project.Tracks()) {
+    const auto& tracks = project.Tracks();
+
+    // One mix buffer (node) per track; buses accumulate their inputs here.
+    std::vector<std::vector<float>> nodeBuf(tracks.size(),
+                                            std::vector<float>(nfloats, 0.0f));
+    std::unordered_map<TrackId, size_t> idx;
+    for (size_t i = 0; i < tracks.size(); i++)
+        idx[tracks[i].id] = i;
+
+    // Processing order: a node before the node it routes into (topo sort).
+    std::vector<RouteNode> rnodes;
+    for (const Track& t : tracks)
+        rnodes.push_back(RouteNode{t.id, t.output});
+    std::vector<TrackId> order;
+    const bool routingOk = ResolveRoutingOrder(rnodes, order);
+    if (!routingOk) {   // cycle / bad graph: fall back to flat (all to master)
+        order.clear();
+        for (const Track& t : tracks) order.push_back(t.id);
+    }
+
+    // Instantiate + run an effect chain over a whole node buffer, in blocks.
+    auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf) {
+        std::vector<std::unique_ptr<IEffect>> chain;
+        for (const EffectDesc& d : fxDescs) {
+            auto e = MakeEffect(d);
+            if (!e) continue;
+            e->Prepare(outRate);
+            chain.push_back(std::move(e));
+        }
+        if (chain.empty()) return;
+        const int64_t kBlock = 8192;
+        for (int64_t off = 0; off < totalOut; off += kBlock) {
+            int64_t n = totalOut - off;
+            if (n > kBlock) n = kBlock;
+            float* p = buf + off * 2;
+            for (auto& e : chain)
+                e->Process(p, static_cast<int>(n));
+        }
+    };
+
+    for (TrackId id : order) {
+        auto it = idx.find(id);
+        if (it == idx.end()) continue;
+        const Track& t = tracks[it->second];
         const bool audible = !t.muted && (!anySolo || t.soloed);
         if (!audible)
-            continue;
+            continue;   // muted/solo'd out: render + route nothing downstream
 
-        std::fill(trackBuf.begin(), trackBuf.end(), 0.0f);
-
+        float* nb = nodeBuf[it->second].data();
         float gainLR[2];
         EqualPowerGains(t.gain, t.pan, &gainLR[0], &gainLR[1]);
 
         if (t.type == TrackType::Audio) {
             for (const Clip& c : t.clips) {
-                if (c.sourcePath.empty())
-                    continue;
-                PlaceClip(c, scale, outRate, totalOut, gainLR, trackBuf);
+                if (c.sourcePath.empty()) continue;
+                PlaceClip(c, scale, outRate, totalOut, gainLR, nodeBuf[it->second]);
             }
-        } else {   // Midi
-            // Synth timing is in output frames; rescale note positions when the
-            // export rate differs from the project rate.
+        } else if (t.type == TrackType::Midi) {
             std::vector<MidiNote> notes = t.notes;
-            if (scale != 1.0) {
+            if (scale != 1.0)
                 for (MidiNote& n : notes) {
                     n.startFrame   = ToOut(n.startFrame, scale);
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
-            }
-            // Render dry (unity), then apply the same equal-power gain/pan the
-            // audio path uses — always, so a centered MIDI track gets the same
-            // -3 dB center attenuation as a centered audio track.
-            synth.Render(notes, trackBuf.data(),
-                         static_cast<size_t>(totalOut), 0, 1.0f);
+            synth.Render(notes, nb, static_cast<size_t>(totalOut), 0, 1.0f);
             for (int64_t i = 0; i < totalOut; ++i) {
-                trackBuf[i * 2 + 0] *= gainLR[0];
-                trackBuf[i * 2 + 1] *= gainLR[1];
+                nb[i * 2 + 0] *= gainLR[0];
+                nb[i * 2 + 1] *= gainLR[1];
+            }
+        } else {   // Bus: nb already holds the summed upstream; apply its fader.
+            for (int64_t i = 0; i < totalOut; ++i) {
+                nb[i * 2 + 0] *= gainLR[0];
+                nb[i * 2 + 1] *= gainLR[1];
             }
         }
 
-        // Per-track effect chain, prepared at the output rate. Process in
-        // blocks so the frame count fits an int and to bound working set.
-        std::vector<std::unique_ptr<IEffect>> chain;
-        for (const EffectDesc& d : t.fx) {
-            auto fx = MakeEffect(d);
-            if (!fx) continue;
-            fx->Prepare(outRate);
-            chain.push_back(std::move(fx));
-        }
-        if (!chain.empty()) {
-            const int64_t kBlock = 8192;
-            for (int64_t off = 0; off < totalOut; off += kBlock) {
-                int64_t n = totalOut - off;
-                if (n > kBlock) n = kBlock;
-                float* p = trackBuf.data() + off * 2;
-                for (auto& fx : chain)
-                    fx->Process(p, static_cast<int>(n));
-            }
-        }
+        applyFx(t.fx, nb);
 
+        // Route this node into its output (a bus) or the master mix.
+        float* dst = master.data();
+        if (routingOk && t.output != kRoutingMaster) {
+            auto d = idx.find(t.output);
+            if (d != idx.end()) dst = nodeBuf[d->second].data();
+        }
         for (size_t i = 0; i < nfloats; ++i)
-            master[i] += trackBuf[i];
+            dst[i] += nb[i];
     }
 
     // Master bus FX chain (applied to the summed mix before master gain).

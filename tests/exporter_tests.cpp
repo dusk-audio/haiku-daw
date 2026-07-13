@@ -73,6 +73,40 @@ int main() {
 
     std::remove(path.c_str());
 
+    // --- Bus routing: the same note through a bus, at bus gain 1.0 vs 0.5,
+    // should scale the exported peak by ~0.5 (validates the topo bus mix).
+    auto peakThroughBus = [&](float busGain) -> float {
+        Project pr;
+        pr.sampleRate = SR;
+        pr.masterGain = 1.0f;
+        Track m;
+        m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        m.notes.push_back(note);
+        Track b;
+        b.id = pr.NextTrackId(); b.type = TrackType::Bus;
+        b.gain = busGain; b.pan = 0.0f;
+        m.output = b.id;                 // route the synth into the bus
+        pr.AddTrack(m);
+        pr.AddTrack(b);
+
+        const std::string p = "/tmp/haiku_daw_export_bus.wav";
+        std::remove(p.c_str());
+        if (!ExportWav(pr, p, SR)) return -1.0f;
+        WavSource s;
+        if (!s.Open(p)) return -1.0f;
+        float pk = 0.0f; const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f * 2; ++i) { float a = std::fabs(c[i]); if (a > pk) pk = a; }
+        std::remove(p.c_str());
+        return pk;
+    };
+    const float pFull = peakThroughBus(1.0f);
+    const float pHalf = peakThroughBus(0.5f);
+    CHECK(pFull > 0.01f);
+    CHECK(pHalf > 0.005f);
+    CHECK(std::fabs(pHalf - pFull * 0.5f) < pFull * 0.1f);   // bus fader halves it
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
