@@ -18,6 +18,8 @@ add_library(daw_model
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
+    src/dsp/Biquad.cpp          # kit-free biquad filter effect
+    src/dsp/Delay.cpp           # kit-free feedback delay effect
 )
 target_include_directories(daw_model PUBLIC src)
 
@@ -42,6 +44,10 @@ add_test(NAME wavwriter_tests COMMAND wavwriter_tests)
 add_executable(resampler_tests tests/resampler_tests.cpp)
 target_link_libraries(resampler_tests PRIVATE daw_model)
 add_test(NAME resampler_tests COMMAND resampler_tests)
+
+add_executable(effect_tests tests/effect_tests.cpp)
+target_link_libraries(effect_tests PRIVATE daw_model)
+add_test(NAME effect_tests COMMAND effect_tests)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are

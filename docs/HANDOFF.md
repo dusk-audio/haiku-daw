@@ -29,9 +29,12 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   int16 stereo on the VM's HD Audio) → RT record hook → lock-free ring →
   disk-writer thread → `WavWriter`. UI: arm (R) + Rec, take dropped via
   `AddClipCommand` at the playhead. Proven end-to-end on real Haiku.
-- **NEXT** — pick one: **resampler** (playback assumes source rate == output
-  rate; 44.1 k / 96 k sources play at wrong pitch — now visible on recorded
-  96 k takes), **M6 MIDI**, or **M7 DSP effects**. See "Next task" below.
+- **Resampler** ✅ — streaming linear SRC per stream on its disk thread, so
+  the RT mixer stays 1:1 and any source rate plays at correct pitch (44.1 k /
+  96 k, incl. recorded takes). Clip lengths stored in timeline frames; source
+  seek + waveform mapping are rate-corrected. Confirmed on real Haiku.
+- **NEXT** — **M6 MIDI** or **M7 DSP effects** (both build on M3). See
+  "Next task" below.
 
 ## Architecture in one breath
 
@@ -58,8 +61,9 @@ src/model/             Project/Track/Clip, Command stack, commands  (kit-free)
 src/engine/
   WavSource.{h,cpp}    native RIFF/WAVE reader + Seek (kit-free, host-testable)
   WavWriter.{h,cpp}    native RIFF/WAVE writer for takes (kit-free, host-test)
+  Resampler.{h,cpp}    streaming linear SRC (kit-free, host-testable)
   RingBuffer.h         lock-free SPSC float ring
-  Engine.{h,cpp}       BSoundPlayer output + TrackStream mixing (Haiku-only)
+  Engine.{h,cpp}       BSoundPlayer output + TrackStream mixing + SRC (Haiku)
   Recorder.{h,cpp}     BMediaRecorder capture -> ring -> WavWriter (Haiku-only)
 src/ui/                Interface Kit (Haiku-only): App in main.cpp
   UiMetrics.h          layout constants, palette, kMsgSeek
@@ -167,24 +171,14 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — pick one (M0–M5 all done)
+## Next task — M6 MIDI or M7 DSP (M0–M5 + resampler all done)
 
-**A. Resampler (recommended first — a real bug now).** Playback assumes each
-source's sample rate equals the output rate. `Engine::Load` only warns on a
-mismatch; `TrackStream::Mix` reads the ring 1:1. So 44.1 k and 96 k sources
-(including every recorded take, which is 96 k) play at the wrong pitch/speed.
-Fix: resample each stream to the output rate. Cleanest spot is the disk
-thread (`TrackStream::DiskLoop`) or a wrapper around `WavSource` output —
-keep the RT `Mix` doing 1:1 reads. A linear or windowed-sinc SRC on the disk
-side is kit-free and host-testable. This unblocks recording actually sounding
-right and mixing sources of different rates.
-
-**B. M6 MIDI.** Midi Kit 2: `BMidiRoster`, a `BMidiLocalProducer` sequencer,
+**A. M6 MIDI.** Midi Kit 2: `BMidiRoster`, a `BMidiLocalProducer` sequencer,
 an internal wavetable/sample synth node so MIDI makes sound with no external
 gear. MIDI clips = delta-timed event lists; transport frame-clock schedules
 them. Slave audio+MIDI to the same transport (see ARCHITECTURE §7).
 
-**C. M7 DSP effects.** `IEffect { process(float** io, int frames) }` chain per
+**B. M7 DSP effects.** `IEffect { process(float** io, int frames) }` chain per
 track (ARCHITECTURE §8 stage 1): gain, pan, a biquad EQ, delay. RT-safe,
 kit-free, host-testable — apply in the mix path.
 
