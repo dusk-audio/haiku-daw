@@ -7,6 +7,8 @@
 #include "../engine/WavSource.h"
 
 #include <Application.h>
+
+#include <cmath>
 #include <Button.h>
 #include <MessageRunner.h>
 #include <StringView.h>
@@ -215,9 +217,13 @@ void MainWindow::StopRecording() {
     for (const Track& t : fProject->Tracks())
         if (t.type == TrackType::Audio && t.armed) { target = t.id; break; }
     if (target != kInvalidTrackId) {
+        // The take is `frames` at the recorder's rate; store its length in
+        // timeline (project-rate) frames.
+        const double recRate = fRecorder->SampleRate();
+        const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
         Clip clip;
         clip.startFrame   = fProject->transport.playhead;
-        clip.lengthFrames = frames;
+        clip.lengthFrames = (int64_t)llround(frames * ratio);
         clip.sourceOffset = 0;
         clip.sourcePath   = path;
         fStack->Execute(std::make_unique<AddClipCommand>(target, clip),

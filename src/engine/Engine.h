@@ -16,6 +16,7 @@
 
 #include "RingBuffer.h"
 #include "WavSource.h"
+#include "Resampler.h"
 #include "../model/Project.h"
 
 #include <SoundPlayer.h>
@@ -31,9 +32,12 @@ namespace daw {
 // plus where the clip sits on the timeline and the track's gain.
 class TrackStream {
 public:
+    // startFrame/lengthFrames/seekProjectDelta are in output (timeline) frames;
+    // sourceOffset is in source frames. The stream resamples the source to
+    // outputRate on its disk thread, so the ring is at the output rate.
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
-                Frame lengthFrames, float gain, float pan, bool audible,
-                Frame srcSeekFrame);
+                Frame lengthFrames, Frame sourceOffset, float gain, float pan,
+                bool audible, Frame seekProjectDelta, float outputRate);
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -63,12 +67,16 @@ private:
     std::string fPath;
     Frame       fStart;
     Frame       fLength;
-    Frame       fSrcSeek;       // source frame to seek to before streaming
+    Frame       fSourceOffset;  // source-frame offset into the file
+    Frame       fSeekDelta;     // output frames into the clip to skip on start
+    float       fOutputRate;    // engine output rate to resample to
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
 
     WavSource   fSource;
+    std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
+    std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
     std::thread fDiskThread;
     std::atomic<bool> fRunning{false};

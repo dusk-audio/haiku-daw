@@ -44,6 +44,9 @@ public:
     int    FramesPerBucket() const { return fFramesPerBucket; }
     size_t BucketCount() const { return fPeaks.size(); }
     Frame  TotalFrames() const { return fTotalFrames; }
+    // Source sample rate the envelope was built from (0 if unknown). The UI
+    // needs it to map timeline frames (output rate) to source frames.
+    float  SampleRate() const { return fSampleRate; }
 
     // The bucket at index i (clamped-empty {0,0} if out of range).
     Peak At(size_t i) const {
@@ -60,6 +63,7 @@ public:
 private:
     int                fFramesPerBucket = 0;
     Frame              fTotalFrames     = 0;
+    float              fSampleRate      = 0.0f;
     std::vector<Peak>  fPeaks;
 };
 

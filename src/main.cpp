@@ -16,6 +16,7 @@
 
 #include <Application.h>
 
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <string>
@@ -52,9 +53,13 @@ static void SeedProject(Project& project, CommandStack& stack,
         stack.Execute(std::move(add), project);
         TrackId tid = addPtr->CreatedId();
 
+        // lengthFrames is timeline (project-rate) frames; convert from the
+        // source's own frame count by the rate ratio.
+        const double srcRate = src.FrameRate();
+        const double ratio = srcRate > 0 ? project.sampleRate / srcRate : 1.0;
         Clip clip;
         clip.startFrame   = 0;
-        clip.lengthFrames = src.TotalFrames();
+        clip.lengthFrames = (Frame)llround(src.TotalFrames() * ratio);
         clip.sourceOffset = 0;
         clip.sourcePath   = path;
         stack.Execute(std::make_unique<AddClipCommand>(tid, clip), project);

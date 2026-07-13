@@ -28,10 +28,11 @@ static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
 
 TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
-                         float gain, float pan, bool audible,
-                         Frame srcSeekFrame)
+                         Frame sourceOffset, float gain, float pan,
+                         bool audible, Frame seekProjectDelta, float outputRate)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
-      fSrcSeek(srcSeekFrame), fRing(kRingFloats) {
+      fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
+      fOutputRate(outputRate), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -54,8 +55,19 @@ TrackStream::~TrackStream() {
 status_t TrackStream::Prepare() {
     if (!fSource.Open(fPath))
         return B_ERROR;
-    if (fSrcSeek > 0)
-        fSource.Seek(fSrcSeek);   // align source to the seeked playhead
+
+    const float srcRate = fSource.FrameRate();
+    fResampler.reset(new Resampler(srcRate, fOutputRate));
+
+    // Seek the source to match the start playhead. fSeekDelta is in output
+    // frames; convert to source frames by the rate ratio.
+    if (fSeekDelta > 0 && fOutputRate > 0) {
+        const Frame srcSkip = static_cast<Frame>(
+            fSeekDelta * (double)srcRate / fOutputRate + 0.5);
+        fSource.Seek(fSourceOffset + srcSkip);
+    } else if (fSourceOffset > 0) {
+        fSource.Seek(fSourceOffset);
+    }
 
     fRunning.store(true);
     fDiskThread = std::thread(&TrackStream::DiskLoop, this);
@@ -77,19 +89,27 @@ void TrackStream::StopThread() {
 // Producer thread: decode chunks and push them into the ring. Carries the
 // unpushed remainder of a chunk across iterations when the ring is full.
 void TrackStream::DiskLoop() {
-    const float* chunk = nullptr;
-    size_t chunkFloats = 0;   // remaining floats in the current chunk
+    const float* chunk = nullptr;   // points into fResampled
+    size_t chunkFloats = 0;         // remaining floats to push
     size_t chunkOffset = 0;
 
     while (fRunning.load()) {
         if (chunkFloats == 0) {
+            const float* src = nullptr;
             size_t frames = 0;
-            if (!fSource.ReadChunk(&chunk, &frames)) {
+            if (!fSource.ReadChunk(&src, &frames)) {
                 // End of file: nothing more to push. Idle until stopped.
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
-            chunkFloats = frames * 2;   // stereo
+            // Resample source-rate audio up/down to the output rate so the RT
+            // callback drains at 1 ring frame == 1 timeline frame.
+            fResampled.clear();
+            fResampler->Process(src, frames, fResampled);
+            if (fResampled.empty())
+                continue;   // produced nothing this pass (heavy downsample)
+            chunk = fResampled.data();
+            chunkFloats = fResampled.size();
             chunkOffset = 0;
         }
 
@@ -171,24 +191,18 @@ status_t Engine::Load(const Project& project, Frame startFrame) {
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty())
                 continue;
-            // Align this clip's source to the start playhead: if the playhead
-            // is inside the clip, skip that many source frames.
-            Frame srcSeek = c.sourceOffset;
-            if (startFrame > c.startFrame)
-                srcSeek += startFrame - c.startFrame;
+            // How far into the clip (in timeline frames) playback starts.
+            const Frame seekDelta =
+                (startFrame > c.startFrame) ? startFrame - c.startFrame : 0;
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
-                t.gain, t.pan, audible, srcSeek);
+                c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
                 continue;
             }
-            // No resampling yet: warn if a file's rate != the output rate.
-            if (s->SourceRate() != fOutputRate)
-                fprintf(stderr, "Engine: WARNING '%s' is %.0f Hz but output "
-                        "is %.0f Hz (will play at wrong pitch)\n",
-                        c.sourcePath.c_str(), s->SourceRate(), fOutputRate);
+            // Sources are resampled to the output rate on their disk thread.
             if (s->EndFrame() > fEndFrame)
                 fEndFrame = s->EndFrame();
             fStreams.push_back(std::move(s));

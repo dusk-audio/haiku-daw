@@ -12,6 +12,7 @@ bool PeakCache::Build(WavSource& src, int framesPerBucket) {
 
     fFramesPerBucket = framesPerBucket;
     fTotalFrames     = 0;
+    fSampleRate      = src.FrameRate();
     fPeaks.clear();
 
     // Accumulator for the bucket currently being filled.

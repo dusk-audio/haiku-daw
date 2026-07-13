@@ -390,6 +390,13 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block) {
     const float mid  = (block.top + block.bottom) * 0.5f;
     const float half = (block.bottom - block.top) * 0.5f - 1.0f;
 
+    // Timeline frames are at the project rate; the envelope indexes source
+    // frames. Scale by source/project rate so the waveform tracks the audio
+    // regardless of the file's sample rate.
+    const double projRate = fProject->sampleRate;
+    const double srcRate  = pc.SampleRate();
+    const double toSrc = (srcRate > 0 && projRate > 0) ? srcRate / projRate : 1.0;
+
     SetHighColor(ColWave());
     const int xL = static_cast<int>(block.left);
     const int xR = static_cast<int>(block.right);
@@ -397,8 +404,8 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block) {
         // Timeline frames this column spans -> source frames within the clip.
         const Frame tf0 = XToFrame(static_cast<float>(x));
         const Frame tf1 = XToFrame(static_cast<float>(x + 1));
-        const Frame s0 = c.sourceOffset + (tf0 - c.startFrame);
-        const Frame s1 = c.sourceOffset + (tf1 - c.startFrame);
+        const Frame s0 = c.sourceOffset + (Frame)((tf0 - c.startFrame) * toSrc);
+        const Frame s1 = c.sourceOffset + (Frame)((tf1 - c.startFrame) * toSrc);
         if (s1 <= 0)
             continue;
 
