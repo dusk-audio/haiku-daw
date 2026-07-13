@@ -234,8 +234,9 @@ on the VM first (mirrors `record_probe.sh`).
 `BQuery` becomes an instant sample browser (ARCHITECTURE §5.2) — the native
 Haiku superpower.
 
-**D. Smaller items.** Effect reordering in the editor, copy/paste of clips +
-notes, a metronome/click, and bundling recorded takes next to the `.dawproj`.
+**D. Smaller items.** Copy/paste of clips + notes, and bundling recorded takes
+next to the `.dawproj`. (Effect reordering, a metronome click, and MIDI
+equal-power pan in both the live engine and export are done.)
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.

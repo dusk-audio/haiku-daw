@@ -6,12 +6,16 @@
 #include <Slider.h>
 #include <StringView.h>
 
+#include <utility>
+
 namespace daw {
 
 enum {
     MSG_EP   = 'epar',   // param slider changed
     MSG_ERM  = 'erm ',   // remove effect
     MSG_EADD = 'eadd',   // add effect (field "kind": 0 LP, 1 HP, 2 Delay)
+    MSG_EUP  = 'eup ',   // move effect earlier in the chain
+    MSG_EDN  = 'edn ',   // move effect later in the chain
 };
 
 static void SetSlot(EffectDesc& d, int slot, float v) {
@@ -81,13 +85,24 @@ void EffectsWindow::Rebuild() {
         else if (d.type == EffectType::Reverb)     tname = "Reverb";
         else if (d.type == EffectType::Compressor) tname = "Compressor";
 
-        BStringView* title = new BStringView(BRect(8, y, w - 74, y + 16),
+        BStringView* title = new BStringView(BRect(8, y, w - 150, y + 16),
             "title", tname);
         title->SetViewColor(ColHeader());
         title->SetHighColor(ColText());
         fRoot->AddChild(title);
 
-        BButton* rm = new BButton(BRect(w - 70, y - 2, w - 8, y + 20),
+        // Reorder + remove controls.
+        BButton* up = new BButton(BRect(w - 146, y - 2, w - 126, y + 20),
+            "up", "^", new BMessage(MSG_EUP));
+        up->Message()->AddInt32("fx", (int32)i);
+        up->SetEnabled(i > 0);
+        fRoot->AddChild(up);
+        BButton* dn = new BButton(BRect(w - 122, y - 2, w - 102, y + 20),
+            "dn", "v", new BMessage(MSG_EDN));
+        dn->Message()->AddInt32("fx", (int32)i);
+        dn->SetEnabled(i + 1 < fChain.size());
+        fRoot->AddChild(dn);
+        BButton* rm = new BButton(BRect(w - 98, y - 2, w - 8, y + 20),
             "rm", "Remove", new BMessage(MSG_ERM));
         rm->Message()->AddInt32("fx", (int32)i);
         fRoot->AddChild(rm);
@@ -158,6 +173,19 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
             msg->FindInt32("fx", &fx);
             if (fx >= 0 && (size_t)fx < fChain.size()) {
                 fChain.erase(fChain.begin() + fx);
+                Rebuild();
+                Apply();
+            }
+            break;
+        }
+        case MSG_EUP:
+        case MSG_EDN: {
+            int32 fx = -1;
+            msg->FindInt32("fx", &fx);
+            const int32 other = (msg->what == MSG_EUP) ? fx - 1 : fx + 1;
+            if (fx >= 0 && (size_t)fx < fChain.size()
+                && other >= 0 && (size_t)other < fChain.size()) {
+                std::swap(fChain[(size_t)fx], fChain[(size_t)other]);
                 Rebuild();
                 Apply();
             }

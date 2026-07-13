@@ -20,6 +20,7 @@
 #include "../model/Project.h"
 #include "../dsp/IEffect.h"
 #include "../synth/Synth.h"
+#include "Metronome.h"
 
 #include <SoundPlayer.h>
 
@@ -108,6 +109,9 @@ public:
     // playing (writes atomics the RT callback reads).
     void UpdateMix(const Project& project);
 
+    // Toggle the metronome click (RT-safe atomic).
+    void SetMetronome(bool on) { fMetronomeOn.store(on); }
+
     // True once the playhead has passed the end of all clips.
     bool  IsFinished() const { return fFinished.load(); }
     Frame Playhead() const { return fPlayhead.load(); }
@@ -130,7 +134,8 @@ private:
         TrackId                               id;
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty for audio)
-        float                                 midiGain = 1.0f;
+        float                                 midiGainL = 1.0f;  // equal-power
+        float                                 midiGainR = 1.0f;
         std::vector<std::unique_ptr<IEffect>> fx;
     };
 
@@ -139,6 +144,8 @@ private:
     std::vector<Bus>                          fBuses;
     std::vector<float>                        fScratch;   // per-bus mix buffer
     Synth                                     fSynth;     // MIDI voice renderer
+    Metronome                                 fMetronome; // click generator
+    std::atomic<bool>                         fMetronomeOn{false};
 
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};

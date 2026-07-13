@@ -27,6 +27,7 @@ class BStringView;
 class BMessageRunner;
 class BFilePanel;
 class BSlider;
+class BMenuItem;
 
 namespace daw {
 
@@ -73,6 +74,8 @@ private:
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
+    BMenuItem*                fMetItem = nullptr;   // metronome toggle
+    bool                      fMetronome = false;
     bool                      fPlaying = false;
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take

@@ -187,6 +187,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     }
     fOutputRate = fPlayer->Format().frame_rate;
     fSynth.SetSampleRate(fOutputRate);
+    fMetronome = Metronome(fOutputRate, project.tempoBPM,
+                           project.timeSig.numerator);
     fMasterGain.store(project.masterGain);
 
     // Solo overrides mute: if any track (audio or MIDI) is soloed, only
@@ -249,9 +251,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         if (!audible)
             continue;
         Bus b;
-        b.id       = t.id;
-        b.notes    = t.notes;
-        b.midiGain = t.gain;
+        b.id    = t.id;
+        b.notes = t.notes;
+        EqualPowerGains(t.gain, t.pan, &b.midiGainL, &b.midiGainR);
         fBuses.push_back(std::move(b));
         for (const MidiNote& n : t.notes)
             if (n.startFrame + n.lengthFrames > fEndFrame)
@@ -348,8 +350,16 @@ void Engine::FillBuffer(float* out, size_t frames) {
         std::memset(sc, 0, nfloats * sizeof(float));
         for (TrackStream* s : b.streams)
             s->Mix(sc, frames, blockStart);
-        if (!b.notes.empty())
-            fSynth.Render(b.notes, sc, frames, blockStart, b.midiGain);
+        if (!b.notes.empty()) {
+            // Render dry, then apply equal-power gain/pan (a MIDI bus is
+            // synth-only, so scaling the whole scratch is correct) — same law
+            // as audio streams, including the -3 dB center attenuation.
+            fSynth.Render(b.notes, sc, frames, blockStart, 1.0f);
+            for (size_t i = 0; i < frames; i++) {
+                sc[i * 2 + 0] *= b.midiGainL;
+                sc[i * 2 + 1] *= b.midiGainR;
+            }
+        }
         for (auto& fx : b.fx)
             fx->Process(sc, static_cast<int>(frames));
         for (size_t i = 0; i < nfloats; i++)
@@ -362,6 +372,10 @@ void Engine::FillBuffer(float* out, size_t frames) {
     if (mg != 1.0f)
         for (size_t i = 0; i < nfloats; i++)
             out[i] *= mg;
+
+    // Metronome click on top of the mix (not affected by master gain).
+    if (fMetronomeOn.load(std::memory_order_relaxed))
+        fMetronome.Render(out, frames, blockStart, 0.3f);
 
     // Block peak per channel for the UI meters (arithmetic only, RT-safe).
     float pl = 0.0f, pr = 0.0f;

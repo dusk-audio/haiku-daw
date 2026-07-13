@@ -48,6 +48,7 @@ enum {
     MSG_NEW_AUDIO = 'naud',
     MSG_NEW_MIDI  = 'nmid',
     MSG_MIXER     = 'mixr',
+    MSG_METRONOME = 'metr',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -79,6 +80,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     menuBar->AddItem(trackMenu);
     BMenu* viewMenu = new BMenu("View");
     viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
+    fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
+    viewMenu->AddItem(fMetItem);
     menuBar->AddItem(viewMenu);
     AddChild(menuBar);
     float menuH = menuBar->Bounds().Height();
@@ -165,6 +168,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
+        case MSG_METRONOME:
+            fMetronome = !fMetronome;
+            if (fMetItem) fMetItem->SetMarked(fMetronome);
+            if (fEngine) fEngine->SetMetronome(fMetronome);
+            break;
         case MSG_EXPORT:
             if (!fExportPanel) {
                 BMessenger to(this);
@@ -387,6 +395,7 @@ void MainWindow::StartPlayback() {
         return;
     }
     fEngine->Start();
+    fEngine->SetMetronome(fMetronome);
     fPlaying = true;
     UpdatePulse();
 }
