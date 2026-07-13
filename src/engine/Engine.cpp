@@ -260,12 +260,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 fEndFrame = n.startFrame + n.lengthFrames;
     }
 
-    if (fBuses.empty()) {
+    // No audio content is fine only if the caller extends the range (e.g. to
+    // run the metronome / a loop over silence); otherwise there's nothing.
+    if (fBuses.empty() && minEndFrame <= 0) {
         fprintf(stderr, "Engine: nothing to play\n");
         return B_ERROR;
     }
 
-    // Extend the play range past content for looping past the last clip/note.
+    // Extend the play range past content for looping / a metronome-only run.
     if (minEndFrame > fEndFrame)
         fEndFrame = minEndFrame;
 

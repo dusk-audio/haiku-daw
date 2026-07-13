@@ -387,7 +387,13 @@ void MainWindow::StartPlayback() {
         fTimeline->SetPlayhead(tr.loopStart);
     }
     const Frame start   = fProject->transport.playhead;
-    const Frame minEnd  = looping ? tr.loopEnd : 0;   // run through silence to loop end
+    Frame minEnd  = looping ? tr.loopEnd : 0;   // run through silence to loop end
+    // Metronome with no audio content: run the transport (10 min) so the click
+    // plays over silence rather than the engine reporting "nothing to play".
+    if (fMetronome && ProjectEndFrame(*fProject) == 0) {
+        const Frame ten = (Frame)(fProject->sampleRate * 600.0);
+        if (ten > minEnd) minEnd = ten;
+    }
     fEngine.reset(new Engine());
     if (fEngine->Load(*fProject, start, minEnd) != B_OK) {
         std::fprintf(stderr, "MainWindow: nothing to play\n");
