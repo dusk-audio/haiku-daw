@@ -38,8 +38,8 @@ int main() {
     status_t s = r->GetAudioInput(&in);
     printf("GetAudioInput: %s\n", strerror(s));
     if (s == B_OK) {
-        printf("  node id=%d kind=0x%llx name=%s\n",
-               (int)in.node, (unsigned long long)in.kind, in.name);
+        printf("  node id=%d kind=0x%llx\n",
+               (int)in.node, (unsigned long long)in.kind);
         r->ReleaseNode(in);
     }
 
@@ -69,29 +69,58 @@ else
     echo "  COMPILE FAILED:"; cat "$TMP/errA"
 fi
 
-# --- Probe B: does BMediaRecorder exist and init? --------------------------
+# --- Probe B: BMediaRecorder end-to-end capture (the M5 recipe) -------------
 cat > "$TMP/probe_recorder.cpp" <<'EOF'
 #include <MediaRecorder.h>
 #include <MediaDefs.h>
+#include <OS.h>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+
+static std::atomic<size_t> g_bytes{0};
+static std::atomic<int>    g_calls{0};
+static media_format        g_negotiated;
+
+static void RecordHook(void*, bigtime_t, void* /*data*/, size_t size,
+                       const media_format& fmt) {
+    g_bytes.fetch_add(size);
+    if (g_calls.fetch_add(1) == 0)
+        g_negotiated = fmt;   // capture the format the input actually gave us
+}
 
 int main() {
     BMediaRecorder rec("probe", B_MEDIA_RAW_AUDIO);
-    status_t s = rec.InitCheck();
-    printf("BMediaRecorder InitCheck: %s\n", strerror(s));
-    // Try connecting it to the system audio input.
+    printf("InitCheck: %s\n", strerror(rec.InitCheck()));
+
+    // Ask for float stereo but leave rate wildcard so the device picks native.
     media_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = B_MEDIA_RAW_AUDIO;
+    fmt.u.raw_audio = media_raw_audio_format::wildcard;
+    fmt.u.raw_audio.format     = media_raw_audio_format::B_AUDIO_FLOAT;
+    fmt.u.raw_audio.byte_order = B_MEDIA_HOST_ENDIAN;
+
+    rec.SetHooks(RecordHook, NULL, NULL);
     status_t c = rec.Connect(fmt);
-    printf("BMediaRecorder::Connect(raw audio wildcard): %s\n", strerror(c));
+    printf("Connect(float, rate/ch wildcard): %s\n", strerror(c));
+    if (c != B_OK) return 1;
+
+    printf("Start: %s\n", strerror(rec.Start()));
+    snooze(500000);            // capture ~0.5 s
+    rec.Stop();
+
+    const media_raw_audio_format& n = g_negotiated.u.raw_audio;
+    printf("captured: %d callbacks, %lu bytes\n",
+           g_calls.load(), (unsigned long)g_bytes.load());
+    printf("negotiated: rate=%.0f ch=%u fmt=0x%x buf=%u bytes\n",
+           n.frame_rate, n.channel_count, n.format, n.buffer_size);
     return 0;
 }
 EOF
 
 echo
-echo "== 4. compile + run BMediaRecorder probe =="
+echo "== 4. compile + run BMediaRecorder capture probe =="
 if g++ "$TMP/probe_recorder.cpp" -o "$TMP/probe_recorder" -lbe -lmedia 2>"$TMP/errB"; then
     "$TMP/probe_recorder"
 else
