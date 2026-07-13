@@ -263,9 +263,23 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 fEndFrame = n.startFrame + n.lengthFrames;
     }
 
-    // No audio content is fine only if the caller extends the range (e.g. to
-    // run the metronome / a loop over silence); otherwise there's nothing.
-    if (fBuses.empty() && minEndFrame <= 0) {
+    // Add a node per bus track (always, even muted, so it stays a valid
+    // routing target; a muted bus just doesn't route its sum onward).
+    for (const Track& t : project.Tracks()) {
+        if (t.type != TrackType::Bus)
+            continue;
+        Bus b;
+        b.id    = t.id;
+        b.isBus = true;
+        EqualPowerGains(t.gain, t.pan, &b.busGainL, &b.busGainR);
+        fBuses.push_back(std::move(b));
+    }
+
+    // No content is fine only if the caller extends the range (metronome/loop).
+    bool anyContent = false;
+    for (const Bus& b : fBuses)
+        if (!b.streams.empty() || !b.notes.empty()) { anyContent = true; break; }
+    if (!anyContent && minEndFrame <= 0) {
         fprintf(stderr, "Engine: nothing to play\n");
         return B_ERROR;
     }
@@ -274,15 +288,37 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     if (minEndFrame > fEndFrame)
         fEndFrame = minEndFrame;
 
-    // Build each bus's effect chain from its track's descriptors.
+    // Set each node's routing output + audibility, and build its effect chain.
     for (Bus& b : fBuses) {
         const Track* t = project.FindTrack(b.id);
         if (!t) continue;
+        b.output  = t->output;
+        // Audio leaves are gated live by their streams (so live mute/unmute
+        // works); a bus node is gated here (rebuild-on-play) and skips routing
+        // its sum when muted / solo'd out.
+        b.audible = b.isBus ? (!t->muted && (!anySolo || t->soloed)) : true;
         for (const EffectDesc& d : t->fx) {
             auto fx = MakeEffect(d);
             if (!fx) continue;
             fx->Prepare(fOutputRate);
             b.fx.push_back(std::move(fx));
+        }
+    }
+
+    // Topological processing order (a node before the node it routes into).
+    {
+        std::vector<RouteNode> rn;
+        rn.reserve(fBuses.size());
+        for (const Bus& b : fBuses)
+            rn.push_back(RouteNode{b.id, b.output});
+        std::vector<TrackId> ord;
+        fOrder.clear();
+        if (ResolveRoutingOrder(rn, ord)) {
+            for (TrackId id : ord)
+                for (size_t i = 0; i < fBuses.size(); i++)
+                    if (fBuses[i].id == id) { fOrder.push_back(i); break; }
+        } else {   // cycle / bad graph: flat order, all to master
+            for (size_t i = 0; i < fBuses.size(); i++) fOrder.push_back(i);
         }
     }
 
@@ -295,11 +331,12 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         fMasterFx.push_back(std::move(fx));
     }
 
-    // Per-bus mix scratch, sized to the output buffer (generous floor).
+    // Per-node mix buffers, sized to the output buffer (generous floor).
     size_t maxFrames = (size_t)(fPlayer->Format().buffer_size
                                 / (sizeof(float) * 2));
     if (maxFrames < 8192) maxFrames = 8192;
     fScratch.assign(maxFrames * 2, 0.0f);
+    fNodeBufs.assign(fBuses.size(), std::vector<float>(maxFrames * 2, 0.0f));
 
     return B_OK;
 }
@@ -308,7 +345,7 @@ void Engine::UpdateMix(const Project& project) {
     fMasterGain.store(project.masterGain, std::memory_order_relaxed);
     bool anySolo = false;
     for (const Track& t : project.Tracks())
-        if (t.type == TrackType::Audio && t.soloed && !t.muted)
+        if (t.soloed && !t.muted)           // any track type can solo
             anySolo = true;
 
     for (const Track& t : project.Tracks()) {
@@ -357,27 +394,44 @@ void Engine::FillBuffer(float* out, size_t frames) {
         return;
     }
 
-    // Mix each bus into scratch, run its effect chain, sum into master.
+    // Routing graph: process nodes in topo order, each into its output bus or
+    // the master. Node buffers accumulate upstream inputs across the pass.
     const size_t nfloats = frames * 2;
-    float* sc = fScratch.data();
-    for (Bus& b : fBuses) {
-        std::memset(sc, 0, nfloats * sizeof(float));
-        for (TrackStream* s : b.streams)
-            s->Mix(sc, frames, blockStart);
-        if (!b.notes.empty()) {
-            // Render dry, then apply equal-power gain/pan (a MIDI bus is
-            // synth-only, so scaling the whole scratch is correct) — same law
-            // as audio streams, including the -3 dB center attenuation.
-            fSynth.Render(b.notes, sc, frames, blockStart, 1.0f);
+    for (size_t i = 0; i < fBuses.size(); i++)
+        std::memset(fNodeBufs[i].data(), 0, nfloats * sizeof(float));
+    for (size_t oi = 0; oi < fOrder.size(); oi++) {
+        const size_t idx = fOrder[oi];
+        Bus& b = fBuses[idx];
+        if (!b.audible)
+            continue;                       // muted / solo'd out: route nothing
+        float* nb = fNodeBufs[idx].data();
+
+        for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
+            s->Mix(nb, frames, blockStart);
+        if (!b.notes.empty()) {             // MIDI: render dry then fader
+            fSynth.Render(b.notes, nb, frames, blockStart, 1.0f);
             for (size_t i = 0; i < frames; i++) {
-                sc[i * 2 + 0] *= b.midiGainL;
-                sc[i * 2 + 1] *= b.midiGainR;
+                nb[i * 2 + 0] *= b.midiGainL;
+                nb[i * 2 + 1] *= b.midiGainR;
+            }
+        }
+        if (b.isBus) {                      // bus: fader on the summed upstream
+            for (size_t i = 0; i < frames; i++) {
+                nb[i * 2 + 0] *= b.busGainL;
+                nb[i * 2 + 1] *= b.busGainR;
             }
         }
         for (auto& fx : b.fx)
-            fx->Process(sc, static_cast<int>(frames));
+            fx->Process(nb, static_cast<int>(frames));
+
+        // Route into the output bus, or the master (out).
+        float* dst = out;
+        if (b.output != kInvalidTrackId) {
+            for (size_t j = 0; j < fBuses.size(); j++)
+                if (fBuses[j].id == b.output) { dst = fNodeBufs[j].data(); break; }
+        }
         for (size_t i = 0; i < nfloats; i++)
-            out[i] += sc[i];
+            dst[i] += nb[i];
     }
 
     // Master bus FX on the summed output (before gain/metering).

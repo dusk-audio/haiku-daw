@@ -18,6 +18,7 @@
 #include "WavSource.h"
 #include "Resampler.h"
 #include "../model/Project.h"
+#include "../model/RoutingGraph.h"
 #include "../dsp/IEffect.h"
 #include "../synth/Synth.h"
 #include "Metronome.h"
@@ -134,20 +135,30 @@ private:
 
     // One mix bus per audio track: its clips' streams summed into a scratch
     // buffer, then the track's effect chain applied, then added to master.
+    // One mix node per track (audio / midi / bus). It sums its content (and,
+    // for a bus, its upstream inputs), applies its FX, and routes into `output`
+    // (another bus) or the master.
     struct Bus {
         TrackId                               id;
+        TrackId                               output = kInvalidTrackId;  // 0 = master
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
-        std::vector<MidiNote>                 notes;     // MIDI (empty for audio)
+        std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
         float                                 midiGainL = 1.0f;  // equal-power
         float                                 midiGainR = 1.0f;
+        float                                 busGainL  = 1.0f;  // bus fader
+        float                                 busGainR  = 1.0f;
+        bool                                  isBus   = false;
+        bool                                  audible = true;
         std::vector<std::unique_ptr<IEffect>> fx;
     };
 
     std::unique_ptr<BSoundPlayer>             fPlayer;
     std::vector<std::unique_ptr<TrackStream>> fStreams;
     std::vector<Bus>                          fBuses;
+    std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
+    std::vector<size_t>                       fOrder;     // node indices, topo order
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
-    std::vector<float>                        fScratch;   // per-bus mix buffer
+    std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
     Metronome                                 fMetronome; // click generator
     std::atomic<bool>                         fMetronomeOn{false};
