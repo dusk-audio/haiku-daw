@@ -39,8 +39,14 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   UI: header FX box toggles a demo low-pass (applies on next Play). Confirmed
   audible on real Haiku. (Chain is per-track post-mix; effect picker / param
   editing / reorder UI still to do.)
-- **NEXT** — **M6 MIDI** (internal-synth path first; external Midi Kit 2 I/O
-  later). See "Next task" below.
+- **M6 MIDI** ✅ (internal-synth path) — `Track` carries a `MidiNote` list
+  (`AddNoteCommand`); kit-free `Synth` (polyphonic sine, AR envelope,
+  deterministic phase) renders notes; engine adds a bus per audible MIDI track
+  and renders through the same FX chain + master mix + transport clock as
+  audio. UI draws a simple piano roll and adds notes on click. Confirmed on
+  real Haiku. (External Midi Kit 2 I/O + note edit/velocity still to do.)
+- **NEXT** — options below (external MIDI I/O, MIDI/effect UI polish, or
+  project save/load M8).
 
 ## Architecture in one breath
 
@@ -184,22 +190,21 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — M6 MIDI (in progress)
+## Next task — pick one (M0–M7 + resampler all done)
 
-Internal-synth path first (makes sound with no external gear, all kit-free /
-host-testable), then external Midi Kit 2 I/O:
+**A. M8 project save/load.** Serialize the `Project` (tracks, clips, notes, fx,
+transport) to a bundle + reload; the model is the single source of truth and
+already funnels through the command stack, so this is mostly a
+serializer/deserializer. Lean into BFS attributes for the sample browser
+(ARCHITECTURE §5.2). Highest value — nothing persists yet.
 
-- **Model:** a MIDI clip = a list of notes (pitch, startFrame, lengthFrames,
-  velocity), on a `TrackType::Midi` track. Kit-free; note-edit commands.
-- **Synth:** a kit-free polyphonic oscillator/wavetable that renders a clip's
-  notes to interleaved-stereo float at a sample rate. Host-testable (render a
-  note, assert energy during it, silence outside).
-- **Engine:** MIDI tracks render via the synth into their bus (alongside audio
-  streams), sharing the same transport frame clock and the FX chain.
-- **UI:** draw MIDI clips (blocks now, piano-roll later); basic note entry.
-- **Later:** Midi Kit 2 (`BMidiRoster` / `BMidiLocalProducer/Consumer`) for
-  external keyboards + ports. Probe VM MIDI availability before that (mirror
-  the record-probe discipline).
+**B. MIDI / effect UI polish.** Note delete + drag + length/velocity edit;
+per-track effect picker (choose type, edit params, reorder) instead of the
+one-shot demo low-pass; live MIDI/FX param push (currently rebuild-on-play).
+
+**C. External Midi Kit 2 I/O.** `BMidiRoster` / `BMidiLocalProducer/Consumer`
+for hardware keyboards + ports and recording MIDI. Probe VM MIDI availability
+first (mirror `record_probe.sh`).
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.

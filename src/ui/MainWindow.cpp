@@ -154,11 +154,28 @@ void MainWindow::UpdatePulse() {
     }
 }
 
+// Latest frame any clip or note reaches in the project (timeline frames).
+static Frame ProjectEndFrame(const Project& p) {
+    Frame end = 0;
+    for (const Track& t : p.Tracks()) {
+        for (const Clip& c : t.clips)
+            if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
+        for (const MidiNote& n : t.notes)
+            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+    }
+    return end;
+}
+
 void MainWindow::StartPlayback() {
     if (fRecorder && fRecorder->IsRecording())
         return;   // no play-while-record in this milestone
     // Rebuild the engine from the current model each time (RT-safe: no live
-    // mutation of a running graph). Playback begins at the current playhead.
+    // mutation of a running graph). Playback begins at the current playhead;
+    // if it's already at/after the end, rewind to the start first.
+    if (fProject->transport.playhead >= ProjectEndFrame(*fProject)) {
+        fProject->transport.playhead = 0;
+        fTimeline->SetPlayhead(0);
+    }
     const Frame start = fProject->transport.playhead;
     fEngine.reset(new Engine());
     if (fEngine->Load(*fProject, start) != B_OK) {
