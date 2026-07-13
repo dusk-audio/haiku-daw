@@ -144,16 +144,32 @@ bool ExportWav(const Project& project, const std::string& outPath,
     for (size_t i = 0; i < tracks.size(); i++)
         idx[tracks[i].id] = i;
 
-    // Processing order: a node before the node it routes into (topo sort).
-    std::vector<RouteNode> rnodes;
-    for (const Track& t : tracks)
-        rnodes.push_back(RouteNode{t.id, t.output});
-    std::vector<TrackId> order;
-    const bool routingOk = ResolveRoutingOrder(rnodes, order);
-    if (!routingOk) {   // cycle / bad graph: fall back to flat (all to master)
-        order.clear();
-        for (const Track& t : tracks) order.push_back(t.id);
+    // Processing order: a node before every node it feeds — its output AND
+    // every aux-send destination. Sends add extra edges, so use the general
+    // edge topo (single-output ResolveRoutingOrder can't express them).
+    std::vector<TrackId> nodeIds;
+    std::vector<std::pair<TrackId, TrackId>> edges;
+    for (const Track& t : tracks) {
+        nodeIds.push_back(t.id);
+        edges.push_back({t.id, t.output});
+        for (const Send& s : t.sends)
+            if (s.dest != kInvalidTrackId) edges.push_back({t.id, s.dest});
     }
+    std::vector<TrackId> order;
+    const bool routingOk = ResolveOrderWithEdges(nodeIds, edges, order);
+    if (!routingOk)    // cycle / bad graph: fall back to flat (all to master)
+        order = nodeIds;
+
+    // Add a node's aux sends (for the given fader phase) into their dest buses.
+    auto addSends = [&](const Track& t, bool pre, const float* nb) {
+        for (const Send& s : t.sends) {
+            if (s.preFader != pre || s.dest == kInvalidTrackId) continue;
+            auto d = idx.find(s.dest);
+            if (d == idx.end()) continue;
+            float* db = nodeBuf[d->second].data();
+            for (size_t i = 0; i < nfloats; ++i) db[i] += nb[i] * s.level;
+        }
+    };
 
     // Instantiate + run an effect chain over a whole node buffer, in blocks.
     auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf) {
@@ -184,13 +200,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
             continue;   // muted/solo'd out: render + route nothing downstream
 
         float* nb = nodeBuf[it->second].data();
-        float gainLR[2];
-        EqualPowerGains(t.gain, t.pan, &gainLR[0], &gainLR[1]);
+        // Split the channel strip into pan (equal-power) then a scalar gain
+        // fader, so a pre-fader send can tap the panned-but-pre-fader signal.
+        float panLR[2];
+        EqualPowerGains(1.0f, t.pan, &panLR[0], &panLR[1]);
 
         if (t.type == TrackType::Audio) {
             for (const Clip& c : t.clips) {
                 if (c.sourcePath.empty()) continue;
-                PlaceClip(c, scale, outRate, totalOut, gainLR, nodeBuf[it->second]);
+                PlaceClip(c, scale, outRate, totalOut, panLR, nodeBuf[it->second]);
             }
         } else if (t.type == TrackType::Midi) {
             std::vector<MidiNote> notes = t.notes;
@@ -201,17 +219,21 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 }
             synth.Render(notes, nb, static_cast<size_t>(totalOut), 0, 1.0f);
             for (int64_t i = 0; i < totalOut; ++i) {
-                nb[i * 2 + 0] *= gainLR[0];
-                nb[i * 2 + 1] *= gainLR[1];
+                nb[i * 2 + 0] *= panLR[0];
+                nb[i * 2 + 1] *= panLR[1];
             }
-        } else {   // Bus: nb already holds the summed upstream; apply its fader.
+        } else {   // Bus: nb already holds the summed upstream; apply its pan.
             for (int64_t i = 0; i < totalOut; ++i) {
-                nb[i * 2 + 0] *= gainLR[0];
-                nb[i * 2 + 1] *= gainLR[1];
+                nb[i * 2 + 0] *= panLR[0];
+                nb[i * 2 + 1] *= panLR[1];
             }
         }
 
+        addSends(t, /*pre=*/true, nb);          // pre-fader taps
+        for (size_t i = 0; i < nfloats; ++i)    // scalar gain fader
+            nb[i] *= t.gain;
         applyFx(t.fx, nb);
+        addSends(t, /*pre=*/false, nb);         // post-fader taps
 
         // Route this node into its output (a bus) or the master mix.
         float* dst = master.data();
