@@ -105,23 +105,39 @@ int main() {
 
     rec.SetHooks(RecordHook, NULL, NULL);
 
-    // The source-less Connect(format) returns "Bad source" on this image, so
-    // connect to the explicit physical input node (GetAudioInput / node 3).
     BMediaRoster* roster = BMediaRoster::Roster();
     media_node inNode;
     status_t gi = roster ? roster->GetAudioInput(&inNode) : B_ERROR;
     printf("GetAudioInput for connect: %s\n", strerror(gi));
+    if (gi != B_OK) return 1;
 
-    status_t c = B_ERROR;
-    if (gi == B_OK) {
-        c = rec.Connect(inNode, NULL, &fmt);
-        printf("Connect(inputNode, NULL, &fmt): %s\n", strerror(c));
-    }
-    // Fall back to the source-less form just to record its status too.
+    // Candidate 1: node + fully wildcard format (let the device pick native).
+    media_format wild;
+    memset(&wild, 0, sizeof(wild));
+    wild.type = B_MEDIA_RAW_AUDIO;
+    wild.u.raw_audio = media_raw_audio_format::wildcard;
+
+    // Candidate 2: node + int16 (HD Audio capture is commonly 16-bit).
+    media_format f16 = wild;
+    f16.u.raw_audio.format     = media_raw_audio_format::B_AUDIO_SHORT;
+    f16.u.raw_audio.byte_order = B_MEDIA_HOST_ENDIAN;
+
+    status_t c = rec.Connect(inNode, NULL, &wild);
+    printf("Connect(node, NULL, wildcard): %s\n", strerror(c));
     if (c != B_OK) {
-        status_t c2 = rec.Connect(fmt);
-        printf("Connect(format only): %s\n", strerror(c2));
-        c = c2;
+        c = rec.Connect(inNode, NULL, &f16);
+        printf("Connect(node, NULL, int16): %s\n", strerror(c));
+    }
+    if (c != B_OK) {
+        // Candidate 3: pick an explicit free output of the input node.
+        media_output out; int32 n = 0;
+        status_t g = roster->GetFreeOutputsFor(inNode, &out, 1, &n,
+                                               B_MEDIA_RAW_AUDIO);
+        printf("GetFreeOutputsFor: %s count=%d\n", strerror(g), (int)n);
+        if (g == B_OK && n > 0) {
+            c = rec.Connect(inNode, &out, NULL);
+            printf("Connect(node, &freeOutput, NULL): %s\n", strerror(c));
+        }
     }
     if (c != B_OK) return 1;
 
