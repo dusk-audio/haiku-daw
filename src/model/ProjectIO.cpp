@@ -91,14 +91,19 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 bool ProjectIO::Load(Project& p, const std::string& path) {
     std::ifstream f(path);
     if (!f) return false;
-    const std::string baseDir = DirOf(path);
 
-    p.Clear();
-
+    // Validate the "DAW" magic with a BOUNDED read before touching the project.
+    // A bare getline on a binary file (e.g. a WAV opened by mistake) can slurp
+    // a huge chunk into a string (memory thrash / apparent freeze); and we must
+    // not Clear() the current session for a file that turns out not to be ours.
     std::string header;
-    std::getline(f, header);
-    if (header.rfind("DAW", 0) != 0)   // must start with "DAW"
+    for (char c; header.size() < 64 && f.get(c) && c != '\n'; )
+        header.push_back(c);
+    if (header.rfind("DAW", 0) != 0)   // not our format -> leave project intact
         return false;
+
+    const std::string baseDir = DirOf(path);
+    p.Clear();
 
     Track    cur;
     bool     haveTrack = false;

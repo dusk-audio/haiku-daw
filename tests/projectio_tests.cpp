@@ -7,6 +7,7 @@
 #include "../src/model/Commands.h"
 
 #include <cstdio>
+#include <fstream>
 #include <unistd.h>
 
 static int g_checks = 0, g_fails = 0;
@@ -109,6 +110,24 @@ int main() {
             std::remove(projPath.c_str());
         }
     }
+    // Loading a non-DAW file (e.g. a WAV picked by mistake) must fail WITHOUT
+    // clearing the current project.
+    {
+        const char* bogus = "not_a_project_tmp.bin";
+        std::ofstream bf(bogus, std::ios::binary);
+        bf << "RIFF";                          // WAV-like magic, no newline
+        for (int i = 0; i < 2000; i++) bf.put((char)(i & 0xFF));
+        bf.close();
+
+        Project keep;
+        CommandStack ks;
+        ks.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Keep"), keep);
+        CHECK(!ProjectIO::Load(keep, bogus));      // rejected
+        CHECK(keep.Tracks().size() == 1);          // project untouched
+        CHECK(keep.Tracks().front().name == "Keep");
+        std::remove(bogus);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
