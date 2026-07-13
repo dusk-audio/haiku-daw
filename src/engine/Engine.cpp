@@ -1,6 +1,7 @@
 #include "Engine.h"
 
 #include "../dsp/EffectFactory.h"
+#include "../model/Crossfade.h"
 
 #include <MediaDefs.h>
 
@@ -220,7 +221,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         if (t.type != TrackType::Audio)
             continue;
         const bool audible = !t.muted && (!anySolo || t.soloed);
-        for (const Clip& c : t.clips) {
+        const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
+        for (size_t ci = 0; ci < t.clips.size(); ci++) {
+            const Clip& c = t.clips[ci];
             if (c.sourcePath.empty())
                 continue;
             // How far into the clip (in timeline frames) playback starts.
@@ -229,7 +232,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate,
-                c.fadeInFrames, c.fadeOutFrames, c.gain);
+                fades[ci].fadeIn, fades[ci].fadeOut, c.gain);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());

@@ -94,6 +94,10 @@ add_executable(routing_tests tests/routing_tests.cpp)
 target_link_libraries(routing_tests PRIVATE daw_model)
 add_test(NAME routing_tests COMMAND routing_tests)
 
+add_executable(crossfade_tests tests/crossfade_tests.cpp)
+target_link_libraries(crossfade_tests PRIVATE daw_model)
+add_test(NAME crossfade_tests COMMAND crossfade_tests)
+
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)
 add_test(NAME loudness_tests COMMAND loudness_tests)

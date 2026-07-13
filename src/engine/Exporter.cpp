@@ -7,6 +7,7 @@
 #include "../dsp/EffectFactory.h"
 #include "../dsp/IEffect.h"
 #include "../model/RoutingGraph.h"
+#include "../model/Crossfade.h"
 
 #include <algorithm>
 #include <cmath>
@@ -57,7 +58,8 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out) {
 // linear fade-in/out (both measured in output frames) and per-channel gain.
 void PlaceClip(const Clip& c, double scale, double outRate,
                int64_t totalOut, const float* gainLR,
-               std::vector<float>& trackBuf) {
+               std::vector<float>& trackBuf,
+               Frame effFadeIn, Frame effFadeOut) {
     std::vector<float> decoded;
     const size_t decodedFrames = DecodeClip(c, outRate, decoded);
     if (decodedFrames == 0)
@@ -73,8 +75,8 @@ void PlaceClip(const Clip& c, double scale, double outRate,
     if (playFrames > static_cast<int64_t>(decodedFrames))
         playFrames = static_cast<int64_t>(decodedFrames);
 
-    const int64_t fadeIn  = ToOut(c.fadeInFrames, scale);
-    const int64_t fadeOut = ToOut(c.fadeOutFrames, scale);
+    const int64_t fadeIn  = ToOut(effFadeIn, scale);
+    const int64_t fadeOut = ToOut(effFadeOut, scale);
 
     for (int64_t i = 0; i < playFrames; ++i) {
         const int64_t dst = startOut + i;
@@ -206,9 +208,12 @@ bool ExportWav(const Project& project, const std::string& outPath,
         // Build the node DRY (no pan / gain yet), so a pre-fader send taps the
         // raw signal and the gain+pan fader can be a time-varying envelope.
         if (t.type == TrackType::Audio) {
-            for (const Clip& c : t.clips) {
+            const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
+            for (size_t ci = 0; ci < t.clips.size(); ci++) {
+                const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
-                PlaceClip(c, scale, outRate, totalOut, kUnity, nodeBuf[it->second]);
+                PlaceClip(c, scale, outRate, totalOut, kUnity,
+                          nodeBuf[it->second], fades[ci].fadeIn, fades[ci].fadeOut);
             }
         } else if (t.type == TrackType::Midi) {
             std::vector<MidiNote> notes = t.notes;
