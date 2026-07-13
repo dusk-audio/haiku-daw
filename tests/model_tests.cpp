@@ -135,12 +135,15 @@ static void test_resize_clip_and_edit_note() {
     TrackId tm = p.Tracks().back().id;
     MidiNote n; n.pitch = 60; n.startFrame = 0; n.lengthFrames = 100;
     stack.Execute(std::make_unique<AddNoteCommand>(tm, n), p);
-    stack.Execute(std::make_unique<NoteEditCommand>(tm, 0, 67, 480, 240), p);
+    MidiNote e; e.pitch = 67; e.velocity = 40; e.startFrame = 480; e.lengthFrames = 240;
+    stack.Execute(std::make_unique<NoteEditCommand>(tm, 0, e), p);
     CHECK(p.FindTrack(tm)->notes[0].pitch == 67);
+    CHECK(p.FindTrack(tm)->notes[0].velocity == 40);
     CHECK(p.FindTrack(tm)->notes[0].startFrame == 480);
     CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 240);
     stack.Undo(p);
     CHECK(p.FindTrack(tm)->notes[0].pitch == 60);
+    CHECK(p.FindTrack(tm)->notes[0].velocity == 100);
     CHECK(p.FindTrack(tm)->notes[0].startFrame == 0);
     CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 100);
 }

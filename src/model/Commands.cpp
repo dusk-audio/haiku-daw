@@ -222,11 +222,13 @@ void ResizeClipCommand::Undo(Project& p) {
 bool NoteEditCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t || fIndex >= t->notes.size()) return false;
-    MidiNote& n = t->notes[fIndex];
-    fOld = n;
-    n.pitch        = fPitch < 0 ? 0 : (fPitch > 127 ? 127 : fPitch);
-    n.startFrame   = fStart  < 0 ? 0 : fStart;
-    n.lengthFrames = fLength > 1 ? fLength : 1;
+    fOld = t->notes[fIndex];
+    MidiNote n = fNote;
+    if (n.pitch < 0) n.pitch = 0; if (n.pitch > 127) n.pitch = 127;
+    if (n.velocity < 1) n.velocity = 1; if (n.velocity > 127) n.velocity = 127;
+    if (n.startFrame < 0) n.startFrame = 0;
+    if (n.lengthFrames < 1) n.lengthFrames = 1;
+    t->notes[fIndex] = n;
     return true;
 }
 

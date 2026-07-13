@@ -217,13 +217,11 @@ private:
     Frame   fOldLength = 0;
 };
 
-// Edit a note's pitch/position/length (move + resize). Stores old for Undo().
+// Replace a note (move, resize, or velocity edit). Stores old for Undo().
 class NoteEditCommand : public Command {
 public:
-    NoteEditCommand(TrackId track, size_t index, int pitch, Frame start,
-                    Frame length)
-        : fTrack(track), fIndex(index), fPitch(pitch),
-          fStart(start), fLength(length) {}
+    NoteEditCommand(TrackId track, size_t index, MidiNote note)
+        : fTrack(track), fIndex(index), fNote(note) {}
 
     bool Do(Project& p) override;
     void Undo(Project& p) override;
@@ -232,10 +230,8 @@ public:
 private:
     TrackId  fTrack;
     size_t   fIndex;
-    int      fPitch;
-    Frame    fStart;
-    Frame    fLength;
-    MidiNote fOld;   // saved in Do()
+    MidiNote fNote;   // the new value (clamped in Do)
+    MidiNote fOld;    // saved in Do()
 };
 
 } // namespace daw

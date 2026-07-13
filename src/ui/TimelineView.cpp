@@ -208,7 +208,9 @@ void TimelineView::MouseDown(BPoint where) {
             fDragLane      = idx;
             fDragNote      = hit;
             fDragNoteOrig  = n;
-            if (wide && where.x >= xEnd - kEdgeGrab)
+            if (modifiers() & B_CONTROL_KEY)
+                fDrag = Drag::NoteVelocity;   // Ctrl-drag = set velocity
+            else if (wide && where.x >= xEnd - kEdgeGrab)
                 fDrag = Drag::NoteResize;
             else {
                 fDrag = Drag::Note;
@@ -376,7 +378,8 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (len < 1) len = 1;
             c->lengthFrames = len;
         }
-    } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize) {
+    } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
+               || fDrag == Drag::NoteVelocity) {
         if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
             MidiNote& n = t->notes[(size_t)fDragNote];
             if (fDrag == Drag::Note) {
@@ -387,10 +390,16 @@ void TimelineView::PreviewDrag(BPoint where) {
                 if (pitch < 0) pitch = 0;
                 if (pitch > 127) pitch = 127;
                 n.pitch = pitch;
-            } else {
+            } else if (fDrag == Drag::NoteResize) {
                 Frame len = Snapped(XToFrame(where.x)) - n.startFrame;
                 if (len < 1) len = 1;
                 n.lengthFrames = len;
+            } else {   // NoteVelocity: vertical position sets velocity
+                float f = (lane.bottom - where.y) / lane.Height();
+                int vel = (int)(f * 127.0f + 0.5f);
+                if (vel < 1) vel = 1;
+                if (vel > 127) vel = 127;
+                n.velocity = vel;
             }
         }
     }
@@ -453,17 +462,18 @@ void TimelineView::MouseUp(BPoint where) {
                 if (v != fDragClipOrigLen)
                     cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
             }
-        } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize) {
+        } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
+                   || fDrag == Drag::NoteVelocity) {
             if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
                 MidiNote& n = t->notes[(size_t)fDragNote];
-                const int   vp = n.pitch;
-                const Frame vs = n.startFrame;
-                const Frame vl = n.lengthFrames;
+                const MidiNote final = n;
                 n = fDragNoteOrig;   // restore for a clean single undo step
-                if (vp != fDragNoteOrig.pitch || vs != fDragNoteOrig.startFrame
-                    || vl != fDragNoteOrig.lengthFrames)
+                if (final.pitch != fDragNoteOrig.pitch
+                    || final.startFrame != fDragNoteOrig.startFrame
+                    || final.lengthFrames != fDragNoteOrig.lengthFrames
+                    || final.velocity != fDragNoteOrig.velocity)
                     cmd = std::make_unique<NoteEditCommand>(fDragTrack,
-                            (size_t)fDragNote, vp, vs, vl);
+                            (size_t)fDragNote, final);
             }
         }
         if (cmd)
@@ -694,7 +704,6 @@ void TimelineView::DrawClip(const Clip& c, BRect lane) {
 // Draw a Midi track's notes as a simple piano roll: time across, pitch up.
 void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
     const float h = lane.Height();
-    SetHighColor(Rgb(120, 200, 140));
     for (const MidiNote& n : t.notes) {
         float x0 = FrameToX(n.startFrame);
         float x1 = FrameToX(n.startFrame + n.lengthFrames);
@@ -706,6 +715,9 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
         if (p >= kMidiRange) p = kMidiRange - 1;
         const float ny = lane.bottom - (float)p / kMidiRange * h;
         const float nh = h / kMidiRange + 1.0f;
+        // Brightness tracks velocity (Ctrl-drag a note to change it).
+        const float s = 0.4f + 0.6f * (n.velocity / 127.0f);
+        SetHighColor(Rgb((uint8)(120 * s), (uint8)(200 * s), (uint8)(140 * s)));
         FillRect(BRect(x0, ny - nh, x1, ny));
     }
 }
