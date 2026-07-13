@@ -58,6 +58,38 @@ private:
     float   fOldPan = 0.0f;
 };
 
+// Toggle/set a track's mute. Stores previous for Undo().
+class SetTrackMuteCommand : public Command {
+public:
+    SetTrackMuteCommand(TrackId track, bool muted)
+        : fTrack(track), fNewMuted(muted) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Mute Track"; }
+
+private:
+    TrackId fTrack;
+    bool    fNewMuted;
+    bool    fOldMuted = false;
+};
+
+// Set a track's solo flag. Stores previous for Undo().
+class SetTrackSoloCommand : public Command {
+public:
+    SetTrackSoloCommand(TrackId track, bool soloed)
+        : fTrack(track), fNewSoloed(soloed) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Solo Track"; }
+
+private:
+    TrackId fTrack;
+    bool    fNewSoloed;
+    bool    fOldSoloed = false;
+};
+
 // Add a clip to a track. Allocates a clip id in Do(); Undo() removes it.
 class AddClipCommand : public Command {
 public:

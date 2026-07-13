@@ -111,6 +111,28 @@ static void test_clip_sorted_insert_and_move() {
     (void)cId;
 }
 
+static void test_mute_solo_undo_redo() {
+    std::printf("test_mute_solo_undo_redo\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Vox"), p);
+    TrackId id = p.Tracks().front().id;
+    CHECK(!p.FindTrack(id)->muted);
+    CHECK(!p.FindTrack(id)->soloed);
+
+    stack.Execute(std::make_unique<SetTrackMuteCommand>(id, true), p);
+    CHECK(p.FindTrack(id)->muted);
+    stack.Undo(p);
+    CHECK(!p.FindTrack(id)->muted);
+    stack.Redo(p);
+    CHECK(p.FindTrack(id)->muted);
+
+    stack.Execute(std::make_unique<SetTrackSoloCommand>(id, true), p);
+    CHECK(p.FindTrack(id)->soloed);
+    stack.Undo(p);
+    CHECK(!p.FindTrack(id)->soloed);
+}
+
 static void test_frame_seconds_roundtrip() {
     std::printf("test_frame_seconds_roundtrip\n");
     CHECK(SecondsToFrames(1.0, 48000.0) == 48000);
@@ -122,6 +144,7 @@ int main() {
     test_add_and_undo_track();
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
+    test_mute_solo_undo_redo();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

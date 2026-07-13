@@ -50,6 +50,36 @@ void SetTrackPanCommand::Undo(Project& p) {
         t->pan = fOldPan;
 }
 
+// --- SetTrackMuteCommand ----------------------------------------------
+
+bool SetTrackMuteCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldMuted = t->muted;
+    t->muted  = fNewMuted;
+    return true;
+}
+
+void SetTrackMuteCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->muted = fOldMuted;
+}
+
+// --- SetTrackSoloCommand ----------------------------------------------
+
+bool SetTrackSoloCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldSoloed = t->soloed;
+    t->soloed  = fNewSoloed;
+    return true;
+}
+
+void SetTrackSoloCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->soloed = fOldSoloed;
+}
+
 // --- AddClipCommand ---------------------------------------------------
 
 bool AddClipCommand::Do(Project& p) {
