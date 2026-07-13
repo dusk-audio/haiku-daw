@@ -2,6 +2,8 @@
 
 #include "UiMetrics.h"
 
+#include <MenuItem.h>
+#include <PopUpMenu.h>
 #include <Window.h>
 
 #include <cstdio>
@@ -25,6 +27,9 @@ static constexpr float kMaxGain = 1.5f;   // fader top of travel
 // MIDI piano-roll vertical range: pitches [kMidiLow, kMidiLow+kMidiRange).
 static constexpr int kMidiLow   = 36;
 static constexpr int kMidiRange = 48;
+
+// How close (px) to a block's right edge counts as a resize grab.
+static constexpr float kEdgeGrab = 5.0f;
 
 static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
@@ -73,6 +78,14 @@ int TimelineView::TrackIndexAt(BPoint where) const {
     if (where.y > LaneRect(idx).bottom)
         return -1;
     return idx;
+}
+
+int TimelineView::PitchAt(BRect lane, float y) const {
+    const float rel = (lane.bottom - y) / lane.Height();
+    int pitch = kMidiLow + (int)(rel * kMidiRange + 0.5f);
+    if (pitch < 0) pitch = 0;
+    if (pitch > 127) pitch = 127;
+    return pitch;
 }
 
 int TimelineView::NoteIndexAt(const Track& t, BRect lane, BPoint where) const {
@@ -126,7 +139,8 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
-    // MIDI track content: right-click deletes a note, left-click adds one.
+    // MIDI track content: right-click deletes; on a note, drag to move or
+    // (near its right edge) resize; on empty space, add a note.
     if (t.type == TrackType::Midi) {
         const int hit = NoteIndexAt(t, lane, where);
         if (rightClick) {
@@ -136,14 +150,29 @@ void TimelineView::MouseDown(BPoint where) {
             Invalidate(lane);
             return;
         }
+        if (hit >= 0) {
+            const MidiNote& n = t.notes[(size_t)hit];
+            const float xStart = FrameToX(n.startFrame);
+            const float xEnd   = FrameToX(n.startFrame + n.lengthFrames);
+            const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
+            fDragTrack     = t.id;
+            fDragLane      = idx;
+            fDragNote      = hit;
+            fDragNoteOrig  = n;
+            if (wide && where.x >= xEnd - kEdgeGrab)
+                fDrag = Drag::NoteResize;
+            else {
+                fDrag = Drag::Note;
+                fDragGrabOffset  = XToFrame(where.x) - n.startFrame;
+                fDragPitchOffset = n.pitch - PitchAt(lane, where.y);
+            }
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            return;
+        }
         Frame time = XToFrame(where.x);
         if (time < 0) time = 0;
-        const float rel = (lane.bottom - where.y) / lane.Height();
-        int pitch = kMidiLow + (int)(rel * kMidiRange + 0.5f);
-        if (pitch < 0) pitch = 0;
-        if (pitch > 127) pitch = 127;
         MidiNote n;
-        n.pitch = pitch;
+        n.pitch = PitchAt(lane, where.y);
         n.velocity = 100;
         n.startFrame = time;
         n.lengthFrames = (Frame)(fProject->sampleRate * 0.25);   // 1/4 s
@@ -163,12 +192,20 @@ void TimelineView::MouseDown(BPoint where) {
                 Invalidate(lane);
                 return;
             }
-            fDrag           = Drag::Clip;
-            fDragTrack      = t.id;
-            fDragLane       = idx;
-            fDragClip       = c.id;
-            fDragClipOrig   = c.startFrame;
-            fDragGrabOffset = at - c.startFrame;
+            fDragTrack       = t.id;
+            fDragLane        = idx;
+            fDragClip        = c.id;
+            fDragClipOrig    = c.startFrame;
+            fDragClipOrigLen = c.lengthFrames;
+            const float xStart = FrameToX(c.startFrame);
+            const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
+            const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
+            if (wide && where.x >= xEnd - kEdgeGrab) {
+                fDrag = Drag::ClipResize;
+            } else {
+                fDrag = Drag::Clip;
+                fDragGrabOffset = at - c.startFrame;
+            }
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             break;
         }
@@ -192,14 +229,29 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         return;
     }
     if (FxRect(lane).Contains(where)) {
-        // Toggle a demo low-pass: add it if the chain is empty, else clear.
-        // Takes effect on the next Play (the FX chain is built at Load).
-        if (t.fx.empty())
-            fStack->Execute(std::make_unique<AddEffectCommand>(id, LowPassDesc(800.0f)),
-                            *fProject);
-        else
-            fStack->Execute(std::make_unique<ClearEffectsCommand>(id), *fProject);
-        Invalidate(lane);
+        // Effect picker. Effects apply on the next Play (chain built at Load).
+        BPopUpMenu* menu = new BPopUpMenu("fx", false, false);
+        menu->AddItem(new BMenuItem("Add Low-pass", NULL));
+        menu->AddItem(new BMenuItem("Add High-pass", NULL));
+        menu->AddItem(new BMenuItem("Add Delay", NULL));
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Clear Effects", NULL));
+        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+        const int32 pick = sel ? menu->IndexOf(sel) : -1;
+        delete menu;
+
+        std::unique_ptr<Command> cmd;
+        switch (pick) {
+            case 0: cmd = std::make_unique<AddEffectCommand>(id, LowPassDesc(800.0f)); break;
+            case 1: cmd = std::make_unique<AddEffectCommand>(id, HighPassDesc(200.0f)); break;
+            case 2: cmd = std::make_unique<AddEffectCommand>(id, DelayDesc()); break;
+            case 4: if (!t.fx.empty()) cmd = std::make_unique<ClearEffectsCommand>(id); break;
+            default: break;
+        }
+        if (cmd) {
+            fStack->Execute(std::move(cmd), *fProject);
+            Invalidate(lane);
+        }
         return;
     }
     if (ArmRect(lane).Contains(where)) {
@@ -255,6 +307,30 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (start < 0) start = 0;
             c->startFrame = start;   // preview only; sort fixed up on release
         }
+    } else if (fDrag == Drag::ClipResize) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            Frame len = XToFrame(where.x) - c->startFrame;
+            if (len < 1) len = 1;
+            c->lengthFrames = len;
+        }
+    } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize) {
+        if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
+            MidiNote& n = t->notes[(size_t)fDragNote];
+            if (fDrag == Drag::Note) {
+                Frame start = XToFrame(where.x) - fDragGrabOffset;
+                if (start < 0) start = 0;
+                n.startFrame = start;
+                int pitch = PitchAt(lane, where.y) + fDragPitchOffset;
+                if (pitch < 0) pitch = 0;
+                if (pitch > 127) pitch = 127;
+                n.pitch = pitch;
+            } else {
+                Frame len = XToFrame(where.x) - n.startFrame;
+                if (len < 1) len = 1;
+                n.lengthFrames = len;
+            }
+        }
     }
     Invalidate(lane);
 }
@@ -271,26 +347,51 @@ void TimelineView::MouseUp(BPoint) {
     if (t) {
         // Restore the pre-drag value, then apply the whole gesture as one
         // undoable command (which records the correct "old" value itself).
+        // Only push a command when the gesture actually changed something, so
+        // a bare click (down + up, no drag) doesn't pollute the undo stack.
         std::unique_ptr<Command> cmd;
         if (fDrag == Drag::Gain) {
             const float v = t->gain;
             t->gain = fDragOrig;
-            cmd = std::make_unique<SetTrackGainCommand>(fDragTrack, v);
+            if (v != fDragOrig)
+                cmd = std::make_unique<SetTrackGainCommand>(fDragTrack, v);
         } else if (fDrag == Drag::Pan) {
             const float v = t->pan;
             t->pan = fDragOrig;
-            cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
+            if (v != fDragOrig)
+                cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
         } else if (fDrag == Drag::Clip) {
             if (Clip* c = t->FindClip(fDragClip)) {
                 const Frame v = c->startFrame;
                 c->startFrame = fDragClipOrig;
-                cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
+                if (v != fDragClipOrig)
+                    cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
+            }
+        } else if (fDrag == Drag::ClipResize) {
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame v = c->lengthFrames;
+                c->lengthFrames = fDragClipOrigLen;
+                if (v != fDragClipOrigLen)
+                    cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
+            }
+        } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize) {
+            if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
+                MidiNote& n = t->notes[(size_t)fDragNote];
+                const int   vp = n.pitch;
+                const Frame vs = n.startFrame;
+                const Frame vl = n.lengthFrames;
+                n = fDragNoteOrig;   // restore for a clean single undo step
+                if (vp != fDragNoteOrig.pitch || vs != fDragNoteOrig.startFrame
+                    || vl != fDragNoteOrig.lengthFrames)
+                    cmd = std::make_unique<NoteEditCommand>(fDragTrack,
+                            (size_t)fDragNote, vp, vs, vl);
             }
         }
         if (cmd)
             fStack->Execute(std::move(cmd), *fProject);
     }
     fDrag = Drag::None;
+    fDragNote = -1;
     Invalidate(LaneRect(fDragLane));
 }
 

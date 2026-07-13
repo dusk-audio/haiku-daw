@@ -7,6 +7,7 @@
 #include "../src/model/Commands.h"
 
 #include <cstdio>
+#include <unistd.h>
 
 static int g_checks = 0, g_fails = 0;
 #define CHECK(cond)                                                       \
@@ -75,6 +76,33 @@ int main() {
     CHECK(newId != t1 && newId != t2);
 
     std::remove(path);
+
+    // Relative media paths: a clip whose absolute path is under the project
+    // file's directory is stored relative and resolves back on load, so a
+    // project + its media are portable together.
+    {
+        char cwd[4096];
+        if (getcwd(cwd, sizeof(cwd))) {
+            const std::string base = cwd;
+            const std::string projPath = base + "/proj_reltest.dawproj";
+            const std::string mediaAbs = base + "/media/loop.wav";
+
+            Project r;
+            CommandStack rs;
+            rs.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "T"), r);
+            TrackId rt = r.Tracks().front().id;
+            Clip rc; rc.startFrame = 0; rc.lengthFrames = 1;
+            rc.sourcePath = mediaAbs;
+            rs.Execute(std::make_unique<AddClipCommand>(rt, rc), r);
+
+            CHECK(ProjectIO::Save(r, projPath));
+            Project r2;
+            CHECK(ProjectIO::Load(r2, projPath));
+            // Round-trips back to the same absolute path.
+            CHECK(r2.Tracks()[0].clips[0].sourcePath == mediaAbs);
+            std::remove(projPath.c_str());
+        }
+    }
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

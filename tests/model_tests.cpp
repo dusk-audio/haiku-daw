@@ -111,6 +111,40 @@ static void test_clip_sorted_insert_and_move() {
     (void)cId;
 }
 
+static void test_resize_clip_and_edit_note() {
+    std::printf("test_resize_clip_and_edit_note\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "A"), p);
+    TrackId ta = p.Tracks().front().id;
+    Clip c; c.startFrame = 0; c.lengthFrames = 1000; c.sourcePath = "x.wav";
+    auto add = std::make_unique<AddClipCommand>(ta, c);
+    AddClipCommand* ap = add.get();
+    stack.Execute(std::move(add), p);
+    ClipId cid = ap->CreatedId();
+
+    stack.Execute(std::make_unique<ResizeClipCommand>(ta, cid, 500), p);
+    CHECK(p.FindTrack(ta)->clips[0].lengthFrames == 500);
+    stack.Undo(p);
+    CHECK(p.FindTrack(ta)->clips[0].lengthFrames == 1000);
+    // Clamp: length below 1 becomes 1.
+    stack.Execute(std::make_unique<ResizeClipCommand>(ta, cid, -5), p);
+    CHECK(p.FindTrack(ta)->clips[0].lengthFrames == 1);
+
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "M"), p);
+    TrackId tm = p.Tracks().back().id;
+    MidiNote n; n.pitch = 60; n.startFrame = 0; n.lengthFrames = 100;
+    stack.Execute(std::make_unique<AddNoteCommand>(tm, n), p);
+    stack.Execute(std::make_unique<NoteEditCommand>(tm, 0, 67, 480, 240), p);
+    CHECK(p.FindTrack(tm)->notes[0].pitch == 67);
+    CHECK(p.FindTrack(tm)->notes[0].startFrame == 480);
+    CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 240);
+    stack.Undo(p);
+    CHECK(p.FindTrack(tm)->notes[0].pitch == 60);
+    CHECK(p.FindTrack(tm)->notes[0].startFrame == 0);
+    CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 100);
+}
+
 static void test_mute_solo_undo_redo() {
     std::printf("test_mute_solo_undo_redo\n");
     Project p;
@@ -226,6 +260,7 @@ int main() {
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();
     test_remove_clip_and_note();
+    test_resize_clip_and_edit_note();
     test_mute_solo_undo_redo();
     test_effect_commands();
     test_note_commands();

@@ -17,11 +17,37 @@ std::string Unquote(const std::string& line) {
     return line.substr(a + 1, b - a - 1);
 }
 
+// Directory portion of a path ("" if none), without the trailing slash.
+std::string DirOf(const std::string& path) {
+    size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// Store media paths relative to the project file's directory when they live
+// under it, so a project + its media are portable together.
+std::string Relativize(const std::string& mediaPath, const std::string& baseDir) {
+    if (baseDir.empty() || mediaPath.empty())
+        return mediaPath;
+    const std::string prefix = baseDir + "/";
+    if (mediaPath.compare(0, prefix.size(), prefix) == 0)
+        return mediaPath.substr(prefix.size());
+    return mediaPath;
+}
+
+// Resolve a stored path: relative paths are taken relative to the project
+// file's directory; absolute paths (leading '/') are left as-is.
+std::string Resolve(const std::string& stored, const std::string& baseDir) {
+    if (stored.empty() || stored[0] == '/' || baseDir.empty())
+        return stored;
+    return baseDir + "/" + stored;
+}
+
 } // namespace
 
 bool ProjectIO::Save(const Project& p, const std::string& path) {
     std::ofstream f(path, std::ios::trunc);
     if (!f) return false;
+    const std::string baseDir = DirOf(path);
 
     f << "DAW 1\n";
     f << "sampleRate " << p.sampleRate << "\n";
@@ -45,7 +71,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)c.startFrame << " " << (long long)c.lengthFrames << " "
               << (long long)c.sourceOffset << " "
               << (long long)c.fadeInFrames << " " << (long long)c.fadeOutFrames
-              << " \"" << c.sourcePath << "\"\n";
+              << " \"" << Relativize(c.sourcePath, baseDir) << "\"\n";
 
         for (const MidiNote& n : t.notes)
             f << "note " << n.pitch << " " << n.velocity << " "
@@ -63,6 +89,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 bool ProjectIO::Load(Project& p, const std::string& path) {
     std::ifstream f(path);
     if (!f) return false;
+    const std::string baseDir = DirOf(path);
 
     p.Clear();
 
@@ -118,7 +145,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             iss >> c.id >> start >> len >> off >> fi >> fo;
             c.startFrame = start; c.lengthFrames = len; c.sourceOffset = off;
             c.fadeInFrames = fi; c.fadeOutFrames = fo;
-            c.sourcePath = Unquote(line);
+            c.sourcePath = Resolve(Unquote(line), baseDir);
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);
         }

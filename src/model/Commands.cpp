@@ -198,4 +198,42 @@ void MoveClipCommand::Undo(Project& p) {
     p.AddClip(fTrack, moved);
 }
 
+// --- ResizeClipCommand ------------------------------------------------
+
+bool ResizeClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldLength = c->lengthFrames;
+    c->lengthFrames = fNewLength > 1 ? fNewLength : 1;
+    return true;
+}
+
+void ResizeClipCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fClip))
+        c->lengthFrames = fOldLength;
+}
+
+// --- NoteEditCommand --------------------------------------------------
+
+bool NoteEditCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || fIndex >= t->notes.size()) return false;
+    MidiNote& n = t->notes[fIndex];
+    fOld = n;
+    n.pitch        = fPitch < 0 ? 0 : (fPitch > 127 ? 127 : fPitch);
+    n.startFrame   = fStart  < 0 ? 0 : fStart;
+    n.lengthFrames = fLength > 1 ? fLength : 1;
+    return true;
+}
+
+void NoteEditCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t && fIndex < t->notes.size())
+        t->notes[fIndex] = fOld;
+}
+
 } // namespace daw

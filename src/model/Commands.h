@@ -200,4 +200,42 @@ private:
     Frame   fOldStart = 0;
 };
 
+// Change a clip's length (right-edge trim/extend). Stores old for Undo().
+class ResizeClipCommand : public Command {
+public:
+    ResizeClipCommand(TrackId track, ClipId clip, Frame newLength)
+        : fTrack(track), fClip(clip), fNewLength(newLength) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Resize Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewLength;
+    Frame   fOldLength = 0;
+};
+
+// Edit a note's pitch/position/length (move + resize). Stores old for Undo().
+class NoteEditCommand : public Command {
+public:
+    NoteEditCommand(TrackId track, size_t index, int pitch, Frame start,
+                    Frame length)
+        : fTrack(track), fIndex(index), fPitch(pitch),
+          fStart(start), fLength(length) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Note"; }
+
+private:
+    TrackId  fTrack;
+    size_t   fIndex;
+    int      fPitch;
+    Frame    fStart;
+    Frame    fLength;
+    MidiNote fOld;   // saved in Do()
+};
+
 } // namespace daw
