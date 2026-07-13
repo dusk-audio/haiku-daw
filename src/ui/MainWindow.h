@@ -57,6 +57,7 @@ private:
     void UpdateTimeReadout(Frame playhead);
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
+    void ImportAudio(const char* path);   // add a WAV as a clip
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
     Project*        fProject;        // non-owning (the session)
@@ -74,6 +75,7 @@ private:
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
+    BFilePanel*               fImportPanel = nullptr;
     BMenuItem*                fMetItem = nullptr;   // metronome toggle
     bool                      fMetronome = false;
     bool                      fPlaying = false;

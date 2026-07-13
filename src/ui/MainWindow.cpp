@@ -49,6 +49,9 @@ enum {
     MSG_NEW_MIDI  = 'nmid',
     MSG_MIXER     = 'mixr',
     MSG_METRONOME = 'metr',
+    MSG_IMPORT    = 'impt',
+    MSG_IMPORT_REF = 'imrf',
+    MSG_PASTE     = 'past',
 };
 
 static constexpr float kTransportH = 36.0f;
@@ -66,6 +69,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     BMenu* fileMenu = new BMenu("File");
     fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fileMenu->AddItem(new BMenuItem("Save" B_UTF8_ELLIPSIS, new BMessage(MSG_SAVE), 'S'));
+    fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
     fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
     fileMenu->AddSeparatorItem();
     fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
@@ -73,6 +77,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     BMenu* editMenu = new BMenu("Edit");
     editMenu->AddItem(new BMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
     editMenu->AddItem(new BMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
+    editMenu->AddSeparatorItem();
+    editMenu->AddItem(new BMenuItem("Paste", new BMessage(MSG_PASTE), 'V'));
     menuBar->AddItem(editMenu);
     BMenu* trackMenu = new BMenu("Track");
     trackMenu->AddItem(new BMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
@@ -144,6 +150,7 @@ MainWindow::~MainWindow() {
     delete fSavePanel;
     delete fOpenPanel;
     delete fExportPanel;
+    delete fImportPanel;
     // fEngine / fRecorder destructors stop their threads.
 }
 
@@ -273,6 +280,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_REDO:
             if (fStack->CanRedo()) { fStack->Redo(*fProject); fTimeline->Invalidate(); }
             break;
+        case MSG_PASTE:
+            fTimeline->PasteAtPlayhead();
+            break;
         case MSG_SAVE:
             if (!fSavePanel) {
                 BMessenger to(this);
@@ -304,6 +314,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (msg->FindRef("refs", &ref) == B_OK) {
                 BPath path(&ref);
                 LoadFrom(path.Path());
+            }
+            break;
+        }
+        case MSG_IMPORT:
+            if (!fImportPanel) {
+                BMessenger to(this);
+                fImportPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0, false,
+                                              new BMessage(MSG_IMPORT_REF));
+            }
+            fImportPanel->Show();
+            break;
+        case MSG_IMPORT_REF: {
+            entry_ref ref;
+            if (msg->FindRef("refs", &ref) == B_OK) {
+                BPath path(&ref);
+                ImportAudio(path.Path());
             }
             break;
         }
@@ -506,6 +532,36 @@ void MainWindow::LoadFrom(const char* path) {
     fTimeline->SetProject(fProject);
     fTimeline->SetPlayhead(fProject->transport.playhead);
     UpdateTimeReadout(fProject->transport.playhead);
+    fTimeline->Invalidate();
+}
+
+void MainWindow::ImportAudio(const char* path) {
+    WavSource src;
+    if (!src.Open(path)) {
+        std::fprintf(stderr, "MainWindow: cannot import '%s'\n", path);
+        return;
+    }
+    // Target the first audio track; create one if the project has none.
+    TrackId tid = kInvalidTrackId;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == TrackType::Audio) { tid = t.id; break; }
+    if (tid == kInvalidTrackId) {
+        auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "Audio 1");
+        AddTrackCommand* ap = add.get();
+        fStack->Execute(std::move(add), *fProject);
+        tid = ap->CreatedId();
+    }
+
+    const double srcRate = src.FrameRate();
+    const double ratio = srcRate > 0 ? fProject->sampleRate / srcRate : 1.0;
+    Clip clip;
+    clip.startFrame   = fProject->transport.playhead;
+    clip.lengthFrames = (int64_t)llround(src.TotalFrames() * ratio);
+    clip.sourceOffset = 0;
+    clip.sourcePath   = path;
+    fStack->Execute(std::make_unique<AddClipCommand>(tid, clip), *fProject);
+
+    (*fPeaks)[path].Build(src);   // waveform envelope (src cursor is at start)
     fTimeline->Invalidate();
 }
 

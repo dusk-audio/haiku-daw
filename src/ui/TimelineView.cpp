@@ -4,6 +4,8 @@
 #include "EffectsWindow.h"
 #include "RenameWindow.h"
 
+#include <MenuItem.h>
+#include <PopUpMenu.h>
 #include <Window.h>
 
 #include <cstdio>
@@ -104,6 +106,45 @@ Frame TimelineView::Snapped(Frame f) const {
     if (modifiers() & B_SHIFT_KEY)   // hold Shift for free placement
         return f;
     return GridOf().Snap(f, kSnapDivision);
+}
+
+// A tiny Copy/Delete popup for a right-clicked clip or note.
+int TimelineView::ContextMenu(BPoint where) const {
+    BPopUpMenu* m = new BPopUpMenu("ctx", false, false);
+    m->AddItem(new BMenuItem("Copy", NULL));
+    m->AddItem(new BMenuItem("Delete", NULL));
+    BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
+                           false, true);
+    const int idx = sel ? m->IndexOf(sel) : -1;
+    delete m;
+    return idx;
+}
+
+void TimelineView::PasteAtPlayhead() {
+    const Frame at = fProject->transport.playhead;
+    if (fHasClipClip) {
+        // Prefer a track of the source type; fall back to the first such track.
+        TrackId target = kInvalidTrackId;
+        for (const Track& t : fProject->Tracks())
+            if (t.type == TrackType::Audio) { target = t.id; break; }
+        if (target != kInvalidTrackId) {
+            Clip c = fClipClip;
+            c.id = kInvalidClipId;      // AddClipCommand assigns a fresh id
+            c.startFrame = at;
+            fStack->Execute(std::make_unique<AddClipCommand>(target, c), *fProject);
+            Invalidate();
+        }
+    } else if (fHasClipNote) {
+        TrackId target = kInvalidTrackId;
+        for (const Track& t : fProject->Tracks())
+            if (t.type == TrackType::Midi) { target = t.id; break; }
+        if (target != kInvalidTrackId) {
+            MidiNote n = fClipNote;
+            n.startFrame = at;
+            fStack->Execute(std::make_unique<AddNoteCommand>(target, n), *fProject);
+            Invalidate();
+        }
+    }
 }
 
 void TimelineView::Draw(BRect updateRect) {
@@ -222,9 +263,17 @@ void TimelineView::MouseDown(BPoint where) {
     if (t.type == TrackType::Midi) {
         const int hit = NoteIndexAt(t, lane, where);
         if (rightClick) {
-            if (hit >= 0)
-                fStack->Execute(std::make_unique<RemoveNoteCommand>(t.id, (size_t)hit),
-                                *fProject);
+            if (hit >= 0) {
+                const int pick = ContextMenu(where);
+                if (pick == 0) {          // Copy
+                    fClipNote = t.notes[(size_t)hit];
+                    fHasClipNote = true; fHasClipClip = false;
+                    fClipType = TrackType::Midi;
+                } else if (pick == 1) {   // Delete
+                    fStack->Execute(std::make_unique<RemoveNoteCommand>(
+                        t.id, (size_t)hit), *fProject);
+                }
+            }
             Invalidate(lane);
             return;
         }
@@ -268,8 +317,15 @@ void TimelineView::MouseDown(BPoint where) {
     for (const Clip& c : t.clips) {
         if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
             if (rightClick) {
-                fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
-                                *fProject);
+                const int pick = ContextMenu(where);
+                if (pick == 0) {          // Copy
+                    fClipClip = c;
+                    fHasClipClip = true; fHasClipNote = false;
+                    fClipType = TrackType::Audio;
+                } else if (pick == 1) {   // Delete
+                    fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
+                                    *fProject);
+                }
                 Invalidate(lane);
                 return;
             }

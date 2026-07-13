@@ -55,6 +55,9 @@ public:
     Grid  GridOf() const;
     Frame Snapped(Frame f) const;
 
+    // Paste the clipboard clip/note at the playhead (Edit > Paste).
+    void  PasteAtPlayhead();
+
     void SetProject(Project* p) { fProject = p; Invalidate(); }
 
     // Waveform envelopes, keyed by clip source path. Non-owning; built once
@@ -116,6 +119,14 @@ private:
     // Ruler loop-drag state.
     Frame    fLoopAnchor  = 0;         // frame where a loop drag started
     bool     fLoopDragged = false;     // did the pointer move (drag vs click)?
+
+    // Clipboard (right-click Copy -> Edit > Paste).
+    int      ContextMenu(BPoint where) const;   // 0=Copy, 1=Delete, -1=none
+    bool     fHasClipClip = false;
+    Clip     fClipClip;                // copied audio clip
+    bool     fHasClipNote = false;
+    MidiNote fClipNote;                // copied MIDI note
+    TrackType fClipType = TrackType::Audio;  // source track type (paste target)
 
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning
