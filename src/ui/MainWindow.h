@@ -26,6 +26,7 @@ class BButton;
 class BStringView;
 class BMessageRunner;
 class BFilePanel;
+class BSlider;
 
 namespace daw {
 
@@ -64,6 +65,7 @@ private:
     TimelineView*   fTimeline;
     BStringView*    fTimeView;
     MeterView*      fMeter;
+    BSlider*        fMaster;
 
     std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
     std::unique_ptr<Recorder> fRecorder;  // active while recording

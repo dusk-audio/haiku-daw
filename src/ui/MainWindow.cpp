@@ -93,12 +93,12 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(zoomIn);
 
     // Master volume slider (0..150% -> gain 0..1.5), live/non-undoable.
-    BSlider* master = new BSlider(BRect(686, 4, 810, kTransportH - 4),
-                                  "master", "Vol", new BMessage(MSG_MASTER),
-                                  0, 150, B_HORIZONTAL);
-    master->SetModificationMessage(new BMessage(MSG_MASTER));
-    master->SetValue((int32)(fProject->masterGain * 100.0f));
-    bar->AddChild(master);
+    fMaster = new BSlider(BRect(686, 4, 810, kTransportH - 4),
+                          "master", "Vol", new BMessage(MSG_MASTER),
+                          0, 150, B_HORIZONTAL);
+    fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
+    fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
+    bar->AddChild(fMaster);
 
     // Master output meter, pinned to the right of the transport bar.
     fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
@@ -146,16 +146,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
-        case MSG_MASTER: {
-            int32 v = 100;
-            if (msg->FindInt32("be:value", &v) != B_OK) {
-                // Fall back to querying the slider if the value isn't attached.
-                if (BSlider* s = dynamic_cast<BSlider*>(FindView("master")))
-                    v = s->Value();
-            }
-            fProject->masterGain = v / 100.0f;   // live; engine reads it each poll
+        case MSG_MASTER:
+            // Live; the engine reads project.masterGain each poll (and at Load).
+            fProject->masterGain = fMaster->Value() / 100.0f;
             break;
-        }
         case MSG_UNDO:
             if (fStack->CanUndo()) { fStack->Undo(*fProject); fTimeline->Invalidate(); }
             break;
@@ -384,6 +378,7 @@ void MainWindow::LoadFrom(const char* path) {
     }
     fStack->Clear();          // history from the previous project is invalid
     RebuildPeaks();           // waveform envelopes for the loaded clips
+    fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
     fTimeline->SetProject(fProject);
     fTimeline->SetPlayhead(fProject->transport.playhead);
     UpdateTimeReadout(fProject->transport.playhead);

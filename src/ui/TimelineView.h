@@ -17,6 +17,8 @@
 
 #include <View.h>
 
+#include <functional>
+
 #include <map>
 #include <string>
 
@@ -72,6 +74,8 @@ public:
 private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
+    // Iterate visible bar/beat gridlines: fn(x, isBar, barNumber).
+    void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
     void DrawTrackHeader(const Track& t, BRect lane);
     void DrawMidiNotes(const Track& t, BRect lane);
     void DrawClip(const Clip& c, BRect lane);
@@ -108,7 +112,8 @@ private:
     MidiNote fDragNoteOrig;            // note at drag start, for undo
 
     // Ruler loop-drag state.
-    Frame    fLoopAnchor = 0;          // frame where a loop drag started
+    Frame    fLoopAnchor  = 0;         // frame where a loop drag started
+    bool     fLoopDragged = false;     // did the pointer move (drag vs click)?
 
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning

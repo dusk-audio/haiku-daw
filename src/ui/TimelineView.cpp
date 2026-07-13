@@ -66,6 +66,15 @@ void TimelineView::ZoomBy(double factor) {
 void TimelineView::PanBy(Frame deltaFrames) {
     fScrollFrame += deltaFrames;
     if (fScrollFrame < 0) fScrollFrame = 0;
+    // Don't scroll past the content (last clip/note end).
+    Frame end = 0;
+    for (const Track& t : fProject->Tracks()) {
+        for (const Clip& c : t.clips)
+            if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
+        for (const MidiNote& n : t.notes)
+            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+    }
+    if (fScrollFrame > end) fScrollFrame = end;
     Invalidate();
 }
 
@@ -171,8 +180,9 @@ void TimelineView::MouseDown(BPoint where) {
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fDrag       = Drag::RulerLoop;
-        fLoopAnchor = f;
+        fDrag        = Drag::RulerLoop;
+        fLoopAnchor  = f;
+        fLoopDragged = false;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;
     }
@@ -342,6 +352,7 @@ void TimelineView::PreviewDrag(BPoint where) {
     if (fDrag == Drag::RulerLoop) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
+        fLoopDragged = true;
         Transport& tr = fProject->transport;
         tr.loopStart = fLoopAnchor < f ? fLoopAnchor : f;
         tr.loopEnd   = fLoopAnchor < f ? f : fLoopAnchor;
@@ -415,11 +426,11 @@ void TimelineView::MouseUp(BPoint where) {
     if (fDrag == Drag::None)
         return;
 
-    // Ruler drag: a real drag left a loop region; a bare click (anchor
-    // unchanged) is a seek that clears the loop.
+    // Ruler: a real drag leaves a loop region; a bare click (no movement)
+    // seeks and clears any loop — regardless of prior loop state.
     if (fDrag == Drag::RulerLoop) {
         Transport& tr = fProject->transport;
-        if (!tr.loopEnabled || tr.loopEnd <= tr.loopStart) {
+        if (!fLoopDragged) {
             tr.loopEnabled = false;
             tr.playhead = fLoopAnchor;
             SetPlayhead(fLoopAnchor);
@@ -521,11 +532,26 @@ void TimelineView::DrawRuler(BRect update) {
         }
     }
 
-    // Bar/beat ticks. Beats are drawn only when there's room; bars always,
-    // with a "bar" number label.
+    // Bar/beat ticks: bars full-height + numbered, beats short (when zoomed in).
+    ForEachGridLine([&](float x, bool isBar, long bar) {
+        SetHighColor(isBar ? ColText() : ColGrid());
+        StrokeLine(BPoint(x, isBar ? 0 : kRulerHeight - 8),
+                   BPoint(x, kRulerHeight));
+        if (isBar) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%ld", bar);
+            DrawString(label, BPoint(x + 3, kRulerHeight - 9));
+        }
+    });
+}
+
+// Walk the visible bar/beat gridlines once, invoking fn for each. Shared by
+// the ruler and the lane background so their grids can't drift apart.
+void TimelineView::ForEachGridLine(
+        const std::function<void(float, bool, long)>& fn) const {
     const Grid   grid = GridOf();
-    const double fpb   = grid.FramesPerBeat();
-    const double fbar  = grid.FramesPerBar();
+    const double fpb  = grid.FramesPerBeat();
+    const double fbar = grid.FramesPerBar();
     if (fpb < 1.0) return;
     const bool drawBeats = (fpb / fFramesPerPixel) >= 8.0;
 
@@ -539,17 +565,8 @@ void TimelineView::DrawRuler(BRect update) {
         const float x = FrameToX(f);
         if (x < kHeaderWidth) continue;
         const bool isBar = ((Frame)(beat * fpb) % (Frame)fbar) < fpb;
-
         if (!isBar && !drawBeats) continue;
-        SetHighColor(isBar ? ColText() : ColGrid());
-        StrokeLine(BPoint(x, isBar ? 0 : kRulerHeight - 8),
-                   BPoint(x, kRulerHeight));
-        if (isBar) {
-            char label[16];
-            std::snprintf(label, sizeof(label), "%ld",
-                          (long)(f / (Frame)fbar) + 1);
-            DrawString(label, BPoint(x + 3, kRulerHeight - 9));
-        }
+        fn(x, isBar, (long)(f / (Frame)fbar) + 1);
     }
 }
 
@@ -571,25 +588,10 @@ void TimelineView::DrawLanes(BRect update) {
         FillRect(lane);
 
         // Bar/beat grid lines through the lane content area (bars brighter).
-        const Grid   grid = GridOf();
-        const double fpb  = grid.FramesPerBeat();
-        const double fbar = grid.FramesPerBar();
-        if (fpb >= 1.0) {
-            const bool drawBeats = (fpb / fFramesPerPixel) >= 8.0;
-            const Frame rightFrame = XToFrame(Bounds().right);
-            long firstBeat = (long)(XToFrame(kHeaderWidth) / fpb);
-            if (firstBeat < 0) firstBeat = 0;
-            for (long beat = firstBeat; ; beat++) {
-                const Frame f = (Frame)(beat * fpb);
-                if (f > rightFrame) break;
-                const float x = FrameToX(f);
-                if (x < kHeaderWidth) continue;
-                const bool isBar = ((Frame)(beat * fpb) % (Frame)fbar) < fpb;
-                if (!isBar && !drawBeats) continue;
-                SetHighColor(isBar ? ColGrid() : ColLaneAlt());
-                StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
-            }
-        }
+        ForEachGridLine([&](float x, bool isBar, long) {
+            SetHighColor(isBar ? ColGrid() : ColLaneAlt());
+            StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
+        });
 
         for (const Clip& c : t.clips)
             DrawClip(c, lane);
