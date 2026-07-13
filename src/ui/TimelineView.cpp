@@ -36,6 +36,7 @@ static constexpr float kEdgeGrab = 5.0f;
 // Edits snap to this grid resolution (16th notes) unless Shift is held.
 static constexpr int kSnapDivision = 4;
 
+static BRect RouteRect(BRect lane) { return BRect(84,  lane.top + 2,  112, lane.top + 17); }
 static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
 static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
@@ -424,6 +425,30 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         Invalidate(lane);
         return;
     }
+    if (RouteRect(lane).Contains(where)) {
+        // Output routing: Master + every bus track (except this one).
+        BPopUpMenu* menu = new BPopUpMenu("route", false, false);
+        menu->AddItem(new BMenuItem("Master", NULL));
+        std::vector<TrackId> targets;   // parallel to items after index 0
+        for (const Track& bt : fProject->Tracks()) {
+            if (bt.type != TrackType::Bus || bt.id == id) continue;
+            menu->AddItem(new BMenuItem(bt.name.c_str(), NULL));
+            targets.push_back(bt.id);
+        }
+        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+        const int32 pick = sel ? menu->IndexOf(sel) : -1;
+        delete menu;
+        if (pick == 0) {
+            fStack->Execute(std::make_unique<SetTrackOutputCommand>(
+                id, kInvalidTrackId), *fProject);
+            Invalidate(lane);
+        } else if (pick > 0 && (size_t)(pick - 1) < targets.size()) {
+            fStack->Execute(std::make_unique<SetTrackOutputCommand>(
+                id, targets[(size_t)(pick - 1)]), *fProject);
+            Invalidate(lane);
+        }
+        return;
+    }
     if (FxRect(lane).Contains(where)) {
         // Open the per-track effects editor. It runs on its own thread with a
         // snapshot of the chain and posts edits back to the window (main
@@ -789,6 +814,16 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
 
     SetHighColor(ColText());
     DrawString(t.name.c_str(), BPoint(6, lane.top + 14));
+
+    // Output routing box: "->M" master, "->B" a bus.
+    BRect rr = RouteRect(lane);
+    SetHighColor(t.output == kInvalidTrackId ? ColLane() : Rgb(70, 90, 130));
+    FillRect(rr);
+    SetHighColor(ColGrid());
+    StrokeRect(rr);
+    SetHighColor(ColText());
+    DrawString(t.output == kInvalidTrackId ? "\xE2\x86\x92M" : "\xE2\x86\x92B",
+               BPoint(rr.left + 4, rr.bottom - 4));
 
     // FX toggle box: lit green when the track has an effect chain.
     BRect fxr = FxRect(lane);

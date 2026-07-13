@@ -48,6 +48,7 @@ enum {
     MSG_EXPORT_REF = 'exrf',
     MSG_NEW_AUDIO = 'naud',
     MSG_NEW_MIDI  = 'nmid',
+    MSG_NEW_BUS   = 'nbus',
     MSG_MIXER     = 'mixr',
     MSG_METRONOME = 'metr',
     MSG_IMPORT    = 'impt',
@@ -90,6 +91,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     BMenu* trackMenu = new BMenu("Track");
     trackMenu->AddItem(new BMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
     trackMenu->AddItem(new BMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
+    trackMenu->AddItem(new BMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
     menuBar->AddItem(trackMenu);
     BMenu* viewMenu = new BMenu("View");
     viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
@@ -237,13 +239,17 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_NEW_AUDIO:
-        case MSG_NEW_MIDI: {
-            const bool midi = (msg->what == MSG_NEW_MIDI);
+        case MSG_NEW_MIDI:
+        case MSG_NEW_BUS: {
+            TrackType ty = msg->what == MSG_NEW_MIDI ? TrackType::Midi
+                         : msg->what == MSG_NEW_BUS  ? TrackType::Bus
+                                                     : TrackType::Audio;
+            const char* pfx = ty == TrackType::Midi ? "MIDI"
+                            : ty == TrackType::Bus  ? "Bus" : "Audio";
             char nm[32];
-            std::snprintf(nm, sizeof(nm), "%s %d", midi ? "MIDI" : "Audio",
+            std::snprintf(nm, sizeof(nm), "%s %d", pfx,
                           (int)fProject->Tracks().size() + 1);
-            fStack->Execute(std::make_unique<AddTrackCommand>(
-                midi ? TrackType::Midi : TrackType::Audio, nm), *fProject);
+            fStack->Execute(std::make_unique<AddTrackCommand>(ty, nm), *fProject);
             fTimeline->Invalidate();
             break;
         }
