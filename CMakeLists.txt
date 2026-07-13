@@ -44,10 +44,11 @@ add_test(NAME wavwriter_tests COMMAND wavwriter_tests)
 if(HAIKU)
     add_library(daw_engine
         src/engine/Engine.cpp
+        src/engine/Recorder.cpp
     )
     target_include_directories(daw_engine PUBLIC src)
-    # -lbe (app/interface), -lmedia (BSoundPlayer), -lroot. WavSource is
-    # now kit-free and lives in daw_model.
+    # -lbe (app/interface), -lmedia (BSoundPlayer/BMediaRecorder), -lroot.
+    # WavSource + WavWriter are kit-free and live in daw_model.
     target_link_libraries(daw_engine PUBLIC daw_model be media root)
 
     add_executable(play_clip prototypes/play_clip/main.cpp)
@@ -55,6 +56,9 @@ if(HAIKU)
 
     add_executable(mix_project prototypes/mix_project/main.cpp)
     target_link_libraries(mix_project PRIVATE daw_engine)
+
+    add_executable(record_clip prototypes/record_clip/main.cpp)
+    target_link_libraries(record_clip PRIVATE daw_engine)
 
     # --- The app: timeline UI (milestone 4) ---------------------------
     add_executable(daw
