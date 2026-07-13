@@ -13,6 +13,7 @@
 #include "../model/PeakCache.h"
 #include "../model/Command.h"
 #include "../engine/Engine.h"
+#include "../engine/Recorder.h"
 
 #include <Window.h>
 
@@ -37,7 +38,7 @@ public:
 
     using PeakMap = std::map<std::string, PeakCache>;
     MainWindow(BRect frame, Project* project, CommandStack* stack,
-               const PeakMap* peaks);
+               PeakMap* peaks);
     ~MainWindow() override;
 
     void MessageReceived(BMessage* msg) override;
@@ -46,17 +47,24 @@ public:
 private:
     void StartPlayback();
     void StopPlayback();
+    void StartRecording();
+    void StopRecording();
+    void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
 
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
+    PeakMap*        fPeaks;          // non-owning; new takes add entries here
 
     TimelineView*   fTimeline;
     BStringView*    fTimeView;
     MeterView*      fMeter;
 
-    std::unique_ptr<Engine> fEngine;         // rebuilt each Play
-    BMessageRunner*         fPulse = nullptr; // playhead poll, deleted on stop
+    std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
+    std::unique_ptr<Recorder> fRecorder;  // active while recording
+    BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
+    bool                      fPlaying = false;
+    int                       fTakeCounter = 0;
 };
 
 } // namespace daw

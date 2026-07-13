@@ -4,6 +4,8 @@
 #include "MeterView.h"
 #include "UiMetrics.h"
 
+#include "../engine/WavSource.h"
+
 #include <Application.h>
 #include <Button.h>
 #include <MessageRunner.h>
@@ -16,6 +18,7 @@ namespace daw {
 enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
+    MSG_REC   = 'rec ',
     MSG_PULSE = 'puls',
     MSG_UNDO  = 'undo',
     MSG_REDO  = 'redo',
@@ -25,10 +28,10 @@ static constexpr float kTransportH = 36.0f;
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
 MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
-                       const PeakMap* peaks)
+                       PeakMap* peaks)
     : BWindow(frame, "Haiku DAW", B_TITLED_WINDOW,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
-      fProject(project), fStack(stack) {
+      fProject(project), fStack(stack), fPeaks(peaks) {
     BRect bounds = Bounds();
 
     // --- Transport bar (top strip) ---
@@ -38,22 +41,25 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->SetViewColor(ColHeader());
     AddChild(bar);
 
-    BButton* play = new BButton(BRect(6, 5, 76, kTransportH - 5), "play",
+    BButton* play = new BButton(BRect(6, 5, 70, kTransportH - 5), "play",
                                 "Play", new BMessage(MSG_PLAY));
-    BButton* stop = new BButton(BRect(82, 5, 152, kTransportH - 5), "stop",
+    BButton* stop = new BButton(BRect(74, 5, 138, kTransportH - 5), "stop",
                                 "Stop", new BMessage(MSG_STOP));
+    BButton* rec  = new BButton(BRect(142, 5, 206, kTransportH - 5), "rec",
+                                "Rec", new BMessage(MSG_REC));
     bar->AddChild(play);
     bar->AddChild(stop);
+    bar->AddChild(rec);
 
-    fTimeView = new BStringView(BRect(170, 8, 300, kTransportH - 6),
+    fTimeView = new BStringView(BRect(216, 8, 330, kTransportH - 6),
                                 "time", "0:00.000");
     fTimeView->SetViewColor(ColHeader());
     fTimeView->SetHighColor(ColText());
     bar->AddChild(fTimeView);
 
-    BButton* undo = new BButton(BRect(310, 5, 380, kTransportH - 5), "undo",
+    BButton* undo = new BButton(BRect(340, 5, 404, kTransportH - 5), "undo",
                                 "Undo", new BMessage(MSG_UNDO));
-    BButton* redo = new BButton(BRect(386, 5, 456, kTransportH - 5), "redo",
+    BButton* redo = new BButton(BRect(408, 5, 472, kTransportH - 5), "redo",
                                 "Redo", new BMessage(MSG_REDO));
     bar->AddChild(undo);
     bar->AddChild(redo);
@@ -76,17 +82,25 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
 MainWindow::~MainWindow() {
     delete fPulse;
-    // fEngine's destructor stops playback and joins disk threads.
+    // fEngine / fRecorder destructors stop their threads.
 }
 
 void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_PLAY:  StartPlayback(); break;
-        case MSG_STOP:  StopPlayback();  break;
+        case MSG_STOP:
+            StopPlayback();
+            StopRecording();
+            break;
+        case MSG_REC:
+            // Toggle: Rec starts, Rec again (or Stop) finishes the take.
+            if (fRecorder && fRecorder->IsRecording()) StopRecording();
+            else                                       StartRecording();
+            break;
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
-            if (fPulse)          // playing -> restart from the new position
+            if (fPlaying)        // restart from the new position
                 StartPlayback();
             break;
         }
@@ -97,15 +111,17 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fStack->CanRedo()) { fStack->Redo(*fProject); fTimeline->Invalidate(); }
             break;
         case MSG_PULSE: {
-            if (!fEngine) break;
-            // Apply any live gain/pan/mute/solo edits without a replay.
-            fEngine->UpdateMix(*fProject);
-            const Frame ph = fEngine->Playhead();
-            fTimeline->SetPlayhead(ph);
-            UpdateTimeReadout(ph);
-            fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
-            if (fEngine->IsFinished())
-                StopPlayback();
+            if (fRecorder && fRecorder->IsRecording()) {
+                fMeter->SetLevels(fRecorder->PeakL(), fRecorder->PeakR());
+            } else if (fPlaying && fEngine) {
+                fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
+                const Frame ph = fEngine->Playhead();
+                fTimeline->SetPlayhead(ph);
+                UpdateTimeReadout(ph);
+                fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
+                if (fEngine->IsFinished())
+                    StopPlayback();
+            }
             break;
         }
         default:
@@ -113,7 +129,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
     }
 }
 
+void MainWindow::UpdatePulse() {
+    const bool need = fPlaying
+                   || (fRecorder && fRecorder->IsRecording());
+    if (need && !fPulse) {
+        fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
+                                    kPulseInterval);
+    } else if (!need && fPulse) {
+        delete fPulse;
+        fPulse = nullptr;
+    }
+}
+
 void MainWindow::StartPlayback() {
+    if (fRecorder && fRecorder->IsRecording())
+        return;   // no play-while-record in this milestone
     // Rebuild the engine from the current model each time (RT-safe: no live
     // mutation of a running graph). Playback begins at the current playhead.
     const Frame start = fProject->transport.playhead;
@@ -124,19 +154,83 @@ void MainWindow::StartPlayback() {
         return;
     }
     fEngine->Start();
-
-    delete fPulse;
-    fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
-                                kPulseInterval);
+    fPlaying = true;
+    UpdatePulse();
 }
 
 void MainWindow::StopPlayback() {
-    delete fPulse;
-    fPulse = nullptr;
     if (fEngine)
         fEngine->Stop();
+    fPlaying = false;
+    UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
     // Leave the playhead where it stopped; the readout keeps its last value.
+}
+
+void MainWindow::StartRecording() {
+    if (fPlaying || (fRecorder && fRecorder->IsRecording()))
+        return;
+
+    // Record onto the first armed audio track.
+    TrackId target = kInvalidTrackId;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == TrackType::Audio && t.armed) { target = t.id; break; }
+    if (target == kInvalidTrackId) {
+        std::fprintf(stderr, "MainWindow: arm a track (R) before recording\n");
+        return;
+    }
+
+    char path[64];
+    std::snprintf(path, sizeof(path), "take-%d.wav", ++fTakeCounter);
+
+    fRecorder.reset(new Recorder());
+    if (fRecorder->Start(path) != B_OK) {
+        std::fprintf(stderr, "MainWindow: recording failed to start\n");
+        fRecorder.reset();
+        return;
+    }
+    UpdatePulse();
+}
+
+void MainWindow::StopRecording() {
+    if (!fRecorder || !fRecorder->IsRecording())
+        return;
+
+    fRecorder->Stop();
+    const int64_t frames = fRecorder->FramesWritten();
+    const std::string path = std::string("take-") + std::to_string(fTakeCounter)
+                           + ".wav";
+
+    UpdatePulse();
+    fMeter->SetLevels(0.0f, 0.0f);
+
+    if (frames <= 0) {
+        std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
+        fRecorder.reset();
+        return;
+    }
+
+    // Find the armed track again and drop the take as a clip at the playhead.
+    TrackId target = kInvalidTrackId;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == TrackType::Audio && t.armed) { target = t.id; break; }
+    if (target != kInvalidTrackId) {
+        Clip clip;
+        clip.startFrame   = fProject->transport.playhead;
+        clip.lengthFrames = frames;
+        clip.sourceOffset = 0;
+        clip.sourcePath   = path;
+        fStack->Execute(std::make_unique<AddClipCommand>(target, clip),
+                        *fProject);
+
+        // Build the waveform envelope for the new take so it draws.
+        WavSource src;
+        if (src.Open(path))
+            (*fPeaks)[path].Build(src);
+    }
+
+    fRecorder.reset();
+    fTimeline->Invalidate();
 }
 
 void MainWindow::UpdateTimeReadout(Frame playhead) {
@@ -151,6 +245,7 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
 
 bool MainWindow::QuitRequested() {
     StopPlayback();
+    StopRecording();
     be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
 }

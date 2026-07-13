@@ -24,8 +24,9 @@ static constexpr float kMaxGain = 1.5f;   // fader top of travel
 
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
 static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
-static BRect GainRect(BRect lane)  { return BRect(58, lane.top + 22, 154, lane.top + 34); }
-static BRect PanRect(BRect lane)   { return BRect(58, lane.top + 40, 154, lane.top + 52); }
+static BRect ArmRect(BRect lane)   { return BRect(54, lane.top + 20, 74,  lane.top + 38); }
+static BRect GainRect(BRect lane)  { return BRect(80, lane.top + 22, 154, lane.top + 34); }
+static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.top + 52); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -124,6 +125,14 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     if (SoloRect(lane).Contains(where)) {
         fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
                         *fProject);
+        Invalidate(lane);
+        return;
+    }
+    if (ArmRect(lane).Contains(where)) {
+        // Arm is transient transport state, not an undoable document edit:
+        // toggle it directly (like the playhead), not through the stack.
+        if (Track* tr = fProject->FindTrack(id))
+            tr->armed = !tr->armed;
         Invalidate(lane);
         return;
     }
@@ -307,17 +316,20 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     SetHighColor(ColText());
     DrawString(t.name.c_str(), BPoint(6, lane.top + 14));
 
-    // Mute / Solo toggle boxes: filled when active.
-    BRect m = MuteRect(lane), s = SoloRect(lane);
+    // Mute / Solo / Arm toggle boxes: filled when active.
+    BRect m = MuteRect(lane), s = SoloRect(lane), a = ArmRect(lane);
     SetHighColor(t.muted ? ColPlayhead() : ColLane());
     FillRect(m);
     SetHighColor(t.soloed ? Rgb(210, 190, 70) : ColLane());
     FillRect(s);
+    SetHighColor(t.armed ? Rgb(220, 60, 60) : ColLane());
+    FillRect(a);
     SetHighColor(ColGrid());
-    StrokeRect(m); StrokeRect(s);
+    StrokeRect(m); StrokeRect(s); StrokeRect(a);
     SetHighColor(ColText());
     DrawString("M", BPoint(m.left + 5, m.bottom - 5));
     DrawString("S", BPoint(s.left + 6, s.bottom - 5));
+    DrawString("R", BPoint(a.left + 6, a.bottom - 5));
 
     // Gain fader: filled proportion = gain / kMaxGain.
     BRect g = GainRect(lane);
