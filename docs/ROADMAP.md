@@ -123,6 +123,41 @@ makes them idiomatic (e.g. BFS browser, native metering). Some Ardour features
 are out of scope by design (video, heavy plugin ecosystems on a plugin-less
 Haiku image, control-surface zoo).
 
+### Recommended additions to the plan (high value + feasible here)
+
+These are the Ardour-tier gaps worth building — mostly kit-free / host-testable,
+native-feeling, and not blocked by the plugin-less VM:
+
+- **Tempo & meter MAP** *(new, high priority)* — multiple tempo + time-signature
+  changes with ramps, replacing the single project tempo. Kit-free extension of
+  `Grid`; touches the ruler, snap, metronome, synth, and export. Foundational
+  for real arrangements. → new **Phase T**, slot right after Phase A.
+- **Markers / ranges / locations** *(easy, high workflow value)* — named
+  markers, loop/punch ranges, a locations list. Kit-free model + UI. → fold into
+  Phase C.
+- **Metering upgrade** — per-track meters, and LUFS + true-peak on the master
+  (kit-free loudness math, host-testable). → extend Phase A / Phase G.
+- **Export upgrade** — stem / per-track / per-bus bounce, export ranges,
+  dithering, loudness-normalize; FLAC/Ogg encoders later. → extend the exporter.
+- **Freeze / bounce a track** — render a track through its FX to audio (reuse
+  the offline `Exporter`). → Phase C.
+- **Region ops** — normalize / reverse / gain / strip-silence / fade presets on
+  a clip (kit-free DSP, host-testable). → Phase C.
+- **SMF (MIDI file) import/export + CC lanes** — standard `.mid` read/write
+  (kit-free) and controller lanes that feed automation. → Phase B / E.
+- **Snapshots + autosave** — cheap given `ProjectIO`. → Phase H.
+- **Basic monitor section** — master dim / mono / solo-safe. Small. → Phase A.
+- **Time-stretch / pitch-shift** *(stretch — harder)* — a basic WSOLA/phase-
+  vocoder, kit-free. High value, high effort; flag as its own later phase.
+
+### Deliberately skipped (for now — low value here or out of scope)
+
+Full plugin hosting (LV2/VST) & PDC beyond Phase I; timecode/LTC/MTC/MMC &
+Ableton Link sync; control surfaces / OSC / MIDI-learn; VCA masters + full
+routing matrix (basic buses/sends in Phase A are enough for now); transient
+detection / audio quantize; video timeline; Lua scripting; surround/VBAP. These
+can be reconsidered once the core is done and if a concrete need appears.
+
 ---
 
 ### Suggested order
