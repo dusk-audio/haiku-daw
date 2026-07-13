@@ -411,6 +411,22 @@ void SetSendsCommand::Undo(Project& p) {
         t->sends = fOld;
 }
 
+// --- MoveTrackCommand -------------------------------------------------
+
+bool MoveTrackCommand::Do(Project& p) {
+    const int from = p.IndexOfTrack(fTrack);
+    if (from < 0) return false;
+    int to = from + fDelta;
+    if (to < 0 || to >= (int)p.Tracks().size()) return false;   // at the edge
+    fFrom = (size_t)from;
+    fTo   = (size_t)to;
+    return p.MoveTrack(fFrom, fTo);
+}
+
+void MoveTrackCommand::Undo(Project& p) {
+    p.MoveTrack(fTo, fFrom);   // move it back
+}
+
 // --- SetAutoLaneCommand -----------------------------------------------
 
 bool SetAutoLaneCommand::Do(Project& p) {

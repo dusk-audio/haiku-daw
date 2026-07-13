@@ -61,6 +61,15 @@ int Project::IndexOfTrack(TrackId id) const {
     return -1;
 }
 
+bool Project::MoveTrack(size_t from, size_t to) {
+    if (from >= fTracks.size() || to >= fTracks.size() || from == to)
+        return false;
+    Track t = std::move(fTracks[from]);
+    fTracks.erase(fTracks.begin() + from);
+    fTracks.insert(fTracks.begin() + to, std::move(t));
+    return true;
+}
+
 bool Project::AddClip(TrackId track, const Clip& c) {
     Track* t = FindTrack(track);
     if (t == nullptr || c.id == kInvalidClipId || t->FindClip(c.id))

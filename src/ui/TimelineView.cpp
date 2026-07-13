@@ -286,8 +286,22 @@ void TimelineView::MouseDown(BPoint where) {
         // Track name strip: right-click deletes the track, double-click renames.
         if (where.y <= lane.top + 18 && where.x < 114) {
             if (rightClick) {
-                fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
-                                *fProject);
+                BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
+                mm->AddItem(new BMenuItem("Move Up", NULL));     // 0
+                mm->AddItem(new BMenuItem("Move Down", NULL));   // 1
+                mm->AddItem(new BMenuItem("Delete", NULL));      // 2
+                BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
+                const int pick = sel ? mm->IndexOf(sel) : -1;
+                delete mm;
+                if (pick == 0)
+                    fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, -1),
+                                    *fProject);
+                else if (pick == 1)
+                    fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, +1),
+                                    *fProject);
+                else if (pick == 2)
+                    fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
+                                    *fProject);
                 Invalidate();
                 return;
             }

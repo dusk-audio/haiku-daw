@@ -107,6 +107,7 @@ public:
     bool InsertTrack(size_t index, const Track& t);   // for faithful undo
     bool RemoveTrack(TrackId id);
     int  IndexOfTrack(TrackId id) const;              // -1 if not found
+    bool MoveTrack(size_t from, size_t to);           // reorder within the list
     bool AddClip(TrackId track, const Clip& c);
     bool RemoveClip(TrackId track, ClipId clip);
 

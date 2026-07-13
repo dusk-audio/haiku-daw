@@ -356,6 +356,23 @@ private:
     MidiNote fOld;    // saved in Do()
 };
 
+// Move a track up (-1) or down (+1) in the track list. Clamped; a no-op move
+// (already at the edge) reports failure so it doesn't hit the undo stack.
+class MoveTrackCommand : public Command {
+public:
+    MoveTrackCommand(TrackId track, int delta)
+        : fTrack(track), fDelta(delta) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Move Track"; }
+
+private:
+    TrackId fTrack;
+    int     fDelta;
+    size_t  fFrom = 0, fTo = 0;   // resolved indices (for undo)
+};
+
 // Replace a track's whole aux-send list. The sends editor edits a snapshot and
 // applies it wholesale (same pattern as the effects/mixer windows). Stores the
 // old list for Undo().

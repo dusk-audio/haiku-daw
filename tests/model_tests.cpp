@@ -150,6 +150,32 @@ static void test_split_clip() {
     CHECK(t->clips[0].fadeOutFrames == 300);
 }
 
+static void test_move_track() {
+    std::printf("test_move_track\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "A"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "B"), p);
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "C"), p);
+    TrackId a = p.Tracks()[0].id, b = p.Tracks()[1].id, c = p.Tracks()[2].id;
+
+    // Move B down -> A C B.
+    stack.Execute(std::make_unique<MoveTrackCommand>(b, +1), p);
+    CHECK(p.Tracks()[0].id == a);
+    CHECK(p.Tracks()[1].id == c);
+    CHECK(p.Tracks()[2].id == b);
+
+    // Undo -> A B C.
+    stack.Undo(p);
+    CHECK(p.Tracks()[0].id == a);
+    CHECK(p.Tracks()[1].id == b);
+    CHECK(p.Tracks()[2].id == c);
+
+    // Move at the edge fails (no undo entry).
+    CHECK(!MoveTrackCommand(a, -1).Do(p));
+    CHECK(!MoveTrackCommand(c, +1).Do(p));
+}
+
 static void test_bus_routing() {
     std::printf("test_bus_routing\n");
     Project p;
@@ -398,6 +424,7 @@ int main() {
     test_effect_commands();
     test_note_commands();
     test_split_clip();
+    test_move_track();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
