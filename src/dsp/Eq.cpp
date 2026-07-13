@@ -9,11 +9,13 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Fixed band layout: low shelf, three peaks, high shelf.
+// Band type is fixed by position: low shelf, three peaks, high shelf.
 enum BandType { LowShelf, Peak, HighShelf };
 const BandType kType[Eq::kBands] = { LowShelf, Peak, Peak, Peak, HighShelf };
-const double   kFreq[Eq::kBands] = { 80.0, 240.0, 750.0, 2200.0, 6500.0 };
-const double   kQ[Eq::kBands]    = { 0.70, 0.90, 0.90, 0.90, 0.70 };
+
+// Sensible default band frequencies / Qs (used before SetBand is called).
+const float kDefFreq[Eq::kBands] = { 80.0f, 240.0f, 750.0f, 2200.0f, 6500.0f };
+const float kDefQ[Eq::kBands]    = { 0.70f, 0.90f, 0.90f, 0.90f, 0.70f };
 
 double ClampFreq(double fc, double sr) {
     return std::max(1.0, std::min(fc, sr * 0.4998));
@@ -80,36 +82,39 @@ Co HighShelfCo(double fc, double sr, double gainDB, double Q) {
 
 } // namespace
 
-Eq::Eq(float g0, float g1, float g2, float g3, float g4) {
-    fGainDb[0] = g0; fGainDb[1] = g1; fGainDb[2] = g2;
-    fGainDb[3] = g3; fGainDb[4] = g4;
-    ComputeCoeffs();
+Eq::Eq() {
+    for (int b = 0; b < kBands; b++) {
+        fFreq[b]   = kDefFreq[b];
+        fGainDb[b] = 0.0f;
+        fQ[b]      = kDefQ[b];
+    }
+    for (int b = 0; b < kBands; b++) ComputeBand(b);
     Reset();
 }
 
-void Eq::SetGains(float g0, float g1, float g2, float g3, float g4) {
-    fGainDb[0] = g0; fGainDb[1] = g1; fGainDb[2] = g2;
-    fGainDb[3] = g3; fGainDb[4] = g4;
-    ComputeCoeffs();
+void Eq::SetBand(int band, float freqHz, float gainDb, float q) {
+    if (band < 0 || band >= kBands) return;
+    fFreq[band]   = freqHz;
+    fGainDb[band] = gainDb;
+    fQ[band]      = q;
+    ComputeBand(band);
 }
 
 void Eq::Prepare(double sampleRate) {
     if (sampleRate > 0) fSampleRate = sampleRate;
-    ComputeCoeffs();
+    for (int b = 0; b < kBands; b++) ComputeBand(b);
     Reset();
 }
 
-void Eq::ComputeCoeffs() {
-    for (int b = 0; b < kBands; b++) {
-        Co c;
-        switch (kType[b]) {
-            case LowShelf:  c = LowShelfCo(kFreq[b], fSampleRate, fGainDb[b], kQ[b]); break;
-            case HighShelf: c = HighShelfCo(kFreq[b], fSampleRate, fGainDb[b], kQ[b]); break;
-            case Peak:
-            default:        c = Peaking(kFreq[b], fSampleRate, fGainDb[b], kQ[b]); break;
-        }
-        fB0[b] = c.b0; fB1[b] = c.b1; fB2[b] = c.b2; fA1[b] = c.a1; fA2[b] = c.a2;
+void Eq::ComputeBand(int b) {
+    Co c;
+    switch (kType[b]) {
+        case LowShelf:  c = LowShelfCo(fFreq[b], fSampleRate, fGainDb[b], fQ[b]); break;
+        case HighShelf: c = HighShelfCo(fFreq[b], fSampleRate, fGainDb[b], fQ[b]); break;
+        case Peak:
+        default:        c = Peaking(fFreq[b], fSampleRate, fGainDb[b], fQ[b]); break;
     }
+    fB0[b] = c.b0; fB1[b] = c.b1; fB2[b] = c.b2; fA1[b] = c.a1; fA2[b] = c.a2;
 }
 
 void Eq::Reset() {

@@ -3,55 +3,67 @@
 // The model stays kit-free and owns no live DSP state: it stores an ordered
 // list of these descriptors per track. The engine instantiates real IEffect
 // objects from them (see dsp/EffectFactory) when it builds its graph. Params
-// are generic slots interpreted per type, which keeps the model simple and
-// trivially serializable later.
+// are a flat float vector whose meaning is per type, which keeps the model
+// simple, trivially serializable, and lets effects carry as many params as
+// they need (e.g. the parametric EQ's 15).
 #pragma once
+
+#include <cstddef>
+#include <vector>
 
 namespace daw {
 
 // Order is the serialized id (0..4); do not reorder without bumping the file
 // format (see ProjectIO). Biquad is kept for loading older projects; new tone
-// shaping uses the 5-band Eq.
+// shaping uses the parametric Eq.
 enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq };
 
 struct EffectDesc {
-    EffectType type = EffectType::Biquad;
-    // Per-type param slots:
-    //   Biquad:     p0 = mode (0 LowPass, 1 HighPass, 2 Peaking), p1 = freq Hz,
-    //               p2 = Q, p3 = gain dB (peaking only)
-    //   Delay:      p0 = time s, p1 = feedback [0,1), p2 = mix [0,1]
-    //   Reverb:     p0 = roomSize [0,1], p1 = mix [0,1]
-    //   Compressor: p0 = threshold dB, p1 = ratio, p2 = attack ms,
-    //               p3 = release ms, p4 = makeup dB
-    //   Eq:         p0..p4 = per-band gain dB (80/240/750/2200/6500 Hz)
-    float p0 = 0.0f;
-    float p1 = 0.0f;
-    float p2 = 0.0f;
-    float p3 = 0.0f;
-    float p4 = 0.0f;   // extra slot (compressor makeup); 0 for older records
+    EffectType         type = EffectType::Biquad;
+    std::vector<float> params;
+    // Per-type param layout:
+    //   Biquad:     [mode(0 LP,1 HP,2 Peak), freq Hz, Q, gain dB]
+    //   Delay:      [time s, feedback [0,1), mix [0,1]]
+    //   Reverb:     [roomSize [0,1], mix [0,1]]
+    //   Compressor: [threshold dB, ratio, attack ms, release ms, makeup dB]
+    //   Eq:         5 bands of [freq Hz, gain dB, Q] (band 0 = low shelf,
+    //               bands 1-3 = peaks, band 4 = high shelf)
+
+    // Read a param with a safe default for missing slots.
+    float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
 };
 
-// Convenience builders for the common presets the UI drops in.
+// Convenience builders for the presets the UI drops in.
+inline EffectDesc BiquadDesc(float mode, float freq, float q = 0.707f,
+                             float gainDb = 0.0f) {
+    return EffectDesc{EffectType::Biquad, {mode, freq, q, gainDb}};
+}
 inline EffectDesc LowPassDesc(float freq = 800.0f, float q = 0.707f) {
-    return EffectDesc{EffectType::Biquad, 0.0f, freq, q, 0.0f};
+    return BiquadDesc(0.0f, freq, q);
 }
 inline EffectDesc HighPassDesc(float freq = 200.0f, float q = 0.707f) {
-    return EffectDesc{EffectType::Biquad, 1.0f, freq, q, 0.0f};
+    return BiquadDesc(1.0f, freq, q);
 }
 inline EffectDesc DelayDesc(float sec = 0.25f, float fb = 0.35f, float mix = 0.3f) {
-    return EffectDesc{EffectType::Delay, sec, fb, mix, 0.0f};
+    return EffectDesc{EffectType::Delay, {sec, fb, mix}};
 }
 inline EffectDesc ReverbDesc(float roomSize = 0.5f, float mix = 0.3f) {
-    return EffectDesc{EffectType::Reverb, roomSize, mix, 0.0f, 0.0f};
+    return EffectDesc{EffectType::Reverb, {roomSize, mix}};
 }
 inline EffectDesc CompressorDesc(float thrDb = -20.0f, float ratio = 4.0f,
                                  float attackMs = 10.0f, float releaseMs = 100.0f,
                                  float makeupDb = 0.0f) {
-    return EffectDesc{EffectType::Compressor, thrDb, ratio, attackMs, releaseMs,
-                      makeupDb};
+    return EffectDesc{EffectType::Compressor,
+                      {thrDb, ratio, attackMs, releaseMs, makeupDb}};
 }
-inline EffectDesc EqDesc() {   // 5 flat bands
-    return EffectDesc{EffectType::Eq, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+// Default parametric EQ: low shelf, three peaks, high shelf, all flat.
+inline EffectDesc EqDesc() {
+    return EffectDesc{EffectType::Eq, {
+        80.0f,   0.0f, 0.70f,
+        240.0f,  0.0f, 0.90f,
+        750.0f,  0.0f, 0.90f,
+        2200.0f, 0.0f, 0.90f,
+        6500.0f, 0.0f, 0.70f }};
 }
 
 } // namespace daw

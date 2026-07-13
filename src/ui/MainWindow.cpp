@@ -245,16 +245,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid)) {
                 t->fx.clear();
-                int32 type = 0;
+                int32 type = 0, epIdx = 0;
                 for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                     EffectDesc d;
                     d.type = (type >= 0 && type <= 4) ? (EffectType)type
                                                       : EffectType::Biquad;
-                    msg->FindFloat("e0", i, &d.p0);
-                    msg->FindFloat("e1", i, &d.p1);
-                    msg->FindFloat("e2", i, &d.p2);
-                    msg->FindFloat("e3", i, &d.p3);
-                    msg->FindFloat("e4", i, &d.p4);
+                    int32 count = 0;
+                    msg->FindInt32("ec", i, &count);
+                    for (int32 j = 0; j < count; j++) {
+                        float v = 0.0f;
+                        msg->FindFloat("ep", epIdx++, &v);
+                        d.params.push_back(v);
+                    }
                     t->fx.push_back(d);
                 }
                 fTimeline->Invalidate();

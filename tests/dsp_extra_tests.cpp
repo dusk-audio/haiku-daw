@@ -112,7 +112,7 @@ int main() {
     // the high-shelf band leaves DC ~unchanged.
     {
         // Low-shelf +12 dB on band 0 -> DC (0 Hz) rises ~4x (10^(12/20)=3.98).
-        Eq low(12.0f, 0, 0, 0, 0);
+        Eq low; low.SetBand(0, 80.0f, 12.0f, 0.7f);
         low.Prepare(SR);
         std::vector<float> buf(4000 * 2, 1.0f);      // DC
         low.Process(buf.data(), 4000);
@@ -126,7 +126,7 @@ int main() {
         CHECK(std::fabs(b2[2 * 3999] - 1.0f) < 1e-3f);
 
         // High-shelf +12 dB (band 4): DC (well below 6.5 kHz) ~unchanged.
-        Eq high(0, 0, 0, 0, 12.0f);
+        Eq high; high.SetBand(4, 6500.0f, 12.0f, 0.7f);
         high.Prepare(SR);
         std::vector<float> b3(4000 * 2, 1.0f);
         high.Process(b3.data(), 4000);

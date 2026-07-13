@@ -67,7 +67,7 @@ int main() {
     CHECK(bt1.fx.size() == 2);
     CHECK(bt1.fx[0].type == EffectType::Biquad);
     CHECK(bt1.fx[1].type == EffectType::Compressor);
-    CHECK(std::abs(bt1.fx[1].p4 - 6.0f) < 1e-4f);   // makeup persisted
+    CHECK(std::abs(bt1.fx[1].p(4) - 6.0f) < 1e-4f);   // makeup persisted
 
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);

@@ -78,10 +78,11 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "note " << n.pitch << " " << n.velocity << " "
               << (long long)n.startFrame << " " << (long long)n.lengthFrames << "\n";
 
-        for (const EffectDesc& e : t.fx)
-            f << "fx " << (int)e.type << " "
-              << e.p0 << " " << e.p1 << " " << e.p2 << " " << e.p3
-              << " " << e.p4 << "\n";
+        for (const EffectDesc& e : t.fx) {
+            f << "fx " << (int)e.type << " " << e.params.size();
+            for (float v : e.params) f << " " << v;
+            f << "\n";
+        }
 
         f << "endtrack\n";
     }
@@ -166,11 +167,15 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         }
         else if (kw == "fx" && haveTrack) {
             EffectDesc e;
-            int type = 0;
-            iss >> type >> e.p0 >> e.p1 >> e.p2 >> e.p3;
-            iss >> e.p4;   // optional 5th param; absent in older records -> 0
+            int type = 0, count = 0;
+            iss >> type >> count;
             if (type < 0 || type > 4) type = 0;
             e.type = (EffectType)type;
+            for (int i = 0; i < count; i++) {
+                float v = 0.0f;
+                iss >> v;
+                e.params.push_back(v);
+            }
             cur.fx.push_back(e);
         }
         // "endtrack" and unknown keywords: ignored (commit happens on next

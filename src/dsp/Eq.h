@@ -1,12 +1,12 @@
-// Eq — a 5-band EQ (low shelf, 3 parametric peaks, high shelf), one of the
+// Eq — a 5-band parametric EQ (low shelf, 3 peaks, high shelf), one of the
 // built-in effects.
 //
-// Fixed band frequencies + Q; the five parameters (p0..p4) are the per-band
-// gains in dB, which fits the EffectDesc's five slots. Coefficient math is
-// ported from the user's Multi-Q AnalogMatchedBiquad ("amb") core
-// (bandwidth-prewarped shelves/peaks, NOT RBJ-alpha) so the tone matches their
-// plugin. Direct Form I, independent state per stereo channel; coefficients are
-// recomputed in Prepare(), Process() is arithmetic on preallocated state.
+// Each band has adjustable frequency, gain (dB), and Q; the band TYPE is fixed
+// by position (0 = low shelf, 1-3 = peaks, 4 = high shelf). Coefficient math is
+// ported from the user's Multi-Q AnalogMatchedBiquad ("amb") core (bandwidth-
+// prewarped shelves/peaks, NOT RBJ-alpha) so the tone matches their plugin.
+// Direct Form I, independent state per stereo channel; coefficients recompute
+// in Prepare()/SetBand, Process() is arithmetic on preallocated state.
 //
 // Kit-free (STL only), host-testable.
 #pragma once
@@ -19,11 +19,10 @@ class Eq : public IEffect {
 public:
     static constexpr int kBands = 5;
 
-    // Per-band gain in dB (0 = flat). Bands: 80 Hz shelf, 240 / 750 / 2200 Hz
-    // peaks, 6.5 kHz shelf.
-    Eq(float g0 = 0, float g1 = 0, float g2 = 0, float g3 = 0, float g4 = 0);
+    Eq();
 
-    void SetGains(float g0, float g1, float g2, float g3, float g4);
+    // Set one band's frequency (Hz), gain (dB), and Q. Recomputes coeffs.
+    void SetBand(int band, float freqHz, float gainDb, float q);
 
     void Prepare(double sampleRate) override;
     void Process(float* stereo, int frames) override;
@@ -31,10 +30,12 @@ public:
     const char* Name() const override { return "EQ"; }
 
 private:
-    void ComputeCoeffs();
+    void ComputeBand(int b);
 
     double fSampleRate = 48000.0;
+    float  fFreq[kBands];
     float  fGainDb[kBands];
+    float  fQ[kBands];
 
     // Normalized biquad coefficients per band (a0 folded in).
     double fB0[kBands], fB1[kBands], fB2[kBands], fA1[kBands], fA2[kBands];

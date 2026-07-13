@@ -6,6 +6,7 @@
 #include <Slider.h>
 #include <StringView.h>
 
+#include <cstdio>
 #include <utility>
 
 namespace daw {
@@ -19,16 +20,11 @@ enum {
 };
 
 static void SetSlot(EffectDesc& d, int slot, float v) {
-    switch (slot) { case 0: d.p0=v; break; case 1: d.p1=v; break;
-                    case 2: d.p2=v; break; case 3: d.p3=v; break;
-                    case 4: d.p4=v; break; }
+    if (slot < 0) return;
+    if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
+    d.params[slot] = v;
 }
-static float GetSlot(const EffectDesc& d, int slot) {
-    switch (slot) { case 0: return d.p0; case 1: return d.p1;
-                    case 2: return d.p2; case 3: return d.p3;
-                    case 4: return d.p4; }
-    return 0.0f;
-}
+static float GetSlot(const EffectDesc& d, int slot) { return d.p((size_t)slot); }
 
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
                              TrackId track, BMessenger apply)
@@ -44,13 +40,13 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
 void EffectsWindow::Apply() {
     BMessage m(kMsgApplyFx);
     m.AddInt64("track", (int64)fTrack);
+    // Per effect: type + param count, with all params concatenated into one
+    // "ep" float array (the receiver consumes them by count).
     for (const EffectDesc& d : fChain) {
         m.AddInt32("et", (int32)(int)d.type);
-        m.AddFloat("e0", d.p0);
-        m.AddFloat("e1", d.p1);
-        m.AddFloat("e2", d.p2);
-        m.AddFloat("e3", d.p3);
-        m.AddFloat("e4", d.p4);
+        m.AddInt32("ec", (int32)d.params.size());
+        for (float v : d.params)
+            m.AddFloat("ep", v);
     }
     fApply.SendMessage(&m);
 }
@@ -131,13 +127,19 @@ void EffectsWindow::Rebuild() {
                 add("Release ms", 3, 5.0f, 1000.0f);
                 add("Makeup dB", 4, 0.0f, 24.0f);
                 break;
-            case EffectType::Eq:
-                add("80 Hz",   0, -18.0f, 18.0f);
-                add("240 Hz",  1, -18.0f, 18.0f);
-                add("750 Hz",  2, -18.0f, 18.0f);
-                add("2.2 kHz", 3, -18.0f, 18.0f);
-                add("6.5 kHz", 4, -18.0f, 18.0f);
+            case EffectType::Eq: {
+                const char* bn[5] = { "Low", "LoMid", "Mid", "HiMid", "High" };
+                for (int bnd = 0; bnd < 5; bnd++) {
+                    char lbl[32];
+                    std::snprintf(lbl, sizeof(lbl), "%s Freq", bn[bnd]);
+                    add(lbl, bnd * 3 + 0, 20.0f, 18000.0f);
+                    std::snprintf(lbl, sizeof(lbl), "%s Gain", bn[bnd]);
+                    add(lbl, bnd * 3 + 1, -18.0f, 18.0f);
+                    std::snprintf(lbl, sizeof(lbl), "%s Q", bn[bnd]);
+                    add(lbl, bnd * 3 + 2, 0.3f, 8.0f);
+                }
                 break;
+            }
             case EffectType::Biquad:
             default:
                 add("Freq", 1, 20.0f, 16000.0f);
