@@ -31,8 +31,8 @@ namespace daw {
 // plus where the clip sits on the timeline and the track's gain.
 class TrackStream {
 public:
-    TrackStream(const std::string& path, Frame startFrame, Frame lengthFrames,
-                float gain, float pan);
+    TrackStream(TrackId track, const std::string& path, Frame startFrame,
+                Frame lengthFrames, float gain, float pan, bool audible);
     ~TrackStream();
 
     status_t Prepare();          // open file, start disk thread, prime ring
@@ -40,9 +40,17 @@ public:
 
     // Called from the RT callback. Adds this stream's contribution for the
     // block [blockStart, blockStart+frames) into the interleaved stereo
-    // `out`. Never blocks; on underrun it contributes silence.
+    // `out`. Never blocks; on underrun it contributes silence. Always drains
+    // the ring inside the clip window (even when inaudible) so an unmute
+    // mid-playback stays sample-aligned with the playhead.
     void Mix(float* out, size_t frames, Frame blockStart);
 
+    // Live mix update from the UI thread: recompute per-channel gains and the
+    // audible flag. Lock-free (atomic stores); the RT callback picks them up
+    // at the next block. No thread restart, no reallocation.
+    void SetMix(float gain, float pan, bool audible);
+
+    TrackId Track() const { return fTrackId; }
     Frame EndFrame() const { return fStart + fLength; }
     bool  Valid() const { return fSource.IsValid(); }
     float SourceRate() const { return fSource.FrameRate(); }
@@ -50,11 +58,13 @@ public:
 private:
     void DiskLoop();             // producer thread body
 
+    TrackId     fTrackId;
     std::string fPath;
     Frame       fStart;
     Frame       fLength;
-    float       fGainL;         // per-channel gain after equal-power pan
-    float       fGainR;
+    std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
+    std::atomic<float> fGainR{0.0f};
+    std::atomic<bool>  fAudible{true};
 
     WavSource   fSource;
     RingBuffer  fRing;
@@ -72,6 +82,11 @@ public:
 
     void Start();
     void Stop();
+
+    // Recompute every stream's gain/pan/audibility from the model, live,
+    // without rebuilding the graph. Safe to call from the UI thread while
+    // playing (writes atomics the RT callback reads).
+    void UpdateMix(const Project& project);
 
     // True once the playhead has passed the end of all clips.
     bool  IsFinished() const { return fFinished.load(); }

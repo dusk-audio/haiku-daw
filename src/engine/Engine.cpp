@@ -14,19 +14,36 @@ namespace daw {
 static constexpr size_t kRingFramesPerStream = 48000 * 2;   // frames
 static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
 
-// --- TrackStream ------------------------------------------------------
-
-TrackStream::TrackStream(const std::string& path, Frame startFrame,
-                         Frame lengthFrames, float gain, float pan)
-    : fPath(path), fStart(startFrame), fLength(lengthFrames),
-      fRing(kRingFloats) {
-    // Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each),
-    // +1 = hard right. Fold the track gain into the per-channel gains.
+// Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each), +1 = hard
+// right. Folds the track gain into the returned per-channel gains.
+static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
     if (pan < -1.0f) pan = -1.0f;
     if (pan >  1.0f) pan =  1.0f;
     const float theta = (pan * 0.5f + 0.5f) * float(M_PI) * 0.5f;
-    fGainL = gain * std::cos(theta);
-    fGainR = gain * std::sin(theta);
+    *outL = gain * std::cos(theta);
+    *outR = gain * std::sin(theta);
+}
+
+// --- TrackStream ------------------------------------------------------
+
+TrackStream::TrackStream(TrackId track, const std::string& path,
+                         Frame startFrame, Frame lengthFrames,
+                         float gain, float pan, bool audible)
+    : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
+      fRing(kRingFloats) {
+    float gl, gr;
+    EqualPowerGains(gain, pan, &gl, &gr);
+    fGainL.store(gl);
+    fGainR.store(gr);
+    fAudible.store(audible);
+}
+
+void TrackStream::SetMix(float gain, float pan, bool audible) {
+    float gl, gr;
+    EqualPowerGains(gain, pan, &gl, &gr);
+    fGainL.store(gl, std::memory_order_relaxed);
+    fGainR.store(gr, std::memory_order_relaxed);
+    fAudible.store(audible, std::memory_order_relaxed);
 }
 
 TrackStream::~TrackStream() {
@@ -84,6 +101,11 @@ void TrackStream::DiskLoop() {
 
 void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
     const Frame clipEnd = fStart + fLength;
+    // Snapshot the live params once per block.
+    const float gl  = fGainL.load(std::memory_order_relaxed);
+    const float gr  = fGainR.load(std::memory_order_relaxed);
+    const bool  aud = fAudible.load(std::memory_order_relaxed);
+
     for (size_t i = 0; i < frames; i++) {
         const Frame ph = blockStart + static_cast<Frame>(i);
         if (ph < fStart || ph >= clipEnd)
@@ -93,8 +115,12 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         if (fRing.Read(lr, 2) < 2)
             continue;   // underrun -> silence for this frame
 
-        out[i * 2 + 0] += lr[0] * fGainL;
-        out[i * 2 + 1] += lr[1] * fGainR;
+        // Always consume the ring above; only sum when audible so an unmute
+        // resumes in sample-sync rather than replaying buffered audio.
+        if (aud) {
+            out[i * 2 + 0] += lr[0] * gl;
+            out[i * 2 + 1] += lr[1] * gr;
+        }
     }
 }
 
@@ -130,18 +156,20 @@ status_t Engine::Load(const Project& project) {
         if (t.type == TrackType::Audio && t.soloed && !t.muted)
             anySolo = true;
 
-    // Build one stream per audio clip on an audible track.
+    // Build one stream per audio clip. All clips get a stream (even muted /
+    // non-soloed) so mute/solo can be toggled live; audibility is a per-stream
+    // flag the RT mix honors, not a build-time filter.
     fEndFrame = 0;
     for (const Track& t : project.Tracks()) {
-        if (t.type != TrackType::Audio || t.muted)
+        if (t.type != TrackType::Audio)
             continue;
-        if (anySolo && !t.soloed)
-            continue;
+        const bool audible = !t.muted && (!anySolo || t.soloed);
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty())
                 continue;
             auto s = std::make_unique<TrackStream>(
-                c.sourcePath, c.startFrame, c.lengthFrames, t.gain, t.pan);
+                t.id, c.sourcePath, c.startFrame, c.lengthFrames,
+                t.gain, t.pan, audible);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
@@ -163,6 +191,22 @@ status_t Engine::Load(const Project& project) {
         return B_ERROR;
     }
     return B_OK;
+}
+
+void Engine::UpdateMix(const Project& project) {
+    bool anySolo = false;
+    for (const Track& t : project.Tracks())
+        if (t.type == TrackType::Audio && t.soloed && !t.muted)
+            anySolo = true;
+
+    for (const Track& t : project.Tracks()) {
+        if (t.type != TrackType::Audio)
+            continue;
+        const bool audible = !t.muted && (!anySolo || t.soloed);
+        for (auto& s : fStreams)
+            if (s->Track() == t.id)
+                s->SetMix(t.gain, t.pan, audible);
+    }
 }
 
 void Engine::Start() {

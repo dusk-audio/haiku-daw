@@ -91,6 +91,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case MSG_PULSE: {
             if (!fEngine) break;
+            // Apply any live gain/pan/mute/solo edits without a replay.
+            fEngine->UpdateMix(*fProject);
             const Frame ph = fEngine->Playhead();
             fTimeline->SetPlayhead(ph);
             UpdateTimeReadout(ph);
