@@ -204,6 +204,9 @@ void Loudness::Process(const float* stereo, int frames) {
 
         // Integrated: accumulate 100 ms sub-blocks; every completed sub-block
         // forms the newest quarter of an overlapping 400 ms gating block.
+        // Skipped on the audio thread (this branch allocates).
+        if (!fIntegratedOn)
+            continue;
         fSubAccum += power;
         if (++fSubPos >= fSubLen) {
             fSubHistory.push_back(fSubAccum);

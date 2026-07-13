@@ -57,6 +57,7 @@ private:
     void StopRecording();
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
+    void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     void ImportAudio(const char* path);   // add a WAV as a clip
@@ -68,6 +69,7 @@ private:
 
     TimelineView*   fTimeline;
     BStringView*    fTimeView;
+    BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
     MeterView*      fMeter;
     BSlider*        fMaster;
     BTextControl*   fTempo;

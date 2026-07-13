@@ -20,6 +20,7 @@
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../dsp/IEffect.h"
+#include "../dsp/Loudness.h"
 #include "../synth/Synth.h"
 #include "Metronome.h"
 
@@ -133,6 +134,13 @@ public:
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
 
+    // Master loudness of the mix, updated per block by the RT callback. LUFS
+    // (momentary 400 ms / short-term 3 s) and true peak in dBTP. Silence reads
+    // Loudness::kSilenceLufs / kSilenceDb.
+    float LufsMomentary() const { return fLufsM.load(); }
+    float LufsShort()     const { return fLufsS.load(); }
+    float TruePeakDb()    const { return fTpDb.load(); }
+
     float OutputRate() const { return fOutputRate; }
 
 private:
@@ -173,9 +181,13 @@ private:
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
     Metronome                                 fMetronome; // click generator
+    Loudness                                  fLoudness;  // master BS.1770 meter
     std::atomic<bool>                         fMetronomeOn{false};
     std::atomic<bool>                         fMonitorDim{false};
     std::atomic<bool>                         fMonitorMono{false};
+    std::atomic<float>                        fLufsM{Loudness::kSilenceLufs};
+    std::atomic<float>                        fLufsS{Loudness::kSilenceLufs};
+    std::atomic<float>                        fTpDb{Loudness::kSilenceDb};
 
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};

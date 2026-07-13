@@ -178,6 +178,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fTempo->SetDivider(32.0f);
     bar->AddChild(fTempo);
 
+    // Loudness readout (momentary / short-term LUFS + true peak dBTP).
+    fLoudView = new BStringView(BRect(672, 8, 900, kTransportH - 6),
+                                "loud", "M --  S --  TP --");
+    fLoudView->SetViewColor(ColHeader());
+    fLoudView->SetHighColor(ColText());
+    bar->AddChild(fLoudView);
+
     // Master output meter, pinned to the right of the transport bar.
     fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
                                  kTransportH - 5));
@@ -476,6 +483,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTimeline->SetPlayhead(ph);
                 UpdateTimeReadout(ph);
                 fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
+                UpdateLoudnessReadout(fEngine->LufsMomentary(),
+                                      fEngine->LufsShort(),
+                                      fEngine->TruePeakDb());
                 if (fEngine->IsFinished())
                     StopPlayback();
             }
@@ -557,6 +567,8 @@ void MainWindow::StopPlayback() {
     fPlaying = false;
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
+    UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
+                          Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
 }
 
@@ -702,6 +714,22 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%d:%06.3f", mins, rem);
     fTimeView->SetText(buf);
+}
+
+void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
+                                       float truePeakDb) {
+    if (!fLoudView) return;
+    // Below the meter's floor reads as "--" rather than a huge negative number.
+    auto fmt = [](char* dst, size_t n, const char* tag, float v, float floor) {
+        if (v <= floor + 0.5f) std::snprintf(dst, n, "%s --", tag);
+        else                   std::snprintf(dst, n, "%s %.1f", tag, v);
+    };
+    char m[24], s[24], tp[24], buf[80];
+    fmt(m,  sizeof(m),  "M",  momLufs,    Loudness::kSilenceLufs);
+    fmt(s,  sizeof(s),  "S",  shortLufs,  Loudness::kSilenceLufs);
+    fmt(tp, sizeof(tp), "TP", truePeakDb, Loudness::kSilenceDb);
+    std::snprintf(buf, sizeof(buf), "%s  %s  %s dBTP", m, s, tp);
+    fLoudView->SetText(buf);
 }
 
 bool MainWindow::QuitRequested() {

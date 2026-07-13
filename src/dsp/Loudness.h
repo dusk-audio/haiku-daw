@@ -49,6 +49,13 @@ public:
     // Clear all history (filters, windows, gating blocks, peak hold).
     void Reset();
 
+    // Enable/disable integrated-loudness accumulation. The integrated path
+    // grows a deque + vector (per 100 ms), which allocates and is therefore
+    // NOT real-time-safe; disable it when Process() runs on the audio thread
+    // (momentary / short-term / true-peak stay valid — they use preallocated
+    // ring buffers and fixed arrays). Enabled by default for offline use.
+    void SetIntegratedEnabled(bool on) { fIntegratedOn = on; }
+
     // Sum of the true-peak FIR coefficients for a phase (its DC gain). Exposed
     // for validation: every phase must be ~1.0 (unity passband at DC).
     double TpPhaseDcGain(int phase) const;
@@ -91,6 +98,7 @@ private:
     // accumulate summed-channel power over 100 ms sub-blocks; the last four
     // sub-blocks form one 400 ms gating block. We store each gating block's
     // mean square for later gating.
+    bool   fIntegratedOn = true;  // RT thread disables this (it allocates)
     int    fSubLen   = 4800;  // samples per 100 ms sub-block
     int    fSubPos   = 0;     // samples into current sub-block
     double fSubAccum = 0.0;   // summed-channel power in current sub-block

@@ -358,6 +358,15 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         fMasterFx.push_back(std::move(fx));
     }
 
+    // Master loudness meter. Integrated accumulation is disabled: it allocates
+    // per 100 ms and this runs on the audio thread. Momentary / short-term /
+    // true-peak stay valid (preallocated rings + fixed arrays).
+    fLoudness.Prepare(fOutputRate);
+    fLoudness.SetIntegratedEnabled(false);
+    fLufsM.store(Loudness::kSilenceLufs);
+    fLufsS.store(Loudness::kSilenceLufs);
+    fTpDb.store(Loudness::kSilenceDb);
+
     // Per-node mix buffers, sized to the output buffer (generous floor).
     size_t maxFrames = (size_t)(fPlayer->Format().buffer_size
                                 / (sizeof(float) * 2));
@@ -495,6 +504,13 @@ void Engine::FillBuffer(float* out, size_t frames) {
     }
     fPeakL.store(pl);
     fPeakR.store(pr);
+
+    // Master loudness on the true mix (post master-gain + metronome, pre
+    // monitor). RT-safe: integrated is disabled, so no allocation.
+    fLoudness.Process(out, static_cast<int>(frames));
+    fLufsM.store(fLoudness.MomentaryLufs());
+    fLufsS.store(fLoudness.ShortTermLufs());
+    fTpDb.store(fLoudness.TruePeakDb());
 
     // Monitor section: applied AFTER metering so the meters show the true mix.
     if (fMonitorMono.load(std::memory_order_relaxed))
