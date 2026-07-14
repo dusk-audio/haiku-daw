@@ -381,6 +381,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     // Master loudness meter. Integrated accumulation is disabled: it allocates
     // per 100 ms and this runs on the audio thread. Momentary / short-term /
     // true-peak stay valid (preallocated rings + fixed arrays).
+    // Metronome follows the project's tempo/meter map (copied for the RT
+    // thread). Sync its rate to the engine's output rate.
+    {
+        TempoMap tm = project.tempoMap;
+        tm.sampleRate = fOutputRate;
+        fMetronome.SetTempoMap(tm);
+    }
+
     fLoudness.Prepare(fOutputRate);
     fLoudness.SetIntegratedEnabled(false);
     fLufsM.store(Loudness::kSilenceLufs);

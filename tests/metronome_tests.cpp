@@ -57,6 +57,22 @@ int main() {
         CHECK(differ);
     }
 
+    // Follows a tempo map: after doubling the tempo at frame 96000, the beat
+    // spacing halves (12000 frames), so there's a tick at 96000 and 108000.
+    {
+        TempoMap tm; tm.sampleRate = SR;
+        tm.SetTempoAt(96000, 240.0);
+        Metronome mm(SR); mm.SetTempoMap(tm);
+        std::vector<float> buf(120000 * 2, 0.0f);
+        mm.Render(buf.data(), 120000, 0, 1.0f);
+        auto tickAt = [&](size_t f) {
+            return rms(buf, f * 2, (f + 1440) * 2) > 0.01f;
+        };
+        CHECK(tickAt(96000));                    // beat 4 (tempo change point)
+        CHECK(tickAt(108000));                   // beat 5, 12000 frames later
+        CHECK(rms(buf, 102000 * 2, 107000 * 2) < 1e-4f);  // silence between
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
