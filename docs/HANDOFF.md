@@ -93,10 +93,19 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   Project/IO (T1); grid/ruler/snap walk the map (T2); metronome follows tempo +
   meter (T3); right-click-ruler markers to add/remove tempo/meter changes (T4).
   Tempo ramps + BBT transport readout deferred. New kit-free header: `TempoMap.h`.
-- **NEXT** — Phase D (recording depth: input monitoring, count-in, punch,
-  loop-record/comping) or Phase E (MIDI depth). Also pending: external Midi Kit 2
-  I/O (class-compliant USB only; run midi_probe.sh on real hardware), BFS sample
-  browser, MIDI-note multi-select, tempo ramps.
+- **Phase D — recording depth** ✅ (audio; host-tested math + compile-checked;
+  runtime pending on VM): overdub (record runs the engine), count-in (D1),
+  punch-in/out (D2), input monitoring (D3, rate-matched), loop-record + take
+  comping (D4). Kit-free `RecordPlan.h`; new `IMonitorSource.h`. See ROADMAP.
+- **TESTING NOW LOCAL** — `scripts/haiku_syntax_check.sh` compile-checks all
+  Haiku-only sources with a local `x86_64-unknown-haiku-g++` (built under
+  `~/haiku-cross/`). Run it before every commit that touches engine/UI — it
+  catches the compile breaks the host `ctest` can't. VM SSH: passt port-forward
+  `2222->22` is live; run `fix_ssh.sh` in the guest, then
+  `ssh -i ~/.ssh/haiku_vm -p 2222 <user>@127.0.0.1` builds/runs on the real VM.
+- **NEXT** — Phase E (MIDI depth) or Phase F (BFS sample browser). Runtime-verify
+  Phase D on the VM. Also pending: external Midi Kit 2 I/O (class-compliant USB;
+  midi_probe.sh), MIDI-note multi-select, tempo ramps, resampled input monitor.
 
 ## Architecture in one breath
 

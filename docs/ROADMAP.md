@@ -81,10 +81,22 @@ sort, with sends, a monitor section, and BS.1770 metering.
   rubber-band / Esc), group move, Delete, Ctrl-D duplicate — each one undo step
   via `MacroCommand`. (MIDI-note multi-select deferred.)
 
-## Phase D — Recording depth
+## Phase D — Recording depth  ✅ DONE (audio; runtime-verify on VM)
 
-- Input monitoring toggle, count-in, punch-in/out, loop-record + take comping.
-- MIDI recording (needs external MIDI input or step entry).
+Recording now runs the playback engine simultaneously (overdub). Kit-free timing
+math in `RecordPlan.h` (host-tested); Media-Kit orchestration compile-checked
+with the local cross-compiler, runtime pending on the VM.
+- ✅ Count-in (D1): Audio > Count-in (0/1/2 bars), tempo-map aware; engine plays
+  N bars of click into the record point, capture begins there.
+- ✅ Punch-in/out (D2): Ctrl-drag the ruler sets a punch range; the take is
+  trimmed to it (`PunchedTake`, non-destructive).
+- ✅ Input monitoring (D3): `IMonitorSource` — Recorder pushes a lock-free
+  monitor ring the engine mixes in. Rate-matched only (no RT resample yet).
+- ✅ Loop-record + take comping (D4): loop + Rec stacks per-pass takes
+  (`LoopTakes`) as a take group; only the active take sounds; right-click ->
+  Next Take. `takeGroup`/`takeActive` on Clip.
+- *Deferred:* MIDI recording (no VM input path); region-level comping;
+  resampled input monitor.
 
 ## Phase E — MIDI depth
 
