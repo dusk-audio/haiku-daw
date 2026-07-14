@@ -114,11 +114,17 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
 - **Phase H — persistence & robustness** ✅ (VM-verified): `AppSettings`
   (prefs + window layout), take bundling next to the project, autosave + crash
   recovery. New dir: `src/app/`.
-- **NEXT** — Phase I (plugins, long-term) or deeper G polish, or clear the
-  deferred list: external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh),
-  MIDI-note multi-select, tempo ramps, band-limited osc, resampled input monitor,
-  drag-drop from the sample browser. Runtime-verify D/E/F/H interactively in the
-  VM GUI (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
+- **UI overhaul + review** ✅ (VM-verified): per-track metering, dark palette +
+  color-striped headers, fully custom-drawn mixer (faders/meters/master/dB),
+  piano-roll MIDI editor (`src/ui/PianoRoll.*`, double-click a MIDI track name).
+  Full-codebase code review fixed 8 real bugs (EQ NaN, delay Inf, self-send
+  routing collapse, MacroCommand data-loss undo, AppSettings zero-clobber,
+  WavSource OOB, WavWriter race, monitor UAF) — all with regression tests.
+- **NEXT** — Phase I (plugins, long-term) or clear the deferred list: external
+  Midi Kit 2 I/O (class-compliant USB; midi_probe.sh), MIDI-note multi-select,
+  tempo ramps, band-limited osc, resampled input monitor, drag-drop from the
+  sample browser, transport-widget theming. Runtime-verify the GUI interactively
+  in the VM (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
 
 ## Architecture in one breath
 

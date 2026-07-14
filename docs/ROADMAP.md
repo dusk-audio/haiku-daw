@@ -118,14 +118,23 @@ with the local cross-compiler, runtime pending on the VM.
 - *Later:* drag-and-drop into the timeline; BPM/key range predicates; Tracker
   MIME attr registration so columns show there too.
 
-## Phase G — UI / UX polish pass  ✅ DONE (first pass)
+## Phase G — UI / UX polish pass  ✅ DONE
 
-- ✅ Vertical track scroll (mouse wheel + PageUp/Down), clamped to content.
-- ✅ Zoom to Fit (F / View menu).
-- ✅ BBT transport readout (bar.beat + min:sec, tempo-map).
-- ✅ Keyboard Shortcuts help (View menu).
-- *Later:* styled widgets/theming, per-track meters, tidy dialogs, drag-resize
-  panels. Revisit after more features land.
+- ✅ Vertical track scroll (mouse wheel + PageUp/Down), zoom-to-fit (F), BBT
+  transport readout, keyboard-shortcuts help.
+- ✅ Pro-DAW visual pass: cohesive dark palette; track headers gain a color
+  stripe + right-edge stereo meter; **per-track metering** (engine exposes
+  per-node peaks, RT-safe).
+- ✅ Mixer rewritten fully custom-drawn (no light OS widgets): faders w/ unity
+  tick + dB, stereo meters, pan, M/S, and a master strip; live peaks pushed.
+- ✅ **Piano-roll MIDI editor** (`PianoRoll`): keyboard column + pitch×time grid,
+  tempo-map grid/snap, add/move/resize/delete/velocity; opens on MIDI
+  track-name double-click.
+- ✅ Code-review pass over the whole codebase: fixed EQ shelf NaN, delay
+  runaway feedback, self-send routing collapse, MacroCommand failed-subcommand
+  undo (data loss), AppSettings zero-clobber, WavSource OOB, WavWriter race,
+  monitor UAF — all with regression tests.
+- *Later:* transport widget theming, tidy dialogs, drag-resize panels.
 
 ## Phase H — Persistence & robustness  ✅ DONE
 
