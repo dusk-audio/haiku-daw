@@ -12,6 +12,7 @@
 #include "../engine/Exporter.h"
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
+#include "../model/RecordPlan.h"
 
 #include <Application.h>
 #include <Button.h>
@@ -60,6 +61,8 @@ enum {
     MSG_MASTER_FX = 'mfx ',
     MSG_MON_DIM   = 'mdim',
     MSG_MON_MONO  = 'mmon',
+    MSG_COUNTIN   = 'cnti',
+    MSG_MONITOR_IN = 'moni',
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -129,6 +132,24 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         fBufMenu->AddItem(it);
     }
     audioMenu->AddItem(fBufMenu);
+    audioMenu->AddSeparatorItem();
+    // Count-in: metronome bars before capture begins.
+    fCountInMenu = new BMenu("Count-in");
+    fCountInMenu->SetRadioMode(true);
+    const int ciOpts[] = { 0, 1, 2 };
+    for (int n : ciOpts) {
+        char lbl[24];
+        if (n == 0) std::snprintf(lbl, sizeof(lbl), "Off");
+        else        std::snprintf(lbl, sizeof(lbl), "%d bar%s", n, n > 1 ? "s" : "");
+        BMessage* m = new BMessage(MSG_COUNTIN);
+        m->AddInt32("bars", n);
+        BMenuItem* it = new BMenuItem(lbl, m);
+        if (n == fCountInBars) it->SetMarked(true);
+        fCountInMenu->AddItem(it);
+    }
+    audioMenu->AddItem(fCountInMenu);
+    fMonInItem = new BMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
+    audioMenu->AddItem(fMonInItem);
     menuBar->AddItem(audioMenu);
     AddChild(menuBar);
     float menuH = menuBar->Bounds().Height();
@@ -219,8 +240,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case MSG_REC:
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
-            if (fRecorder && fRecorder->IsRecording()) StopRecording();
-            else                                       StartRecording();
+            if (fRecMode) StopRecording();
+            else          StartRecording();
             break;
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;
@@ -240,6 +261,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fMonMono = !fMonMono;
             if (fMonoItem) fMonoItem->SetMarked(fMonMono);
             if (fEngine) fEngine->SetMonitorMono(fMonMono);
+            break;
+        case MSG_COUNTIN: {
+            int32 bars = 0;
+            msg->FindInt32("bars", &bars);
+            fCountInBars = bars;
+            if (fCountInMenu)
+                for (int32 i = 0; i < fCountInMenu->CountItems(); i++)
+                    if (BMenuItem* it = fCountInMenu->ItemAt(i))
+                        it->SetMarked(it->Message()
+                            && it->Message()->FindInt32("bars") == bars);
+            break;
+        }
+        case MSG_MONITOR_IN:
+            fMonitorInput = !fMonitorInput;
+            if (fMonInItem) fMonInItem->SetMarked(fMonitorInput);
+            // Engine passthrough wired in D3.
             break;
         case MSG_METRONOME:
             fMetronome = !fMetronome;
@@ -462,25 +499,28 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
-            if (fRecorder && fRecorder->IsRecording()) {
-                fMeter->SetLevels(fRecorder->PeakL(), fRecorder->PeakR());
-                // Advance the playhead + grow the REC block from frames
-                // captured so far (converted recorder-rate -> timeline).
-                const double recRate = fRecorder->SampleRate();
-                if (recRate > 0) {
-                    const double ratio = fProject->sampleRate / recRate;
-                    const Frame len = (Frame)(fRecorder->FramesWritten() * ratio);
-                    const Frame pos = fRecStart + len;
-                    fTimeline->SetRecording(true, fRecStart, len);
-                    fTimeline->SetPlayhead(pos);
-                    UpdateTimeReadout(pos);
-                }
-            } else if (fPlaying && fEngine) {
+            if (fEngine && (fPlaying || fRecMode)) {
                 fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
                 const Frame ph = fEngine->Playhead();
                 const Transport& tr = fProject->transport;
-                // Loop: when the playhead passes the loop end, restart at the
-                // loop start (rebuild-on-play seek; a small gap at the seam).
+
+                if (fRecMode) {
+                    // Count-in over: begin capture once we reach the record point.
+                    if (fCapturePending && ph >= fRecPoint)
+                        StartCapture();
+                    const bool capturing = fRecorder && fRecorder->IsRecording();
+                    fTimeline->SetPlayhead(ph);
+                    UpdateTimeReadout(ph);
+                    if (capturing) {
+                        fTimeline->SetRecording(true, fRecStart, ph - fRecStart);
+                        fMeter->SetLevels(fRecorder->PeakL(), fRecorder->PeakR());
+                    } else {
+                        fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
+                    }
+                    break;
+                }
+
+                // Playback loop: restart at the loop start past the loop end.
                 if (tr.loopEnabled && tr.loopEnd > tr.loopStart
                     && ph >= tr.loopEnd) {
                     fProject->transport.playhead = tr.loopStart;
@@ -504,7 +544,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
 }
 
 void MainWindow::UpdatePulse() {
-    const bool need = fPlaying
+    const bool need = fPlaying || fRecMode
                    || (fRecorder && fRecorder->IsRecording());
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -528,8 +568,8 @@ static Frame ProjectEndFrame(const Project& p) {
 }
 
 void MainWindow::StartPlayback() {
-    if (fRecorder && fRecorder->IsRecording())
-        return;   // no play-while-record in this milestone
+    if (fRecMode)
+        return;   // recording runs its own engine (overdub)
     // Rebuild the engine from the current model each time (RT-safe: no live
     // mutation of a running graph). Playback begins at the current playhead;
     // if it's already at/after the end (and not looping), rewind first.
@@ -579,9 +619,43 @@ void MainWindow::StopPlayback() {
     // Leave the playhead where it stopped; the readout keeps its last value.
 }
 
-void MainWindow::StartRecording() {
-    if (fPlaying || (fRecorder && fRecorder->IsRecording()))
+// Start the playback engine from `engineStart` for overdub monitoring during a
+// record pass (existing tracks + metronome play while capturing). Returns true
+// on success. Runs a long transport so it keeps advancing through silence.
+bool MainWindow::StartRecordEngine(Frame engineStart) {
+    const Frame tenMin = (Frame)(fProject->sampleRate * 600.0);
+    fEngine.reset(new Engine());
+    fEngine->SetBufferFrames(fBufferFrames);
+    if (fEngine->Load(*fProject, engineStart, engineStart + tenMin) != B_OK) {
+        fEngine.reset();
+        return false;
+    }
+    fEngine->Start();
+    // Count-in needs the click; force it on during record if a count-in is set.
+    fEngine->SetMetronome(fMetronome || fCountInBars > 0);
+    fEngine->SetMonitorDim(fMonDim);
+    fEngine->SetMonitorMono(fMonMono);
+    return true;
+}
+
+void MainWindow::StartCapture() {
+    char path[64];
+    std::snprintf(path, sizeof(path), "take-%d.wav", ++fTakeCounter);
+    fRecorder.reset(new Recorder());
+    if (fRecorder->Start(path) != B_OK) {
+        std::fprintf(stderr, "MainWindow: recording failed to start\n");
+        fRecorder.reset();
+        --fTakeCounter;
         return;
+    }
+    fRecStart = fRecPoint;      // clip origin = record point
+    fCapturePending = false;
+}
+
+void MainWindow::StartRecording() {
+    if (fRecMode || (fRecorder && fRecorder->IsRecording()))
+        return;
+    if (fPlaying) StopPlayback();
 
     // Record onto every armed audio track (one input take, dropped on each).
     fRecTracks.clear();
@@ -593,37 +667,51 @@ void MainWindow::StartRecording() {
         return;
     }
 
-    char path[64];
-    std::snprintf(path, sizeof(path), "take-%d.wav", ++fTakeCounter);
+    // Record point = current playhead. A count-in plays the engine (existing
+    // tracks + click) for N bars leading up to it before capture begins.
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    fRecPoint = fProject->transport.playhead;
+    const Frame countIn = CountInFrames(fProject->tempoMap, fRecPoint,
+                                        fCountInBars);
+    const Frame engineStart = (fRecPoint > countIn) ? fRecPoint - countIn : 0;
 
-    fRecorder.reset(new Recorder());
-    if (fRecorder->Start(path) != B_OK) {
-        std::fprintf(stderr, "MainWindow: recording failed to start\n");
-        fRecorder.reset();
+    if (!StartRecordEngine(engineStart)) {
+        std::fprintf(stderr, "MainWindow: record engine failed to start\n");
         return;
     }
-    fRecStart = fProject->transport.playhead;
+    fRecMode = true;
+    fCapturePending = (countIn > 0);
+    if (!fCapturePending)
+        StartCapture();         // no count-in: capture immediately
     UpdatePulse();
 }
 
 void MainWindow::StopRecording() {
-    if (!fRecorder || !fRecorder->IsRecording())
+    if (!fRecMode)
         return;
 
-    fRecorder->Stop();
-    const int64_t frames = fRecorder->FramesWritten();
-    const double  recRate = fRecorder->SampleRate();
+    const bool captured = fRecorder && fRecorder->IsRecording();
+    int64_t frames = 0;
+    double  recRate = fProject->sampleRate;
+    if (captured) {
+        fRecorder->Stop();
+        frames  = fRecorder->FramesWritten();
+        recRate = fRecorder->SampleRate();
+    }
     const std::string path = std::string("take-") + std::to_string(fTakeCounter)
                            + ".wav";
     std::vector<TrackId> targets = fRecTracks;
 
-    // Clear the live REC region and stop the poll.
+    // Stop the overdub engine + live REC region, end the poll.
+    if (fEngine) fEngine->Stop();
+    fRecMode = false;
+    fCapturePending = false;
     fTimeline->SetRecording(false, 0, 0);
     fRecTracks.clear();
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
 
-    if (frames <= 0 || targets.empty()) {
+    if (!captured || frames <= 0 || targets.empty()) {
         std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
         fRecorder.reset();
         return;
@@ -637,10 +725,11 @@ void MainWindow::StopRecording() {
     // lengthFrames is timeline (project-rate) frames, converted from the
     // recorder-rate frame count.
     const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
+    const Frame captureLen = (Frame)llround(frames * ratio);
     for (TrackId target : targets) {
         Clip clip;
         clip.startFrame   = fRecStart;
-        clip.lengthFrames = (int64_t)llround(frames * ratio);
+        clip.lengthFrames = captureLen;
         clip.sourceOffset = 0;
         clip.sourcePath   = path;
         fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);

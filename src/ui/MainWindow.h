@@ -55,6 +55,8 @@ private:
     void StopPlayback();
     void StartRecording();
     void StopRecording();
+    void StartCapture();             // open the Recorder (after any count-in)
+    bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
@@ -90,9 +92,16 @@ private:
     bool                      fMonDim = false;
     bool                      fMonMono = false;
     bool                      fPlaying = false;
+    bool                      fRecMode = false;      // engine running for a take
+    bool                      fCapturePending = false; // in count-in, not yet capturing
+    bool                      fMonitorInput = false; // hear live input while armed
+    int                       fCountInBars = 0;      // metronome bars before capture
+    BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
+    BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
-    Frame                     fRecStart = 0; // playhead at rec start
+    Frame                     fRecStart = 0; // frame the capture (clip) begins at
+    Frame                     fRecPoint = 0; // record start (== fRecStart)
 };
 
 } // namespace daw
