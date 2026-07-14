@@ -41,6 +41,9 @@ static constexpr float kEdgeGrab = 5.0f;
 // Edits snap to this grid resolution (16th notes) unless Shift is held.
 static constexpr int kSnapDivision = 4;
 
+// Defined below; used by TrackIndexAt/LaneRect above its definition.
+static float LaneHeightOf(const Track& t);
+
 static BRect RouteRect(BRect lane) { return BRect(84,  lane.top + 2,  112, lane.top + 17); }
 static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
 static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
