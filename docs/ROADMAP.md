@@ -113,11 +113,14 @@ with the local cross-compiler, runtime pending on the VM.
 - BFS attribute tagging (BPM / Key / Duration) + a live `BQuery` browser — the
   native-Haiku superpower (ARCHITECTURE §5.2).
 
-## Phase G — UI / UX polish pass
+## Phase G — UI / UX polish pass  ✅ DONE (first pass)
 
-Dedicated pass once features settle: consistent spacing/theming, styled widgets,
-resizable/scrollable panels (vertical track scroll), zoom-to-fit, a keyboard-
-shortcut map, better meters, tidy dialogs.
+- ✅ Vertical track scroll (mouse wheel + PageUp/Down), clamped to content.
+- ✅ Zoom to Fit (F / View menu).
+- ✅ BBT transport readout (bar.beat + min:sec, tempo-map).
+- ✅ Keyboard Shortcuts help (View menu).
+- *Later:* styled widgets/theming, per-track meters, tidy dialogs, drag-resize
+  panels. Revisit after more features land.
 
 ## Phase H — Persistence & robustness
 
