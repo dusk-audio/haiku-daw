@@ -57,11 +57,19 @@ sort, with sends, a monitor section, and BS.1770 metering.
   one undoable gesture per drag.
 - *Deferred:* per-effect-param + send-level lanes (model generalizes cleanly).
 
-## Phase C — Editing depth
+## Phase C — Editing depth  ✅ DONE
 
-- Clip split, crossfade between overlapping clips, per-clip gain.
-- Multi-select + range copy/paste/duplicate/delete.
-- Track reorder, per-track height + color.
+- ✅ Per-clip gain (C1): `Clip.gain`, engine+Exporter apply, IO, Ctrl-drag +
+  dB label.
+- ✅ Clip split (C2): `SplitClipCommand`, right-click "Split here".
+- ✅ Track reorder (C3): `MoveTrackCommand`, name menu Move Up/Down.
+- ✅ Per-track color + height (C4): 6-color palette + variable lane height
+  (LaneRect sums heights); name menu Next Color / Taller / Shorter.
+- ✅ Crossfade (C5): kit-free `ComputeCrossfades` — overlapping clips auto
+  fade-out/in; engine + Exporter derive effective fades. Host-tested.
+- ✅ Multi-select + range ops (C6): clip selection (click / Shift-click /
+  rubber-band / Esc), group move, Delete, Ctrl-D duplicate — each one undo step
+  via `MacroCommand`. (MIDI-note multi-select deferred.)
 
 ## Phase D — Recording depth
 

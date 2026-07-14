@@ -83,10 +83,15 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   per-sample envelope, RT engine per-block lane-driven fader (B2); header "Auto"
   box + breakpoint editing on the lane (B3). Effect-param/send-level automation
   deferred. See `docs/ROADMAP.md` Phase B.
-- **NEXT** — Phase T (tempo/meter map) or Phase C (editing depth: clip split,
-  crossfade, per-clip gain, multi-select, track reorder). Also pending: external
-  Midi Kit 2 I/O (class-compliant USB only; run midi_probe.sh on real hardware),
-  BFS sample browser.
+- **Phase C — editing depth** ✅ (host-tested where kit-free): per-clip gain
+  (C1), clip split (C2), track reorder (C3), per-track color + variable lane
+  height (C4), automatic overlap crossfade (C5, kit-free ComputeCrossfades),
+  clip multi-select + group move/delete/duplicate via MacroCommand (C6). See
+  `docs/ROADMAP.md` Phase C. New kit-free helpers: `Crossfade.h`, `MacroCommand`.
+- **NEXT** — Phase T (tempo/meter map) or Phase D (recording depth: input
+  monitoring, count-in, punch, loop-record/comping). Also pending: external Midi
+  Kit 2 I/O (class-compliant USB only; run midi_probe.sh on real hardware), BFS
+  sample browser. MIDI-note multi-select still deferred.
 
 ## Architecture in one breath
 
