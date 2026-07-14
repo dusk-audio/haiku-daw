@@ -15,16 +15,23 @@ cat "$HOME/.ssh/authorized_keys" 2>&1
 echo
 echo "== re-add key + tighten perms =="
 mkdir -p "$HOME/.ssh"
-if ! grep -qF "$KEY" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
-    echo "$KEY" >> "$HOME/.ssh/authorized_keys"
-    echo "  key appended"
-else
-    echo "  key already present"
-fi
+# Install into BOTH the common ~/.ssh path AND the path Haiku's sshd_config
+# actually uses by default: AuthorizedKeysFile config/settings/ssh/authorized_keys
+# (relative to $HOME). Writing only ~/.ssh silently fails pubkey auth.
+for AK in "$HOME/.ssh/authorized_keys" \
+          "$HOME/config/settings/ssh/authorized_keys"; do
+    mkdir -p "$(dirname "$AK")"
+    if ! grep -qF "$KEY" "$AK" 2>/dev/null; then
+        echo "$KEY" >> "$AK"
+        echo "  key appended -> $AK"
+    else
+        echo "  key already present -> $AK"
+    fi
+    chmod 600 "$AK"
+done
 chmod 755 "$HOME"
-chmod 700 "$HOME/.ssh"
-chmod 600 "$HOME/.ssh/authorized_keys"
-ls -ld "$HOME" "$HOME/.ssh"; ls -l "$HOME/.ssh/authorized_keys"
+chmod 700 "$HOME/.ssh" "$HOME/config/settings/ssh" 2>/dev/null
+ls -l "$HOME/.ssh/authorized_keys" "$HOME/config/settings/ssh/authorized_keys" 2>&1
 
 echo
 echo "== sshd_config auth-relevant settings =="
