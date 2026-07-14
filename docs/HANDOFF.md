@@ -103,9 +103,13 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   catches the compile breaks the host `ctest` can't. VM SSH: passt port-forward
   `2222->22` is live; run `fix_ssh.sh` in the guest, then
   `ssh -i ~/.ssh/haiku_vm -p 2222 <user>@127.0.0.1` builds/runs on the real VM.
-- **NEXT** — Phase E (MIDI depth) or Phase F (BFS sample browser). Runtime-verify
-  Phase D on the VM. Also pending: external Midi Kit 2 I/O (class-compliant USB;
-  midi_probe.sh), MIDI-note multi-select, tempo ramps, resampled input monitor.
+- **Phase E — MIDI depth** ✅ (instrument; host-tested + VM-verified): per-track
+  `Instrument` (waveform + ADSR), rewritten stateless Synth, InstrumentWindow
+  editor. External MIDI-in + sample/wavetable synth deferred. New: `Instrument.h`.
+- **NEXT** — Phase F (BFS sample browser) or Phase G (UI polish). Also pending:
+  external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh), MIDI-note
+  multi-select, tempo ramps, resampled input monitor, band-limited oscillators.
+  Runtime-verify Phase D/E interactively in the GUI on the VM.
 
 ## Architecture in one breath
 

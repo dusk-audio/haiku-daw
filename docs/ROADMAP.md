@@ -98,9 +98,13 @@ with the local cross-compiler, runtime pending on the VM.
 - *Deferred:* MIDI recording (no VM input path); region-level comping;
   resampled input monitor.
 
-## Phase E — MIDI depth
+## Phase E — MIDI depth  ✅ DONE (instrument; MIDI-in deferred)
 
-- Richer instrument: multi-waveform + ADSR UI, then a sample/wavetable synth.
+- ✅ Richer instrument: per-MIDI-track `Instrument` — waveform (sine/saw/square/
+  triangle) + ADSR with a release tail past note-off. Stateless Synth; engine +
+  Exporter + IO wired; `InstrumentWindow` editor from the "Inst" header box.
+  Host-tested + VM-verified.
+- *Deferred:* sample/wavetable synth; band-limited oscillators (naive now).
 - **External Midi Kit 2 I/O** (keyboards, hardware synths) — *deferred until the
   VM can pass through MIDI; `scripts/midi_probe.sh` is ready to characterize it.*
 
