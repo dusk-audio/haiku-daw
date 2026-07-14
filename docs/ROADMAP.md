@@ -127,11 +127,15 @@ with the local cross-compiler, runtime pending on the VM.
 - *Later:* styled widgets/theming, per-track meters, tidy dialogs, drag-resize
   panels. Revisit after more features land.
 
-## Phase H — Persistence & robustness
+## Phase H — Persistence & robustness  ✅ DONE
 
-- Save app settings (buffer size, last dir) and window layout.
-- Project bundle: keep recorded takes next to the `.dawproj`.
-- Autosave / crash recovery.
+- ✅ App settings + window layout: kit-free `AppSettings` (buffer, count-in,
+  metronome, monitor-input, last dir, window frame); loaded on start, saved on
+  quit to `~/config/settings/HaikuDAW/settings`. Host-tested.
+- ✅ Take bundle: recorded takes written into the project's directory (portable
+  bundle) when saved, else CWD.
+- ✅ Autosave / crash recovery: a recovery `.dawproj` every 30 s; clean quit
+  deletes it, so a leftover triggers a Recover/Discard prompt on next launch.
 
 ## Phase I — Plugins (long-term)
 

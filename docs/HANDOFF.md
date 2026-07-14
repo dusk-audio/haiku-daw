@@ -111,11 +111,14 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
 - **Phase F — sample browser** ✅ (VM-verified): `src/storage/BfsAttr` (BFS
   attributes + fs indexes), `SampleBrowser` live BQuery window, import auto-tags
   duration. New dirs: `src/storage/`.
-- **NEXT** — Phase H (persistence & robustness) or Phase I (plugins), or deeper
-  G polish. Pending: external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh),
+- **Phase H — persistence & robustness** ✅ (VM-verified): `AppSettings`
+  (prefs + window layout), take bundling next to the project, autosave + crash
+  recovery. New dir: `src/app/`.
+- **NEXT** — Phase I (plugins, long-term) or deeper G polish, or clear the
+  deferred list: external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh),
   MIDI-note multi-select, tempo ramps, band-limited osc, resampled input monitor,
-  drag-drop from the sample browser. Runtime-verify D/E/F interactively in the VM
-  GUI (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
+  drag-drop from the sample browser. Runtime-verify D/E/F/H interactively in the
+  VM GUI (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
 
 ## Architecture in one breath
 
