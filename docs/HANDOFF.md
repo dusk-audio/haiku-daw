@@ -106,10 +106,16 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
 - **Phase E — MIDI depth** ✅ (instrument; host-tested + VM-verified): per-track
   `Instrument` (waveform + ADSR), rewritten stateless Synth, InstrumentWindow
   editor. External MIDI-in + sample/wavetable synth deferred. New: `Instrument.h`.
-- **NEXT** — Phase F (BFS sample browser) or Phase G (UI polish). Also pending:
-  external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh), MIDI-note
-  multi-select, tempo ramps, resampled input monitor, band-limited oscillators.
-  Runtime-verify Phase D/E interactively in the GUI on the VM.
+- **Phase G — UI polish (first pass)** ✅ (VM-verified): vertical track scroll,
+  zoom-to-fit (F), BBT transport readout, keyboard-shortcuts help.
+- **Phase F — sample browser** ✅ (VM-verified): `src/storage/BfsAttr` (BFS
+  attributes + fs indexes), `SampleBrowser` live BQuery window, import auto-tags
+  duration. New dirs: `src/storage/`.
+- **NEXT** — Phase H (persistence & robustness) or Phase I (plugins), or deeper
+  G polish. Pending: external Midi Kit 2 I/O (class-compliant USB; midi_probe.sh),
+  MIDI-note multi-select, tempo ramps, band-limited osc, resampled input monitor,
+  drag-drop from the sample browser. Runtime-verify D/E/F interactively in the VM
+  GUI (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
 
 ## Architecture in one breath
 

@@ -108,10 +108,15 @@ with the local cross-compiler, runtime pending on the VM.
 - **External Midi Kit 2 I/O** (keyboards, hardware synths) — *deferred until the
   VM can pass through MIDI; `scripts/midi_probe.sh` is ready to characterize it.*
 
-## Phase F — Sample browser
+## Phase F — Sample browser  ✅ DONE
 
-- BFS attribute tagging (BPM / Key / Duration) + a live `BQuery` browser — the
-  native-Haiku superpower (ARCHITECTURE §5.2).
+- ✅ BFS attribute tagging: `src/storage/BfsAttr` reads/writes DAW:bpm / DAW:key
+  / DAW:duration + creates their fs indexes; import auto-tags duration.
+- ✅ Live `BQuery` browser (`SampleBrowser`, View > Sample Browser): name filter
+  over the boot volume, lists audio files + their duration/BPM, double-click
+  imports, BPM field tags the selection. Compile-checked + VM-built.
+- *Later:* drag-and-drop into the timeline; BPM/key range predicates; Tracker
+  MIME attr registration so columns show there too.
 
 ## Phase G — UI / UX polish pass  ✅ DONE (first pass)
 
