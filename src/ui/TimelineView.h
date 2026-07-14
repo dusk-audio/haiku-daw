@@ -100,7 +100,8 @@ private:
     // directly; on release we restore the original and push ONE command, so
     // the whole gesture is a single clean undo step.
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipFadeIn, ClipFadeOut,
-                      ClipGain, Note, NoteResize, NoteVelocity, RulerLoop };
+                      ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
+                      RulerPunch };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;

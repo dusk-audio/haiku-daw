@@ -59,6 +59,10 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
       << (p.transport.loopEnabled ? 1 : 0) << " "
       << (long long)p.transport.loopStart << " "
       << (long long)p.transport.loopEnd << "\n";
+    f << "punch "
+      << (p.transport.punchEnabled ? 1 : 0) << " "
+      << (long long)p.transport.punchIn << " "
+      << (long long)p.transport.punchOut << "\n";
 
     for (const EffectDesc& e : p.masterFx) {
         f << "masterfx " << (int)e.type << " " << e.params.size();
@@ -191,6 +195,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             p.transport.loopEnabled = (loop != 0);
             p.transport.loopStart = ls;
             p.transport.loopEnd = le;
+        }
+        else if (kw == "punch") {
+            long long pi, po; int en;
+            iss >> en >> pi >> po;
+            p.transport.punchEnabled = (en != 0);
+            p.transport.punchIn = pi;
+            p.transport.punchOut = po;
         }
         else if (kw == "track") {
             commit();

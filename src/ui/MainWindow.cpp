@@ -726,11 +726,28 @@ void MainWindow::StopRecording() {
     // recorder-rate frame count.
     const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
     const Frame captureLen = (Frame)llround(frames * ratio);
+
+    // Punch: trim the take to the punch range (non-destructive — the clip just
+    // references a sub-span of the captured file).
+    TakeRegion region;
+    region.startFrame = fRecStart;
+    region.sourceOffset = 0;
+    region.lengthFrames = captureLen;
+    const Transport& tr = fProject->transport;
+    if (tr.punchEnabled) {
+        if (!PunchedTake(fRecStart, captureLen, tr.punchIn, tr.punchOut,
+                         &region)) {
+            std::fprintf(stderr, "MainWindow: take outside punch range, discarded\n");
+            fRecorder.reset();
+            return;
+        }
+    }
+
     for (TrackId target : targets) {
         Clip clip;
-        clip.startFrame   = fRecStart;
-        clip.lengthFrames = captureLen;
-        clip.sourceOffset = 0;
+        clip.startFrame   = region.startFrame;
+        clip.lengthFrames = region.lengthFrames;
+        clip.sourceOffset = region.sourceOffset;
         clip.sourcePath   = path;
         fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);
     }

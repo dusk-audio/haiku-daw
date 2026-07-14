@@ -428,12 +428,13 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
-    // Ruler: click seeks, drag sets a loop region. Begin a ruler drag; on
-    // release we decide seek-vs-loop by how far it moved.
+    // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
+    // range instead. On release we decide seek-vs-drag by how far it moved.
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fDrag        = Drag::RulerLoop;
+        fDrag        = (modifiers() & B_CONTROL_KEY) ? Drag::RulerPunch
+                                                     : Drag::RulerLoop;
         fLoopAnchor  = f;
         fLoopDragged = false;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
@@ -752,15 +753,21 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
 // model for live feedback. This is a transient preview only; the undoable
 // command is pushed in MouseUp.
 void TimelineView::PreviewDrag(BPoint where) {
-    // Ruler loop drag isn't tied to a track.
-    if (fDrag == Drag::RulerLoop) {
+    // Ruler loop / punch drags aren't tied to a track.
+    if (fDrag == Drag::RulerLoop || fDrag == Drag::RulerPunch) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
         fLoopDragged = true;
         Transport& tr = fProject->transport;
-        tr.loopStart = fLoopAnchor < f ? fLoopAnchor : f;
-        tr.loopEnd   = fLoopAnchor < f ? f : fLoopAnchor;
-        tr.loopEnabled = (tr.loopEnd > tr.loopStart);
+        const Frame lo = fLoopAnchor < f ? fLoopAnchor : f;
+        const Frame hi = fLoopAnchor < f ? f : fLoopAnchor;
+        if (fDrag == Drag::RulerPunch) {
+            tr.punchIn = lo; tr.punchOut = hi;
+            tr.punchEnabled = (hi > lo);
+        } else {
+            tr.loopStart = lo; tr.loopEnd = hi;
+            tr.loopEnabled = (hi > lo);
+        }
         Invalidate(BRect(0, 0, Bounds().right, kRulerHeight));
         return;
     }
@@ -934,6 +941,14 @@ void TimelineView::MouseUp(BPoint where) {
         Invalidate();
         return;
     }
+    // Punch drag: a bare click (no movement) clears the punch range.
+    if (fDrag == Drag::RulerPunch) {
+        if (!fLoopDragged)
+            fProject->transport.punchEnabled = false;
+        fDrag = Drag::None;
+        Invalidate();
+        return;
+    }
 
     Track* t = fProject->FindTrack(fDragTrack);
     if (t) {
@@ -1063,6 +1078,16 @@ void TimelineView::DrawRuler(BRect update) {
         if (lx1 > lx0) {
             SetHighColor(Rgb(70, 110, 90));
             FillRect(BRect(lx0, 0, lx1, kRulerHeight));
+        }
+    }
+    // Punch region (Ctrl-drag): a red band on the lower half of the ruler.
+    if (tr.punchEnabled && tr.punchOut > tr.punchIn) {
+        float px0 = FrameToX(tr.punchIn);
+        float px1 = FrameToX(tr.punchOut);
+        if (px0 < kHeaderWidth) px0 = kHeaderWidth;
+        if (px1 > px0) {
+            SetHighColor(Rgb(150, 60, 60));
+            FillRect(BRect(px0, kRulerHeight - 6, px1, kRulerHeight));
         }
     }
 

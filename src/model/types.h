@@ -40,6 +40,9 @@ struct Transport {
     bool           loopEnabled = false;
     Frame          loopStart   = 0;
     Frame          loopEnd     = 0;
+    bool           punchEnabled = false;   // record only within [punchIn, punchOut)
+    Frame          punchIn      = 0;
+    Frame          punchOut     = 0;
 };
 
 // Seconds<->frames conversion lives here so the rule is in exactly one

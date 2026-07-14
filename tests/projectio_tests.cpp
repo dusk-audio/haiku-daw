@@ -28,6 +28,8 @@ int main() {
     a.masterGain = 0.75f;
     a.masterFx.push_back(ReverbDesc(0.6f, 0.25f));   // master bus chain
     a.transport.playhead = 12345;
+    a.transport.punchEnabled = true;
+    a.transport.punchIn = 2000; a.transport.punchOut = 8000;
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr L"), a);
     TrackId t1 = a.Tracks().front().id;
@@ -77,6 +79,9 @@ int main() {
     CHECK(b.tempoMap.Meters()[1].frame == 96000);
     CHECK(b.tempoMap.Meters()[1].num == 3);
     CHECK(b.transport.playhead == 12345);
+    CHECK(b.transport.punchEnabled == true);
+    CHECK(b.transport.punchIn == 2000);
+    CHECK(b.transport.punchOut == 8000);
     CHECK(b.Tracks().size() == 2);
 
     const Track& bt1 = b.Tracks()[0];
