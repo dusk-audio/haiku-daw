@@ -75,6 +75,7 @@ private:
     PeakMap*        fPeaks;          // non-owning; new takes add entries here
 
     TimelineView*   fTimeline;
+    class TransportBar* fTransport = nullptr;
     BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
     MeterView*      fMeter;

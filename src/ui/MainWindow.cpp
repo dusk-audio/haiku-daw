@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "TimelineView.h"
+#include "TransportBar.h"
 #include "MeterView.h"
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
@@ -182,20 +183,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Transport bar (below the menu) ---
     const float barTop = menuH + 1;
     BRect barRect(0, barTop, bounds.right, barTop + kTransportH);
-    BView* bar = new BView(barRect, "transport",
-                           B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW);
-    bar->SetViewColor(ColHeader());
+    fTransport = new TransportBar(barRect, BMessenger(this),
+                                  MSG_PLAY, MSG_STOP, MSG_REC);
+    BView* bar = fTransport;
     AddChild(bar);
-
-    BButton* play = new BButton(BRect(6, 5, 70, kTransportH - 5), "play",
-                                "Play", new BMessage(MSG_PLAY));
-    BButton* stop = new BButton(BRect(74, 5, 138, kTransportH - 5), "stop",
-                                "Stop", new BMessage(MSG_STOP));
-    BButton* rec  = new BButton(BRect(142, 5, 206, kTransportH - 5), "rec",
-                                "Rec", new BMessage(MSG_REC));
-    bar->AddChild(play);
-    bar->AddChild(stop);
-    bar->AddChild(rec);
 
     fTimeView = new BStringView(BRect(210, 8, 344, kTransportH - 6),
                                 "time", "1.1   0:00.000");
@@ -217,6 +208,12 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
+    // Dark theme: accent fill below the thumb, dark groove/background.
+    fMaster->SetViewColor(ColHeader());
+    fMaster->SetLowColor(ColHeader());
+    rgb_color fill = ColAccent();
+    fMaster->UseFillColor(true, &fill);
+    fMaster->SetBarColor(Rgb(20, 22, 26));
     bar->AddChild(fMaster);
 
     // Tempo (BPM) — affects the grid/snap and the metronome (next Play).
@@ -746,6 +743,7 @@ void MainWindow::StartPlayback() {
     fEngine->SetMonitorDim(fMonDim);
     fEngine->SetMonitorMono(fMonMono);
     fPlaying = true;
+    if (fTransport) fTransport->SetPlaying(true);
     UpdatePulse();
 }
 
@@ -753,6 +751,7 @@ void MainWindow::StopPlayback() {
     if (fEngine)
         fEngine->Stop();
     fPlaying = false;
+    if (fTransport) fTransport->SetPlaying(false);
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
     fTimeline->ClearTrackPeaks();
@@ -843,6 +842,7 @@ void MainWindow::StartRecording() {
         return;
     }
     fRecMode = true;
+    if (fTransport) fTransport->SetRecording(true);
     fCapturePending = (countIn > 0);
     if (!fCapturePending)
         StartCapture();         // no count-in: capture immediately
@@ -873,6 +873,7 @@ void MainWindow::StopRecording() {
         fEngine->Stop();
     }
     fRecMode = false;
+    if (fTransport) fTransport->SetRecording(false);
     fCapturePending = false;
     fTimeline->SetRecording(false, 0, 0);
     fRecTracks.clear();

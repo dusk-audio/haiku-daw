@@ -154,6 +154,7 @@ if(HAIKU)
         src/main.cpp
         src/ui/TimelineView.cpp
         src/ui/MainWindow.cpp
+        src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
         src/ui/SendsWindow.cpp
