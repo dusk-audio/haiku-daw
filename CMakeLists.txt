@@ -155,6 +155,8 @@ if(HAIKU)
         src/ui/InstrumentWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
+        src/ui/SampleBrowser.cpp
+        src/storage/BfsAttr.cpp
     )
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.

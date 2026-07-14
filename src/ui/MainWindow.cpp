@@ -5,7 +5,9 @@
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
+#include "SampleBrowser.h"
 #include "MixerWindow.h"
+#include "../storage/BfsAttr.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
 
@@ -67,6 +69,7 @@ enum {
     MSG_MONITOR_IN = 'moni',
     MSG_SHORTCUTS = 'keys',
     MSG_ZOOMFIT   = 'zfit',
+    MSG_BROWSER   = 'brws',
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -122,6 +125,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
     viewMenu->AddItem(new BMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SHORTCUTS)));
+    viewMenu->AddItem(new BMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
+                                    new BMessage(MSG_BROWSER)));
     menuBar->AddItem(viewMenu);
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
@@ -444,6 +449,19 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_ZOOMFIT:
             fTimeline->ZoomToFit();
             break;
+        case MSG_BROWSER: {
+            BRect wr = BWindow::Frame();
+            wr.OffsetBy(40, 40);
+            wr.right = wr.left + 420; wr.bottom = wr.top + 380;
+            (new SampleBrowser(wr, BMessenger(this)))->Show();
+            break;
+        }
+        case kMsgBrowserImport: {
+            const char* path = nullptr;
+            if (msg->FindString("path", &path) == B_OK && path)
+                ImportAudio(path);
+            break;
+        }
         case MSG_SHORTCUTS: {
             BAlert* a = new BAlert("Keyboard Shortcuts",
                 "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
@@ -905,6 +923,13 @@ void MainWindow::ImportAudio(const char* path) {
     clip.sourceOffset = 0;
     clip.sourcePath   = path;
     fStack->Execute(std::make_unique<AddClipCommand>(tid, clip), *fProject);
+
+    // Tag the file with its duration (BFS attribute) so the sample browser's
+    // BQuery can find/sort it. BPM/Key are user-set in the browser.
+    if (srcRate > 0) {
+        EnsureDawIndexes(path);
+        WriteAttrFloat(path, kAttrDuration, (float)(src.TotalFrames() / srcRate));
+    }
 
     (*fPeaks)[path].Build(src);   // waveform envelope (src cursor is at start)
     fTimeline->Invalidate();
