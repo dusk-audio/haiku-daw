@@ -12,6 +12,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 
 namespace daw {
@@ -345,6 +347,68 @@ int TimelineView::NoteIndexAt(const Track& t, BRect lane, BPoint where) const {
     return -1;
 }
 
+Frame TimelineView::BarStartFrameAt(Frame f) const {
+    const TempoMap& tm = fProject->tempoMap;
+    if (f < 0) f = 0;
+    const auto& meters = tm.Meters();
+    size_t seg = 0;
+    for (size_t i = 0; i < meters.size(); i++)
+        if (meters[i].frame <= f) seg = i; else break;
+    const double segStartBeat = tm.BeatAt(meters[seg].frame);
+    const int    num = meters[seg].num;
+    const double into = tm.BeatAt(f) - segStartBeat;
+    const double bars = std::floor(into / num + 0.5);   // nearest bar
+    return tm.FrameAt(segStartBeat + bars * num);
+}
+
+void TimelineView::HandleRulerMenu(BPoint where) {
+    TempoMap& tm = fProject->tempoMap;
+    tm.sampleRate = fProject->sampleRate;
+
+    // A marker near the click (within ~8 px) can be removed.
+    Frame nearTempo = -1, nearMeter = -1;
+    for (const TempoChange& t : tm.Tempos())
+        if (t.frame > 0 && std::fabs(FrameToX(t.frame) - where.x) < 8.0f)
+            nearTempo = t.frame;
+    for (const MeterChange& m : tm.Meters())
+        if (m.frame > 0 && std::fabs(FrameToX(m.frame) - where.x) < 8.0f)
+            nearMeter = m.frame;
+
+    BPopUpMenu* menu = new BPopUpMenu("tm", false, false);
+    BMenu* tsub = new BMenu("Tempo change");
+    const int bpms[] = { 60, 80, 90, 100, 110, 120, 130, 140, 160, 180 };
+    for (int b : bpms) { char s[8]; std::snprintf(s, 8, "%d", b);
+                         tsub->AddItem(new BMenuItem(s, NULL)); }
+    menu->AddItem(tsub);
+    BMenu* msub = new BMenu("Meter change");
+    const char* mets[] = { "4/4", "3/4", "2/4", "6/8", "5/4", "7/8" };
+    for (const char* mm : mets) msub->AddItem(new BMenuItem(mm, NULL));
+    menu->AddItem(msub);
+    if (nearTempo >= 0 || nearMeter >= 0) {
+        menu->AddSeparatorItem();
+        menu->AddItem(new BMenuItem("Remove change here", NULL));
+    }
+
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    if (sel) {
+        BMenu* parent = sel->Menu();
+        const char* label = sel->Label();
+        if (parent == tsub) {
+            const Frame at = tm.FrameAt((double)std::llround(
+                tm.BeatAt(XToFrame(where.x) < 0 ? 0 : XToFrame(where.x))));
+            tm.SetTempoAt(at, atof(label));
+        } else if (parent == msub) {
+            int n = 4, d = 4; std::sscanf(label, "%d/%d", &n, &d);
+            tm.SetMeterAt(BarStartFrameAt(XToFrame(where.x)), n, d);
+        } else if (label && std::strcmp(label, "Remove change here") == 0) {
+            if (nearTempo >= 0) tm.RemoveTempoAt(nearTempo);
+            else if (nearMeter >= 0) tm.RemoveMeterAt(nearMeter);
+        }
+        Invalidate();
+    }
+    delete menu;
+}
+
 void TimelineView::MouseDown(BPoint where) {
     if (!fProject || !fStack)
         return;
@@ -354,6 +418,12 @@ void TimelineView::MouseDown(BPoint where) {
     if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
         m->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
+
+    // Right-click on the ruler: tempo / meter change menu.
+    if (rightClick && where.y < kRulerHeight && where.x >= kHeaderWidth) {
+        HandleRulerMenu(where);
+        return;
+    }
 
     // Ruler: click seeks, drag sets a loop region. Begin a ruler drag; on
     // release we decide seek-vs-loop by how far it moved.
@@ -1004,6 +1074,24 @@ void TimelineView::DrawRuler(BRect update) {
             DrawString(label, BPoint(x + 3, kRulerHeight - 9));
         }
     });
+
+    // Tempo/meter change markers (right-click the ruler to add/remove).
+    const TempoMap& tm = fProject->tempoMap;
+    for (const TempoChange& t : tm.Tempos()) {
+        const float x = FrameToX(t.frame);
+        if (x < kHeaderWidth || x > r.right) continue;
+        SetHighColor(Rgb(230, 170, 70));
+        StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
+        char s[16]; std::snprintf(s, sizeof(s), "%.0f", t.bpm);
+        DrawString(s, BPoint(x + 2, 9));
+    }
+    for (const MeterChange& m : tm.Meters()) {
+        const float x = FrameToX(m.frame);
+        if (x < kHeaderWidth || x > r.right) continue;
+        SetHighColor(Rgb(120, 190, 230));
+        char s[16]; std::snprintf(s, sizeof(s), "%d/%d", m.num, m.denom);
+        DrawString(s, BPoint(x + 2, 19));
+    }
 }
 
 // Walk the visible bar/beat gridlines once, invoking fn for each. Shared by

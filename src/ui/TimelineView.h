@@ -93,6 +93,8 @@ private:
     int   TrackIndexAt(BPoint where) const;             // -1 if none
     int   NoteIndexAt(const Track& t, BRect lane, BPoint where) const;  // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
+    void  HandleRulerMenu(BPoint where);        // tempo/meter change menu
+    Frame BarStartFrameAt(Frame f) const;       // nearest bar boundary frame
 
     // Live fader/pan drag. During a drag we preview by writing the model
     // directly; on release we restore the original and push ONE command, so
