@@ -38,6 +38,7 @@ public:
     TimelineView(BRect frame, Project* project, CommandStack* stack);
 
     void Draw(BRect updateRect) override;
+    void MessageReceived(BMessage* msg) override;   // mouse-wheel vertical scroll
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void MouseUp(BPoint where) override;
@@ -47,6 +48,8 @@ public:
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);
     void PanBy(Frame deltaFrames);
+    void ZoomToFit();               // fit the whole project in the view width
+    void ScrollVerticalBy(float dy);// vertical track scroll (clamped)
 
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;
@@ -178,6 +181,8 @@ private:
     const PeakMap* fPeaks = nullptr;  // non-owning
     double         fFramesPerPixel;   // horizontal zoom
     Frame          fScrollFrame;      // leftmost visible frame (content x=0)
+    float          fScrollY = 0.0f;   // vertical track-scroll offset (pixels)
+    float          ContentHeight() const;   // total stacked lane height
     Frame          fPlayhead = 0;     // in project frames
 
     // Live recording region (no clips yet); drawn on every armed track.

@@ -15,6 +15,7 @@
 #include "../model/Commands.h"
 #include "../model/RecordPlan.h"
 
+#include <Alert.h>
 #include <Application.h>
 #include <Button.h>
 #include <Entry.h>
@@ -64,6 +65,8 @@ enum {
     MSG_MON_MONO  = 'mmon',
     MSG_COUNTIN   = 'cnti',
     MSG_MONITOR_IN = 'moni',
+    MSG_SHORTCUTS = 'keys',
+    MSG_ZOOMFIT   = 'zfit',
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -115,6 +118,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(fDimItem);
     fMonoItem = new BMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
     viewMenu->AddItem(fMonoItem);
+    viewMenu->AddSeparatorItem();
+    viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
+    viewMenu->AddItem(new BMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
+                                    new BMessage(MSG_SHORTCUTS)));
     menuBar->AddItem(viewMenu);
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
@@ -174,8 +181,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(stop);
     bar->AddChild(rec);
 
-    fTimeView = new BStringView(BRect(216, 8, 330, kTransportH - 6),
-                                "time", "0:00.000");
+    fTimeView = new BStringView(BRect(210, 8, 344, kTransportH - 6),
+                                "time", "1.1   0:00.000");
     fTimeView->SetViewColor(ColHeader());
     fTimeView->SetHighColor(ColText());
     bar->AddChild(fTimeView);
@@ -432,6 +439,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 t->instrument.sustain = s; t->instrument.release = r;
                 fTimeline->Invalidate();
             }
+            break;
+        }
+        case MSG_ZOOMFIT:
+            fTimeline->ZoomToFit();
+            break;
+        case MSG_SHORTCUTS: {
+            BAlert* a = new BAlert("Keyboard Shortcuts",
+                "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
+                "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-V paste\n"
+                "       Ctrl-D duplicate   Del delete selection   Esc clear\n"
+                "View:  + / - zoom   F fit   arrows pan   wheel / PgUp-PgDn scroll   Home start\n"
+                "Clips: drag move   right edge resize   top corners fade\n"
+                "       Ctrl-drag gain   Shift free-snap   right-click menu\n"
+                "Select: click / Shift-click / drag rubber-band\n"
+                "Ruler: click seek   drag loop   Ctrl-drag punch   right-click tempo/meter\n"
+                "Track header: M mute  S solo  R arm  route/FX/sends/auto/inst boxes",
+                "OK");
+            a->SetShortcut(0, B_ESCAPE);
+            a->Go(NULL);   // async; non-blocking
             break;
         }
         case MSG_MASTER:
@@ -901,8 +927,12 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
     const double sec  = rate > 0 ? playhead / rate : 0.0;
     const int    mins = static_cast<int>(sec / 60.0);
     const double rem  = sec - mins * 60.0;
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), "%d:%06.3f", mins, rem);
+    // Bar:beat from the tempo map alongside min:sec.
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    int bar = 1, beat = 1;
+    fProject->tempoMap.BarBeat(playhead, &bar, &beat);
+    char buf[48];
+    std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
     fTimeView->SetText(buf);
 }
 

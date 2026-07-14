@@ -93,6 +93,44 @@ void TimelineView::PanBy(Frame deltaFrames) {
     Invalidate();
 }
 
+void TimelineView::ScrollVerticalBy(float dy) {
+    const float viewH = Bounds().Height() - kRulerHeight;
+    const float maxScroll = ContentHeight() - viewH;
+    fScrollY += dy;
+    if (fScrollY > maxScroll) fScrollY = maxScroll;
+    if (fScrollY < 0.0f)      fScrollY = 0.0f;   // (also clamps when all fits)
+    Invalidate();
+}
+
+void TimelineView::ZoomToFit() {
+    Frame end = 0;
+    for (const Track& t : fProject->Tracks()) {
+        for (const Clip& c : t.clips)
+            if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
+        for (const MidiNote& n : t.notes)
+            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+    }
+    const float contentW = Bounds().Width() - kHeaderWidth;
+    if (end <= 0 || contentW < 1.0f) return;
+    double fpp = (double)end / contentW * 1.05;   // small margin
+    if (fpp < 16.0)    fpp = 16.0;
+    if (fpp > 65536.0) fpp = 65536.0;
+    fFramesPerPixel = fpp;
+    fScrollFrame = 0;
+    Invalidate();
+}
+
+void TimelineView::MessageReceived(BMessage* msg) {
+    if (msg->what == B_MOUSE_WHEEL_CHANGED) {
+        float dy = 0.0f;
+        if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
+            ScrollVerticalBy(dy * 40.0f);   // ~40 px per notch
+            return;
+        }
+    }
+    BView::MessageReceived(msg);
+}
+
 void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
     // One page = the visible content width in frames.
@@ -103,6 +141,9 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         case B_HOME:        fScrollFrame = 0; Invalidate(); break;
         case '+': case '=': ZoomBy(0.5); break;   // zoom in
         case '-': case '_': ZoomBy(2.0); break;   // zoom out
+        case 'f': case 'F': ZoomToFit(); break;   // fit project to view width
+        case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - kRulerHeight) * 0.8f); break;
+        case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - kRulerHeight) * 0.8f); break;
         case B_DELETE: case B_BACKSPACE:
             if (!fSelClips.empty()) DeleteSelection();
             else BView::KeyDown(bytes, numBytes);
@@ -315,8 +356,8 @@ void TimelineView::SetPlayhead(Frame f) {
 int TimelineView::TrackIndexAt(BPoint where) const {
     if (!fProject || where.y < kRulerHeight)
         return -1;
-    // Walk cumulative lane heights (variable per track).
-    float y = kRulerHeight;
+    // Walk cumulative lane heights (variable per track), scroll-offset.
+    float y = kRulerHeight - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < (int)tracks.size(); i++) {
         const float h = LaneHeightOf(tracks[i]);
@@ -1198,9 +1239,17 @@ static float LaneHeightOf(const Track& t) {
     return h;
 }
 
+float TimelineView::ContentHeight() const {
+    float h = 0.0f;
+    for (const Track& t : fProject->Tracks())
+        h += LaneHeightOf(t) + kTrackGap;
+    return h;
+}
+
 BRect TimelineView::LaneRect(int index) const {
-    // Sum the heights of all lanes above `index` (variable per-track heights).
-    float top = kRulerHeight;
+    // Sum the heights of all lanes above `index` (variable per-track heights),
+    // offset by the vertical scroll.
+    float top = kRulerHeight - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < index && i < (int)tracks.size(); i++)
         top += LaneHeightOf(tracks[i]) + kTrackGap;
