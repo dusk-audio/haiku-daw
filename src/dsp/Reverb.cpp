@@ -105,4 +105,9 @@ void Reverb::Process(float* stereo, int frames) {
     }
 }
 
+void Reverb::SetParam(int slot, float v) {
+    if (slot == 0) SetParams(v, fMix);
+    else if (slot == 1) SetParams(fRoomSize, v);
+}
+
 } // namespace daw

@@ -107,4 +107,11 @@ void Saturator::Process(float* stereo, int frames) {
     }
 }
 
+void Saturator::SetParam(int slot, float v) {
+    double d = fDrive, m = fMix, o = fOutputTrimDb;
+    switch (slot) { case 0: d = v; break; case 1: m = v; break; case 2: o = v; break;
+                    default: return; }
+    SetParams(d, m, o);
+}
+
 } // namespace daw

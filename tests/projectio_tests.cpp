@@ -65,6 +65,9 @@ int main() {
     { AutomationLane g; g.AddPoint(0, 1.0f); g.AddPoint(96000, 0.25f);
       stack.Execute(std::make_unique<SetAutoLaneCommand>(
           t1, AutoLaneKind::Gain, g), a); }
+    { FxAutoLane fa; fa.fxIndex = 1; fa.slot = 4;   // effect-param automation
+      fa.lane.AddPoint(0, -18.0f); fa.lane.AddPoint(48000, -6.0f);
+      a.FindTrack(t1)->fxAuto.push_back(fa); }
 
     CHECK(ProjectIO::Save(a, path));
 
@@ -108,6 +111,11 @@ int main() {
     CHECK(bt1.sends[0].dest == t2);
     CHECK(std::abs(bt1.sends[0].level - 0.4f) < 1e-4f);
     CHECK(bt1.sends[0].preFader == true);
+    CHECK(bt1.fxAuto.size() == 1);
+    CHECK(bt1.fxAuto[0].fxIndex == 1);
+    CHECK(bt1.fxAuto[0].slot == 4);
+    CHECK(bt1.fxAuto[0].lane.Count() == 2);
+    CHECK(std::abs(bt1.fxAuto[0].lane.At(1).value - (-6.0f)) < 1e-4f);
     CHECK(bt1.gainAuto.Count() == 2);
     CHECK(bt1.gainAuto.At(0).frame == 0);
     CHECK(std::abs(bt1.gainAuto.At(1).value - 0.25f) < 1e-4f);

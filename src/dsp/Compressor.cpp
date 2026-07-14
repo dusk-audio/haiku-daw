@@ -82,4 +82,11 @@ void Compressor::Process(float* stereo, int frames) {
     }
 }
 
+void Compressor::SetParam(int slot, float v) {
+    double t = fThresholdDb, r = fRatio, a = fAttackMs, rl = fReleaseMs, m = fMakeupDb;
+    switch (slot) { case 0: t = v; break; case 1: r = v; break; case 2: a = v; break;
+                    case 3: rl = v; break; case 4: m = v; break; default: return; }
+    SetParams(t, r, a, rl, m);
+}
+
 } // namespace daw

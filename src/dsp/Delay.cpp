@@ -53,4 +53,11 @@ void Delay::Process(float* stereo, int frames) {
     }
 }
 
+void Delay::SetParam(int slot, float v) {
+    // Slot 0 (time) would resize the line -> not RT-safe; skip. Feedback/mix are
+    // read live in Process(), so set them directly.
+    if (slot == 1) fFeedback = v;
+    else if (slot == 2) fMix = v;
+}
+
 } // namespace daw

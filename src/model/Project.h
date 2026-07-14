@@ -52,6 +52,14 @@ struct Send {
     bool    preFader = false;   // false = post-fader (typical for reverb/delay)
 };
 
+// Automation of one effect parameter: fxIndex into the track's fx chain, the
+// parameter slot within that effect, and the breakpoint lane (absolute value).
+struct FxAutoLane {
+    int            fxIndex = 0;
+    int            slot    = 0;
+    AutomationLane lane;
+};
+
 struct Track {
     TrackId           id    = kInvalidTrackId;
     TrackType         type  = TrackType::Audio;
@@ -70,6 +78,7 @@ struct Track {
     std::vector<Send>       sends;    // aux sends into buses
     AutomationLane          gainAuto; // volume envelope (absolute gain; empty = static)
     AutomationLane          panAuto;  // pan envelope (absolute pan; empty = static)
+    std::vector<FxAutoLane> fxAuto;   // effect-parameter automation lanes
     Instrument              instrument; // synth voice (MIDI tracks)
 
     Clip*       FindClip(ClipId id);

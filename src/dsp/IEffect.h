@@ -30,6 +30,13 @@ public:
     // parameters — e.g. on seek so stale audio doesn't bleed across a jump.
     virtual void Reset() = 0;
 
+    // Set parameter `slot` to `value` (same slot order as the EffectDesc params
+    // / editor knobs). Used for per-block parameter automation, so it must be
+    // RT-safe: recompute coefficients only, no allocation. Slots that would need
+    // a reallocation (e.g. resizing a delay line) may clamp/ignore. Default:
+    // no-op (an effect opts in by overriding).
+    virtual void SetParam(int /*slot*/, float /*value*/) {}
+
     virtual const char* Name() const = 0;
 };
 

@@ -39,6 +39,7 @@ public:
     void Prepare(double sampleRate) override;
     void Process(float* stereo, int frames) override;
     void Reset() override;
+    void SetParam(int slot, float value) override;
     const char* Name() const override { return "Gate"; }
 
 private:

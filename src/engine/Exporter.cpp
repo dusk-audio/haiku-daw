@@ -177,22 +177,31 @@ bool ExportWav(const Project& project, const std::string& outPath,
     };
 
     // Instantiate + run an effect chain over a whole node buffer, in blocks.
-    auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf) {
+    auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf,
+                       const std::vector<FxAutoLane>& fxAuto) {
+        // Chain kept index-aligned with fxDescs (nullptr for any skipped) so
+        // effect-parameter automation can address chain[fxIndex].
         std::vector<std::unique_ptr<IEffect>> chain;
+        bool any = false;
         for (const EffectDesc& d : fxDescs) {
             auto e = MakeEffect(d);
-            if (!e) continue;
-            e->Prepare(outRate);
+            if (e) { e->Prepare(outRate); any = true; }
             chain.push_back(std::move(e));
         }
-        if (chain.empty()) return;
+        if (!any) return;
         const int64_t kBlock = 8192;
         for (int64_t off = 0; off < totalOut; off += kBlock) {
             int64_t n = totalOut - off;
             if (n > kBlock) n = kBlock;
+            const Frame pf = (Frame)(off / scale);   // block start, project frame
+            for (const FxAutoLane& fa : fxAuto) {
+                if (fa.fxIndex < 0 || fa.fxIndex >= (int)chain.size()) continue;
+                if (!chain[fa.fxIndex] || fa.lane.Count() == 0) continue;
+                chain[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(pf, 0.0f));
+            }
             float* p = buf + off * 2;
             for (auto& e : chain)
-                e->Process(p, static_cast<int>(n));
+                if (e) e->Process(p, static_cast<int>(n));
         }
     };
 
@@ -253,7 +262,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
             }
         }
 
-        applyFx(t.fx, nb);
+        applyFx(t.fx, nb, t.fxAuto);
         addSends(t, /*pre=*/false, nb);         // post-fader taps
 
         // Route this node into its output (a bus) or the master mix.

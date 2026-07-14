@@ -325,6 +325,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         b.statPan  = t->pan;
         b.gainAuto = t->gainAuto;
         b.panAuto  = t->panAuto;
+        b.fxAuto   = t->fxAuto;   // effect-parameter automation (index-aligned)
         b.hasAuto  = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
     }
 
@@ -531,6 +532,13 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 nb[i * 2 + 0] *= b.busGainL;
                 nb[i * 2 + 1] *= b.busGainR;
             }
+        }
+        // Effect-parameter automation: set each automated param from its lane
+        // at the block start before the chain processes (per block, RT-safe).
+        for (const FxAutoLane& fa : b.fxAuto) {
+            if (fa.fxIndex < 0 || fa.fxIndex >= (int)b.fx.size()) continue;
+            if (fa.lane.Count() == 0) continue;
+            b.fx[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(blockStart, 0.0f));
         }
         for (auto& fx : b.fx)
             fx->Process(nb, static_cast<int>(frames));

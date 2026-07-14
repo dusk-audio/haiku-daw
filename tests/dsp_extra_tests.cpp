@@ -134,6 +134,24 @@ int main() {
         CHECK(std::fabs(b3[2 * 3999] - 1.0f) < 0.1f);
     }
 
+    // SetParam (per-block automation hook): setting the EQ mid band's gain via
+    // SetParam matches SetBand; setting a compressor param stays finite.
+    {
+        Eq a; a.SetBand(2, 1000.0f, 9.0f, 2.0f); a.Prepare(SR);
+        Eq b; b.Prepare(SR);
+        b.SetParam(2 * 3 + 0, 1000.0f);   // mid freq
+        b.SetParam(2 * 3 + 1, 9.0f);      // mid gain
+        b.SetParam(2 * 3 + 2, 2.0f);      // mid Q
+        CHECK(std::fabs(a.MagnitudeResponseDb(1000.0f)
+                        - b.MagnitudeResponseDb(1000.0f)) < 0.01f);
+        Compressor c(-18, 4, 5, 80, 0); c.Prepare(SR);
+        c.SetParam(0, -30.0f);            // threshold
+        std::vector<float> buf(1000 * 2, 0.5f);
+        c.Process(buf.data(), 1000);
+        bool fin = true; for (float v : buf) if (!std::isfinite(v)) fin = false;
+        CHECK(fin);
+    }
+
     // EQ magnitude response: flat EQ ~ 0 dB everywhere; a +9 dB mid-peak reads
     // near +9 dB at its center and ~0 dB far away. (Drives the graph UI.)
     {

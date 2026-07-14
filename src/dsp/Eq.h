@@ -27,6 +27,7 @@ public:
     void Prepare(double sampleRate) override;
     void Process(float* stereo, int frames) override;
     void Reset() override;
+    void SetParam(int slot, float value) override;   // band*3 + {freq,gain,Q}
     const char* Name() const override { return "EQ"; }
 
     // Band parameters (for a response-graph UI).

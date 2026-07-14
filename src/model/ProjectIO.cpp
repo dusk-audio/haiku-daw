@@ -124,6 +124,16 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         writeLane("gain", t.gainAuto);
         writeLane("pan",  t.panAuto);
 
+        for (const FxAutoLane& fa : t.fxAuto) {
+            if (fa.lane.Count() == 0) continue;
+            f << "fxauto " << fa.fxIndex << " " << fa.slot << " "
+              << fa.lane.Count();
+            for (size_t i = 0; i < fa.lane.Count(); i++)
+                f << " " << (long long)fa.lane.At(i).frame << " "
+                  << fa.lane.At(i).value;
+            f << "\n";
+        }
+
         if (t.type == TrackType::Midi) {
             const Instrument& in = t.instrument;
             f << "instrument " << in.waveform << " " << in.attack << " "
@@ -281,6 +291,17 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
                 e.params.push_back(v);
             }
             cur.fx.push_back(e);
+        }
+        else if (kw == "fxauto" && haveTrack) {
+            FxAutoLane fa;
+            int count = 0;
+            iss >> fa.fxIndex >> fa.slot >> count;
+            for (int i = 0; i < count; i++) {
+                long long fr = 0; float v = 0.0f;
+                iss >> fr >> v;
+                fa.lane.AddPoint((Frame)fr, v);
+            }
+            if (fa.lane.Count() > 0) cur.fxAuto.push_back(fa);
         }
         else if (kw == "instrument" && haveTrack) {
             Instrument in;

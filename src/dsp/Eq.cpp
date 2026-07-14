@@ -133,6 +133,14 @@ void Eq::Reset() {
         }
 }
 
+void Eq::SetParam(int slot, float value) {
+    if (slot < 0 || slot >= kBands * 3) return;
+    const int b = slot / 3, which = slot % 3;
+    float f = fFreq[b], g = fGainDb[b], q = fQ[b];
+    if (which == 0) f = value; else if (which == 1) g = value; else q = value;
+    SetBand(b, f, g, q);   // recomputes the band's coefficients (RT-safe)
+}
+
 float Eq::MagnitudeResponseDb(float freqHz) const {
     const double w = 2.0 * kPi * (double)freqHz / fSampleRate;
     const double c1 = std::cos(w),      s1 = std::sin(w);

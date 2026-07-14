@@ -59,4 +59,11 @@ void Widener::Process(float* stereo, int frames) {
     }
 }
 
+void Widener::SetParam(int slot, float v) {
+    double w = fWidth, p = fPan, g = fGain;
+    switch (slot) { case 0: w = v; break; case 1: p = v; break; case 2: g = v; break;
+                    default: return; }
+    SetParams(w, p, g);
+}
+
 } // namespace daw

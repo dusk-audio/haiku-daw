@@ -198,6 +198,7 @@ private:
         // UpdateMix leaves automated nodes alone.
         AutomationLane                        gainAuto;
         AutomationLane                        panAuto;
+        std::vector<FxAutoLane>               fxAuto;   // effect-param automation
         float                                 statGain = 1.0f;  // ValueAt default
         float                                 statPan  = 0.0f;
         bool                                  hasAuto  = false;

@@ -88,4 +88,11 @@ void Gate::Process(float* stereo, int frames) {
     }
 }
 
+void Gate::SetParam(int slot, float v) {
+    double t = fThresholdDb, r = fRatio, a = fAttackMs, rl = fReleaseMs, rg = fRangeDb;
+    switch (slot) { case 0: t = v; break; case 1: r = v; break; case 2: a = v; break;
+                    case 3: rl = v; break; case 4: rg = v; break; default: return; }
+    SetParams(t, r, a, rl, rg);
+}
+
 } // namespace daw
