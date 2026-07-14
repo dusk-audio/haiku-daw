@@ -13,9 +13,9 @@ namespace daw {
 
 static constexpr float kPanelPad = 8.0f;
 static constexpr float kTitleH   = 22.0f;
-static constexpr float kKnobW    = 56.0f;
-static constexpr float kKnobH    = 62.0f;
-static constexpr float kGraphH   = 150.0f;
+static constexpr float kKnobW    = 68.0f;
+static constexpr float kKnobH    = 78.0f;
+static constexpr float kGraphH   = 156.0f;
 static constexpr float kBtnW     = 22.0f;
 
 struct KnobDef { const char* label; int slot; float mn; float mx; };
@@ -100,28 +100,44 @@ void EffectsView::Apply() {
 void EffectsView::DrawKnob(BRect r, const char* label, float value,
                            float mn, float mx) {
     const float cx = (r.left + r.right) * 0.5f;
-    const float cy = r.top + 22;
-    const float rad = 16.0f;
+    const float cy = r.top + 30;
+    const float rad = 21.0f;
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
+
+    // Label (centered above).
+    SetHighColor(ColText());
+    DrawString(label, BPoint(r.left + 4, r.top + 11));
+
+    // Tick scale around the -135..+135 sweep; the reached ticks are lit.
+    for (int i = 0; i <= 10; i++) {
+        const double tf = i / 10.0;
+        const double a  = (-135.0 + 270.0 * tf) * M_PI / 180.0;
+        const float ux = (float)std::sin(a), uy = -(float)std::cos(a);
+        SetHighColor(tf <= t + 0.001 ? ColAccent() : ColGrid());
+        StrokeLine(BPoint(cx + ux * (rad + 2), cy + uy * (rad + 2)),
+                   BPoint(cx + ux * (rad + 6), cy + uy * (rad + 6)));
+    }
     // Body.
     SetHighColor(ColHeaderHi());
     FillEllipse(BPoint(cx, cy), rad, rad);
     SetHighColor(ColGrid());
     StrokeEllipse(BPoint(cx, cy), rad, rad);
-    // Indicator (‑135°..+135°).
+    // Indicator (thick).
     const double ang = (-135.0 + 270.0 * t) * M_PI / 180.0;
+    const float ix = (float)std::sin(ang), iy = -(float)std::cos(ang);
     SetHighColor(ColAccent());
-    StrokeLine(BPoint(cx, cy),
-               BPoint(cx + std::sin(ang) * rad, cy - std::cos(ang) * rad));
-    // Label + value.
-    SetHighColor(ColTextDim());
-    DrawString(label, BPoint(r.left + 2, r.top + 2));
+    SetPenSize(2.0f);
+    StrokeLine(BPoint(cx + ix * 5, cy + iy * 5),
+               BPoint(cx + ix * (rad - 3), cy + iy * (rad - 3)));
+    SetPenSize(1.0f);
+
+    // Value (centered below).
     char v[16];
     if (std::fabs(mx) > 50 || std::fabs(mn) > 50) std::snprintf(v, sizeof(v), "%.0f", value);
     else std::snprintf(v, sizeof(v), "%.2f", value);
     SetHighColor(ColText());
-    DrawString(v, BPoint(r.left + 2, r.bottom - 2));
+    DrawString(v, BPoint(r.left + 4, r.bottom - 3));
 }
 
 void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
@@ -148,6 +164,16 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
         const float x = freqToX(f);
         SetHighColor(ColLaneAlt());
         StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
+        SetHighColor(ColTextDim());
+        DrawString(f >= 1000 ? (f >= 10000 ? "10k" : "1k") : "100",
+                   BPoint(x + 2, r.bottom - 2));
+    }
+    // dB axis labels (left).
+    SetHighColor(ColTextDim());
+    for (int db = 12; db >= -12; db -= 12) {
+        const float y = r.bottom - (db + 18) / 36.0f * r.Height();
+        char l[8]; std::snprintf(l, sizeof(l), "%+d", db);
+        DrawString(l, BPoint(r.left + 2, y - 2));
     }
 
     // Build an Eq from the params and stroke its magnitude response.

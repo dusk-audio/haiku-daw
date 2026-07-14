@@ -77,6 +77,11 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
     StrokeLine(BPoint(fr.left, uy), BPoint(fr.right, uy));
     SetHighColor(ColGrid());
     StrokeRect(fr);
+    // Fader thumb (cap at the current level).
+    SetHighColor(ColText());
+    FillRect(BRect(fr.left - 3, fill.top - 2, fr.right + 3, fill.top + 2));
+    SetHighColor(Rgb(20, 22, 26));
+    StrokeLine(BPoint(fr.left - 3, fill.top), BPoint(fr.right + 3, fill.top));
 
     // dB readout.
     char db[16];
@@ -98,6 +103,12 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
     };
     bar(mr.left + 1, peakL);
     bar(mr.left + 2 + bw, peakR);
+    // dB tick lines (0 / -6 / -12 dBFS).
+    for (float lvl : { 1.0f, 0.5f, 0.25f }) {
+        const float ty = mr.bottom - mr.Height() * lvl;
+        SetHighColor(ColGrid());
+        StrokeLine(BPoint(mr.left, ty), BPoint(mr.right, ty));
+    }
     SetHighColor(ColGrid());
     StrokeRect(mr);
 
