@@ -77,11 +77,15 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
     StrokeLine(BPoint(fr.left, uy), BPoint(fr.right, uy));
     SetHighColor(ColGrid());
     StrokeRect(fr);
-    // Fader thumb (cap at the current level).
+    // Fader thumb (cap at the current level). Kept inside the fader rect so it
+    // stays fully clickable (MouseDown hit-tests FaderRect).
+    float ty = fill.top;
+    if (ty < fr.top + 2)    ty = fr.top + 2;
+    if (ty > fr.bottom - 2) ty = fr.bottom - 2;
     SetHighColor(ColText());
-    FillRect(BRect(fr.left - 3, fill.top - 2, fr.right + 3, fill.top + 2));
+    FillRect(BRect(fr.left, ty - 2, fr.right, ty + 2));
     SetHighColor(Rgb(20, 22, 26));
-    StrokeLine(BPoint(fr.left - 3, fill.top), BPoint(fr.right + 3, fill.top));
+    StrokeLine(BPoint(fr.left, ty), BPoint(fr.right, ty));
 
     // dB readout.
     char db[16];

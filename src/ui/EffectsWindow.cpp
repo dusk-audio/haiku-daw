@@ -107,7 +107,7 @@ void EffectsView::DrawKnob(BRect r, const char* label, float value,
 
     // Label (centered above).
     SetHighColor(ColText());
-    DrawString(label, BPoint(r.left + 4, r.top + 11));
+    DrawString(label, BPoint(cx - StringWidth(label) * 0.5f, r.top + 11));
 
     // Tick scale around the -135..+135 sweep; the reached ticks are lit.
     for (int i = 0; i <= 10; i++) {
@@ -137,7 +137,7 @@ void EffectsView::DrawKnob(BRect r, const char* label, float value,
     if (std::fabs(mx) > 50 || std::fabs(mn) > 50) std::snprintf(v, sizeof(v), "%.0f", value);
     else std::snprintf(v, sizeof(v), "%.2f", value);
     SetHighColor(ColText());
-    DrawString(v, BPoint(r.left + 4, r.bottom - 3));
+    DrawString(v, BPoint(cx - StringWidth(v) * 0.5f, r.bottom - 3));
 }
 
 void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
@@ -164,16 +164,6 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
         const float x = freqToX(f);
         SetHighColor(ColLaneAlt());
         StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
-        SetHighColor(ColTextDim());
-        DrawString(f >= 1000 ? (f >= 10000 ? "10k" : "1k") : "100",
-                   BPoint(x + 2, r.bottom - 2));
-    }
-    // dB axis labels (left).
-    SetHighColor(ColTextDim());
-    for (int db = 12; db >= -12; db -= 12) {
-        const float y = r.bottom - (db + 18) / 36.0f * r.Height();
-        char l[8]; std::snprintf(l, sizeof(l), "%+d", db);
-        DrawString(l, BPoint(r.left + 2, y - 2));
     }
 
     // Build an Eq from the params and stroke its magnitude response.
@@ -206,6 +196,17 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
         StrokeEllipse(BPoint(hx, hy), 5, 5);
         fHits.push_back({ effIdx, 5, b, BRect(hx - 6, hy - 6, hx + 6, hy + 6),
                           0, 0 });
+    }
+
+    // Axis labels last (on top of the curve/handles) so they stay legible.
+    SetHighColor(ColTextDim());
+    for (double f : { 100.0, 1000.0, 10000.0 })
+        DrawString(f >= 1000 ? (f >= 10000 ? "10k" : "1k") : "100",
+                   BPoint(freqToX(f) + 2, r.bottom - 2));
+    for (int db = 12; db >= -12; db -= 12) {
+        const float y = r.bottom - (db + 18) / 36.0f * r.Height();
+        char l[8]; std::snprintf(l, sizeof(l), "%+d", db);
+        DrawString(l, BPoint(r.left + 2, y - 2));
     }
     SetHighColor(ColGrid());
     StrokeRect(r);
