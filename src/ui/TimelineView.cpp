@@ -3,6 +3,7 @@
 #include "UiMetrics.h"
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
+#include "InstrumentWindow.h"
 #include "RenameWindow.h"
 
 #include <MenuItem.h>
@@ -53,6 +54,7 @@ static BRect GainRect(BRect lane)  { return BRect(80, lane.top + 22, 154, lane.t
 static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.top + 52); }
 static BRect SndRect(BRect lane)   { return BRect(6,  lane.top + 54, 60,  lane.top + 69); }
 static BRect AutoRect(BRect lane)  { return BRect(64, lane.top + 54, 118, lane.top + 69); }
+static BRect InstRect(BRect lane)  { return BRect(120, lane.top + 54, 154, lane.top + 69); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -747,6 +749,15 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         Invalidate(lane);
         return;
     }
+    if (t.type == TrackType::Midi && InstRect(lane).Contains(where)) {
+        // Open the instrument editor (waveform + ADSR). Posts back via
+        // kMsgApplyInstrument.
+        BPoint p = ConvertToScreen(where);
+        BRect  wr(p.x, p.y, p.x + 280, p.y + 190);
+        (new InstrumentWindow(wr, t.instrument, id,
+                              BMessenger(Window())))->Show();
+        return;
+    }
     if (ArmRect(lane).Contains(where)) {
         // Arm is transient transport state, not an undoable document edit:
         // toggle it directly. Multiple tracks may be armed; recording writes
@@ -1354,6 +1365,21 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     const char* an = amode == 1 ? "Auto:Gain" : amode == 2 ? "Auto:Pan"
                                                            : "Auto: -";
     DrawString(an, BPoint(ar.left + 4, ar.bottom - 4));
+
+    // Instrument box (MIDI tracks): opens the waveform/ADSR editor.
+    if (t.type == TrackType::Midi) {
+        BRect ir = InstRect(lane);
+        SetHighColor(Rgb(70, 90, 130));
+        FillRect(ir);
+        SetHighColor(ColGrid());  StrokeRect(ir);
+        SetHighColor(ColText());
+        const char* wn[4] = { "Sin", "Saw", "Sqr", "Tri" };
+        int wi = t.instrument.waveform;
+        if (wi < 0 || wi > 3) wi = 0;
+        char ib[16];
+        std::snprintf(ib, sizeof(ib), "\xE2\x99\xAA%s", wn[wi]);
+        DrawString(ib, BPoint(ir.left + 3, ir.bottom - 4));
+    }
 }
 
 // --- Automation editing --------------------------------------------------

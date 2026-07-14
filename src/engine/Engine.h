@@ -174,6 +174,7 @@ private:
         TrackId                               output = kInvalidTrackId;  // 0 = master
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
+        Instrument                            instrument;// synth voice (MIDI)
         float                                 midiGainL = 1.0f;  // equal-power
         float                                 midiGainR = 1.0f;
         float                                 busGainL  = 1.0f;  // bus fader

@@ -272,6 +272,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         Bus b;
         b.id    = t.id;
         b.notes = t.notes;
+        b.instrument = t.instrument;
         EqualPowerGains(t.gain, t.pan, &b.midiGainL, &b.midiGainR);
         fBuses.push_back(std::move(b));
         for (const MidiNote& n : t.notes)
@@ -495,7 +496,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
             s->Mix(nb, frames, blockStart);
         if (!b.notes.empty()) {             // MIDI: render dry then fader
-            fSynth.Render(b.notes, nb, frames, blockStart, 1.0f);
+            fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, 1.0f);
             for (size_t i = 0; i < frames; i++) {
                 nb[i * 2 + 0] *= b.midiGainL;
                 nb[i * 2 + 1] *= b.midiGainR;

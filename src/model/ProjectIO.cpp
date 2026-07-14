@@ -123,6 +123,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         writeLane("gain", t.gainAuto);
         writeLane("pan",  t.panAuto);
 
+        if (t.type == TrackType::Midi) {
+            const Instrument& in = t.instrument;
+            f << "instrument " << in.waveform << " " << in.attack << " "
+              << in.decay << " " << in.sustain << " " << in.release << "\n";
+        }
+
         f << "endtrack\n";
     }
     return f.good();
@@ -266,6 +272,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
                 e.params.push_back(v);
             }
             cur.fx.push_back(e);
+        }
+        else if (kw == "instrument" && haveTrack) {
+            Instrument in;
+            iss >> in.waveform >> in.attack >> in.decay >> in.sustain
+                >> in.release;
+            if (in.waveform < 0 || in.waveform > 3) in.waveform = 0;
+            cur.instrument = in;
         }
         else if (kw == "send" && haveTrack) {
             Send s;

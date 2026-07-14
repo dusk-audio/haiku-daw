@@ -54,6 +54,8 @@ int main() {
     TrackId t2 = a.Tracks().back().id;
     MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500; n.lengthFrames = 480;
     stack.Execute(std::make_unique<AddNoteCommand>(t2, n), a);
+    { Instrument in; in.waveform = 2; in.attack = 0.01f; in.decay = 0.2f;
+      in.sustain = 0.5f; in.release = 0.3f; a.FindTrack(t2)->instrument = in; }
 
     // Aux send from track 1 to a bus (id t2 stands in as a dest here).
     { std::vector<Send> s = {{t2, 0.4f, true}};
@@ -120,6 +122,10 @@ int main() {
     CHECK(bt2.notes.size() == 1);
     CHECK(bt2.notes[0].pitch == 64);
     CHECK(bt2.notes[0].startFrame == 500);
+    CHECK(bt2.instrument.waveform == 2);
+    CHECK(std::abs(bt2.instrument.decay - 0.2f) < 1e-4f);
+    CHECK(std::abs(bt2.instrument.sustain - 0.5f) < 1e-4f);
+    CHECK(std::abs(bt2.instrument.release - 0.3f) < 1e-4f);
 
     // A new track after load must get a fresh id, not collide with loaded ones.
     CommandStack s2;

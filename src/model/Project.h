@@ -9,6 +9,7 @@
 #include "Effect.h"
 #include "Automation.h"
 #include "TempoMap.h"
+#include "Instrument.h"
 
 #include <string>
 #include <vector>
@@ -69,6 +70,7 @@ struct Track {
     std::vector<Send>       sends;    // aux sends into buses
     AutomationLane          gainAuto; // volume envelope (absolute gain; empty = static)
     AutomationLane          panAuto;  // pan envelope (absolute pan; empty = static)
+    Instrument              instrument; // synth voice (MIDI tracks)
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;

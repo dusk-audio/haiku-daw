@@ -4,6 +4,7 @@
 #include "MeterView.h"
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
+#include "InstrumentWindow.h"
 #include "MixerWindow.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
@@ -412,6 +413,23 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     if (s.dest != kInvalidTrackId && s.dest != (TrackId)tid)
                         t->sends.push_back(s);
                 }
+                fTimeline->Invalidate();
+            }
+            break;
+        }
+        case kMsgApplyInstrument: {
+            // An InstrumentWindow posts the edited voice; direct mutation (like
+            // fx/sends). Applies on the next Play.
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                int32 wv = 0; float a = 0, d = 0, s = 0, r = 0;
+                msg->FindInt32("wave", &wv);
+                msg->FindFloat("a", &a); msg->FindFloat("d", &d);
+                msg->FindFloat("s", &s); msg->FindFloat("r", &r);
+                t->instrument.waveform = (wv >= 0 && wv <= 3) ? wv : 0;
+                t->instrument.attack = a; t->instrument.decay = d;
+                t->instrument.sustain = s; t->instrument.release = r;
                 fTimeline->Invalidate();
             }
             break;

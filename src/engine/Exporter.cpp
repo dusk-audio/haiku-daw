@@ -223,7 +223,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
                     n.startFrame   = ToOut(n.startFrame, scale);
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
-            synth.Render(notes, nb, static_cast<size_t>(totalOut), 0, 1.0f);
+            synth.Render(notes, t.instrument, nb, static_cast<size_t>(totalOut),
+                         0, 1.0f);
         }   // Bus: nb already holds the summed upstream (dry).
 
         addSends(t, /*pre=*/true, nb);          // pre-fader taps (dry)

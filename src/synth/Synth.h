@@ -23,9 +23,10 @@ public:
     void SetSampleRate(double sr) { if (sr > 0) fSampleRate = sr; }
 
     // Add every note sounding in [blockStart, blockStart+frames) into the
-    // interleaved-stereo `out`, scaled by `gain`. Never allocates.
-    void Render(const std::vector<MidiNote>& notes, float* out, size_t frames,
-                Frame blockStart, float gain) const;
+    // interleaved-stereo `out`, scaled by `gain`, using the instrument's
+    // waveform + ADSR (release rings past note-off). Never allocates.
+    void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
+                float* out, size_t frames, Frame blockStart, float gain) const;
 
 private:
     double fSampleRate;
