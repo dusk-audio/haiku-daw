@@ -66,6 +66,16 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         f << "\n";
     }
 
+    // Tempo/meter map. Frame 0 is seeded from `tempo`/`timesig` above, so only
+    // changes at frame > 0 are written.
+    for (const TempoChange& tc : p.tempoMap.Tempos())
+        if (tc.frame > 0)
+            f << "tempochange " << (long long)tc.frame << " " << tc.bpm << "\n";
+    for (const MeterChange& mc : p.tempoMap.Meters())
+        if (mc.frame > 0)
+            f << "meterchange " << (long long)mc.frame << " "
+              << mc.num << " " << mc.denom << "\n";
+
     for (const Track& t : p.Tracks()) {
         const char* ty = t.type == TrackType::Midi ? "midi"
                        : t.type == TrackType::Bus  ? "bus" : "audio";
@@ -135,6 +145,11 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     TrackId  maxTrack = 0;
     ClipId   maxClip  = 0;
 
+    // Tempo/meter changes are collected and applied after the whole file is
+    // read (frame-0 seed depends on `tempo`/`timesig`, which may appear anywhere).
+    std::vector<TempoChange> tempoChanges;
+    std::vector<MeterChange> meterChanges;
+
     auto commit = [&]() {
         if (haveTrack) { p.AddTrack(cur); haveTrack = false; }
     };
@@ -159,6 +174,16 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             p.masterFx.push_back(e);
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
+        else if (kw == "tempochange") {
+            long long fr = 0; double bpm = 120.0;
+            iss >> fr >> bpm;
+            if (fr > 0) tempoChanges.push_back({(Frame)fr, bpm});
+        }
+        else if (kw == "meterchange") {
+            long long fr = 0; int n = 4, d = 4;
+            iss >> fr >> n >> d;
+            if (fr > 0) meterChanges.push_back({(Frame)fr, n, d});
+        }
         else if (kw == "transport") {
             long long ph, ls, le; int loop;
             iss >> ph >> loop >> ls >> le;
@@ -249,6 +274,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         // track / EOF).
     }
     commit();
+
+    // Build the tempo/meter map: seed frame 0 from tempo/timesig, sync sample
+    // rate, then apply the collected changes.
+    p.tempoMap.sampleRate = p.sampleRate;
+    p.tempoMap.Reset(p.tempoBPM, p.timeSig.numerator, p.timeSig.denominator);
+    for (const TempoChange& tc : tempoChanges) p.tempoMap.SetTempoAt(tc.frame, tc.bpm);
+    for (const MeterChange& mc : meterChanges) p.tempoMap.SetMeterAt(mc.frame, mc.num, mc.denom);
 
     p.ReserveIds(maxTrack, maxClip);
     return true;

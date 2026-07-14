@@ -39,6 +39,10 @@ int main() {
     stack.Execute(std::make_unique<AddClipCommand>(t1, c), a);
     a.FindTrack(t1)->colorIndex = 3;   // per-track color + height
     a.FindTrack(t1)->height     = 104;
+    a.tempoMap.sampleRate = a.sampleRate;
+    a.tempoMap.Reset(a.tempoBPM, 4, 4);
+    a.tempoMap.SetTempoAt(48000, 90.0);   // a tempo change
+    a.tempoMap.SetMeterAt(96000, 3, 4);   // a meter change
     stack.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(700.0f)), a);
     stack.Execute(std::make_unique<AddEffectCommand>(t1,
         CompressorDesc(-18.0f, 3.0f, 5.0f, 80.0f, 6.0f)), a);   // p4 = makeup
@@ -66,6 +70,12 @@ int main() {
     CHECK(std::abs(b.masterGain - 0.75f) < 1e-4f);
     CHECK(b.masterFx.size() == 1);
     CHECK(b.masterFx[0].type == EffectType::Reverb);
+    CHECK(b.tempoMap.Tempos().size() == 2);          // frame-0 seed + change
+    CHECK(b.tempoMap.Tempos()[1].frame == 48000);
+    CHECK(std::abs(b.tempoMap.Tempos()[1].bpm - 90.0) < 1e-6);
+    CHECK(b.tempoMap.Meters().size() == 2);
+    CHECK(b.tempoMap.Meters()[1].frame == 96000);
+    CHECK(b.tempoMap.Meters()[1].num == 3);
     CHECK(b.transport.playhead == 12345);
     CHECK(b.Tracks().size() == 2);
 

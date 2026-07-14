@@ -8,6 +8,7 @@
 #include "types.h"
 #include "Effect.h"
 #include "Automation.h"
+#include "TempoMap.h"
 
 #include <string>
 #include <vector>
@@ -72,10 +73,11 @@ struct Track {
 class Project {
 public:
     double        sampleRate = 48000.0;
-    double        tempoBPM   = 120.0;
+    double        tempoBPM   = 120.0;   // initial tempo (frame-0 of tempoMap)
     float         masterGain = 1.0f;   // linear, applied to the summed output
     std::vector<EffectDesc> masterFx;  // master bus effect chain (post-sum)
     TimeSignature timeSig;
+    TempoMap      tempoMap;            // variable tempo + meter (authoritative)
     Transport     transport;
 
     const std::vector<Track>& Tracks() const { return fTracks; }

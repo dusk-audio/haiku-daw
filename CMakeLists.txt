@@ -98,6 +98,10 @@ add_executable(crossfade_tests tests/crossfade_tests.cpp)
 target_link_libraries(crossfade_tests PRIVATE daw_model)
 add_test(NAME crossfade_tests COMMAND crossfade_tests)
 
+add_executable(tempomap_tests tests/tempomap_tests.cpp)
+target_link_libraries(tempomap_tests PRIVATE daw_model)
+add_test(NAME tempomap_tests COMMAND tempomap_tests)
+
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)
 add_test(NAME loudness_tests COMMAND loudness_tests)
