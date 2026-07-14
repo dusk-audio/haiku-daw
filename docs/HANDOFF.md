@@ -88,10 +88,15 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   height (C4), automatic overlap crossfade (C5, kit-free ComputeCrossfades),
   clip multi-select + group move/delete/duplicate via MacroCommand (C6). See
   `docs/ROADMAP.md` Phase C. New kit-free helpers: `Crossfade.h`, `MacroCommand`.
-- **NEXT** — Phase T (tempo/meter map) or Phase D (recording depth: input
-  monitoring, count-in, punch, loop-record/comping). Also pending: external Midi
-  Kit 2 I/O (class-compliant USB only; run midi_probe.sh on real hardware), BFS
-  sample browser. MIDI-note multi-select still deferred.
+- **Phase T — tempo & meter map** ✅ (step changes; host-tested where kit-free):
+  kit-free `TempoMap` (frame-anchored, exact frame<->beat, meter-aware BBT) +
+  Project/IO (T1); grid/ruler/snap walk the map (T2); metronome follows tempo +
+  meter (T3); right-click-ruler markers to add/remove tempo/meter changes (T4).
+  Tempo ramps + BBT transport readout deferred. New kit-free header: `TempoMap.h`.
+- **NEXT** — Phase D (recording depth: input monitoring, count-in, punch,
+  loop-record/comping) or Phase E (MIDI depth). Also pending: external Midi Kit 2
+  I/O (class-compliant USB only; run midi_probe.sh on real hardware), BFS sample
+  browser, MIDI-note multi-select, tempo ramps.
 
 ## Architecture in one breath
 
