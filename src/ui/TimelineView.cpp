@@ -9,6 +9,7 @@
 #include <PopUpMenu.h>
 #include <Window.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -95,6 +96,18 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         case B_HOME:        fScrollFrame = 0; Invalidate(); break;
         case '+': case '=': ZoomBy(0.5); break;   // zoom in
         case '-': case '_': ZoomBy(2.0); break;   // zoom out
+        case B_DELETE: case B_BACKSPACE:
+            if (!fSelClips.empty()) DeleteSelection();
+            else BView::KeyDown(bytes, numBytes);
+            break;
+        case 'd': case 'D':
+            if (modifiers() & B_CONTROL_KEY) DuplicateSelection();
+            else BView::KeyDown(bytes, numBytes);
+            break;
+        case B_ESCAPE:
+            if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(); }
+            else BView::KeyDown(bytes, numBytes);
+            break;
         default: BView::KeyDown(bytes, numBytes);
     }
 }
@@ -179,15 +192,86 @@ void TimelineView::PasteAtPlayhead() {
     }
 }
 
+Track* TimelineView::TrackOfClip(ClipId id) const {
+    for (Track& t : fProject->Tracks())
+        if (t.FindClip(id))
+            return &t;
+    return nullptr;
+}
+
+void TimelineView::DeleteSelection() {
+    if (fSelClips.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Delete Clips");
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id))
+            macro->Add(std::make_unique<RemoveClipCommand>(t->id, id));
+    if (!macro->Empty())
+        fStack->Execute(std::move(macro), *fProject);
+    fSelClips.clear();
+    Invalidate();
+}
+
+void TimelineView::DuplicateSelection() {
+    if (fSelClips.empty()) return;
+    // Offset the copies by the selection's total span so they land just after.
+    bool have = false; Frame minStart = 0, maxEnd = 0;
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id))
+            if (Clip* c = t->FindClip(id)) {
+                const Frame e = c->startFrame + c->lengthFrames;
+                if (!have) { minStart = c->startFrame; maxEnd = e; have = true; }
+                else { if (c->startFrame < minStart) minStart = c->startFrame;
+                       if (e > maxEnd) maxEnd = e; }
+            }
+    if (!have) return;
+    const Frame off = maxEnd - minStart;
+    auto macro = std::make_unique<MacroCommand>("Duplicate Clips");
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id))
+            if (Clip* c = t->FindClip(id)) {
+                Clip nc = *c;
+                nc.id = kInvalidClipId;         // AddClipCommand assigns a fresh id
+                nc.startFrame = c->startFrame + off;
+                macro->Add(std::make_unique<AddClipCommand>(t->id, nc));
+            }
+    if (!macro->Empty())
+        fStack->Execute(std::move(macro), *fProject);
+    Invalidate();
+}
+
 void TimelineView::Draw(BRect updateRect) {
     DrawLanes(updateRect);
     if (fDrag == Drag::Clip && fDragCurLane >= 0)
         DrawDragGhost();     // clip-move preview
+    if (fBanding) {          // rubber-band selection rectangle
+        BRect b(std::min(fBandA.x, fBandB.x), std::min(fBandA.y, fBandB.y),
+                std::max(fBandA.x, fBandB.x), std::max(fBandA.y, fBandB.y));
+        SetHighColor(Rgb(200, 220, 255));
+        StrokeRect(b);
+    }
     DrawPlayhead();          // over lanes, under the ruler
     DrawRuler(updateRect);   // ruler last so it sits above lane content
 }
 
 void TimelineView::DrawDragGhost() {
+    if (fMultiMove) {   // one ghost per selected clip at start + delta
+        SetHighColor(Rgb(210, 225, 255));
+        int idx = 0;
+        for (const Track& t : fProject->Tracks()) {
+            const BRect lane = LaneRect(idx++);
+            if (t.type != TrackType::Audio) continue;
+            for (const Clip& c : t.clips) {
+                if (!ClipSelected(c.id)) continue;
+                Frame ns = c.startFrame + fMultiDelta;
+                if (ns < 0) ns = 0;
+                float x0 = FrameToX(ns), x1 = FrameToX(ns + c.lengthFrames);
+                if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+                if (x1 <= x0) continue;
+                StrokeRect(BRect(x0, lane.top + 3, x1, lane.bottom - 3));
+            }
+        }
+        return;
+    }
     if (fDragCurLane >= (int)fProject->Tracks().size())
         return;
     BRect lane = LaneRect(fDragCurLane);
@@ -424,6 +508,20 @@ void TimelineView::MouseDown(BPoint where) {
                 Invalidate(lane);
                 return;
             }
+            // Selection: Shift-click toggles; a plain click on an unselected
+            // clip selects only it (a click on an already-selected clip keeps
+            // the whole selection so it can be dragged as a group).
+            if (modifiers() & B_SHIFT_KEY) {
+                if (ClipSelected(c.id)) fSelClips.erase(c.id);
+                else                    fSelClips.insert(c.id);
+                Invalidate(lane);
+                return;
+            }
+            if (!ClipSelected(c.id)) {
+                fSelClips.clear();
+                fSelClips.insert(c.id);
+            }
+            fMultiMove       = false;
             fDragTrack       = t.id;
             fDragLane        = idx;
             fDragClip        = c.id;
@@ -449,6 +547,8 @@ void TimelineView::MouseDown(BPoint where) {
                 fDragGrabOffset = at - c.startFrame;
                 fDragCurLane  = idx;
                 fDragCurStart = c.startFrame;
+                fMultiMove    = fSelClips.size() > 1;   // drag the group together
+                fMultiDelta   = 0;
             }
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             break;
@@ -459,6 +559,17 @@ void TimelineView::MouseDown(BPoint where) {
     if (fDrag == Drag::None && rightClick && fHasClipClip) {
         if (PastePopup(where))
             PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Audio);
+        return;
+    }
+
+    // Left-click on empty audio content: clear selection (unless Shift) and
+    // begin a rubber-band box select.
+    if (fDrag == Drag::None && !rightClick && where.x >= kHeaderWidth) {
+        if (!(modifiers() & B_SHIFT_KEY)) fSelClips.clear();
+        fBanding = true;
+        fBandA = fBandB = where;
+        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        Invalidate();
     }
 }
 
@@ -596,9 +707,11 @@ void TimelineView::PreviewDrag(BPoint where) {
         Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
         if (start < 0) start = 0;
         fDragCurStart = start;
+        fMultiDelta   = fDragCurStart - fDragClipOrig;   // group shift
         const int dstIdx = TrackIndexAt(where);
-        if (dstIdx >= 0 && fProject->Tracks()[dstIdx].type == TrackType::Audio)
-            fDragCurLane = dstIdx;
+        if (!fMultiMove && dstIdx >= 0
+            && fProject->Tracks()[dstIdx].type == TrackType::Audio)
+            fDragCurLane = dstIdx;   // cross-track move only for a single clip
         Invalidate();
         return;   // ghost is drawn in Draw(); no per-lane model change
     } else if (fDrag == Drag::ClipResize) {
@@ -662,6 +775,11 @@ void TimelineView::PreviewDrag(BPoint where) {
 }
 
 void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
+    if (fBanding) {
+        fBandB = where;
+        Invalidate();
+        return;
+    }
     if (fAutoDragging) {
         Track* t = fProject->FindTrack(fAutoTrack);
         if (!t) return;
@@ -686,6 +804,26 @@ void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
 }
 
 void TimelineView::MouseUp(BPoint where) {
+    if (fBanding) {
+        fBanding = false;
+        // Select every audio clip whose block intersects the band rectangle.
+        BRect band(std::min(fBandA.x, fBandB.x), std::min(fBandA.y, fBandB.y),
+                   std::max(fBandA.x, fBandB.x), std::max(fBandA.y, fBandB.y));
+        int idx = 0;
+        for (const Track& t : fProject->Tracks()) {
+            const BRect lane = LaneRect(idx++);
+            if (t.type != TrackType::Audio) continue;
+            if (lane.bottom < band.top || lane.top > band.bottom) continue;
+            for (const Clip& c : t.clips) {
+                const float cx0 = FrameToX(c.startFrame);
+                const float cx1 = FrameToX(c.startFrame + c.lengthFrames);
+                if (cx1 >= band.left && cx0 <= band.right)
+                    fSelClips.insert(c.id);
+            }
+        }
+        Invalidate();
+        return;
+    }
     if (fAutoDragging) {
         fAutoDragging = false;
         Track* t = fProject->FindTrack(fAutoTrack);
@@ -736,6 +874,21 @@ void TimelineView::MouseUp(BPoint where) {
             t->pan = fDragOrig;
             if (v != fDragOrig)
                 cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
+        } else if (fDrag == Drag::Clip && fMultiMove) {
+            // Group move: shift every selected clip by the same frame delta
+            // (same track each), as one undoable step.
+            if (fMultiDelta != 0) {
+                auto macro = std::make_unique<MacroCommand>("Move Clips");
+                for (ClipId id : fSelClips)
+                    if (Track* tr = TrackOfClip(id))
+                        if (Clip* c = tr->FindClip(id)) {
+                            Frame ns = c->startFrame + fMultiDelta;
+                            if (ns < 0) ns = 0;
+                            macro->Add(std::make_unique<MoveClipCommand>(
+                                tr->id, id, ns));
+                        }
+                if (!macro->Empty()) cmd = std::move(macro);
+            }
         } else if (fDrag == Drag::Clip) {
             // Model was never mutated during the drag (ghost preview). Apply
             // the drop: same lane -> reposition; different lane -> move track.
@@ -794,6 +947,7 @@ void TimelineView::MouseUp(BPoint where) {
     fDrag = Drag::None;
     fDragNote = -1;
     fDragCurLane = -1;
+    fMultiMove = false;
     Invalidate();   // a clip may have moved to another lane
 }
 
@@ -1174,8 +1328,14 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
         }
     }
 
-    SetHighColor(ColClipBorder());
-    StrokeRect(block);
+    if (ClipSelected(c.id)) {           // selection highlight
+        SetHighColor(Rgb(255, 255, 255));
+        StrokeRect(block);
+        StrokeRect(block.InsetByCopy(1, 1));
+    } else {
+        SetHighColor(ColClipBorder());
+        StrokeRect(block);
+    }
 
     // Clip label (source file basename), clipped to the block width.
     const std::string& p = c.sourcePath;

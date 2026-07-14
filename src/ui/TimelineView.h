@@ -20,7 +20,9 @@
 #include <functional>
 
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 
 namespace daw {
 
@@ -149,6 +151,23 @@ private:
     AutoLaneKind   fAutoKind  = AutoLaneKind::Gain;
     Frame          fAutoDragFrame = 0;      // frame-key of the dragged breakpoint
     AutomationLane fAutoOrig;               // lane at drag start (for undo)
+
+    // Multi-select over audio clips. Clip ids are project-unique, so a plain
+    // set suffices; the track is found by scan when needed.
+    std::set<ClipId> fSelClips;
+    bool  ClipSelected(ClipId id) const { return fSelClips.count(id) != 0; }
+    void  DeleteSelection();       // MacroCommand remove of all selected clips
+    void  DuplicateSelection();    // MacroCommand add of offset copies
+    Track* TrackOfClip(ClipId id) const;   // owning track, or nullptr
+
+    // Rubber-band box select (drag on empty lane content).
+    bool   fBanding = false;
+    BPoint fBandA, fBandB;
+
+    // Multi-clip move: all selected clips shift by one frame delta (ghost
+    // preview; model untouched until drop).
+    bool   fMultiMove  = false;
+    Frame  fMultiDelta = 0;
 
     Project*       fProject;          // non-owning, mutable via fStack
     CommandStack*  fStack;            // non-owning

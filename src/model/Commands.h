@@ -410,4 +410,32 @@ private:
     AutomationLane fOld;
 };
 
+// Group several commands into one undoable step (multi-select edits: delete /
+// move / paste many clips at once). Do() applies them in order; Undo() reverses
+// in the opposite order. Do() fails only if the group is empty or the first
+// sub-command fails (so a wholly no-op group isn't pushed).
+class MacroCommand : public Command {
+public:
+    explicit MacroCommand(std::string name) : fName(std::move(name)) {}
+
+    void Add(std::unique_ptr<Command> c) { fCmds.push_back(std::move(c)); }
+    bool Empty() const { return fCmds.empty(); }
+
+    bool Do(Project& p) override {
+        if (fCmds.empty()) return false;
+        bool any = false;
+        for (auto& c : fCmds) any |= c->Do(p);
+        return any;
+    }
+    void Undo(Project& p) override {
+        for (auto it = fCmds.rbegin(); it != fCmds.rend(); ++it)
+            (*it)->Undo(p);
+    }
+    std::string Name() const override { return fName; }
+
+private:
+    std::string                           fName;
+    std::vector<std::unique_ptr<Command>> fCmds;
+};
+
 } // namespace daw

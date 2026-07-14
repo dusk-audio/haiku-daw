@@ -150,6 +150,34 @@ static void test_split_clip() {
     CHECK(t->clips[0].fadeOutFrames == 300);
 }
 
+static void test_macro_command() {
+    std::printf("test_macro_command\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "T"), p);
+    TrackId tid = p.Tracks().front().id;
+    Clip a; a.startFrame = 0;    a.lengthFrames = 100; a.sourcePath = "a.wav";
+    Clip b; b.startFrame = 200;  b.lengthFrames = 100; b.sourcePath = "b.wav";
+    stack.Execute(std::make_unique<AddClipCommand>(tid, a), p);
+    stack.Execute(std::make_unique<AddClipCommand>(tid, b), p);
+    ClipId aId = p.Tracks()[0].clips[0].id;
+    ClipId bId = p.Tracks()[0].clips[1].id;
+    CHECK(p.Tracks()[0].clips.size() == 2);
+
+    // Macro delete of both clips = one undo step.
+    auto macro = std::make_unique<MacroCommand>("Delete 2");
+    macro->Add(std::make_unique<RemoveClipCommand>(tid, aId));
+    macro->Add(std::make_unique<RemoveClipCommand>(tid, bId));
+    stack.Execute(std::move(macro), p);
+    CHECK(p.Tracks()[0].clips.empty());
+
+    stack.Undo(p);                         // single undo restores both
+    CHECK(p.Tracks()[0].clips.size() == 2);
+
+    stack.Redo(p);                         // single redo removes both again
+    CHECK(p.Tracks()[0].clips.empty());
+}
+
 static void test_move_track() {
     std::printf("test_move_track\n");
     Project p;
@@ -425,6 +453,7 @@ int main() {
     test_note_commands();
     test_split_clip();
     test_move_track();
+    test_macro_command();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
