@@ -134,7 +134,14 @@ with the local cross-compiler, runtime pending on the VM.
   runaway feedback, self-send routing collapse, MacroCommand failed-subcommand
   undo (data loss), AppSettings zero-clobber, WavSource OOB, WavWriter race,
   monitor UAF — all with regression tests.
-- *Later:* transport widget theming, tidy dialogs, drag-resize panels.
+- ✅ Effects editor rewritten custom-drawn: dark rotary knobs (no OS sliders),
+  **EQ frequency-response graph** with draggable per-band handles
+  (`Eq::MagnitudeResponseDb`), **compressor transfer curve**, per-effect
+  reorder/remove/add, vertical scroll.
+- ✅ Transport: custom dark Play/Stop/Rec buttons (lit by state) + themed Vol
+  fader.
+- *Later:* live compressor GR meter (needs per-effect engine telemetry), tidy
+  dialogs, drag-resize panels.
 
 ## Phase H — Persistence & robustness  ✅ DONE
 
