@@ -27,11 +27,16 @@ bool AppSettings::Deserialize(const std::string& text) {
         ls >> kw;
         if (kw.empty()) continue;
         any = true;
-        if      (kw == "buffer")    ls >> bufferFrames;
-        else if (kw == "countin")   ls >> countInBars;
-        else if (kw == "metronome") { int v = 0; ls >> v; metronome = (v != 0); }
-        else if (kw == "monitorin") { int v = 0; ls >> v; monitorInput = (v != 0); }
-        else if (kw == "win")       ls >> winL >> winT >> winR >> winB;
+        // Read into a temp and only assign on success: a failed operator>>
+        // sets the target to 0, which would clobber a sane default.
+        if      (kw == "buffer")    { int v; if (ls >> v) bufferFrames = v; }
+        else if (kw == "countin")   { int v; if (ls >> v) countInBars = v; }
+        else if (kw == "metronome") { int v; if (ls >> v) metronome = (v != 0); }
+        else if (kw == "monitorin") { int v; if (ls >> v) monitorInput = (v != 0); }
+        else if (kw == "win") {
+            float l, t, r, b;
+            if (ls >> l >> t >> r >> b) { winL = l; winT = t; winR = r; winB = b; }
+        }
         else if (kw == "lastdir") {
             std::string rest;
             std::getline(ls, rest);

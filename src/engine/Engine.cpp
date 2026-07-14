@@ -359,7 +359,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             const Track* t = project.FindTrack(b.id);
             if (t)
                 for (const Send& s : t->sends)
-                    if (s.dest != kInvalidTrackId) edges.push_back({b.id, s.dest});
+                    if (s.dest != kInvalidTrackId && s.dest != b.id)
+                        edges.push_back({b.id, s.dest});   // skip self-send edge
         }
         std::vector<TrackId> ord;
         fOrder.clear();

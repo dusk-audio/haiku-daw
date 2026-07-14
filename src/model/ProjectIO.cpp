@@ -1,5 +1,6 @@
 #include "ProjectIO.h"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -162,7 +163,15 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     std::vector<MeterChange> meterChanges;
 
     auto commit = [&]() {
-        if (haveTrack) { p.AddTrack(cur); haveTrack = false; }
+        if (!haveTrack) return;
+        // Clips are parsed in file order; enforce the sorted-by-start invariant
+        // the engine/crossfade rely on (a hand-edited file may be out of order).
+        std::sort(cur.clips.begin(), cur.clips.end(),
+                  [](const Clip& a, const Clip& b) {
+                      return a.startFrame < b.startFrame;
+                  });
+        p.AddTrack(cur);
+        haveTrack = false;
     };
 
     std::string line;

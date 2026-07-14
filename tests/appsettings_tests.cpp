@@ -40,6 +40,13 @@ int main() {
     CHECK(d.Deserialize("mystery 5\nbuffer 256\n"));
     CHECK(d.bufferFrames == 256);
 
+    // Regression: a malformed numeric value must keep the default (not zero it,
+    // which would make buffer=0 -> div-by-zero in the audio path).
+    AppSettings e;
+    CHECK(e.Deserialize("buffer notanumber\ncountin 1\n"));
+    CHECK(e.bufferFrames == 512);   // default retained
+    CHECK(e.countInBars == 1);      // the good line still parsed
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

@@ -50,7 +50,11 @@ Co LowShelfCo(double fc, double sr, double gainDB, double Q) {
     const double sqA  = std::sqrt(A);
     const double cosW = (1.0 - k2) / (1.0 + k2);
     const double sinW = 2.0 * k / (1.0 + k2);
-    const double alpha = sinW / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / Q - 1.0) + 2.0);
+    // Shelf-slope radicand; with Q > 1 the (1/Q - 1) term is negative and can
+    // drive this below zero at high gain -> sqrt(NaN). Clamp to keep it finite.
+    double rad = (A + 1.0 / A) * (1.0 / Q - 1.0) + 2.0;
+    if (rad < 0.0) rad = 0.0;
+    const double alpha = sinW / 2.0 * std::sqrt(rad);
     const double b0 =  A * ((A + 1.0) - (A - 1.0) * cosW + 2.0 * sqA * alpha);
     const double b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cosW);
     const double b2 =  A * ((A + 1.0) - (A - 1.0) * cosW - 2.0 * sqA * alpha);
@@ -70,7 +74,11 @@ Co HighShelfCo(double fc, double sr, double gainDB, double Q) {
     const double k2   = k * k;
     const double cosW = (1.0 - k2) / (1.0 + k2);
     const double sinW = 2.0 * k / (1.0 + k2);
-    const double alpha = sinW / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / Q - 1.0) + 2.0);
+    // Shelf-slope radicand; with Q > 1 the (1/Q - 1) term is negative and can
+    // drive this below zero at high gain -> sqrt(NaN). Clamp to keep it finite.
+    double rad = (A + 1.0 / A) * (1.0 / Q - 1.0) + 2.0;
+    if (rad < 0.0) rad = 0.0;
+    const double alpha = sinW / 2.0 * std::sqrt(rad);
     const double b0 =  A * ((A + 1.0) + (A - 1.0) * cosW + 2.0 * sqA * alpha);
     const double b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosW);
     const double b2 =  A * ((A + 1.0) + (A - 1.0) * cosW - 2.0 * sqA * alpha);

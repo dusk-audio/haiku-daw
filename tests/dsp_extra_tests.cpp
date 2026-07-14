@@ -6,6 +6,7 @@
 #include "../src/dsp/Reverb.h"
 #include "../src/dsp/Compressor.h"
 #include "../src/dsp/Eq.h"
+#include "../src/dsp/Delay.h"
 
 #include <cmath>
 #include <cstdio>
@@ -131,6 +132,30 @@ int main() {
         std::vector<float> b3(4000 * 2, 1.0f);
         high.Process(b3.data(), 4000);
         CHECK(std::fabs(b3[2 * 3999] - 1.0f) < 0.1f);
+    }
+
+    // Regression: a high-Q shelf with gain must NOT produce NaN (radicand went
+    // negative in the shelf-alpha formula for Q > 1).
+    {
+        Eq eq; eq.SetBand(0, 80.0f, 12.0f, 10.0f);   // low shelf, +12 dB, Q=10
+        eq.Prepare(SR);
+        std::vector<float> buf(2000 * 2, 0.3f);
+        eq.Process(buf.data(), 2000);
+        bool allFinite = true;
+        for (float v : buf) if (!std::isfinite(v)) allFinite = false;
+        CHECK(allFinite);
+    }
+
+    // Regression: a >= 1.0 delay feedback must stay finite (clamped, no Inf).
+    {
+        Delay dl(0.01, 1.5 /*feedback*/, 0.5);   // 1.5 would diverge unclamped
+        dl.Prepare(SR);
+        std::vector<float> buf(20000 * 2, 0.0f);
+        buf[0] = buf[1] = 1.0f;                  // an impulse to feed the loop
+        dl.Process(buf.data(), 20000);
+        bool allFinite = true;
+        for (float v : buf) if (!std::isfinite(v)) allFinite = false;
+        CHECK(allFinite);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

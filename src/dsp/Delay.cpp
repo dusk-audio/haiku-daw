@@ -6,7 +6,9 @@
 namespace daw {
 
 Delay::Delay(double delaySeconds, double feedback, double mix)
-    : fDelaySec(delaySeconds), fFeedback(feedback), fMix(mix) {}
+    : fDelaySec(delaySeconds), fFeedback(feedback), fMix(mix) {
+    fBuf.assign(2, 0.0f);   // self-safe if Process runs before Prepare
+}
 
 void Delay::SetParams(double delaySeconds, double feedback, double mix) {
     fDelaySec  = delaySeconds;
@@ -31,7 +33,10 @@ void Delay::Reset() {
 }
 
 void Delay::Process(float* stereo, int frames) {
-    const float fb  = (float)fFeedback;
+    // Clamp feedback below unity or the echo diverges to +Inf.
+    float fb = (float)fFeedback;
+    if (fb < 0.0f) fb = 0.0f;
+    if (fb > 0.99f) fb = 0.99f;
     const float wet = (float)fMix;
     const float dry = 1.0f - wet;
 

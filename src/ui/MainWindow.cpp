@@ -864,8 +864,14 @@ void MainWindow::StopRecording() {
     const std::string path = fTakePath;   // the file StartCapture opened
     std::vector<TrackId> targets = fRecTracks;
 
-    // Stop the overdub engine + live REC region, end the poll.
-    if (fEngine) fEngine->Stop();
+    // Stop the overdub engine + live REC region, end the poll. Detach the
+    // monitor source before the recorder is freed so the RT callback (already
+    // halted by Stop) never dereferences it again.
+    if (fEngine) {
+        fEngine->SetInputMonitor(false);
+        fEngine->SetMonitorSource(nullptr);
+        fEngine->Stop();
+    }
     fRecMode = false;
     fCapturePending = false;
     fTimeline->SetRecording(false, 0, 0);

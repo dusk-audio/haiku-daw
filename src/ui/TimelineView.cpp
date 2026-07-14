@@ -503,7 +503,8 @@ void TimelineView::MouseDown(BPoint where) {
                 mm->AddItem(new BMenuItem("Next Color", NULL));  // 2
                 mm->AddItem(new BMenuItem("Taller", NULL));      // 3
                 mm->AddItem(new BMenuItem("Shorter", NULL));     // 4
-                mm->AddItem(new BMenuItem("Delete", NULL));      // 5
+                mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL)); // 5
+                mm->AddItem(new BMenuItem("Delete", NULL));      // 6
                 BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
                 const int pick = sel ? mm->IndexOf(sel) : -1;
                 delete mm;
@@ -524,7 +525,12 @@ void TimelineView::MouseDown(BPoint where) {
                 } else if (pick == 4) {
                     if (Track* tr = fProject->FindTrack(t.id))
                         tr->height = tr->height - 24 < 72 ? 72 : tr->height - 24;
-                } else if (pick == 5)
+                } else if (pick == 5) {
+                    BPoint sp = ConvertToScreen(where);
+                    BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                    (new RenameWindow(wr, t.id, t.name.c_str(),
+                                      BMessenger(Window())))->Show();
+                } else if (pick == 6)
                     fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
                                     *fProject);
                 Invalidate();
@@ -535,9 +541,16 @@ void TimelineView::MouseDown(BPoint where) {
                 m->FindInt32("clicks", &clicks);
             if (clicks >= 2) {
                 BPoint sp = ConvertToScreen(where);
-                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
-                (new RenameWindow(wr, t.id, t.name.c_str(),
-                                  BMessenger(Window())))->Show();
+                if (t.type == TrackType::Midi) {   // MIDI name: open piano roll
+                    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
+                    (new PianoRoll(wr, t.id, t.notes, fProject->tempoMap,
+                                   fProject->sampleRate,
+                                   BMessenger(Window())))->Show();
+                } else {                            // audio name: rename
+                    BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                    (new RenameWindow(wr, t.id, t.name.c_str(),
+                                      BMessenger(Window())))->Show();
+                }
                 return;
             }
         }
@@ -558,17 +571,6 @@ void TimelineView::MouseDown(BPoint where) {
     // MIDI track content: right-click deletes; on a note, drag to move or
     // (near its right edge) resize; on empty space, add a note.
     if (t.type == TrackType::Midi) {
-        // Double-click opens the piano-roll editor for this track.
-        int32 clicks = 1;
-        if (BMessage* cm = Window() ? Window()->CurrentMessage() : nullptr)
-            cm->FindInt32("clicks", &clicks);
-        if (!rightClick && clicks >= 2) {
-            BPoint p = ConvertToScreen(BPoint(where.x, lane.top));
-            BRect wr(p.x, p.y, p.x + 720, p.y + 480);
-            (new PianoRoll(wr, t.id, t.notes, fProject->tempoMap,
-                           fProject->sampleRate, BMessenger(Window())))->Show();
-            return;
-        }
         const int hit = NoteIndexAt(t, lane, where);
         if (rightClick) {
             if (hit >= 0) {

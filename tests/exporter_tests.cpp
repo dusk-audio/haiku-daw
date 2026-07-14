@@ -145,6 +145,29 @@ int main() {
     CHECK(pDirect > 0.01f);
     CHECK(std::fabs(pSend - pDirect * (1.0f + kBusPan)) < pDirect * 0.05f);
 
+    // Regression: a self-send (dest == own track) must be ignored, not collapse
+    // the routing graph to flat. Export a MIDI track with a self-send and check
+    // the peak matches the plain direct case (self-send neither doubles nor
+    // breaks routing).
+    {
+        Project pr;
+        pr.sampleRate = SR;
+        Track m;
+        m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f; m.notes.push_back(note);
+        m.sends.push_back(Send{ m.id, 1.0f, false });   // self-send
+        pr.AddTrack(m);
+        const std::string p = "/tmp/haiku_daw_export_selfsend.wav";
+        std::remove(p.c_str());
+        CHECK(ExportWav(pr, p, SR));
+        WavSource s; CHECK(s.Open(p));
+        float pk = 0.0f; const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f * 2; ++i) pk = std::max(pk, std::fabs(c[i]));
+        std::remove(p.c_str());
+        CHECK(std::fabs(pk - pDirect) < pDirect * 0.05f);   // == plain direct
+    }
+
     // --- Gain automation: a full-scale note with a 1.0 -> 0.0 gain ramp over
     // the buffer should leave the second half much quieter than the first.
     {

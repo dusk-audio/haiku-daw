@@ -156,7 +156,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
         nodeIds.push_back(t.id);
         edges.push_back({t.id, t.output});
         for (const Send& s : t.sends)
-            if (s.dest != kInvalidTrackId) edges.push_back({t.id, s.dest});
+            if (s.dest != kInvalidTrackId && s.dest != t.id)
+                edges.push_back({t.id, s.dest});   // skip self-send edge
     }
     std::vector<TrackId> order;
     const bool routingOk = ResolveOrderWithEdges(nodeIds, edges, order);
@@ -166,7 +167,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // Add a node's aux sends (for the given fader phase) into their dest buses.
     auto addSends = [&](const Track& t, bool pre, const float* nb) {
         for (const Send& s : t.sends) {
-            if (s.preFader != pre || s.dest == kInvalidTrackId) continue;
+            if (s.preFader != pre || s.dest == kInvalidTrackId
+                || s.dest == t.id) continue;   // ignore a self-send
             auto d = idx.find(s.dest);
             if (d == idx.end()) continue;
             float* db = nodeBuf[d->second].data();

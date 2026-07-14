@@ -44,6 +44,7 @@ bool WavSource::Open(const std::string& path) {
         (void)id;
 
         if (std::memcmp(ch, "fmt ", 4) == 0) {
+            if (size < 16) break;   // malformed: base PCM fmt is 16 bytes
             std::vector<uint8_t> f(size);
             fFile.read(reinterpret_cast<char*>(f.data()), size);
             if (fFile.gcount() != (std::streamsize)size) break;

@@ -27,7 +27,9 @@ constexpr float kDenormal = 1.0e-15f;
 } // namespace
 
 Reverb::Reverb(double roomSize, double mix)
-    : fRoomSize(roomSize), fMix(mix) {}
+    : fRoomSize(roomSize), fMix(mix) {
+    BuildLines();   // self-safe if Process runs before Prepare
+}
 
 void Reverb::SetParams(double roomSize, double mix) {
     fRoomSize = roomSize;

@@ -44,10 +44,10 @@ static double Envelope(double rel, double noteLen,
 void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
                    float* out, size_t frames, Frame blockStart, float gain) const {
     const double sr = fSampleRate;
-    const double a = inst.attack  * sr;
-    const double d = inst.decay   * sr;
+    const double a = std::max(0.0f, inst.attack)  * sr;
+    const double d = std::max(0.0f, inst.decay)   * sr;
     const double s = std::clamp(inst.sustain, 0.0f, 1.0f);
-    const double r = inst.release * sr;
+    const double r = std::max(0.0f, inst.release) * sr;
 
     for (const MidiNote& n : notes) {
         // The note sounds from start through its release tail past note-off.

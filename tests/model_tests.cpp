@@ -207,6 +207,26 @@ static void test_macro_command() {
 
     stack.Redo(p);                         // single redo removes both again
     CHECK(p.Tracks()[0].clips.empty());
+
+    // Regression: a macro with a FAILING sub-command must not undo that
+    // sub-command (it captured no rollback state). Here a MoveClipToTrack of a
+    // clip that isn't on the source track fails; a following AddClip succeeds.
+    // Undo must not delete an unrelated clip.
+    stack.Undo(p);                          // clips back (2)
+    Clip keep; keep.startFrame = 5000; keep.lengthFrames = 100;
+    keep.sourcePath = "k.wav";
+    stack.Execute(std::make_unique<AddClipCommand>(tid, keep), p);
+    const size_t before = p.Tracks()[0].clips.size();   // 3
+    ClipId keepId = p.Tracks()[0].clips.back().id;
+    auto m2 = std::make_unique<MacroCommand>("mixed");
+    m2->Add(std::make_unique<MoveClipToTrackCommand>(tid, 999999 /*absent*/,
+                                                     tid, 1000));   // fails
+    m2->Add(std::make_unique<SetTrackNameCommand>(tid, "renamed"));  // succeeds
+    stack.Execute(std::move(m2), p);
+    stack.Undo(p);
+    // The failing move's Undo must NOT have run -> keep clip still present.
+    CHECK(p.Tracks()[0].clips.size() == before);
+    CHECK(p.FindTrack(tid)->FindClip(keepId) != nullptr);
 }
 
 static void test_move_track() {

@@ -440,19 +440,27 @@ public:
 
     bool Do(Project& p) override {
         if (fCmds.empty()) return false;
+        fDone.assign(fCmds.size(), false);
         bool any = false;
-        for (auto& c : fCmds) any |= c->Do(p);
+        for (size_t i = 0; i < fCmds.size(); i++) {
+            fDone[i] = fCmds[i]->Do(p);
+            any |= fDone[i];
+        }
         return any;
     }
     void Undo(Project& p) override {
-        for (auto it = fCmds.rbegin(); it != fCmds.rend(); ++it)
-            (*it)->Undo(p);
+        // Reverse only the sub-commands whose Do() actually succeeded — a
+        // failed Do() captured no rollback state, so its Undo() must not run.
+        for (size_t i = fCmds.size(); i-- > 0; )
+            if (i < fDone.size() && fDone[i])
+                fCmds[i]->Undo(p);
     }
     std::string Name() const override { return fName; }
 
 private:
     std::string                           fName;
     std::vector<std::unique_ptr<Command>> fCmds;
+    std::vector<bool>                     fDone;   // which sub-Do()s succeeded
 };
 
 } // namespace daw

@@ -9,6 +9,7 @@
 // (negotiated int16 stereo). Little-endian on disk (x86 host + Haiku target).
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -24,7 +25,8 @@ public:
     bool Open(const std::string& path, int sampleRate, int channels);
 
     bool    IsOpen() const { return fOpen; }
-    int64_t FramesWritten() const { return fFramesWritten; }
+    // Read live from the UI thread while the disk thread writes -> atomic.
+    int64_t FramesWritten() const { return fFramesWritten.load(std::memory_order_relaxed); }
 
     // Append `sampleCount` interleaved int16 samples (sampleCount =
     // frames * channels). Returns false if not open or the write fails.
@@ -40,7 +42,7 @@ private:
     int      fChannels    = 0;
     int      fSampleRate  = 0;
     int64_t  fDataBytes   = 0;
-    int64_t  fFramesWritten = 0;
+    std::atomic<int64_t> fFramesWritten{0};
 };
 
 } // namespace daw
