@@ -158,6 +158,7 @@ if(HAIKU)
         src/ui/EffectsWindow.cpp
         src/ui/SendsWindow.cpp
         src/ui/InstrumentWindow.cpp
+        src/ui/PianoRoll.cpp
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp

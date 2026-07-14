@@ -5,6 +5,7 @@
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
+#include "PianoRoll.h"
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
 #include "../storage/BfsAttr.h"
@@ -375,6 +376,28 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindFloat("gain", &fProject->masterGain);
             if (fMaster) fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
             break;
+        case kMsgApplyNotes: {
+            // A PianoRoll posts the edited note list; direct mutation (applies
+            // on the next Play, like the other editors).
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                t->notes.clear();
+                int32 pitch = 0;
+                for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
+                    MidiNote n;
+                    int32 vel = 100; int64 st = 0, len = 1;
+                    msg->FindInt32("nv", i, &vel);
+                    msg->FindInt64("ns", i, &st);
+                    msg->FindInt64("nl", i, &len);
+                    n.pitch = pitch; n.velocity = vel;
+                    n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
+                    t->notes.push_back(n);
+                }
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgRenameTrack: {
             int64 tid = 0; const char* name = nullptr;
             msg->FindInt64("track", &tid);

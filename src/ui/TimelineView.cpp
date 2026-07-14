@@ -4,6 +4,7 @@
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
+#include "PianoRoll.h"
 #include "RenameWindow.h"
 
 #include <MenuItem.h>
@@ -557,6 +558,17 @@ void TimelineView::MouseDown(BPoint where) {
     // MIDI track content: right-click deletes; on a note, drag to move or
     // (near its right edge) resize; on empty space, add a note.
     if (t.type == TrackType::Midi) {
+        // Double-click opens the piano-roll editor for this track.
+        int32 clicks = 1;
+        if (BMessage* cm = Window() ? Window()->CurrentMessage() : nullptr)
+            cm->FindInt32("clicks", &clicks);
+        if (!rightClick && clicks >= 2) {
+            BPoint p = ConvertToScreen(BPoint(where.x, lane.top));
+            BRect wr(p.x, p.y, p.x + 720, p.y + 480);
+            (new PianoRoll(wr, t.id, t.notes, fProject->tempoMap,
+                           fProject->sampleRate, BMessenger(Window())))->Show();
+            return;
+        }
         const int hit = NoteIndexAt(t, lane, where);
         if (rightClick) {
             if (hit >= 0) {
