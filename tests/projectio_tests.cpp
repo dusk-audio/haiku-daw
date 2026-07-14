@@ -38,6 +38,7 @@ int main() {
     Clip c; c.startFrame = 1000; c.lengthFrames = 2000; c.sourceOffset = 10;
     c.sourcePath = "takes/one two.wav";   // note the space
     c.gain = 0.6f;                         // per-clip gain
+    c.takeGroup = 7; c.takeActive = false; // loop-record take
     stack.Execute(std::make_unique<AddClipCommand>(t1, c), a);
     a.FindTrack(t1)->colorIndex = 3;   // per-track color + height
     a.FindTrack(t1)->height     = 104;
@@ -95,6 +96,8 @@ int main() {
     CHECK(bt1.clips[0].lengthFrames == 2000);
     CHECK(bt1.clips[0].sourcePath == "takes/one two.wav");
     CHECK(std::abs(bt1.clips[0].gain - 0.6f) < 1e-4f);   // per-clip gain roundtrips
+    CHECK(bt1.clips[0].takeGroup == 7);
+    CHECK(bt1.clips[0].takeActive == false);
     CHECK(bt1.fx.size() == 2);
     CHECK(bt1.fx[0].type == EffectType::Biquad);
     CHECK(bt1.fx[1].type == EffectType::Compressor);

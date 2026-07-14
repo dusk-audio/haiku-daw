@@ -96,7 +96,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)c.sourceOffset << " "
               << (long long)c.fadeInFrames << " " << (long long)c.fadeOutFrames
               << " \"" << Relativize(c.sourcePath, baseDir) << "\" "
-              << c.gain << "\n";
+              << c.gain << " " << c.takeGroup << " " << (c.takeActive ? 1 : 0)
+              << "\n";
 
         for (const MidiNote& n : t.notes)
             f << "note " << n.pitch << " " << n.velocity << " "
@@ -239,6 +240,9 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
                 std::istringstream tail(line.substr(q + 1));
                 float g = 1.0f;
                 if (tail >> g) c.gain = g;
+                int tg = 0, ta = 1;
+                if (tail >> tg) c.takeGroup = tg;
+                if (tail >> ta) c.takeActive = (ta != 0);
             }
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);

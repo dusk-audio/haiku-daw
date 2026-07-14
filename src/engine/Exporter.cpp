@@ -212,6 +212,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
             for (size_t ci = 0; ci < t.clips.size(); ci++) {
                 const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
+                if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
                 PlaceClip(c, scale, outRate, totalOut, kUnity,
                           nodeBuf[it->second], fades[ci].fadeIn, fades[ci].fadeOut);
             }

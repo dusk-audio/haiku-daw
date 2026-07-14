@@ -95,6 +95,8 @@ private:
     bool                      fRecMode = false;      // engine running for a take
     bool                      fCapturePending = false; // in count-in, not yet capturing
     bool                      fMonitorInput = false; // hear live input while armed
+    bool                      fLoopRecord = false;   // capturing stacked takes over a loop
+    int                       fTakeGroup = 0;        // running take-group id
     int                       fCountInBars = 0;      // metronome bars before capture
     BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
     BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle

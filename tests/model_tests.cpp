@@ -150,6 +150,37 @@ static void test_split_clip() {
     CHECK(t->clips[0].fadeOutFrames == 300);
 }
 
+static void test_active_take() {
+    std::printf("test_active_take\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "T"), p);
+    TrackId tid = p.Tracks().front().id;
+    // Three stacked takes (group 1) at the same position; the first is active.
+    ClipId ids[3];
+    for (int i = 0; i < 3; i++) {
+        Clip c; c.id = p.NextClipId(); ids[i] = c.id;
+        c.startFrame = 0; c.lengthFrames = 1000; c.sourcePath = "t.wav";
+        c.takeGroup = 1; c.takeActive = (i == 0); c.sourceOffset = i * 1000;
+        p.AddClip(tid, c);
+    }
+    auto activeId = [&]() {
+        const Track* tr = p.FindTrack(tid);
+        int n = 0; ClipId a = kInvalidClipId;
+        for (const Clip& c : tr->clips) if (c.takeActive) { n++; a = c.id; }
+        return std::make_pair(n, a);
+    };
+    CHECK(activeId() == std::make_pair(1, ids[0]));
+
+    // Select take ids[1] -> only it active.
+    stack.Execute(std::make_unique<SetActiveTakeCommand>(tid, ids[1]), p);
+    CHECK(activeId() == std::make_pair(1, ids[1]));
+
+    // Undo restores ids[0] active.
+    stack.Undo(p);
+    CHECK(activeId() == std::make_pair(1, ids[0]));
+}
+
 static void test_macro_command() {
     std::printf("test_macro_command\n");
     Project p;
@@ -454,6 +485,7 @@ int main() {
     test_split_clip();
     test_move_track();
     test_macro_command();
+    test_active_take();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

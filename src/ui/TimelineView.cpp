@@ -137,12 +137,14 @@ Frame TimelineView::Snapped(Frame f) const {
 }
 
 // A tiny Copy/Delete popup for a right-clicked clip or note.
-int TimelineView::ContextMenu(BPoint where, bool withSplit) const {
+int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const {
     BPopUpMenu* m = new BPopUpMenu("ctx", false, false);
     m->AddItem(new BMenuItem("Copy", NULL));      // 0
     m->AddItem(new BMenuItem("Delete", NULL));    // 1
     if (withSplit)
         m->AddItem(new BMenuItem("Split here", NULL));  // 2
+    if (withTake)
+        m->AddItem(new BMenuItem("Next Take", NULL));   // 3 (2 if no split)
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const int idx = sel ? m->IndexOf(sel) : -1;
@@ -569,9 +571,12 @@ void TimelineView::MouseDown(BPoint where) {
     // start dragging it.
     const Frame at = XToFrame(where.x);
     for (const Clip& c : t.clips) {
+        if (c.takeGroup > 0 && !c.takeActive)
+            continue;   // inactive takes are hidden; act on the visible one
         if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
             if (rightClick) {
-                const int pick = ContextMenu(where, /*withSplit=*/true);
+                const int pick = ContextMenu(where, /*withSplit=*/true,
+                                             /*withTake=*/c.takeGroup > 0);
                 if (pick == 0) {          // Copy
                     fClipClip = c;
                     fHasClipClip = true; fHasClipNote = false;
@@ -580,9 +585,28 @@ void TimelineView::MouseDown(BPoint where) {
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
                                     *fProject);
                 } else if (pick == 2) {   // Split here
-                    Frame at = Snapped(XToFrame(where.x));
+                    Frame sat = Snapped(XToFrame(where.x));
                     fStack->Execute(std::make_unique<SplitClipCommand>(
-                        t.id, c.id, at), *fProject);
+                        t.id, c.id, sat), *fProject);
+                } else if (pick == 3 && c.takeGroup > 0) {   // Next Take
+                    // Cycle to the next take (by sourceOffset order, wrapping).
+                    ClipId next = kInvalidClipId; Frame bestAbove = 0;
+                    ClipId firstId = kInvalidClipId; Frame firstOff = 0;
+                    bool haveFirst = false;
+                    for (const Clip& o : t.clips) {
+                        if (o.takeGroup != c.takeGroup) continue;
+                        if (!haveFirst || o.sourceOffset < firstOff) {
+                            firstOff = o.sourceOffset; firstId = o.id; haveFirst = true;
+                        }
+                        if (o.sourceOffset > c.sourceOffset
+                            && (next == kInvalidClipId || o.sourceOffset < bestAbove)) {
+                            bestAbove = o.sourceOffset; next = o.id;
+                        }
+                    }
+                    if (next == kInvalidClipId) next = firstId;   // wrap
+                    if (next != kInvalidClipId)
+                        fStack->Execute(std::make_unique<SetActiveTakeCommand>(
+                            t.id, next), *fProject);
                 }
                 Invalidate(lane);
                 return;
@@ -1192,8 +1216,25 @@ void TimelineView::DrawLanes(BRect update) {
             StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
         });
 
-        for (const Clip& c : t.clips)
+        for (const Clip& c : t.clips) {
+            if (c.takeGroup > 0 && !c.takeActive)
+                continue;   // only the active take of a group is drawn
             DrawClip(c, lane, TrackColor(t.colorIndex));
+            if (c.takeGroup > 0) {   // "T k/N" badge on the active take
+                int n = 0, k = 0;
+                for (const Clip& o : t.clips)
+                    if (o.takeGroup == c.takeGroup) {
+                        n++;
+                        if (o.sourceOffset <= c.sourceOffset) k++;
+                    }
+                float bx = FrameToX(c.startFrame) + 4;
+                if (bx < kHeaderWidth + 2) bx = kHeaderWidth + 2;
+                char tb[16];
+                std::snprintf(tb, sizeof(tb), "T%d/%d", k, n);
+                SetHighColor(Rgb(240, 220, 120));
+                DrawString(tb, BPoint(bx, lane.bottom - 16));
+            }
+        }
 
         if (t.type == TrackType::Midi)
             DrawMidiNotes(t, lane);

@@ -226,6 +226,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             const Clip& c = t.clips[ci];
             if (c.sourcePath.empty())
                 continue;
+            if (c.takeGroup > 0 && !c.takeActive)
+                continue;   // inactive loop-record take: don't stream it
             // How far into the clip (in timeline frames) playback starts.
             const Frame seekDelta =
                 (startFrame > c.startFrame) ? startFrame - c.startFrame : 0;

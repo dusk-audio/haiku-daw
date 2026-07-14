@@ -32,6 +32,8 @@ inline std::vector<ClipFades> ComputeCrossfades(const std::vector<Clip>& clips) 
     for (std::size_t i = 0; i + 1 < clips.size(); i++) {
         const Clip& a = clips[i];
         const Clip& b = clips[i + 1];
+        // Loop-record takes are stacked alternatives, not crossfade partners.
+        if (a.takeGroup > 0 || b.takeGroup > 0) continue;
         const Frame aEnd = a.startFrame + a.lengthFrames;
         if (b.startFrame >= aEnd) continue;            // no overlap
 

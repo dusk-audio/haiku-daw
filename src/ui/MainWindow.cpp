@@ -510,6 +510,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     // Count-in over: begin capture once we reach the record point.
                     if (fCapturePending && ph >= fRecPoint)
                         StartCapture();
+                    // Loop-record: at the loop end, rewind the engine to the
+                    // loop start (the recorder keeps capturing across the seam).
+                    if (fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
+                        fProject->transport.playhead = tr.loopStart;
+                        StartRecordEngine(tr.loopStart);
+                        break;
+                    }
                     const bool capturing = fRecorder && fRecorder->IsRecording();
                     fTimeline->SetPlayhead(ph);
                     UpdateTimeReadout(ph);
@@ -637,6 +644,11 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
     fEngine->SetMetronome(fMetronome || fCountInBars > 0);
     fEngine->SetMonitorDim(fMonDim);
     fEngine->SetMonitorMono(fMonMono);
+    // Re-attach input monitoring across an engine restart (loop-record seam).
+    if (fRecorder) {
+        fEngine->SetMonitorSource(fRecorder.get());
+        fEngine->SetInputMonitor(fMonitorInput);
+    }
     return true;
 }
 
@@ -676,10 +688,15 @@ void MainWindow::StartRecording() {
         return;
     }
 
-    // Record point = current playhead. A count-in plays the engine (existing
-    // tracks + click) for N bars leading up to it before capture begins.
+    // Loop-record when a loop range is set: capture aligns to the loop start
+    // and each pass becomes a stacked take.
+    const Transport& tr = fProject->transport;
+    fLoopRecord = tr.loopEnabled && tr.loopEnd > tr.loopStart;
+
+    // Record point = loop start (loop-record) or the playhead. A count-in plays
+    // the engine (existing tracks + click) for N bars leading up to it.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
-    fRecPoint = fProject->transport.playhead;
+    fRecPoint = fLoopRecord ? tr.loopStart : fProject->transport.playhead;
     const Frame countIn = CountInFrames(fProject->tempoMap, fRecPoint,
                                         fCountInBars);
     const Frame engineStart = (fRecPoint > countIn) ? fRecPoint - countIn : 0;
@@ -732,9 +749,43 @@ void MainWindow::StopRecording() {
         (*fPeaks)[path].Build(src);
 
     // lengthFrames is timeline (project-rate) frames, converted from the
-    // recorder-rate frame count.
+    // recorder-rate frame count. `ratio` = project/record rate; a source-frame
+    // offset is a timeline offset divided by ratio (the capture file is at the
+    // record rate).
     const double ratio = recRate > 0 ? fProject->sampleRate / recRate : 1.0;
     const Frame captureLen = (Frame)llround(frames * ratio);
+    auto toSourceOffset = [&](Frame timelineOffset) -> Frame {
+        return (Frame)llround(timelineOffset / ratio);
+    };
+
+    const Transport& tr = fProject->transport;
+
+    // Loop-record: split the linear capture into one take per loop pass and
+    // stack them as a take group on each armed track (last pass active).
+    if (fLoopRecord) {
+        const std::vector<TakeRegion> takes =
+            LoopTakes(tr.loopStart, tr.loopEnd, captureLen);
+        fLoopRecord = false;
+        if (takes.empty()) { fRecorder.reset(); return; }
+        for (TrackId target : targets) {
+            const int group = ++fTakeGroup;
+            auto macro = std::make_unique<MacroCommand>("Loop Takes");
+            for (size_t k = 0; k < takes.size(); k++) {
+                Clip clip;
+                clip.startFrame   = takes[k].startFrame;
+                clip.lengthFrames = takes[k].lengthFrames;
+                clip.sourceOffset = toSourceOffset(takes[k].sourceOffset);
+                clip.sourcePath   = path;
+                clip.takeGroup    = group;
+                clip.takeActive   = (k + 1 == takes.size());  // last pass active
+                macro->Add(std::make_unique<AddClipCommand>(target, clip));
+            }
+            fStack->Execute(std::move(macro), *fProject);
+        }
+        fRecorder.reset();
+        fTimeline->Invalidate();
+        return;
+    }
 
     // Punch: trim the take to the punch range (non-destructive — the clip just
     // references a sub-span of the captured file).
@@ -742,7 +793,6 @@ void MainWindow::StopRecording() {
     region.startFrame = fRecStart;
     region.sourceOffset = 0;
     region.lengthFrames = captureLen;
-    const Transport& tr = fProject->transport;
     if (tr.punchEnabled) {
         if (!PunchedTake(fRecStart, captureLen, tr.punchIn, tr.punchOut,
                          &region)) {
@@ -756,7 +806,7 @@ void MainWindow::StopRecording() {
         Clip clip;
         clip.startFrame   = region.startFrame;
         clip.lengthFrames = region.lengthFrames;
-        clip.sourceOffset = region.sourceOffset;
+        clip.sourceOffset = toSourceOffset(region.sourceOffset);
         clip.sourcePath   = path;
         fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);
     }

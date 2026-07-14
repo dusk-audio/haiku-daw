@@ -322,6 +322,23 @@ private:
     Frame   fOldIn = 0, fOldOut = 0;
 };
 
+// Make one clip the active take in its take group (others in the group go
+// inactive). No-op for an ordinary clip (takeGroup 0). Stores prior states.
+class SetActiveTakeCommand : public Command {
+public:
+    SetActiveTakeCommand(TrackId track, ClipId clip)
+        : fTrack(track), fClip(clip) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Select Take"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    std::vector<std::pair<ClipId, bool>> fOld;   // group members' prior active
+};
+
 // Set a clip's per-clip linear gain. Stores the old value for Undo().
 class SetClipGainCommand : public Command {
 public:

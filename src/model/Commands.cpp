@@ -349,6 +349,31 @@ void SetClipFadeCommand::Undo(Project& p) {
     }
 }
 
+// --- SetActiveTakeCommand ---------------------------------------------
+
+bool SetActiveTakeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* target = t->FindClip(fClip);
+    if (!target || target->takeGroup == 0) return false;
+    const int group = target->takeGroup;
+    fOld.clear();
+    for (Clip& c : t->clips) {
+        if (c.takeGroup != group) continue;
+        fOld.push_back({c.id, c.takeActive});
+        c.takeActive = (c.id == fClip);
+    }
+    return true;
+}
+
+void SetActiveTakeCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    for (const auto& pr : fOld)
+        if (Clip* c = t->FindClip(pr.first))
+            c->takeActive = pr.second;
+}
+
 // --- SetClipGainCommand -----------------------------------------------
 
 bool SetClipGainCommand::Do(Project& p) {

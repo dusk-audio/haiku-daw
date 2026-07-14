@@ -26,6 +26,10 @@ struct Clip {
     Frame       fadeInFrames  = 0;
     Frame       fadeOutFrames = 0;
     float       gain          = 1.0f;   // per-clip linear gain (1.0 = unity)
+    // Loop-record take comping: clips sharing a takeGroup (>0) are stacked
+    // alternatives; only the one with takeActive sounds. 0 = an ordinary clip.
+    int         takeGroup     = 0;
+    bool        takeActive    = true;
 };
 
 // A single MIDI note placed on a track's timeline. Positions are in project
