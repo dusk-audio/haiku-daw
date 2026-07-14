@@ -354,7 +354,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_MASTER_FX: {
-            BRect wr(160, 160, 460, 720);
+            BRect wr(120, 120, 600, 740);
             (new EffectsWindow(wr, fProject->masterFx, kMasterFxTarget,
                                BMessenger(this)))->Show();
             break;

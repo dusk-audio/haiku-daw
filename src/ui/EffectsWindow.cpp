@@ -1,246 +1,405 @@
 #include "EffectsWindow.h"
 
 #include "UiMetrics.h"
+#include "../dsp/Eq.h"
 
-#include <Button.h>
-#include <Slider.h>
-#include <StringView.h>
+#include <ScrollBar.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
-#include <utility>
 
 namespace daw {
 
-enum {
-    MSG_EP   = 'epar',   // param slider changed
-    MSG_ERM  = 'erm ',   // remove effect
-    MSG_EADD = 'eadd',   // add effect (field "kind": 0 LP, 1 HP, 2 Delay)
-    MSG_EUP  = 'eup ',   // move effect earlier in the chain
-    MSG_EDN  = 'edn ',   // move effect later in the chain
-};
+static constexpr float kPanelPad = 8.0f;
+static constexpr float kTitleH   = 22.0f;
+static constexpr float kKnobW    = 56.0f;
+static constexpr float kKnobH    = 62.0f;
+static constexpr float kGraphH   = 150.0f;
+static constexpr float kBtnW     = 22.0f;
 
-static void SetSlot(EffectDesc& d, int slot, float v) {
-    if (slot < 0) return;
-    if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
-    d.params[slot] = v;
+struct KnobDef { const char* label; int slot; float mn; float mx; };
+
+static const char* EffName(EffectType t) {
+    switch (t) {
+        case EffectType::Delay:      return "Delay";
+        case EffectType::Reverb:     return "Reverb";
+        case EffectType::Compressor: return "Compressor";
+        case EffectType::Eq:         return "EQ (5-band)";
+        case EffectType::Saturator:  return "Saturator";
+        case EffectType::Gate:       return "Gate";
+        case EffectType::Widener:    return "Widener";
+        default:                     return "Biquad";
+    }
 }
-static float GetSlot(const EffectDesc& d, int slot) { return d.p((size_t)slot); }
 
-EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
-                             TrackId track, BMessenger apply)
-    : BWindow(frame, "Effects", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
+// Knobs shown for each effect. EQ uses the graph for freq/gain; only the 5 Q
+// knobs are listed here.
+static std::vector<KnobDef> KnobsFor(EffectType t) {
+    switch (t) {
+        case EffectType::Delay:  return {{"Time", 0, 0.01f, 1.0f}, {"Fbk", 1, 0, 0.95f}, {"Mix", 2, 0, 1}};
+        case EffectType::Reverb: return {{"Room", 0, 0, 1}, {"Mix", 1, 0, 1}};
+        case EffectType::Compressor:
+            return {{"Thr dB", 0, -60, 0}, {"Ratio", 1, 1, 20}, {"Atk ms", 2, 0.1f, 100},
+                    {"Rel ms", 3, 5, 1000}, {"Makeup", 4, 0, 24}};
+        case EffectType::Saturator: return {{"Drive", 0, 0, 1}, {"Mix", 1, 0, 1}, {"Out dB", 2, -24, 24}};
+        case EffectType::Gate:
+            return {{"Thr dB", 0, -80, 0}, {"Ratio", 1, 1, 20}, {"Atk ms", 2, 0.1f, 100},
+                    {"Rel ms", 3, 5, 1000}, {"Range", 4, 0, 80}};
+        case EffectType::Widener: return {{"Width", 0, 0, 2}, {"Pan", 1, -1, 1}, {"Gain", 2, 0, 2}};
+        case EffectType::Eq:
+            return {{"Low Q", 2, 0.3f, 8}, {"LoM Q", 5, 0.3f, 8}, {"Mid Q", 8, 0.3f, 8},
+                    {"HiM Q", 11, 0.3f, 8}, {"Hi Q", 14, 0.3f, 8}};
+        case EffectType::Biquad:
+        default: return {{"Freq", 1, 20, 16000}, {"Q", 2, 0.1f, 10}};
+    }
+}
+
+EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
+                         TrackId track, BMessenger apply)
+    : BView(frame, "fx", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
       fChain(std::move(chain)), fTrack(track), fApply(apply) {
-    fRoot = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    fRoot->SetViewColor(ColHeader());
-    AddChild(fRoot);
-    Rebuild();
+    SetViewColor(ColBackground());
 }
 
-void EffectsWindow::Apply() {
+float EffectsView::PanelHeight(const EffectDesc& d) const {
+    float h = kTitleH + 6;
+    if (d.type == EffectType::Eq || d.type == EffectType::Compressor)
+        h += kGraphH;
+    h += kKnobH;   // one knob row (all effects have <= 5 knobs)
+    return h + 8;
+}
+
+float EffectsView::PanelTop(size_t i) const {
+    float y = kPanelPad;
+    for (size_t k = 0; k < i && k < fChain.size(); k++)
+        y += PanelHeight(fChain[k]) + 6;
+    return y;
+}
+
+float EffectsView::ContentHeight() const {
+    float y = kPanelPad;
+    for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
+    y += 8 * 26 + 12;   // the Add-effect buttons
+    return y;
+}
+
+void EffectsView::Apply() {
     BMessage m(kMsgApplyFx);
     m.AddInt64("track", (int64)fTrack);
-    // Per effect: type + param count, with all params concatenated into one
-    // "ep" float array (the receiver consumes them by count).
     for (const EffectDesc& d : fChain) {
         m.AddInt32("et", (int32)(int)d.type);
         m.AddInt32("ec", (int32)d.params.size());
-        for (float v : d.params)
-            m.AddFloat("ep", v);
+        for (float v : d.params) m.AddFloat("ep", v);
     }
     fApply.SendMessage(&m);
 }
 
-static BSlider* ParamRow(BRect r, const char* label, int fxIndex, int slot,
-                         float min, float max, float value, BWindow* target) {
-    BMessage* m = new BMessage(MSG_EP);
-    m->AddInt32("fx", fxIndex);
-    m->AddInt32("slot", slot);
-    m->AddFloat("min", min);
-    m->AddFloat("max", max);
-    BSlider* s = new BSlider(r, label, label, m, 0, 1000, B_HORIZONTAL);
-    float t = (max > min) ? (value - min) / (max - min) : 0.0f;
+// --- drawing --------------------------------------------------------------
+
+void EffectsView::DrawKnob(BRect r, const char* label, float value,
+                           float mn, float mx) {
+    const float cx = (r.left + r.right) * 0.5f;
+    const float cy = r.top + 22;
+    const float rad = 16.0f;
+    float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
-    s->SetValue((int32)(t * 1000.0f));
-    s->SetModificationMessage(new BMessage(*m));   // live while dragging
-    s->SetTarget(target);
-    return s;
+    // Body.
+    SetHighColor(ColHeaderHi());
+    FillEllipse(BPoint(cx, cy), rad, rad);
+    SetHighColor(ColGrid());
+    StrokeEllipse(BPoint(cx, cy), rad, rad);
+    // Indicator (‑135°..+135°).
+    const double ang = (-135.0 + 270.0 * t) * M_PI / 180.0;
+    SetHighColor(ColAccent());
+    StrokeLine(BPoint(cx, cy),
+               BPoint(cx + std::sin(ang) * rad, cy - std::cos(ang) * rad));
+    // Label + value.
+    SetHighColor(ColTextDim());
+    DrawString(label, BPoint(r.left + 2, r.top + 2));
+    char v[16];
+    if (std::fabs(mx) > 50 || std::fabs(mn) > 50) std::snprintf(v, sizeof(v), "%.0f", value);
+    else std::snprintf(v, sizeof(v), "%.2f", value);
+    SetHighColor(ColText());
+    DrawString(v, BPoint(r.left + 2, r.bottom - 2));
 }
 
-void EffectsWindow::Rebuild() {
-    while (BView* c = fRoot->ChildAt(0)) { fRoot->RemoveChild(c); delete c; }
+void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
+    SetHighColor(Rgb(16, 18, 22));
+    FillRect(r);
+    // dB grid (-18..+18) + 0 line.
+    for (int db = -18; db <= 18; db += 6) {
+        const float y = r.bottom - (db + 18) / 36.0f * r.Height();
+        SetHighColor(db == 0 ? ColGrid() : ColLaneAlt());
+        StrokeLine(BPoint(r.left, y), BPoint(r.right, y));
+    }
+    // Freq grid (log, 20..20000; decades at 100/1000/10000).
+    auto freqToX = [&](double f) {
+        const double lo = std::log10(20.0), hi = std::log10(20000.0);
+        double t = (std::log10(f) - lo) / (hi - lo);
+        return r.left + (float)t * r.Width();
+    };
+    auto xToFreq = [&](float x) {
+        const double lo = std::log10(20.0), hi = std::log10(20000.0);
+        double t = (x - r.left) / r.Width();
+        return std::pow(10.0, lo + t * (hi - lo));
+    };
+    for (double f : { 100.0, 1000.0, 10000.0 }) {
+        const float x = freqToX(f);
+        SetHighColor(ColLaneAlt());
+        StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
+    }
 
-    float y = 8.0f;
+    // Build an Eq from the params and stroke its magnitude response.
+    Eq eq;
+    for (int b = 0; b < 5; b++)
+        eq.SetBand(b, d.p((size_t)(b * 3)), d.p((size_t)(b * 3 + 1)),
+                   d.p((size_t)(b * 3 + 2)));
+    eq.Prepare(48000.0);
+    auto dbToY = [&](float db) {
+        if (db < -18) db = -18; if (db > 18) db = 18;
+        return r.bottom - (db + 18) / 36.0f * r.Height();
+    };
+    SetHighColor(ColAccent());
+    float px = r.left, py = dbToY(eq.MagnitudeResponseDb((float)xToFreq(r.left)));
+    for (float x = r.left + 2; x <= r.right; x += 2) {
+        const float y = dbToY(eq.MagnitudeResponseDb((float)xToFreq(x)));
+        StrokeLine(BPoint(px, py), BPoint(x, y));
+        px = x; py = y;
+    }
+
+    // Draggable band handles (x = freq, y = gain).
+    for (int b = 0; b < 5; b++) {
+        const float f = d.p((size_t)(b * 3));
+        const float g = d.p((size_t)(b * 3 + 1));
+        const float hx = freqToX(f <= 20 ? 20 : f);
+        const float hy = dbToY(g);
+        SetHighColor(TrackColor(b));
+        FillEllipse(BPoint(hx, hy), 5, 5);
+        SetHighColor(ColText());
+        StrokeEllipse(BPoint(hx, hy), 5, 5);
+        fHits.push_back({ effIdx, 5, b, BRect(hx - 6, hy - 6, hx + 6, hy + 6),
+                          0, 0 });
+    }
+    SetHighColor(ColGrid());
+    StrokeRect(r);
+}
+
+void EffectsView::DrawCompCurve(BRect r, const EffectDesc& d) {
+    SetHighColor(Rgb(16, 18, 22));
+    FillRect(r);
+    const float thr = d.p(0);     // dB
+    const float ratio = d.p(1) < 1 ? 1 : d.p(1);
+    const float makeup = d.p(4);
+    // Axes: input/output -60..0 dB.
+    auto mapx = [&](float in) { return r.left + (in + 60) / 60.0f * r.Width(); };
+    auto mapy = [&](float out) {
+        if (out > 6) out = 6; if (out < -60) out = -60;
+        return r.bottom - (out + 60) / 66.0f * r.Height();
+    };
+    // Unity reference.
+    SetHighColor(ColLaneAlt());
+    StrokeLine(BPoint(mapx(-60), mapy(-60)), BPoint(mapx(0), mapy(0)));
+    // Transfer curve.
+    SetHighColor(ColAccent());
+    float px = mapx(-60), py = mapy(-60 + makeup);
+    for (float in = -60; in <= 0; in += 1.0f) {
+        float out = (in <= thr) ? in : thr + (in - thr) / ratio;
+        out += makeup;
+        const float x = mapx(in), y = mapy(out);
+        StrokeLine(BPoint(px, py), BPoint(x, y));
+        px = x; py = y;
+    }
+    // Threshold marker.
+    SetHighColor(ColPlayhead());
+    StrokeLine(BPoint(mapx(thr), r.top), BPoint(mapx(thr), r.bottom));
+    SetHighColor(ColGrid());
+    StrokeRect(r);
+}
+
+void EffectsView::Draw(BRect) {
+    fHits.clear();
     const float w = Bounds().Width();
 
     for (size_t i = 0; i < fChain.size(); i++) {
         const EffectDesc& d = fChain[i];
+        const float top = PanelTop(i);
+        const float ph  = PanelHeight(d);
+        BRect panel(kPanelPad, top, w - kPanelPad, top + ph - 6);
+        SetHighColor(ColHeader());
+        FillRect(panel);
+        SetHighColor(ColHeaderHi());
+        FillRect(BRect(panel.left, panel.top, panel.right, panel.top + kTitleH));
+        SetHighColor(ColText());
+        DrawString(EffName(d.type), BPoint(panel.left + 8, panel.top + 15));
 
-        const char* tname = "Biquad filter";
-        if (d.type == EffectType::Delay)           tname = "Delay";
-        else if (d.type == EffectType::Reverb)     tname = "Reverb";
-        else if (d.type == EffectType::Compressor) tname = "Compressor";
-        else if (d.type == EffectType::Eq)         tname = "EQ (5-band)";
-        else if (d.type == EffectType::Saturator)  tname = "Saturator";
-        else if (d.type == EffectType::Gate)       tname = "Gate";
-        else if (d.type == EffectType::Widener)    tname = "Widener";
-
-        BStringView* title = new BStringView(BRect(8, y, w - 150, y + 16),
-            "title", tname);
-        title->SetViewColor(ColHeader());
-        title->SetHighColor(ColText());
-        fRoot->AddChild(title);
-
-        // Reorder + remove controls.
-        BButton* up = new BButton(BRect(w - 146, y - 2, w - 126, y + 20),
-            "up", "^", new BMessage(MSG_EUP));
-        up->Message()->AddInt32("fx", (int32)i);
-        up->SetEnabled(i > 0);
-        fRoot->AddChild(up);
-        BButton* dn = new BButton(BRect(w - 122, y - 2, w - 102, y + 20),
-            "dn", "v", new BMessage(MSG_EDN));
-        dn->Message()->AddInt32("fx", (int32)i);
-        dn->SetEnabled(i + 1 < fChain.size());
-        fRoot->AddChild(dn);
-        BButton* rm = new BButton(BRect(w - 98, y - 2, w - 8, y + 20),
-            "rm", "Remove", new BMessage(MSG_ERM));
-        rm->Message()->AddInt32("fx", (int32)i);
-        fRoot->AddChild(rm);
-        y += 24;
-
-        auto add = [&](const char* lbl, int slot, float mn, float mx) {
-            fRoot->AddChild(ParamRow(BRect(8, y, w - 8, y + 24), lbl,
-                                     (int)i, slot, mn, mx, GetSlot(d, slot), this));
-            y += 30;
+        // Up / Down / Remove buttons in the title bar.
+        auto btn = [&](float rx, const char* lbl, int kind) {
+            BRect b(rx, panel.top + 2, rx + kBtnW, panel.top + kTitleH - 2);
+            SetHighColor(ColHeaderHi());  FillRect(b);
+            SetHighColor(ColGrid());      StrokeRect(b);
+            SetHighColor(ColText());      DrawString(lbl, BPoint(b.left + 6, b.bottom - 5));
+            fHits.push_back({ (int)i, kind, 0, b, 0, 0 });
         };
-        switch (d.type) {
-            case EffectType::Delay:
-                add("Time", 0, 0.01f, 1.0f);
-                add("Feedback", 1, 0.0f, 0.95f);
-                add("Mix", 2, 0.0f, 1.0f);
-                break;
-            case EffectType::Reverb:
-                add("Room", 0, 0.0f, 1.0f);
-                add("Mix", 1, 0.0f, 1.0f);
-                break;
-            case EffectType::Compressor:
-                add("Threshold dB", 0, -60.0f, 0.0f);
-                add("Ratio", 1, 1.0f, 20.0f);
-                add("Attack ms", 2, 0.1f, 100.0f);
-                add("Release ms", 3, 5.0f, 1000.0f);
-                add("Makeup dB", 4, 0.0f, 24.0f);
-                break;
-            case EffectType::Saturator:
-                add("Drive", 0, 0.0f, 1.0f);
-                add("Mix", 1, 0.0f, 1.0f);
-                add("Output dB", 2, -24.0f, 24.0f);
-                break;
-            case EffectType::Gate:
-                add("Threshold dB", 0, -80.0f, 0.0f);
-                add("Ratio", 1, 1.0f, 20.0f);
-                add("Attack ms", 2, 0.1f, 100.0f);
-                add("Release ms", 3, 5.0f, 1000.0f);
-                add("Range dB", 4, 0.0f, 80.0f);
-                break;
-            case EffectType::Widener:
-                add("Width", 0, 0.0f, 2.0f);
-                add("Pan", 1, -1.0f, 1.0f);
-                add("Gain", 2, 0.0f, 2.0f);
-                break;
-            case EffectType::Eq: {
-                const char* bn[5] = { "Low", "LoMid", "Mid", "HiMid", "High" };
-                for (int bnd = 0; bnd < 5; bnd++) {
-                    char lbl[32];
-                    std::snprintf(lbl, sizeof(lbl), "%s Freq", bn[bnd]);
-                    add(lbl, bnd * 3 + 0, 20.0f, 18000.0f);
-                    std::snprintf(lbl, sizeof(lbl), "%s Gain", bn[bnd]);
-                    add(lbl, bnd * 3 + 1, -18.0f, 18.0f);
-                    std::snprintf(lbl, sizeof(lbl), "%s Q", bn[bnd]);
-                    add(lbl, bnd * 3 + 2, 0.3f, 8.0f);
-                }
-                break;
-            }
-            case EffectType::Biquad:
-            default:
-                add("Freq", 1, 20.0f, 16000.0f);
-                add("Q", 2, 0.1f, 10.0f);
-                if (d.p(0) == 2.0f) add("Gain dB", 3, -24.0f, 24.0f);
-                break;
+        btn(panel.right - 3 * kBtnW - 60, "^", 1);
+        btn(panel.right - 2 * kBtnW - 56, "v", 2);
+        BRect rm(panel.right - 52, panel.top + 2, panel.right - 4, panel.top + kTitleH - 2);
+        SetHighColor(Rgb(120, 60, 60)); FillRect(rm);
+        SetHighColor(ColGrid());        StrokeRect(rm);
+        SetHighColor(ColText());        DrawString("Del", BPoint(rm.left + 12, rm.bottom - 5));
+        fHits.push_back({ (int)i, 3, 0, rm, 0, 0 });
+
+        float knobTop = panel.top + kTitleH + 4;
+        if (d.type == EffectType::Eq) {
+            DrawEqGraph(BRect(panel.left + 6, knobTop, panel.right - 6,
+                              knobTop + kGraphH - 6), d, (int)i);
+            knobTop += kGraphH;
+        } else if (d.type == EffectType::Compressor) {
+            DrawCompCurve(BRect(panel.left + 6, knobTop, panel.right - 6,
+                                knobTop + kGraphH - 6), d);
+            knobTop += kGraphH;
         }
-        y += 8;
+
+        // Knob row.
+        const std::vector<KnobDef> knobs = KnobsFor(d.type);
+        float kx = panel.left + 8;
+        for (const KnobDef& k : knobs) {
+            BRect kr(kx, knobTop, kx + kKnobW, knobTop + kKnobH);
+            DrawKnob(kr, k.label, d.p((size_t)k.slot), k.mn, k.mx);
+            fHits.push_back({ (int)i, 0, k.slot, kr, k.mn, k.mx });
+            kx += kKnobW + 4;
+        }
     }
 
-    const char* names[7] = { "Add EQ", "Add Delay", "Add Reverb",
-                             "Add Compressor", "Add Saturator", "Add Gate",
-                             "Add Widener" };
+    // Add-effect buttons.
+    float ay = PanelTop(fChain.size());
+    const char* adds[8] = { "Add EQ", "Add Delay", "Add Reverb", "Add Compressor",
+                            "Add Saturator", "Add Gate", "Add Widener", "" };
+    const EffectType at[7] = { EffectType::Eq, EffectType::Delay, EffectType::Reverb,
+                               EffectType::Compressor, EffectType::Saturator,
+                               EffectType::Gate, EffectType::Widener };
     for (int k = 0; k < 7; k++) {
-        BButton* b = new BButton(BRect(8, y, w - 8, y + 22), "add",
-                                 names[k], new BMessage(MSG_EADD));
-        b->Message()->AddInt32("kind", k);
-        fRoot->AddChild(b);
-        y += 26;
+        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
+        SetHighColor(ColHeaderHi()); FillRect(b);
+        SetHighColor(ColGrid());     StrokeRect(b);
+        SetHighColor(ColAccent());   DrawString(adds[k], BPoint(b.left + 10, b.bottom - 6));
+        fHits.push_back({ (int)at[k], 4, 0, b, 0, 0 });
+        ay += 26;
+    }
+}
+
+// --- interaction ----------------------------------------------------------
+
+int EffectsView::HitTest(BPoint where, Hit* out) const {
+    for (const Hit& h : fHits)
+        if (h.rect.Contains(where)) { *out = h; return h.kind; }
+    return -1;
+}
+
+static EffectDesc MakeDefault(EffectType t) {
+    switch (t) {
+        case EffectType::Delay:      return DelayDesc();
+        case EffectType::Reverb:     return ReverbDesc();
+        case EffectType::Compressor: return CompressorDesc();
+        case EffectType::Saturator:  return SaturatorDesc();
+        case EffectType::Gate:       return GateDesc();
+        case EffectType::Widener:    return WidenerDesc();
+        case EffectType::Eq:
+        default:                     return EqDesc();
+    }
+}
+
+void EffectsView::MouseDown(BPoint where) {
+    Hit h;
+    const int kind = HitTest(where, &h);
+    if (kind < 0) return;
+    switch (kind) {
+        case 0:   // knob: begin a vertical drag
+        case 5: { // eq handle: 2D drag
+            fDragEffect = h.effect; fDragSlot = h.slot; fDragKind = kind;
+            fDragMin = h.min; fDragMax = h.max;
+            fDragStart = where;
+            fDragStartVal = (fDragEffect >= 0 && fDragEffect < (int)fChain.size())
+                            ? fChain[fDragEffect].p((size_t)fDragSlot) : 0;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            break;
+        }
+        case 1: case 2: {   // up / down reorder
+            const int j = h.effect + (kind == 1 ? -1 : 1);
+            if (h.effect >= 0 && h.effect < (int)fChain.size()
+                && j >= 0 && j < (int)fChain.size()) {
+                std::swap(fChain[h.effect], fChain[j]);
+                Apply(); Invalidate();
+            }
+            break;
+        }
+        case 3:   // remove
+            if (h.effect >= 0 && h.effect < (int)fChain.size()) {
+                fChain.erase(fChain.begin() + h.effect);
+                Apply(); Invalidate();
+            }
+            break;
+        case 4:   // add (h.effect carries the EffectType)
+            fChain.push_back(MakeDefault((EffectType)h.effect));
+            Apply(); Invalidate();
+            break;
+    }
+}
+
+void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
+    if (fDragEffect < 0 || fDragEffect >= (int)fChain.size()) return;
+    EffectDesc& d = fChain[fDragEffect];
+    auto setP = [&](int slot, float v) {
+        if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
+        d.params[slot] = v;
+    };
+    if (fDragKind == 0) {   // knob: vertical drag over ~160 px = full range
+        const float dv = (fDragStart.y - where.y) / 160.0f * (fDragMax - fDragMin);
+        float v = fDragStartVal + dv;
+        if (v < fDragMin) v = fDragMin; if (v > fDragMax) v = fDragMax;
+        setP(fDragSlot, v);
+    } else if (fDragKind == 5) {   // eq handle: x -> freq (log), y -> gain
+        // Recover the graph rect for this effect to map coordinates.
+        const float top = PanelTop((size_t)fDragEffect) + kTitleH + 4;
+        BRect r(kPanelPad + 6, top, Bounds().Width() - kPanelPad - 6, top + kGraphH - 6);
+        const double lo = std::log10(20.0), hi = std::log10(20000.0);
+        double tf = (where.x - r.left) / r.Width();
+        if (tf < 0) tf = 0; if (tf > 1) tf = 1;
+        const float freq = (float)std::pow(10.0, lo + tf * (hi - lo));
+        float gain = 18.0f - (where.y - r.top) / r.Height() * 36.0f;
+        if (gain < -18) gain = -18; if (gain > 18) gain = 18;
+        setP(fDragSlot * 3, freq);
+        setP(fDragSlot * 3 + 1, gain);
+    }
+    Apply();
+    Invalidate();
+}
+
+void EffectsView::MouseUp(BPoint) {
+    fDragEffect = fDragSlot = fDragKind = -1;
+}
+
+// --- window ---------------------------------------------------------------
+
+EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
+                             TrackId track, BMessenger apply)
+    : BWindow(frame, "Effects", B_TITLED_WINDOW,
+              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
+    BRect b = Bounds();
+    BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
+    fView = new EffectsView(vr, std::move(chain), track, apply);
+    BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
+                                      false, true);
+    AddChild(sv);
+    if (BScrollBar* bar = sv->ScrollBar(B_VERTICAL)) {
+        const float ch = fView->ContentHeight();
+        bar->SetRange(0, std::max(0.0f, ch - vr.Height()));
+        bar->SetSteps(16, vr.Height());
     }
 }
 
 void EffectsWindow::MessageReceived(BMessage* msg) {
-    switch (msg->what) {
-        case MSG_EP: {
-            int32 fx = -1, slot = 0; float mn = 0, mx = 1;
-            msg->FindInt32("fx", &fx);
-            msg->FindInt32("slot", &slot);
-            msg->FindFloat("min", &mn);
-            msg->FindFloat("max", &mx);
-            int32 v = 0;
-            msg->FindInt32("be:value", &v);
-            if (fx >= 0 && (size_t)fx < fChain.size()) {
-                SetSlot(fChain[(size_t)fx], (int)slot,
-                        mn + (v / 1000.0f) * (mx - mn));
-                Apply();   // no Rebuild: only the value changed
-            }
-            break;
-        }
-        case MSG_ERM: {
-            int32 fx = -1;
-            msg->FindInt32("fx", &fx);
-            if (fx >= 0 && (size_t)fx < fChain.size()) {
-                fChain.erase(fChain.begin() + fx);
-                Rebuild();
-                Apply();
-            }
-            break;
-        }
-        case MSG_EUP:
-        case MSG_EDN: {
-            int32 fx = -1;
-            msg->FindInt32("fx", &fx);
-            const int32 other = (msg->what == MSG_EUP) ? fx - 1 : fx + 1;
-            if (fx >= 0 && (size_t)fx < fChain.size()
-                && other >= 0 && (size_t)other < fChain.size()) {
-                std::swap(fChain[(size_t)fx], fChain[(size_t)other]);
-                Rebuild();
-                Apply();
-            }
-            break;
-        }
-        case MSG_EADD: {
-            int32 kind = 0;
-            msg->FindInt32("kind", &kind);
-            switch (kind) {
-                case 0: fChain.push_back(EqDesc()); break;
-                case 1: fChain.push_back(DelayDesc()); break;
-                case 2: fChain.push_back(ReverbDesc()); break;
-                case 3: fChain.push_back(CompressorDesc()); break;
-                case 4: fChain.push_back(SaturatorDesc()); break;
-                case 5: fChain.push_back(GateDesc()); break;
-                case 6: fChain.push_back(WidenerDesc()); break;
-            }
-            Rebuild();
-            Apply();
-            break;
-        }
-        default:
-            BWindow::MessageReceived(msg);
-    }
+    BWindow::MessageReceived(msg);
 }
 
 } // namespace daw

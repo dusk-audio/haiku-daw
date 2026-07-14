@@ -29,6 +29,15 @@ public:
     void Reset() override;
     const char* Name() const override { return "EQ"; }
 
+    // Band parameters (for a response-graph UI).
+    float BandFreq(int b)   const { return fFreq[b]; }
+    float BandGainDb(int b) const { return fGainDb[b]; }
+    float BandQ(int b)      const { return fQ[b]; }
+
+    // Summed magnitude of the 5-band cascade at a frequency, in dB. Used to
+    // draw the frequency-response curve. Kit-free.
+    float MagnitudeResponseDb(float freqHz) const;
+
 private:
     void ComputeBand(int b);
 

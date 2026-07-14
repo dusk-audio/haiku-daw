@@ -778,7 +778,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         // snapshot of the chain and posts edits back to the window (main
         // thread) via kMsgApplyFx. Effects apply on the next Play.
         BPoint p = ConvertToScreen(where);
-        BRect  wr(p.x, p.y, p.x + 300, p.y + 560);   // tall enough for EQ bands
+        BRect  wr(p.x, p.y, p.x + 480, p.y + 620);   // room for graphs + knobs
         EffectsWindow* w = new EffectsWindow(wr, t.fx, id, BMessenger(Window()));
         w->Show();
         return;

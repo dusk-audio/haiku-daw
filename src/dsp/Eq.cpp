@@ -133,6 +133,25 @@ void Eq::Reset() {
         }
 }
 
+float Eq::MagnitudeResponseDb(float freqHz) const {
+    const double w = 2.0 * kPi * (double)freqHz / fSampleRate;
+    const double c1 = std::cos(w),      s1 = std::sin(w);
+    const double c2 = std::cos(2.0 * w), s2 = std::sin(2.0 * w);
+    double totalDb = 0.0;
+    for (int b = 0; b < kBands; b++) {
+        // H(e^jw) = (b0 + b1 e^-jw + b2 e^-2jw)/(1 + a1 e^-jw + a2 e^-2jw).
+        const double nr = fB0[b] + fB1[b] * c1 + fB2[b] * c2;
+        const double ni = -(fB1[b] * s1 + fB2[b] * s2);
+        const double dr = 1.0 + fA1[b] * c1 + fA2[b] * c2;
+        const double di = -(fA1[b] * s1 + fA2[b] * s2);
+        const double num = nr * nr + ni * ni;
+        const double den = dr * dr + di * di;
+        if (den > 1e-20 && num > 1e-20)
+            totalDb += 10.0 * std::log10(num / den);   // 10*log10 of |H|^2
+    }
+    return (float)totalDb;
+}
+
 void Eq::Process(float* stereo, int frames) {
     for (int i = 0; i < frames; i++) {
         for (int ch = 0; ch < 2; ch++) {

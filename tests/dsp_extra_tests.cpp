@@ -134,6 +134,17 @@ int main() {
         CHECK(std::fabs(b3[2 * 3999] - 1.0f) < 0.1f);
     }
 
+    // EQ magnitude response: flat EQ ~ 0 dB everywhere; a +9 dB mid-peak reads
+    // near +9 dB at its center and ~0 dB far away. (Drives the graph UI.)
+    {
+        Eq flat; flat.Prepare(SR);
+        CHECK(std::fabs(flat.MagnitudeResponseDb(1000.0f)) < 0.5f);
+        Eq peak; peak.SetBand(2, 1000.0f, 9.0f, 2.0f); peak.Prepare(SR);
+        peak.SetBand(2, 1000.0f, 9.0f, 2.0f);   // re-apply after Prepare reset
+        CHECK(peak.MagnitudeResponseDb(1000.0f) > 6.0f);
+        CHECK(std::fabs(peak.MagnitudeResponseDb(60.0f)) < 2.0f);
+    }
+
     // Regression: a high-Q shelf with gain must NOT produce NaN (radicand went
     // negative in the shelf-alpha formula for Q > 1).
     {
