@@ -362,12 +362,19 @@ void MainWindow::MessageReceived(BMessage* msg) {
             std::vector<MixerStripInfo> strips;
             for (const Track& t : fProject->Tracks())
                 strips.push_back(MixerStripInfo{ (uint64)t.id, t.name,
-                    t.gain, t.pan, t.muted, t.soloed });
-            const float ww = 16 + strips.size() * 84;
-            BRect wr(140, 140, 140 + ww, 140 + 260);
-            (new MixerWindow(wr, strips, BMessenger(this)))->Show();
+                    t.gain, t.pan, t.muted, t.soloed, t.colorIndex });
+            const float ww = 24 + (strips.size() + 1) * 90;   // + master
+            BRect wr(120, 120, 120 + ww, 120 + 300);
+            MixerWindow* mx = new MixerWindow(wr, strips, fProject->masterGain,
+                                              BMessenger(this));
+            fMixerMsgr = BMessenger(mx);
+            mx->Show();
             break;
         }
+        case kMsgApplyMaster:
+            msg->FindFloat("gain", &fProject->masterGain);
+            if (fMaster) fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
+            break;
         case kMsgRenameTrack: {
             int64 tid = 0; const char* name = nullptr;
             msg->FindInt64("track", &tid);
@@ -1108,6 +1115,19 @@ void MainWindow::PushTrackPeaks() {
     for (const Track& t : fProject->Tracks())
         tp[t.id] = { fEngine->TrackPeakL(t.id), fEngine->TrackPeakR(t.id) };
     fTimeline->SetTrackPeaks(tp);
+
+    // Also feed the mixer window (its own looper) if one is open.
+    if (fMixerMsgr.IsValid()) {
+        BMessage m(kMsgMixPeaks);
+        for (const auto& kv : tp) {
+            m.AddInt64("tid", (int64)kv.first);
+            m.AddFloat("pl", kv.second.first);
+            m.AddFloat("pr", kv.second.second);
+        }
+        m.AddFloat("mpl", fEngine->PeakL());
+        m.AddFloat("mpr", fEngine->PeakR());
+        fMixerMsgr.SendMessage(&m);
+    }
 }
 
 void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,

@@ -15,6 +15,7 @@
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
 
+#include <Messenger.h>
 #include <Window.h>
 
 #include <map>
@@ -84,6 +85,7 @@ private:
     std::unique_ptr<Recorder> fRecorder;  // active while recording
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
+    BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;

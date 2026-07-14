@@ -1,27 +1,23 @@
-// MixerWindow — a horizontal rack of channel strips, one per track.
+// MixerWindow — a horizontal rack of channel strips + a master strip.
 //
-// Like EffectsWindow, this is a separate BWindow that runs on its own looper
-// thread, so it must NOT touch the shared Project directly (that would race
-// the main thread's paint/playback). It receives a *snapshot* of the mix
-// state (one MixerStripInfo per track) in its constructor, edits only that
-// local copy, and posts each changed strip's full state to the main window
-// (via `apply`). The main window owns all model mutation and repaints.
+// Fully custom-drawn (a single MixerStripsView) so it matches the dark timeline
+// theme instead of falling back to light OS controls. Runs on its own looper
+// thread; it holds a snapshot of the mix state, edits the local copy on mouse
+// input, and posts changes to the main window (kMsgApplyMix / kMsgApplyMaster).
+// The main window pushes live per-track peaks via kMsgMixPeaks.
 #pragma once
 
-#include <Button.h>
 #include <Messenger.h>
-#include <Slider.h>
-#include <StringView.h>
-#include <SupportDefs.h>
+#include <View.h>
 #include <Window.h>
 
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace daw {
 
-// One channel strip's mixer state. POD; TrackId is uint64_t in the model
-// (see ../model/types.h), stored here as uint64 for the Interface Kit edge.
 struct MixerStripInfo {
     uint64      trackId;
     std::string name;
@@ -29,41 +25,57 @@ struct MixerStripInfo {
     float       pan;     // -1..+1 (0 == center)
     bool        muted;
     bool        soloed;
+    int         colorIndex = 0;
 };
 
-// Message the main window handles to apply one strip's edited state to the
-// model. It carries that strip's FULL current state, so the handler can just
-// overwrite the track's gain/pan/mute/solo. Fields:
-//   int64 "track"  — the track id (MixerStripInfo::trackId)
-//   float "gain"   — linear gain, 0..1.5
-//   float "pan"    — -1..+1
-//   bool  "mute"   — muted
-//   bool  "solo"   — soloed
-constexpr uint32 kMsgApplyMix = 'mxap';
+// One strip's edited state -> the model. Fields: int64 "track", float "gain",
+// float "pan", bool "mute", bool "solo".
+constexpr uint32 kMsgApplyMix    = 'mxap';
+// Master gain -> the model. Field: float "gain".
+constexpr uint32 kMsgApplyMaster = 'mmst';
+// Live peaks pushed from the main window. Per track: int64 "tid", float "pl",
+// "pr"; plus master float "mpl","mpr".
+constexpr uint32 kMsgMixPeaks    = 'mpks';
+
+class MixerStripsView : public BView {
+public:
+    MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips,
+                    float masterGain, BMessenger apply);
+
+    void Draw(BRect update) override;
+    void MouseDown(BPoint where) override;
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
+    void MouseUp(BPoint where) override;
+
+    void SetPeaks(const std::map<uint64, std::pair<float, float>>& peaks,
+                  float masterL, float masterR);
+
+private:
+    float StripX(int i) const;       // left x of strip i (i == count -> master)
+    void  DrawStrip(int i, const char* name, float gain, float pan,
+                    bool muted, bool soloed, int colorIndex,
+                    float peakL, float peakR, bool master);
+    int   StripAt(BPoint where) const;   // -1 none, count == master
+    void  ApplyStrip(int i);
+
+    std::vector<MixerStripInfo> fStrips;
+    std::map<uint64, std::pair<float, float>> fPeaks;
+    float      fMasterGain;
+    float      fMasterL = 0.0f, fMasterR = 0.0f;
+    BMessenger fApply;
+
+    enum class Drag { None, Fader, Pan };
+    Drag fDrag = Drag::None;
+    int  fDragStrip = -1;   // count == master
+};
 
 class MixerWindow : public BWindow {
 public:
     MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
-                BMessenger apply);
-
+                float masterGain, BMessenger apply);
     void MessageReceived(BMessage* msg) override;
-
 private:
-    void Build();          // build the UI from the local snapshot
-    void Apply(size_t i);  // post strip i's full current state to the main window
-
-    // A strip's controls, kept so we can read live values back out.
-    struct Strip {
-        MixerStripInfo info;
-        BSlider* gain = nullptr;   // vertical, 0..150 -> gain*100
-        BSlider* pan  = nullptr;   // horizontal, -100..100 -> pan*100
-        BButton* mute = nullptr;   // two-state "M"
-        BButton* solo = nullptr;   // two-state "S"
-    };
-
-    std::vector<Strip> fStrips;   // local snapshot (edited here)
-    BMessenger         fApply;    // -> main window
-    BView*             fRoot;
+    MixerStripsView* fView;
 };
 
 } // namespace daw
