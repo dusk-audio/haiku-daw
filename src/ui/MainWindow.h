@@ -62,6 +62,8 @@ private:
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
+    void LoadSettings();             // ~/config/settings/HaikuDAW/settings
+    void SaveSettings();
     void ImportAudio(const char* path);   // add a WAV as a clip
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
@@ -79,6 +81,7 @@ private:
     std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
     std::unique_ptr<Recorder> fRecorder;  // active while recording
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
+    BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
@@ -104,6 +107,9 @@ private:
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
     Frame                     fRecStart = 0; // frame the capture (clip) begins at
     Frame                     fRecPoint = 0; // record start (== fRecStart)
+    std::string               fLastDir;      // last Open/Save/Import directory
+    std::string               fTakeDir;      // where recorded takes are written
+    std::string               fTakePath;     // full path of the current take
 };
 
 } // namespace daw

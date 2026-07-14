@@ -17,6 +17,7 @@ add_library(daw_model
     src/model/PeakCache.cpp     # kit-free min/max waveform envelope
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
+    src/app/AppSettings.cpp     # kit-free app settings text serializer
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -105,6 +106,10 @@ add_test(NAME tempomap_tests COMMAND tempomap_tests)
 add_executable(recordplan_tests tests/recordplan_tests.cpp)
 target_link_libraries(recordplan_tests PRIVATE daw_model)
 add_test(NAME recordplan_tests COMMAND recordplan_tests)
+
+add_executable(appsettings_tests tests/appsettings_tests.cpp)
+target_link_libraries(appsettings_tests PRIVATE daw_model)
+add_test(NAME appsettings_tests COMMAND appsettings_tests)
 
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)

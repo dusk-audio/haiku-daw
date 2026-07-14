@@ -8,6 +8,7 @@
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
 #include "../storage/BfsAttr.h"
+#include "../app/AppSettings.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
 
@@ -20,6 +21,8 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <File.h>
+#include <FindDirectory.h>
 #include <Entry.h>
 #include <FilePanel.h>
 #include <Menu.h>
@@ -30,6 +33,8 @@
 #include <Slider.h>
 #include <StringView.h>
 #include <TextControl.h>
+
+#include <sys/stat.h>
 
 #include <cmath>
 #include <cstdio>
@@ -70,7 +75,12 @@ enum {
     MSG_SHORTCUTS = 'keys',
     MSG_ZOOMFIT   = 'zfit',
     MSG_BROWSER   = 'brws',
+    MSG_AUTOSAVE  = 'asav',
+    MSG_RECOVER   = 'rcvr',   // deferred startup recovery check
 };
+
+// Defined below; used by MessageReceived above its definition.
+static bool RecoveryPath(BPath& out);
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
@@ -233,10 +243,18 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fTimeline = new TimelineView(tlRect, project, stack);
     fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
+
+    // Restore persisted preferences + window layout (after the menus exist).
+    LoadSettings();
+    // Autosave for crash recovery; check for a leftover once the looper runs.
+    fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
+                                   30LL * 1000 * 1000);   // every 30 s
+    PostMessage(MSG_RECOVER);
 }
 
 MainWindow::~MainWindow() {
     delete fPulse;
+    delete fAutosave;
     delete fSavePanel;
     delete fOpenPanel;
     delete fExportPanel;
@@ -449,6 +467,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_ZOOMFIT:
             fTimeline->ZoomToFit();
             break;
+        case MSG_AUTOSAVE: {
+            // Save a recovery copy while there's content and we're not mid-take.
+            if (!fRecMode && !fProject->Tracks().empty()) {
+                BPath p;
+                if (RecoveryPath(p)) ProjectIO::Save(*fProject, p.Path());
+            }
+            break;
+        }
+        case MSG_RECOVER: {
+            BPath p;
+            BEntry e;
+            if (RecoveryPath(p) && (e.SetTo(p.Path()), e.Exists())) {
+                BAlert* a = new BAlert("Recover",
+                    "Unsaved work from a previous session was found. Recover it?",
+                    "Discard", "Recover");
+                if (a->Go() == 1) LoadFrom(p.Path());
+                else              std::remove(p.Path());
+            }
+            break;
+        }
         case MSG_BROWSER: {
             BRect wr = BWindow::Frame();
             wr.OffsetBy(40, 40);
@@ -715,10 +753,14 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
 }
 
 void MainWindow::StartCapture() {
-    char path[64];
-    std::snprintf(path, sizeof(path), "take-%d.wav", ++fTakeCounter);
+    // Write takes into the project's directory (a self-contained bundle) when
+    // the project has been saved; otherwise the working directory.
+    char name[64];
+    std::snprintf(name, sizeof(name), "take-%d.wav", ++fTakeCounter);
+    fTakePath = fTakeDir.empty() ? std::string(name)
+                                 : fTakeDir + "/" + name;
     fRecorder.reset(new Recorder());
-    if (fRecorder->Start(path) != B_OK) {
+    if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
         std::fprintf(stderr, "MainWindow: recording failed to start\n");
         fRecorder.reset();
         --fTakeCounter;
@@ -786,8 +828,7 @@ void MainWindow::StopRecording() {
         frames  = fRecorder->FramesWritten();
         recRate = fRecorder->SampleRate();
     }
-    const std::string path = std::string("take-") + std::to_string(fTakeCounter)
-                           + ".wav";
+    const std::string path = fTakePath;   // the file StartCapture opened
     std::vector<TrackId> targets = fRecTracks;
 
     // Stop the overdub engine + live REC region, end the poll.
@@ -877,9 +918,20 @@ void MainWindow::StopRecording() {
     fTimeline->Invalidate();
 }
 
+// The directory portion of a path (empty if none), for bundling takes.
+static std::string DirOfPath(const char* path) {
+    std::string p(path ? path : "");
+    const size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? std::string() : p.substr(0, slash);
+}
+
 void MainWindow::SaveTo(const char* path) {
-    if (!ProjectIO::Save(*fProject, path))
+    if (!ProjectIO::Save(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: save failed: %s\n", path);
+        return;
+    }
+    fTakeDir = DirOfPath(path);   // new takes land beside the project
+    fLastDir = fTakeDir;
 }
 
 void MainWindow::LoadFrom(const char* path) {
@@ -889,6 +941,8 @@ void MainWindow::LoadFrom(const char* path) {
         std::fprintf(stderr, "MainWindow: load failed: %s\n", path);
         return;
     }
+    fTakeDir = DirOfPath(path);
+    fLastDir = fTakeDir;
     fStack->Clear();          // history from the previous project is invalid
     RebuildPeaks();           // waveform envelopes for the loaded clips
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
@@ -947,6 +1001,90 @@ void MainWindow::RebuildPeaks() {
         }
 }
 
+// Resolve ~/config/settings/HaikuDAW/settings, creating the dir if needed.
+static bool SettingsPath(BPath& out) {
+    BPath p;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK) return false;
+    p.Append("HaikuDAW");
+    mkdir(p.Path(), 0755);   // ignore EEXIST
+    p.Append("settings");
+    out = p;
+    return true;
+}
+
+// The crash-recovery autosave file (settings dir). A leftover after startup
+// means the last session didn't exit cleanly.
+static bool RecoveryPath(BPath& out) {
+    BPath p;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK) return false;
+    p.Append("HaikuDAW");
+    mkdir(p.Path(), 0755);
+    p.Append("recovery.dawproj");
+    out = p;
+    return true;
+}
+
+// Mark the radio item in `menu` whose message's int32 `field` equals `value`.
+static void MarkRadio(BMenu* menu, const char* field, int32 value) {
+    if (!menu) return;
+    for (int32 i = 0; i < menu->CountItems(); i++)
+        if (BMenuItem* it = menu->ItemAt(i))
+            it->SetMarked(it->Message()
+                          && it->Message()->FindInt32(field) == value);
+}
+
+void MainWindow::LoadSettings() {
+    BPath p;
+    if (!SettingsPath(p)) return;
+    BFile f(p.Path(), B_READ_ONLY);
+    if (f.InitCheck() != B_OK) return;
+    off_t sz = 0;
+    if (f.GetSize(&sz) != B_OK || sz <= 0 || sz > 65536) return;
+    std::string text;
+    text.resize((size_t)sz);
+    if (f.Read(&text[0], (size_t)sz) != (ssize_t)sz) return;
+
+    AppSettings s;
+    s.bufferFrames = (int)fBufferFrames;
+    s.countInBars  = fCountInBars;
+    s.metronome    = fMetronome;
+    s.monitorInput = fMonitorInput;
+    if (!s.Deserialize(text)) return;
+
+    fBufferFrames = (size_t)s.bufferFrames;
+    fCountInBars  = s.countInBars;
+    fMetronome    = s.metronome;
+    fMonitorInput = s.monitorInput;
+    fLastDir      = s.lastDir;
+    MarkRadio(fBufMenu, "frames", (int32)fBufferFrames);
+    MarkRadio(fCountInMenu, "bars", fCountInBars);
+    if (fMetItem)   fMetItem->SetMarked(fMetronome);
+    if (fMonInItem) fMonInItem->SetMarked(fMonitorInput);
+    // Restore the window frame (clamped to something sane).
+    if (s.winR - s.winL > 320 && s.winB - s.winT > 240) {
+        MoveTo(s.winL, s.winT);
+        ResizeTo(s.winR - s.winL, s.winB - s.winT);
+    }
+}
+
+void MainWindow::SaveSettings() {
+    AppSettings s;
+    s.bufferFrames = (int)fBufferFrames;
+    s.countInBars  = fCountInBars;
+    s.metronome    = fMetronome;
+    s.monitorInput = fMonitorInput;
+    s.lastDir      = fLastDir;
+    const BRect fr = BWindow::Frame();
+    s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
+
+    BPath p;
+    if (!SettingsPath(p)) return;
+    BFile f(p.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+    if (f.InitCheck() != B_OK) return;
+    const std::string t = s.Serialize();
+    f.Write(t.data(), t.size());
+}
+
 void MainWindow::UpdateTimeReadout(Frame playhead) {
     const double rate = fEngine ? fEngine->OutputRate() : fProject->sampleRate;
     const double sec  = rate > 0 ? playhead / rate : 0.0;
@@ -980,6 +1118,10 @@ void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
 bool MainWindow::QuitRequested() {
     StopPlayback();
     StopRecording();
+    SaveSettings();
+    // Clean exit: drop the recovery file so next launch doesn't offer it.
+    BPath rp;
+    if (RecoveryPath(rp)) std::remove(rp.Path());
     be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
 }
