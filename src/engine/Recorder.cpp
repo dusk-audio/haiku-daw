@@ -10,7 +10,7 @@ namespace daw {
 // ~2 seconds of stereo float at 96k of slack between hook and disk thread.
 static constexpr size_t kRecRingFloats = 96000 * 2 * 2;
 
-Recorder::Recorder() : fRing(kRecRingFloats) {}
+Recorder::Recorder() : fRing(kRecRingFloats), fMonitorRing(kRecRingFloats) {}
 
 Recorder::~Recorder() {
     Stop();
@@ -41,9 +41,12 @@ void Recorder::HandleBuffer(void* data, size_t size, const media_format& fmt) {
     float pl = 0.0f, pr = 0.0f;
     const int ch = fChannels.load(std::memory_order_relaxed);
 
+    const bool monitor = fMonitor.load(std::memory_order_relaxed);
     auto flush = [&](size_t n) {
         if (fRing.Write(tmp, n) < n)
             fXrun.store(true, std::memory_order_relaxed);   // disk fell behind
+        if (monitor)
+            fMonitorRing.Write(tmp, n);   // overflow silently dropped (tolerable)
     };
 
     if (raw.format == media_raw_audio_format::B_AUDIO_SHORT) {

@@ -400,6 +400,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                                 / (sizeof(float) * 2));
     if (maxFrames < 8192) maxFrames = 8192;
     fScratch.assign(maxFrames * 2, 0.0f);
+    fMonBuf.assign(maxFrames * 2, 0.0f);
     fNodeBufs.assign(fBuses.size(), std::vector<float>(maxFrames * 2, 0.0f));
 
     return B_OK;
@@ -540,6 +541,18 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Metronome click on top of the mix (not affected by master gain).
     if (fMetronomeOn.load(std::memory_order_relaxed))
         fMetronome.Render(out, frames, blockStart, 0.3f);
+
+    // Input monitoring: mix the live input into the output. Only when its rate
+    // matches ours (no RT resampling) and the scratch is big enough.
+    if (fInputMonitor.load(std::memory_order_relaxed)) {
+        IMonitorSource* src = fMonSource.load(std::memory_order_relaxed);
+        if (src && std::fabs(src->MonitorRate() - fOutputRate) < 1.0f
+            && fMonBuf.size() >= nfloats) {
+            const size_t got = src->ReadMonitor(fMonBuf.data(), nfloats);
+            for (size_t i = 0; i < got; i++)
+                out[i] += fMonBuf[i];
+        }
+    }
 
     // Block peak per channel for the UI meters (arithmetic only, RT-safe).
     float pl = 0.0f, pr = 0.0f;

@@ -17,6 +17,7 @@
 
 #include "RingBuffer.h"
 #include "WavWriter.h"
+#include "IMonitorSource.h"
 
 #include <MediaDefs.h>
 #include <MediaRecorder.h>
@@ -29,7 +30,7 @@
 
 namespace daw {
 
-class Recorder {
+class Recorder : public IMonitorSource {
 public:
     Recorder();
     ~Recorder();
@@ -37,6 +38,14 @@ public:
     // Open the input, start the disk thread, begin capturing to `path`.
     status_t Start(const std::string& path);
     void     Stop();   // stop capture, flush, finalize the WAV
+
+    // Input monitoring: when on, the capture hook also pushes samples into a
+    // monitor ring the engine drains. RT-safe (lock-free, drops on overflow).
+    void SetMonitor(bool on) { fMonitor.store(on, std::memory_order_relaxed); }
+    std::size_t ReadMonitor(float* dst, std::size_t maxFloats) override {
+        return fMonitorRing.Read(dst, maxFloats);
+    }
+    float MonitorRate() const override { return fRate.load(); }
 
     bool    IsRecording() const { return fRunning.load(); }
     int64_t FramesWritten() const { return fWriter.FramesWritten(); }
@@ -58,10 +67,12 @@ private:
     std::string                     fPath;
 
     RingBuffer  fRing;              // float samples, hook -> disk thread
+    RingBuffer  fMonitorRing;       // float samples, hook -> engine (monitoring)
     WavWriter   fWriter;           // opened by the disk thread once format known
     std::thread fDiskThread;
 
     std::atomic<bool>  fRunning{false};
+    std::atomic<bool>  fMonitor{false};
     std::atomic<bool>  fFormatReady{false};
     std::atomic<float> fRate{0.0f};
     std::atomic<int>   fChannels{0};

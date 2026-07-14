@@ -23,6 +23,7 @@
 #include "../dsp/Loudness.h"
 #include "../synth/Synth.h"
 #include "Metronome.h"
+#include "IMonitorSource.h"
 
 #include <SoundPlayer.h>
 
@@ -130,6 +131,12 @@ public:
     void SetMonitorDim(bool on)  { fMonitorDim.store(on); }
     void SetMonitorMono(bool on) { fMonitorMono.store(on); }
 
+    // Input monitoring: mix a live input source into the output. The source is
+    // only mixed when its rate matches the engine's output rate (no RT-side
+    // resampling). Both are RT-safe atomic stores.
+    void SetMonitorSource(IMonitorSource* src) { fMonSource.store(src); }
+    void SetInputMonitor(bool on) { fInputMonitor.store(on); }
+
     // Output buffer size in frames (per channel); applied at the next Load.
     // Smaller = lower latency, higher xrun risk. Call before Load().
     void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
@@ -203,6 +210,9 @@ private:
     std::atomic<bool>                         fMetronomeOn{false};
     std::atomic<bool>                         fMonitorDim{false};
     std::atomic<bool>                         fMonitorMono{false};
+    std::atomic<IMonitorSource*>              fMonSource{nullptr};
+    std::atomic<bool>                         fInputMonitor{false};
+    std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
     std::atomic<float>                        fLufsM{Loudness::kSilenceLufs};
     std::atomic<float>                        fLufsS{Loudness::kSilenceLufs};
     std::atomic<float>                        fTpDb{Loudness::kSilenceDb};

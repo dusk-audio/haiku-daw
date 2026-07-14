@@ -276,7 +276,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_MONITOR_IN:
             fMonitorInput = !fMonitorInput;
             if (fMonInItem) fMonInItem->SetMarked(fMonitorInput);
-            // Engine passthrough wired in D3.
+            // Live toggle while a take is running.
+            if (fRecorder) fRecorder->SetMonitor(fMonitorInput);
+            if (fEngine)   fEngine->SetInputMonitor(fMonitorInput);
             break;
         case MSG_METRONOME:
             fMetronome = !fMetronome;
@@ -647,6 +649,13 @@ void MainWindow::StartCapture() {
         fRecorder.reset();
         --fTakeCounter;
         return;
+    }
+    // Wire input monitoring: the engine mixes the recorder's live input (only
+    // if the input rate matches the output rate).
+    fRecorder->SetMonitor(fMonitorInput);
+    if (fEngine) {
+        fEngine->SetMonitorSource(fRecorder.get());
+        fEngine->SetInputMonitor(fMonitorInput);
     }
     fRecStart = fRecPoint;      // clip origin = record point
     fCapturePending = false;
