@@ -27,6 +27,14 @@ public:
 
     // Human-readable label for an "Undo <name>" menu item.
     virtual std::string Name() const = 0;
+
+    // Coalescing: when a just-executed command targets the same thing as the
+    // previous one (e.g. successive posts from a slider drag), it can fold its
+    // new value into `prev` instead of pushing a separate undo entry — so a
+    // whole gesture is one undo step and the stack doesn't flood. Return true
+    // if `prev` absorbed this command's result (this command is then discarded,
+    // its Do() having already mutated the model). Default: no coalescing.
+    virtual bool CoalesceInto(Command* /*prev*/) { return false; }
 };
 
 class CommandStack {
@@ -35,6 +43,13 @@ public:
     // command clears the redo stack (standard linear-history semantics).
     bool Execute(std::unique_ptr<Command> cmd, Project& p) {
         if (!cmd || !cmd->Do(p)) return false;
+        // Fold into the previous command when they coalesce (one undo step per
+        // gesture). The model is already mutated by Do(); we just avoid pushing
+        // a redundant entry, keeping the earlier command's captured "old".
+        if (!fUndo.empty() && cmd->CoalesceInto(fUndo.back().get())) {
+            fRedo.clear();
+            return true;
+        }
         fUndo.push_back(std::move(cmd));
         fRedo.clear();
         return true;

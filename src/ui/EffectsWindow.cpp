@@ -398,11 +398,11 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         setP(fDragSlot * 3, freq);
         setP(fDragSlot * 3 + 1, gain);
     }
-    Apply();
-    Invalidate();
+    Invalidate();   // live preview; commit (one undo step) on mouse-up
 }
 
 void EffectsView::MouseUp(BPoint) {
+    if (fDragEffect >= 0) Apply();   // commit the drag as one undoable change
     fDragEffect = fDragSlot = fDragKind = -1;
 }
 

@@ -518,13 +518,19 @@ void TimelineView::MouseDown(BPoint where) {
                                     *fProject);
                 else if (pick == 2) {
                     if (Track* tr = fProject->FindTrack(t.id))
-                        tr->colorIndex = (tr->colorIndex + 1) % kTrackColorCount;
+                        fStack->Execute(std::make_unique<SetTrackColorCommand>(
+                            t.id, (tr->colorIndex + 1) % kTrackColorCount),
+                            *fProject);
                 } else if (pick == 3) {
                     if (Track* tr = fProject->FindTrack(t.id))
-                        tr->height = tr->height + 24 > 300 ? 300 : tr->height + 24;
+                        fStack->Execute(std::make_unique<SetTrackHeightCommand>(
+                            t.id, tr->height + 24 > 300 ? 300 : tr->height + 24),
+                            *fProject);
                 } else if (pick == 4) {
                     if (Track* tr = fProject->FindTrack(t.id))
-                        tr->height = tr->height - 24 < 72 ? 72 : tr->height - 24;
+                        fStack->Execute(std::make_unique<SetTrackHeightCommand>(
+                            t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
+                            *fProject);
                 } else if (pick == 5) {
                     BPoint sp = ConvertToScreen(where);
                     BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);

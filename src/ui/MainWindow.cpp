@@ -374,12 +374,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMaster) fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
             break;
         case kMsgApplyNotes: {
-            // A PianoRoll posts the edited note list; direct mutation (applies
-            // on the next Play, like the other editors).
+            // A PianoRoll posts the edited note list. Undoable via SetNotesCommand
+            // (one step per gesture — the roll posts on mouse-up / add / delete).
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                t->notes.clear();
+            if (fProject->FindTrack((TrackId)tid)) {
+                std::vector<MidiNote> notes;
                 int32 pitch = 0;
                 for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
                     MidiNote n;
@@ -389,8 +389,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     msg->FindInt64("nl", i, &len);
                     n.pitch = pitch; n.velocity = vel;
                     n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
-                    t->notes.push_back(n);
+                    notes.push_back(n);
                 }
+                fStack->Execute(std::make_unique<SetNotesCommand>(
+                    (TrackId)tid, std::move(notes)), *fProject);
                 fTimeline->Invalidate();
             }
             break;
@@ -425,39 +427,36 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             // The chain goes to a track, or to the master when tid is the
             // master sentinel.
-            std::vector<EffectDesc>* dst = nullptr;
-            if ((TrackId)tid == kMasterFxTarget)
-                dst = &fProject->masterFx;
-            else if (Track* t = fProject->FindTrack((TrackId)tid))
-                dst = &t->fx;
-            if (dst) {
-                dst->clear();
-                int32 type = 0, epIdx = 0;
-                for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
-                    EffectDesc d;
-                    d.type = (type >= 0 && type <= 7) ? (EffectType)type
-                                                      : EffectType::Biquad;
-                    int32 count = 0;
-                    msg->FindInt32("ec", i, &count);
-                    for (int32 j = 0; j < count; j++) {
-                        float v = 0.0f;
-                        msg->FindFloat("ep", epIdx++, &v);
-                        d.params.push_back(v);
-                    }
-                    dst->push_back(d);
+            const bool master = ((TrackId)tid == kMasterFxTarget);
+            if (!master && !fProject->FindTrack((TrackId)tid)) break;
+            std::vector<EffectDesc> chain;
+            int32 type = 0, epIdx = 0;
+            for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
+                EffectDesc d;
+                d.type = (type >= 0 && type <= 7) ? (EffectType)type
+                                                  : EffectType::Biquad;
+                int32 count = 0;
+                msg->FindInt32("ec", i, &count);
+                for (int32 j = 0; j < count; j++) {
+                    float v = 0.0f;
+                    msg->FindFloat("ep", epIdx++, &v);
+                    d.params.push_back(v);
                 }
-                fTimeline->Invalidate();
+                chain.push_back(d);
             }
+            fStack->Execute(std::make_unique<SetFxCommand>(
+                (TrackId)tid, master, std::move(chain)), *fProject);
+            fTimeline->Invalidate();
             break;
         }
         case kMsgApplySends: {
-            // A SendsWindow (its own thread) posts the edited send list here.
-            // Direct mutation (like kMsgApplyFx) so dragging a level slider
-            // doesn't flood the undo stack. Sends take effect on the next Play.
+            // A SendsWindow posts the edited send list. Undoable via a coalescing
+            // SetSendsCommand (its native sliders post continuously -> one undo
+            // step per drag). Applies on the next Play.
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                t->sends.clear();
+            if (fProject->FindTrack((TrackId)tid)) {
+                std::vector<Send> sends;
                 int64 dest = 0;
                 for (int32 i = 0; msg->FindInt64("sd", i, &dest) == B_OK; i++) {
                     Send s;
@@ -468,25 +467,29 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     s.level = lvl;
                     s.preFader = (pre != 0);
                     if (s.dest != kInvalidTrackId && s.dest != (TrackId)tid)
-                        t->sends.push_back(s);
+                        sends.push_back(s);
                 }
+                fStack->Execute(std::make_unique<SetSendsCommand>(
+                    (TrackId)tid, std::move(sends)), *fProject);
                 fTimeline->Invalidate();
             }
             break;
         }
         case kMsgApplyInstrument: {
-            // An InstrumentWindow posts the edited voice; direct mutation (like
-            // fx/sends). Applies on the next Play.
+            // An InstrumentWindow posts the edited voice. Undoable via a
+            // coalescing SetInstrumentCommand. Applies on the next Play.
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+            if (fProject->FindTrack((TrackId)tid)) {
+                Instrument in;
                 int32 wv = 0; float a = 0, d = 0, s = 0, r = 0;
                 msg->FindInt32("wave", &wv);
                 msg->FindFloat("a", &a); msg->FindFloat("d", &d);
                 msg->FindFloat("s", &s); msg->FindFloat("r", &r);
-                t->instrument.waveform = (wv >= 0 && wv <= 3) ? wv : 0;
-                t->instrument.attack = a; t->instrument.decay = d;
-                t->instrument.sustain = s; t->instrument.release = r;
+                in.waveform = (wv >= 0 && wv <= 3) ? wv : 0;
+                in.attack = a; in.decay = d; in.sustain = s; in.release = r;
+                fStack->Execute(std::make_unique<SetInstrumentCommand>(
+                    (TrackId)tid, in), *fProject);
                 fTimeline->Invalidate();
             }
             break;

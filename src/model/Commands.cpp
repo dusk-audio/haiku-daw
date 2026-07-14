@@ -470,4 +470,70 @@ void SetAutoLaneCommand::Undo(Project& p) {
     ((fKind == AutoLaneKind::Gain) ? t->gainAuto : t->panAuto) = fOld;
 }
 
+// --- SetFxCommand -----------------------------------------------------
+
+bool SetFxCommand::Do(Project& p) {
+    std::vector<EffectDesc>* dst = nullptr;
+    if (fMaster) dst = &p.masterFx;
+    else if (Track* t = p.FindTrack(fTrack)) dst = &t->fx;
+    if (!dst) return false;
+    fOld = *dst;
+    *dst = fNew;
+    return true;
+}
+void SetFxCommand::Undo(Project& p) {
+    if (fMaster) { p.masterFx = fOld; return; }
+    if (Track* t = p.FindTrack(fTrack)) t->fx = fOld;
+}
+
+// --- SetInstrumentCommand ---------------------------------------------
+
+bool SetInstrumentCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->instrument;
+    t->instrument = fNew;
+    return true;
+}
+void SetInstrumentCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->instrument = fOld;
+}
+
+// --- SetNotesCommand --------------------------------------------------
+
+bool SetNotesCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->notes;
+    t->notes = fNew;
+    return true;
+}
+void SetNotesCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->notes = fOld;
+}
+
+// --- SetTrackColor / SetTrackHeight -----------------------------------
+
+bool SetTrackColorCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->colorIndex;
+    t->colorIndex = fNew;
+    return true;
+}
+void SetTrackColorCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->colorIndex = fOld;
+}
+
+bool SetTrackHeightCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->height;
+    t->height = fNew;
+    return true;
+}
+void SetTrackHeightCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->height = fOld;
+}
+
 } // namespace daw

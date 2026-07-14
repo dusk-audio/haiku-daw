@@ -181,6 +181,58 @@ static void test_active_take() {
     CHECK(activeId() == std::make_pair(1, ids[0]));
 }
 
+static void test_undo_unification() {
+    std::printf("test_undo_unification\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "S"), p);
+    TrackId tid = p.Tracks().front().id;
+
+    // SetFxCommand (track).
+    stack.Execute(std::make_unique<SetFxCommand>(
+        tid, false, std::vector<EffectDesc>{ ReverbDesc(), DelayDesc() }), p);
+    CHECK(p.FindTrack(tid)->fx.size() == 2);
+    stack.Undo(p);
+    CHECK(p.FindTrack(tid)->fx.empty());
+    stack.Redo(p);
+    CHECK(p.FindTrack(tid)->fx.size() == 2);
+
+    // SetFxCommand (master).
+    stack.Execute(std::make_unique<SetFxCommand>(
+        kInvalidTrackId, true, std::vector<EffectDesc>{ EqDesc() }), p);
+    CHECK(p.masterFx.size() == 1);
+    stack.Undo(p);
+    CHECK(p.masterFx.empty());
+
+    // SetNotesCommand.
+    MidiNote n; n.pitch = 60; n.startFrame = 0; n.lengthFrames = 100;
+    stack.Execute(std::make_unique<SetNotesCommand>(
+        tid, std::vector<MidiNote>{ n }), p);
+    CHECK(p.FindTrack(tid)->notes.size() == 1);
+    stack.Undo(p);
+    CHECK(p.FindTrack(tid)->notes.empty());
+
+    // Coalescing: two consecutive SetInstrumentCommand -> ONE undo step that
+    // restores the original instrument (before the first).
+    const int origWave = p.FindTrack(tid)->instrument.waveform;
+    Instrument i1; i1.waveform = 1;
+    Instrument i2; i2.waveform = 3;
+    stack.Execute(std::make_unique<SetInstrumentCommand>(tid, i1), p);
+    stack.Execute(std::make_unique<SetInstrumentCommand>(tid, i2), p);
+    CHECK(p.FindTrack(tid)->instrument.waveform == 3);   // latest applied
+    CHECK(stack.Undo(p));                                 // single undo...
+    CHECK(p.FindTrack(tid)->instrument.waveform == origWave);  // ...to original
+    // Only one entry existed for the coalesced pair (next undo hits the note cmd
+    // era, not a second instrument step) — verify the instrument didn't step.
+    CHECK(p.FindTrack(tid)->instrument.waveform == origWave);
+
+    // SetTrackColor / Height do + undo.
+    stack.Execute(std::make_unique<SetTrackColorCommand>(tid, 3), p);
+    CHECK(p.FindTrack(tid)->colorIndex == 3);
+    stack.Undo(p);
+    CHECK(p.FindTrack(tid)->colorIndex == 0);
+}
+
 static void test_macro_command() {
     std::printf("test_macro_command\n");
     Project p;
@@ -505,6 +557,7 @@ int main() {
     test_split_clip();
     test_move_track();
     test_macro_command();
+    test_undo_unification();
     test_active_take();
     test_frame_seconds_roundtrip();
 

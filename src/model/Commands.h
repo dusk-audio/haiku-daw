@@ -401,11 +401,94 @@ public:
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Set Sends"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetSendsCommand*>(prev);
+        if (!p || p->fTrack != fTrack) return false;
+        p->fNew = fNew;   // absorb latest (its editor posts continuously)
+        return true;
+    }
 
 private:
     TrackId           fTrack;
     std::vector<Send> fNew;
     std::vector<Send> fOld;
+};
+
+// Replace a track's effect chain, or the master chain (master == true). One
+// undo step per editor gesture (the effects editor posts on mouse-up).
+class SetFxCommand : public Command {
+public:
+    SetFxCommand(TrackId track, bool master, std::vector<EffectDesc> fx)
+        : fTrack(track), fMaster(master), fNew(std::move(fx)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Effects"; }
+private:
+    TrackId                 fTrack;
+    bool                    fMaster;
+    std::vector<EffectDesc> fNew, fOld;
+};
+
+// Set a MIDI track's synth instrument. Coalesces (its editor's native sliders
+// post continuously) so a slider drag is one undo step.
+class SetInstrumentCommand : public Command {
+public:
+    SetInstrumentCommand(TrackId track, Instrument inst)
+        : fTrack(track), fNew(inst) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Instrument"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetInstrumentCommand*>(prev);
+        if (!p || p->fTrack != fTrack) return false;
+        p->fNew = fNew;
+        return true;
+    }
+private:
+    TrackId    fTrack;
+    Instrument fNew, fOld;
+};
+
+// Replace a MIDI track's whole note list (piano-roll edits). One step per
+// gesture (the piano roll posts on mouse-up / add / delete).
+class SetNotesCommand : public Command {
+public:
+    SetNotesCommand(TrackId track, std::vector<MidiNote> notes)
+        : fTrack(track), fNew(std::move(notes)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Notes"; }
+private:
+    TrackId               fTrack;
+    std::vector<MidiNote> fNew, fOld;
+};
+
+// Set a track's color index / lane height (view props; discrete, undoable).
+class SetTrackColorCommand : public Command {
+public:
+    SetTrackColorCommand(TrackId track, int colorIndex)
+        : fTrack(track), fNew(colorIndex) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Color"; }
+private:
+    TrackId fTrack; int fNew; int fOld = 0;
+};
+class SetTrackHeightCommand : public Command {
+public:
+    SetTrackHeightCommand(TrackId track, int height)
+        : fTrack(track), fNew(height) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Height"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetTrackHeightCommand*>(prev);
+        if (!p || p->fTrack != fTrack) return false;
+        p->fNew = fNew;
+        return true;
+    }
+private:
+    TrackId fTrack; int fNew; int fOld = 72;
 };
 
 // Replace a track's whole gain or pan automation lane. The timeline edits a
