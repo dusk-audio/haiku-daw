@@ -123,7 +123,12 @@ Grid TimelineView::GridOf() const {
 Frame TimelineView::Snapped(Frame f) const {
     if (modifiers() & B_SHIFT_KEY)   // hold Shift for free placement
         return f;
-    return GridOf().Snap(f, kSnapDivision);
+    // Snap to the nearest beat subdivision using the tempo map (variable tempo).
+    const TempoMap& tm = fProject->tempoMap;
+    const double beat = tm.BeatAt(f < 0 ? 0 : f);
+    const double snapped = std::llround(beat * kSnapDivision) / (double)kSnapDivision;
+    const Frame out = tm.FrameAt(snapped);
+    return out < 0 ? 0 : out;
 }
 
 // A tiny Copy/Delete popup for a right-clicked clip or note.
@@ -479,8 +484,8 @@ void TimelineView::MouseDown(BPoint where) {
         n.pitch = PitchAt(lane, where.y);
         n.velocity = 100;
         n.startFrame = time;
-        // Default length = one beat, so added notes land on the grid.
-        n.lengthFrames = (Frame)GridOf().FramesPerBeat();
+        // Default length = one beat at the note's tempo, so it lands on grid.
+        n.lengthFrames = (Frame)fProject->tempoMap.FramesPerBeatAt(time);
         fStack->Execute(std::make_unique<AddNoteCommand>(t.id, n), *fProject);
         Invalidate(lane);
         return;
@@ -1005,24 +1010,30 @@ void TimelineView::DrawRuler(BRect update) {
 // the ruler and the lane background so their grids can't drift apart.
 void TimelineView::ForEachGridLine(
         const std::function<void(float, bool, long)>& fn) const {
-    const Grid   grid = GridOf();
-    const double fpb  = grid.FramesPerBeat();
-    const double fbar = grid.FramesPerBar();
-    if (fpb < 1.0) return;
-    const bool drawBeats = (fpb / fFramesPerPixel) >= 8.0;
-
+    const TempoMap& tm = fProject->tempoMap;
+    const Frame leftFrame  = XToFrame(kHeaderWidth);
     const Frame rightFrame = XToFrame(Bounds().right);
-    long firstBeat = (long)(XToFrame(kHeaderWidth) / fpb);
+    if (rightFrame <= leftFrame) return;
+
+    // Beat spacing varies with tempo; gate beat lines on the local spacing at
+    // the left edge (good enough for the visible span).
+    const double fpbLeft = tm.FramesPerBeatAt(leftFrame < 0 ? 0 : leftFrame);
+    if (fpbLeft < 1.0) return;
+    const bool drawBeats = (fpbLeft / fFramesPerPixel) >= 8.0;
+
+    long firstBeat = (long)std::floor(tm.BeatAt(leftFrame < 0 ? 0 : leftFrame));
     if (firstBeat < 0) firstBeat = 0;
 
     for (long beat = firstBeat; ; beat++) {
-        const Frame f = (Frame)(beat * fpb);
+        const Frame f = tm.FrameAt((double)beat);
         if (f > rightFrame) break;
         const float x = FrameToX(f);
         if (x < kHeaderWidth) continue;
-        const bool isBar = ((Frame)(beat * fpb) % (Frame)fbar) < fpb;
+        int bar = 1, bb = 1;
+        tm.BarBeat(f, &bar, &bb);
+        const bool isBar = (bb == 1);
         if (!isBar && !drawBeats) continue;
-        fn(x, isBar, (long)(f / (Frame)fbar) + 1);
+        fn(x, isBar, (long)bar);
     }
 }
 

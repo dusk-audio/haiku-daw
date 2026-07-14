@@ -74,6 +74,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
       fProject(project), fStack(stack), fPeaks(peaks) {
     BRect bounds = Bounds();
+    // Keep the tempo map's rate in sync with the project's sample rate.
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+
+
 
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
@@ -397,6 +401,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (bpm < 20.0)  bpm = 20.0;
             if (bpm > 300.0) bpm = 300.0;
             fProject->tempoBPM = bpm;
+            // The BPM field edits the tempo map's frame-0 (initial) tempo.
+            fProject->tempoMap.sampleRate = fProject->sampleRate;
+            fProject->tempoMap.SetTempoAt(0, bpm);
             char buf[16];
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);
