@@ -18,6 +18,7 @@
 #include <Window.h>
 
 #include <map>
+#include <utility>
 #include <memory>
 #include <string>
 #include <vector>
@@ -60,6 +61,7 @@ private:
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
+    void PushTrackPeaks();           // engine per-track peaks -> timeline meters
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     void LoadSettings();             // ~/config/settings/HaikuDAW/settings

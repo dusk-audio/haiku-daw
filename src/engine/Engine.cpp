@@ -405,6 +405,13 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     fScratch.assign(maxFrames * 2, 0.0f);
     fMonBuf.assign(maxFrames * 2, 0.0f);
     fNodeBufs.assign(fBuses.size(), std::vector<float>(maxFrames * 2, 0.0f));
+    // Per-node peak meters (one atomic pair per node).
+    fNodePeakL.reset(new std::atomic<float>[fBuses.size()]);
+    fNodePeakR.reset(new std::atomic<float>[fBuses.size()]);
+    for (size_t i = 0; i < fBuses.size(); i++) {
+        fNodePeakL[i].store(0.0f);
+        fNodePeakR[i].store(0.0f);
+    }
 
     return B_OK;
 }
@@ -452,6 +459,19 @@ void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
     self->FillBuffer(static_cast<float*>(buffer), frames);
 }
 
+float Engine::TrackPeakL(TrackId id) const {
+    if (!fNodePeakL) return 0.0f;
+    for (size_t i = 0; i < fBuses.size(); i++)
+        if (fBuses[i].id == id) return fNodePeakL[i].load(std::memory_order_relaxed);
+    return 0.0f;
+}
+float Engine::TrackPeakR(TrackId id) const {
+    if (!fNodePeakR) return 0.0f;
+    for (size_t i = 0; i < fBuses.size(); i++)
+        if (fBuses[i].id == id) return fNodePeakR[i].load(std::memory_order_relaxed);
+    return 0.0f;
+}
+
 void Engine::FillBuffer(float* out, size_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));   // stereo silence
 
@@ -470,8 +490,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Routing graph: process nodes in topo order, each into its output bus or
     // the master. Node buffers accumulate upstream inputs across the pass.
     const size_t nfloats = frames * 2;
-    for (size_t i = 0; i < fBuses.size(); i++)
+    for (size_t i = 0; i < fBuses.size(); i++) {
         std::memset(fNodeBufs[i].data(), 0, nfloats * sizeof(float));
+        fNodePeakL[i].store(0.0f, std::memory_order_relaxed);   // muted -> 0
+        fNodePeakR[i].store(0.0f, std::memory_order_relaxed);
+    }
     for (size_t oi = 0; oi < fOrder.size(); oi++) {
         const size_t idx = fOrder[oi];
         Bus& b = fBuses[idx];
@@ -510,6 +533,19 @@ void Engine::FillBuffer(float* out, size_t frames) {
         }
         for (auto& fx : b.fx)
             fx->Process(nb, static_cast<int>(frames));
+
+        // Per-node peak (post-FX) for the track meter.
+        {
+            float pl = 0.0f, pr = 0.0f;
+            for (size_t i = 0; i < frames; i++) {
+                const float l = std::fabs(nb[i * 2 + 0]);
+                const float r = std::fabs(nb[i * 2 + 1]);
+                if (l > pl) pl = l;
+                if (r > pr) pr = r;
+            }
+            fNodePeakL[idx].store(pl, std::memory_order_relaxed);
+            fNodePeakR[idx].store(pr, std::memory_order_relaxed);
+        }
 
         // Aux sends: add this node's post-FX signal into each dest node buffer.
         // Topo order guarantees the dest is processed later, so it sees this.

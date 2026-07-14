@@ -1334,11 +1334,14 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     BRect hdr(0, lane.top, kHeaderWidth, lane.bottom);
     SetHighColor(ColHeader());
     FillRect(hdr);
+    // Left color stripe (track color) for quick visual grouping.
+    SetHighColor(TrackColor(t.colorIndex));
+    FillRect(BRect(0, lane.top, 4, lane.bottom));
     SetHighColor(ColGrid());
     StrokeLine(BPoint(kHeaderWidth, lane.top), BPoint(kHeaderWidth, lane.bottom));
 
     SetHighColor(ColText());
-    DrawString(t.name.c_str(), BPoint(6, lane.top + 14));
+    DrawString(t.name.c_str(), BPoint(9, lane.top + 14));
 
     // Output routing box: "->M" master, "->B" a bus.
     BRect rr = RouteRect(lane);
@@ -1429,6 +1432,26 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
         std::snprintf(ib, sizeof(ib), "\xE2\x99\xAA%s", wn[wi]);
         DrawString(ib, BPoint(ir.left + 3, ir.bottom - 4));
     }
+
+    // Per-track stereo meter at the header's right edge.
+    const float mx0 = kHeaderWidth - kHdrMeterW;
+    BRect meterBox(mx0, lane.top + 2, kHeaderWidth - 2, lane.bottom - 2);
+    SetHighColor(Rgb(16, 18, 22));
+    FillRect(meterBox);
+    float mPeakL = 0.0f, mPeakR = 0.0f;
+    if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
+        mPeakL = it->second.first; mPeakR = it->second.second;
+    }
+    const float bw = (meterBox.Width() - 3) * 0.5f;
+    auto meterBar = [&](float x0, float level) {
+        if (level < 0.0f) level = 0.0f; if (level > 1.0f) level = 1.0f;
+        const float h = meterBox.Height() * level;
+        BRect b(x0, meterBox.bottom - h, x0 + bw, meterBox.bottom);
+        SetHighColor(MeterColor(level));
+        FillRect(b);
+    };
+    meterBar(meterBox.left + 1, mPeakL);
+    meterBar(meterBox.left + 2 + bw, mPeakR);
 }
 
 // --- Automation editing --------------------------------------------------

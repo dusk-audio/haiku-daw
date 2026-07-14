@@ -626,6 +626,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     } else {
                         fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
                     }
+                    PushTrackPeaks();
                     break;
                 }
 
@@ -642,6 +643,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 UpdateLoudnessReadout(fEngine->LufsMomentary(),
                                       fEngine->LufsShort(),
                                       fEngine->TruePeakDb());
+                PushTrackPeaks();
                 if (fEngine->IsFinished())
                     StopPlayback();
             }
@@ -723,6 +725,7 @@ void MainWindow::StopPlayback() {
     fPlaying = false;
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
+    fTimeline->ClearTrackPeaks();
     UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
                           Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
@@ -1097,6 +1100,14 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
     char buf[48];
     std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
     fTimeView->SetText(buf);
+}
+
+void MainWindow::PushTrackPeaks() {
+    if (!fEngine) return;
+    std::map<TrackId, std::pair<float, float>> tp;
+    for (const Track& t : fProject->Tracks())
+        tp[t.id] = { fEngine->TrackPeakL(t.id), fEngine->TrackPeakR(t.id) };
+    fTimeline->SetTrackPeaks(tp);
 }
 
 void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,

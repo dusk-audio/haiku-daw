@@ -22,6 +22,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace daw {
@@ -73,6 +74,13 @@ public:
     // Move the playhead. Invalidates only the old + new columns, so the 60 Hz
     // poll doesn't repaint the whole view each tick.
     void SetPlayhead(Frame f);
+
+    // Per-track output peaks (from the engine) for the header meters. Cleared
+    // when playback stops. Keyed by TrackId -> (peakL, peakR) in [0, 1+].
+    void SetTrackPeaks(const std::map<TrackId, std::pair<float, float>>& peaks) {
+        fTrackPeaks = peaks; Invalidate();
+    }
+    void ClearTrackPeaks() { fTrackPeaks.clear(); Invalidate(); }
 
     // Live recording region drawn as a growing block on every armed track
     // while a take is being captured (before the real clips exist). Pass
@@ -161,6 +169,8 @@ private:
 
     // Multi-select over audio clips. Clip ids are project-unique, so a plain
     // set suffices; the track is found by scan when needed.
+    std::map<TrackId, std::pair<float, float>> fTrackPeaks;   // header meters
+
     std::set<ClipId> fSelClips;
     bool  ClipSelected(ClipId id) const { return fSelClips.count(id) != 0; }
     void  DeleteSelection();       // MacroCommand remove of all selected clips

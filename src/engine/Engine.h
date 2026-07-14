@@ -150,6 +150,11 @@ public:
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
 
+    // Per-track output peak (post-FX node level) for track meters. 0 if the
+    // track isn't a live node or nothing is playing.
+    float TrackPeakL(TrackId id) const;
+    float TrackPeakR(TrackId id) const;
+
     // Master loudness of the mix, updated per block by the RT callback. LUFS
     // (momentary 400 ms / short-term 3 s) and true peak in dBTP. Silence reads
     // Loudness::kSilenceLufs / kSilenceDb.
@@ -203,6 +208,8 @@ private:
     std::vector<Bus>                          fBuses;
     std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
     std::vector<size_t>                       fOrder;     // node indices, topo order
+    std::unique_ptr<std::atomic<float>[]>     fNodePeakL; // per-node output peak
+    std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
