@@ -1,5 +1,6 @@
 #!/bin/sh
-# Drive the Haiku VM from the host over SSH (passt port-forward 2222 -> guest 22).
+# Drive the Haiku VM from the host over SSH. Since the Virt Manager migration the
+# VM has its own libvirt-NAT IP (no more passt 2222 port-forward).
 # Prereq once: in the VM run `sh scripts/fix_ssh.sh` (starts sshd, installs key).
 #
 #   sh scripts/vm.sh ssh   [cmd...]   # run a command in the VM (default: shell info)
@@ -11,14 +12,16 @@
 # (host is authoritative; the VM never commits).
 set -e
 KEY=~/.ssh/haiku_vm
-SSH="ssh -i $KEY -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 user@127.0.0.1"
-SCP="scp -i $KEY -P 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes"
+VM=${HAIKU_VM_IP:-192.168.122.232}   # override with HAIKU_VM_IP if it changes
+OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
+SSH="ssh -i $KEY $OPTS user@$VM"
+SCP="scp -i $KEY $OPTS"
 
 cmd="${1:-ssh}"; shift 2>/dev/null || true
 
 do_sync() {
     git bundle create /tmp/haiku.bundle master
-    $SCP /tmp/haiku.bundle user@127.0.0.1:/tmp/haiku.bundle
+    $SCP /tmp/haiku.bundle user@$VM:/tmp/haiku.bundle
     $SSH 'cd ~/haiku-daw && git fetch /tmp/haiku.bundle master && git reset --hard FETCH_HEAD && git log --oneline -1'
 }
 

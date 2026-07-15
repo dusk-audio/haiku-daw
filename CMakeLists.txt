@@ -40,6 +40,7 @@ add_library(daw_model
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
+    src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
 )
 target_include_directories(daw_model PUBLIC src)
 
@@ -141,6 +142,10 @@ add_executable(smfio_tests tests/smfio_tests.cpp)
 target_link_libraries(smfio_tests PRIVATE daw_model)
 add_test(NAME smfio_tests COMMAND smfio_tests)
 
+add_executable(midi_tests tests/midi_tests.cpp)
+target_link_libraries(midi_tests PRIVATE daw_model)
+add_test(NAME midi_tests COMMAND midi_tests)
+
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
 # skipped so the model layer + tests still build for fast iteration.
@@ -148,11 +153,13 @@ if(HAIKU)
     add_library(daw_engine
         src/engine/Engine.cpp
         src/engine/Recorder.cpp
+        src/midi/MidiPort.cpp       # Midi Kit 2 adapter (external MIDI I/O)
     )
     target_include_directories(daw_engine PUBLIC src)
-    # -lbe (app/interface), -lmedia (BSoundPlayer/BMediaRecorder), -lroot.
+    # -lbe (app/interface), -lmedia (BSoundPlayer/BMediaRecorder),
+    # -lmidi2 (Midi Kit 2: BMidiRoster/BMidiLocalProducer/Consumer), -lroot.
     # WavSource + WavWriter are kit-free and live in daw_model.
-    target_link_libraries(daw_engine PUBLIC daw_model be media root)
+    target_link_libraries(daw_engine PUBLIC daw_model be media midi2 root)
 
     add_executable(play_clip prototypes/play_clip/main.cpp)
     target_link_libraries(play_clip PRIVATE daw_engine)
@@ -162,6 +169,11 @@ if(HAIKU)
 
     add_executable(record_clip prototypes/record_clip/main.cpp)
     target_link_libraries(record_clip PRIVATE daw_engine)
+
+    # MIDI loopback: producer -> our consumer -> MidiRecorder. Proves the Midi
+    # Kit 2 adapter end-to-end with no hardware (a keyboard stand-in).
+    add_executable(midi_loop prototypes/midi_loop/main.cpp)
+    target_link_libraries(midi_loop PRIVATE daw_engine)
 
     # --- The app: timeline UI (milestone 4) ---------------------------
     add_executable(daw
