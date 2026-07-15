@@ -151,6 +151,7 @@ private:
     TrackId fDragTrack = kInvalidTrackId;
     int     fDragLane  = -1;
     float   fDragOrig  = 0.0f;         // gain/pan value at drag start, for undo
+    float   fDragGrabY = 0.0f;         // cursor y at drag start (pan knob = vertical)
 
     // Clip drag state.
     ClipId  fDragClip        = kInvalidClipId;

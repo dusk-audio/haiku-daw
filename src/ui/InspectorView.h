@@ -48,7 +48,8 @@ private:
     // Fader / pan drag (preview by writing the model, commit one command on up).
     enum class Drag { None, Fader, Pan };
     Drag  fDrag = Drag::None;
-    float fDragOrig = 0.0f;   // gain/pan at drag start (for undo)
+    float fDragOrig  = 0.0f;   // gain/pan at drag start (for undo)
+    float fDragStartY = 0.0f;  // cursor y at drag start (pan knob = vertical)
 };
 
 } // namespace daw

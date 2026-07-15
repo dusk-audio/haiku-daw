@@ -54,8 +54,9 @@ void InspectorView::Layout() {
     fSendsR = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
     fFxR    = BRect(pad,           y, pad + hw,     y + 20);
     fInstR  = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
-    fAutoR  = BRect(pad, y, pad + bw, y + 20); y += 30;
-    // Pan knob (centered) then a tall vertical fader below it.
+    fAutoR  = BRect(pad, y, pad + bw, y + 20);
+    y += 20 + 20;               // button + a labelled gap ("Pan") before the knob
+    // Pan knob (centered); its "Pan" label sits in the gap above it.
     const float knob = 46.0f;
     fPanR   = BRect(w * 0.5f - knob * 0.5f, y, w * 0.5f + knob * 0.5f, y + knob);
     y += knob + 18;
@@ -130,9 +131,11 @@ void InspectorView::Draw(BRect) {
 
     DrawButton(this, fAutoR, "Automation", false);
 
-    // Pan knob (value ring in the track accent).
+    // Pan knob (value ring in the track accent). Label centered above it.
     SetHighColor(ColTextDim());
-    DrawString("Pan", BPoint(fPanR.left - 2, fPanR.top - 4));
+    const float pw = StringWidth("Pan");
+    DrawString("Pan", BPoint((fPanR.left + fPanR.right) * 0.5f - pw * 0.5f,
+                             fPanR.top - 7));
     DrawKnob(this, fPanR, t->pan, accent);
 
     // Channel fader + VU meter (peak-fed) side by side.
@@ -261,10 +264,9 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fPanR.Contains(where)) {
-        fDrag = Drag::Pan; fDragOrig = t->pan;
+        fDrag = Drag::Pan; fDragOrig = t->pan; fDragStartY = where.y;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
-        MouseMoved(where, 0, nullptr);
-        return;
+        return;   // no jump: dragging changes it relative to here
     }
 }
 
@@ -277,8 +279,8 @@ void InspectorView::MouseMoved(BPoint where, uint32, const BMessage*) {
         float frac = (fFaderR.bottom - where.y) / fFaderR.Height();
         t->gain = FracToGain(frac);
     } else if (fDrag == Drag::Pan) {
-        // Horizontal drag across the knob spans full L..R.
-        float pan = (where.x - (fPanR.left + fPanR.right) * 0.5f) / 60.0f;
+        // Vertical drag (up = right), relative to the grab point.
+        float pan = fDragOrig + (fDragStartY - where.y) / 100.0f;
         if (pan < -1) pan = -1; if (pan > 1) pan = 1;
         t->pan = pan;
     }

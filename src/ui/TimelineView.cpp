@@ -979,6 +979,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     fDrag      = mode;
     fDragTrack = id;
     fDragOrig  = (mode == Drag::Gain) ? t.gain : t.pan;
+    fDragGrabY = where.y;                       // pan knob drags vertically
     SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     PreviewDrag(where);
 }
@@ -1018,10 +1019,8 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
         t->gain = v;
     } else if (fDrag == Drag::Pan) {
-        // Pan knob: horizontal drag across its width spans full L..R.
-        BRect pr = PanKnobRect(lane);
-        const float cx = (pr.left + pr.right) * 0.5f;
-        float v = (where.x - cx) / (pr.Width() * 0.5f);
+        // Pan knob: vertical drag (up = right), relative to the grab point.
+        float v = fDragOrig + (fDragGrabY - where.y) / 100.0f;
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
     } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
