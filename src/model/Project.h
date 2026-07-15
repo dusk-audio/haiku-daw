@@ -98,6 +98,19 @@ struct Track {
     std::vector<FxAutoLane> fxAuto;   // effect-parameter automation lanes
     Instrument              instrument; // synth voice (MIDI tracks)
 
+    // Freeze (render-to-audio): when frozen, the track plays a single rendered
+    // clip with its fx/fader baked in, and its pre-freeze content is stashed
+    // below so Unfreeze can restore it exactly. The stash is runtime-only (not
+    // serialized): a saved project stores the frozen clip as ordinary audio, so
+    // reloading loses the ability to unfreeze (re-freeze instead).
+    bool                    frozen = false;
+    std::vector<Clip>       freezeClips;   // pre-freeze audio clips
+    std::vector<MidiClip>   freezeMidi;    // pre-freeze MIDI regions
+    std::vector<EffectDesc> freezeFx;      // pre-freeze effect chain
+    float                   freezeGain = 1.0f;  // pre-freeze fader
+    float                   freezePan  = 0.0f;  // pre-freeze pan
+    TrackType               freezeType = TrackType::Audio;  // pre-freeze type
+
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;
     MidiClip*       FindMidiClip(ClipId id);

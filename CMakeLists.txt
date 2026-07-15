@@ -17,6 +17,7 @@ add_library(daw_model
     src/model/PeakCache.cpp     # kit-free min/max waveform envelope
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
+    src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
@@ -130,6 +131,10 @@ add_test(NAME gate_tests COMMAND gate_tests)
 add_executable(widener_tests tests/widener_tests.cpp)
 target_link_libraries(widener_tests PRIVATE daw_model)
 add_test(NAME widener_tests COMMAND widener_tests)
+
+add_executable(regionops_tests tests/regionops_tests.cpp)
+target_link_libraries(regionops_tests PRIVATE daw_model)
+add_test(NAME regionops_tests COMMAND regionops_tests)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are

@@ -15,9 +15,12 @@
 #include "UiMetrics.h"
 
 #include "../engine/WavSource.h"
+#include "../engine/WavWriter.h"
 #include "../engine/Exporter.h"
+#include "../engine/Resampler.h"
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
+#include "../model/RegionOps.h"
 #include "../model/RecordPlan.h"
 
 #include <Alert.h>
@@ -592,6 +595,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgRegionNormalize: case kMsgRegionReverse: case kMsgRegionStrip: {
+            int64 tid = 0, cid = 0;
+            if (msg->FindInt64("track", &tid) != B_OK) break;
+            msg->FindInt64("clip", &cid);
+            if (msg->what == kMsgRegionNormalize)
+                RegionNormalize((TrackId)tid, (ClipId)cid);
+            else if (msg->what == kMsgRegionReverse)
+                RegionReverse((TrackId)tid, (ClipId)cid);
+            else
+                RegionStripSilence((TrackId)tid, (ClipId)cid);
+            break;
+        }
+        case kMsgFreezeTrack: {
+            int64 tid = 0; bool freeze = true;
+            if (msg->FindInt64("track", &tid) != B_OK) break;
+            msg->FindBool("freeze", &freeze);
+            FreezeTrack((TrackId)tid, freeze);
+            break;
+        }
         case MSG_SHORTCUTS: {
             BAlert* a = new BAlert("Keyboard Shortcuts",
                 "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
@@ -1119,6 +1141,195 @@ void MainWindow::RebuildPeaks() {
             if (src.Open(c.sourcePath))
                 (*fPeaks)[c.sourcePath].Build(src);
         }
+}
+
+// A unique path for a rendered region/freeze file: in the take dir (beside the
+// project) if known, else the working dir. Suffixed with a session counter so
+// repeated ops don't collide.
+std::string MainWindow::RenderPath(const std::string& tag) const {
+    std::string dir = fTakeDir.empty() ? std::string(".") : fTakeDir;
+    char name[64];
+    std::snprintf(name, sizeof(name), "/%s-%d.wav", tag.c_str(), fRenderSeq);
+    return dir + name;
+}
+
+int64_t MainWindow::DecodeClipRegion(const Clip& c, std::vector<float>& out,
+                                     double& outRate) const {
+    out.clear();
+    outRate = 0.0;
+    WavSource src;
+    if (!src.Open(c.sourcePath))
+        return 0;
+    outRate = src.FrameRate();
+    if (c.sourceOffset > 0)
+        src.Seek(c.sourceOffset);
+    // The clip plays lengthFrames project-frames == that many source-frames
+    // scaled by the rate ratio, starting at sourceOffset.
+    const double projRate = fProject->sampleRate;
+    int64_t wantSrc = c.lengthFrames;
+    if (outRate > 0 && projRate > 0)
+        wantSrc = (int64_t)llround((double)c.lengthFrames * outRate / projRate);
+    const float* chunk = nullptr;
+    size_t frames = 0;
+    while ((int64_t)(out.size() / 2) < wantSrc && src.ReadChunk(&chunk, &frames)) {
+        int64_t have = (int64_t)(out.size() / 2);
+        int64_t take = wantSrc - have;
+        if ((int64_t)frames > take) frames = (size_t)take;
+        out.insert(out.end(), chunk, chunk + frames * 2);
+    }
+    return (int64_t)(out.size() / 2);
+}
+
+void MainWindow::RegionNormalize(TrackId track, ClipId clip) {
+    const Track* t = fProject->FindTrack(track);
+    const Clip*  c = t ? t->FindClip(clip) : nullptr;
+    if (!c) return;
+    std::vector<float> buf; double rate = 0;
+    const int64_t n = DecodeClipRegion(*c, buf, rate);
+    if (n <= 0) return;
+    const float peak = PeakLinear(buf.data(), n);
+    if (peak <= 1e-6f) return;              // silent: nothing to normalize
+    float g = 1.0f / peak;
+    if (g > 64.0f) g = 64.0f;               // ceiling for near-silent clips
+    fStack->Execute(std::make_unique<SetClipGainCommand>(track, clip, g), *fProject);
+    fTimeline->Invalidate();
+}
+
+void MainWindow::RegionReverse(TrackId track, ClipId clip) {
+    const Track* t = fProject->FindTrack(track);
+    const Clip*  c = t ? t->FindClip(clip) : nullptr;
+    if (!c) return;
+    std::vector<float> buf; double rate = 0;
+    const int64_t n = DecodeClipRegion(*c, buf, rate);
+    if (n <= 0 || rate <= 0) return;
+    ReverseStereo(buf.data(), n);
+
+    const std::string path = RenderPath("reversed");
+    std::vector<int16_t> pcm((size_t)n * 2);
+    for (int64_t i = 0; i < n * 2; ++i) {
+        float s = buf[i];
+        if (s >  1.0f) s =  1.0f;
+        if (s < -1.0f) s = -1.0f;
+        pcm[i] = (int16_t)lround(s * 32767.0f);
+    }
+    WavWriter w;
+    if (!w.Open(path, (int)lround(rate), 2)
+        || !w.WriteInt16(pcm.data(), pcm.size()) || !w.Close()) {
+        std::fprintf(stderr, "Reverse: cannot write %s\n", path.c_str());
+        return;
+    }
+    ++fRenderSeq;
+
+    // Replace the clip with one pointing at the reversed file (fades swap so the
+    // fade follows the now-reversed audio); same position, length, gain.
+    Clip nc = *c;
+    nc.id = kInvalidClipId;
+    nc.sourcePath   = path;
+    nc.sourceOffset = 0;
+    nc.takeGroup    = 0;
+    std::swap(nc.fadeInFrames, nc.fadeOutFrames);
+    auto macro = std::make_unique<MacroCommand>("Reverse Clip");
+    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
+    macro->Add(std::make_unique<AddClipCommand>(track, nc));
+    fStack->Execute(std::move(macro), *fProject);
+
+    WavSource src;
+    if (src.Open(path)) (*fPeaks)[path].Build(src);
+    fTimeline->Invalidate();
+}
+
+void MainWindow::RegionStripSilence(TrackId track, ClipId clip) {
+    const Track* t = fProject->FindTrack(track);
+    const Clip*  c = t ? t->FindClip(clip) : nullptr;
+    if (!c) return;
+    std::vector<float> buf; double rate = 0;
+    const int64_t n = DecodeClipRegion(*c, buf, rate);
+    if (n <= 0 || rate <= 0) return;
+
+    const float   thresh = 0.00316f;               // ~ -50 dBFS
+    const int64_t minSil = (int64_t)(0.25 * rate); // 250 ms of silence = a gap
+    const int64_t pad    = (int64_t)(0.02 * rate); // keep 20 ms of air each side
+    auto spans = NonSilentSpans(buf.data(), n, thresh, minSil, pad);
+    if (spans.size() <= 1) return;                 // no gaps worth cutting
+
+    const double projRate = fProject->sampleRate;
+    const double toProj = (rate > 0) ? projRate / rate : 1.0;   // src -> project
+    auto macro = std::make_unique<MacroCommand>("Strip Silence");
+    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
+    for (const daw::Span& s : spans) {
+        Clip nc = *c;
+        nc.id           = kInvalidClipId;
+        nc.sourceOffset = c->sourceOffset + s.start;              // source frames
+        nc.startFrame   = c->startFrame + (Frame)llround(s.start * toProj);
+        nc.lengthFrames = (Frame)llround((s.end - s.start) * toProj);
+        nc.fadeInFrames = 0;
+        nc.fadeOutFrames = 0;
+        nc.takeGroup    = 0;
+        macro->Add(std::make_unique<AddClipCommand>(track, nc));
+    }
+    fStack->Execute(std::move(macro), *fProject);
+    fTimeline->Invalidate();
+}
+
+// Render one track in isolation (its clips/notes through its fader + effect
+// chain) to a stereo WAV — the basis for Freeze. Routing/sends are stripped so
+// only the track's own output is baked; solo/mute are cleared so it's audible.
+static bool RenderTrackToWav(const Project& src, TrackId id,
+                             const std::string& out) {
+    const Track* t = src.FindTrack(id);
+    if (!t) return false;
+    Project iso;
+    iso.sampleRate = src.sampleRate;
+    iso.tempoBPM   = src.tempoBPM;
+    iso.timeSig    = src.timeSig;
+    iso.tempoMap   = src.tempoMap;
+    Track copy = *t;
+    copy.output = kRoutingMaster;      // straight to the master sum
+    copy.sends.clear();
+    copy.muted = false;
+    copy.soloed = false;
+    copy.frozen = false;
+    copy.freezeClips.clear();
+    copy.freezeMidi.clear();
+    copy.freezeFx.clear();
+    iso.AddTrack(copy);
+    return ExportWav(iso, out, src.sampleRate);
+}
+
+void MainWindow::FreezeTrack(TrackId track, bool freeze) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+
+    if (!freeze) {                     // unfreeze: pure model restore
+        if (!t->frozen) return;
+        fStack->Execute(std::make_unique<FreezeTrackCommand>(track, false),
+                        *fProject);
+        RebuildPeaks();
+        fTimeline->Invalidate();
+        return;
+    }
+    if (t->frozen) return;
+
+    const std::string path = RenderPath("frozen");
+    if (!RenderTrackToWav(*fProject, track, path)) {
+        std::fprintf(stderr, "Freeze: render failed for track %ld\n", (long)track);
+        return;
+    }
+    ++fRenderSeq;
+    WavSource src;
+    if (!src.Open(path)) return;
+    const double fileRate = src.FrameRate();
+    const double projRate = fProject->sampleRate;
+    Clip fc;
+    fc.startFrame   = 0;
+    fc.sourceOffset = 0;
+    fc.sourcePath   = path;
+    fc.lengthFrames = (Frame)llround(src.TotalFrames()
+                        * (fileRate > 0 ? projRate / fileRate : 1.0));
+    fStack->Execute(std::make_unique<FreezeTrackCommand>(track, true, fc),
+                    *fProject);
+    (*fPeaks)[path].Build(src);
+    fTimeline->Invalidate();
 }
 
 // Resolve ~/config/settings/HaikuDAW/settings, creating the dir if needed.

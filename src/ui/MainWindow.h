@@ -72,6 +72,20 @@ private:
     void ImportAudioAt(const char* path, TrackId track, Frame start);  // drop target
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
+    // Clip region ops (decode-backed): normalize to unity peak (via clip gain),
+    // reverse (render a new file), strip silence (split into clips). Each finds
+    // the clip, does any file work, and issues the resulting command(s).
+    void RegionNormalize(TrackId track, ClipId clip);
+    void RegionReverse(TrackId track, ClipId clip);
+    void RegionStripSilence(TrackId track, ClipId clip);
+    void FreezeTrack(TrackId track, bool freeze);   // render-to-audio / restore
+    // Decode a clip's played region to interleaved-stereo float at the source
+    // rate. Returns frames decoded (0 on failure); sets outRate to the file rate.
+    int64_t DecodeClipRegion(const Clip& c, std::vector<float>& out,
+                             double& outRate) const;
+    // A unique path in the take/working dir for a rendered region/freeze file.
+    std::string RenderPath(const std::string& tag) const;
+
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
     PeakMap*        fPeaks;          // non-owning; new takes add entries here
@@ -122,6 +136,7 @@ private:
     std::string               fLastDir;      // last Open/Save/Import directory
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take
+    int                       fRenderSeq = 0; // counter for rendered region/freeze filenames
 };
 
 } // namespace daw

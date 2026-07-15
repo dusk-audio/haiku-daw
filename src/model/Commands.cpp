@@ -663,4 +663,77 @@ void SetTrackHeightCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->height = fOld;
 }
 
+bool FreezeTrackCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    if (fFreeze && t->frozen) return false;    // already frozen
+    if (!fFreeze && !t->frozen) return false;  // nothing to unfreeze
+
+    // Snapshot every field this command touches, so Undo restores exactly.
+    fSType        = t->type;
+    fSClips       = t->clips;
+    fSMidi        = t->midiClips;
+    fSFx          = t->fx;
+    fSGain        = t->gain;
+    fSPan         = t->pan;
+    fSFrozen      = t->frozen;
+    fSFreezeClips = t->freezeClips;
+    fSFreezeMidi  = t->freezeMidi;
+    fSFreezeFx    = t->freezeFx;
+    fSFreezeGain  = t->freezeGain;
+    fSFreezePan   = t->freezePan;
+    fSFreezeType  = t->freezeType;
+    fCaptured     = true;
+
+    if (fFreeze) {
+        // Stash the pre-freeze content, then install the rendered clip as the
+        // sole content with a flat unity fader and no inserts (all baked in).
+        t->freezeClips = t->clips;
+        t->freezeMidi  = t->midiClips;
+        t->freezeFx    = t->fx;
+        t->freezeGain  = t->gain;
+        t->freezePan   = t->pan;
+        t->freezeType  = t->type;
+
+        t->clips.assign(1, fFrozenClip);
+        t->midiClips.clear();
+        t->fx.clear();
+        t->gain = 1.0f;
+        t->pan  = 0.0f;
+        t->type = TrackType::Audio;
+        t->frozen = true;
+    } else {
+        // Restore from the stash and drop it.
+        t->clips     = t->freezeClips;
+        t->midiClips = t->freezeMidi;
+        t->fx        = t->freezeFx;
+        t->gain      = t->freezeGain;
+        t->pan       = t->freezePan;
+        t->type      = t->freezeType;
+        t->frozen    = false;
+        t->freezeClips.clear();
+        t->freezeMidi.clear();
+        t->freezeFx.clear();
+    }
+    return true;
+}
+
+void FreezeTrackCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || !fCaptured) return;
+    t->type         = fSType;
+    t->clips        = fSClips;
+    t->midiClips    = fSMidi;
+    t->fx           = fSFx;
+    t->gain         = fSGain;
+    t->pan          = fSPan;
+    t->frozen       = fSFrozen;
+    t->freezeClips  = fSFreezeClips;
+    t->freezeMidi   = fSFreezeMidi;
+    t->freezeFx     = fSFreezeFx;
+    t->freezeGain   = fSFreezeGain;
+    t->freezePan    = fSFreezePan;
+    t->freezeType   = fSFreezeType;
+}
+
 } // namespace daw

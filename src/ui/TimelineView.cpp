@@ -217,6 +217,25 @@ int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const
     return idx;
 }
 
+std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
+    BPopUpMenu* m = new BPopUpMenu("clip", false, false);
+    m->AddItem(new BMenuItem("Copy", NULL));
+    m->AddItem(new BMenuItem("Delete", NULL));
+    m->AddItem(new BMenuItem("Split here", NULL));
+    if (withTake)
+        m->AddItem(new BMenuItem("Next Take", NULL));
+    m->AddSeparatorItem();
+    m->AddItem(new BMenuItem("Normalize", NULL));
+    m->AddItem(new BMenuItem("Reverse", NULL));
+    m->AddItem(new BMenuItem("Strip Silence", NULL));
+    m->AddItem(new BMenuItem("Clear Fades", NULL));
+    BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
+                           false, true);
+    std::string label = sel ? std::string(sel->Label()) : std::string();
+    delete m;
+    return label;
+}
+
 bool TimelineView::PastePopup(BPoint where) const {
     BPopUpMenu* m = new BPopUpMenu("paste", false, false);
     m->AddItem(new BMenuItem("Paste here", NULL));
@@ -549,45 +568,56 @@ void TimelineView::MouseDown(BPoint where) {
         if (where.y <= lane.top + 18 && where.x < 114) {
             if (rightClick) {
                 BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
-                mm->AddItem(new BMenuItem("Move Up", NULL));     // 0
-                mm->AddItem(new BMenuItem("Move Down", NULL));   // 1
-                mm->AddItem(new BMenuItem("Next Color", NULL));  // 2
-                mm->AddItem(new BMenuItem("Taller", NULL));      // 3
-                mm->AddItem(new BMenuItem("Shorter", NULL));     // 4
-                mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL)); // 5
-                mm->AddItem(new BMenuItem("Delete", NULL));      // 6
+                mm->AddItem(new BMenuItem("Move Up", NULL));
+                mm->AddItem(new BMenuItem("Move Down", NULL));
+                mm->AddItem(new BMenuItem("Next Color", NULL));
+                mm->AddItem(new BMenuItem("Taller", NULL));
+                mm->AddItem(new BMenuItem("Shorter", NULL));
+                mm->AddSeparatorItem();
+                mm->AddItem(new BMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
+                mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
+                mm->AddItem(new BMenuItem("Delete", NULL));
                 BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
-                const int pick = sel ? mm->IndexOf(sel) : -1;
+                const std::string pick = sel ? std::string(sel->Label())
+                                             : std::string();
                 delete mm;
                 // Color/height are view properties (serialized): mutate directly,
                 // like the arm toggle, rather than through the undo stack.
-                if (pick == 0)
+                if (pick == "Move Up")
                     fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, -1),
                                     *fProject);
-                else if (pick == 1)
+                else if (pick == "Move Down")
                     fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, +1),
                                     *fProject);
-                else if (pick == 2) {
+                else if (pick == "Next Color") {
                     if (Track* tr = fProject->FindTrack(t.id))
                         fStack->Execute(std::make_unique<SetTrackColorCommand>(
                             t.id, (tr->colorIndex + 1) % kTrackColorCount),
                             *fProject);
-                } else if (pick == 3) {
+                } else if (pick == "Taller") {
                     if (Track* tr = fProject->FindTrack(t.id))
                         fStack->Execute(std::make_unique<SetTrackHeightCommand>(
                             t.id, tr->height + 24 > 300 ? 300 : tr->height + 24),
                             *fProject);
-                } else if (pick == 4) {
+                } else if (pick == "Shorter") {
                     if (Track* tr = fProject->FindTrack(t.id))
                         fStack->Execute(std::make_unique<SetTrackHeightCommand>(
                             t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
                             *fProject);
-                } else if (pick == 5) {
+                } else if (pick == "Freeze" || pick == "Unfreeze") {
+                    // Freeze needs an offline render (file I/O): hand off to the
+                    // main window. Unfreeze is pure model but routed the same way
+                    // so the main window can rebuild peaks/engine after either.
+                    BMessage req(kMsgFreezeTrack);
+                    req.AddInt64("track", (int64)t.id);
+                    req.AddBool("freeze", pick == "Freeze");
+                    if (BWindow* w = Window()) w->PostMessage(&req);
+                } else if (pick == "Rename" B_UTF8_ELLIPSIS) {
                     BPoint sp = ConvertToScreen(where);
                     BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
                     (new RenameWindow(wr, t.id, t.name.c_str(),
                                       BMessenger(Window())))->Show();
-                } else if (pick == 6)
+                } else if (pick == "Delete")
                     fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
                                     *fProject);
                 Invalidate();
@@ -740,21 +770,35 @@ void TimelineView::MouseDown(BPoint where) {
             continue;   // inactive takes are hidden; act on the visible one
         if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
             if (rightClick) {
-                const int pick = ContextMenu(where, /*withSplit=*/true,
-                                             /*withTake=*/c.takeGroup > 0);
-                if (pick == 0) {          // Copy
+                const std::string pick =
+                    AudioClipMenu(where, /*withTake=*/c.takeGroup > 0);
+                if (pick == "Copy") {
                     fClipClip = c;
                     fHasClipClip = true; fHasClipNote = false;
                     fHasClipMidi = false;   // audio copy invalidates MIDI clipboard
                     fClipType = TrackType::Audio;
-                } else if (pick == 1) {   // Delete
+                } else if (pick == "Delete") {
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
                                     *fProject);
-                } else if (pick == 2) {   // Split here
+                } else if (pick == "Split here") {
                     Frame sat = Snapped(XToFrame(where.x));
                     fStack->Execute(std::make_unique<SplitClipCommand>(
                         t.id, c.id, sat), *fProject);
-                } else if (pick == 3 && c.takeGroup > 0) {   // Next Take
+                } else if (pick == "Normalize" || pick == "Reverse"
+                           || pick == "Strip Silence") {
+                    // Needs the decoded source: hand off to the main window,
+                    // which owns file I/O and issues the resulting command(s).
+                    uint32 what = pick == "Normalize" ? kMsgRegionNormalize
+                                : pick == "Reverse"   ? kMsgRegionReverse
+                                                      : kMsgRegionStrip;
+                    BMessage req(what);
+                    req.AddInt64("track", (int64)t.id);
+                    req.AddInt64("clip",  (int64)c.id);
+                    if (BWindow* w = Window()) w->PostMessage(&req);
+                } else if (pick == "Clear Fades") {
+                    fStack->Execute(std::make_unique<SetClipFadeCommand>(
+                        t.id, c.id, 0, 0), *fProject);
+                } else if (pick == "Next Take" && c.takeGroup > 0) {   // Next Take
                     // Cycle to the next take (by sourceOffset order, wrapping).
                     ClipId next = kInvalidClipId; Frame bestAbove = 0;
                     ClipId firstId = kInvalidClipId; Frame firstOff = 0;

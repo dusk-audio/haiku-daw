@@ -439,6 +439,43 @@ private:
     ClipId                fRightId = kInvalidClipId;
 };
 
+// Freeze or unfreeze a track. Freezing bakes the track's clips/notes through
+// its fader + effect chain into one rendered audio clip (supplied by the UI,
+// which does the offline render) and stashes the pre-freeze content on the
+// track; unfreezing restores it. Either direction snapshots every field it
+// touches so Undo reverses exactly. `freeze=false` requires the track to be
+// frozen (else Do fails and nothing is pushed).
+class FreezeTrackCommand : public Command {
+public:
+    // Freeze: pass freeze=true + the rendered clip (path/length filled in).
+    // Unfreeze: pass freeze=false; frozenClip is ignored.
+    FreezeTrackCommand(TrackId track, bool freeze, Clip frozenClip = Clip{})
+        : fTrack(track), fFreeze(freeze), fFrozenClip(std::move(frozenClip)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return fFreeze ? "Freeze Track"
+                                                       : "Unfreeze Track"; }
+
+private:
+    TrackId   fTrack;
+    bool      fFreeze;
+    Clip      fFrozenClip;
+    bool      fCaptured = false;   // is the snapshot below valid (Do ran)?
+    // Full snapshot of the mutated fields, for exact Undo.
+    TrackType               fSType = TrackType::Audio;
+    std::vector<Clip>       fSClips;
+    std::vector<MidiClip>   fSMidi;
+    std::vector<EffectDesc> fSFx;
+    float                   fSGain = 1.0f, fSPan = 0.0f;
+    bool                    fSFrozen = false;
+    std::vector<Clip>       fSFreezeClips;
+    std::vector<MidiClip>   fSFreezeMidi;
+    std::vector<EffectDesc> fSFreezeFx;
+    float                   fSFreezeGain = 1.0f, fSFreezePan = 0.0f;
+    TrackType               fSFreezeType = TrackType::Audio;
+};
+
 // Move a track up (-1) or down (+1) in the track list. Clamped; a no-op move
 // (already at the edge) reports failure so it doesn't hit the undo stack.
 class MoveTrackCommand : public Command {

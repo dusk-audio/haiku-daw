@@ -644,6 +644,61 @@ static void test_frame_seconds_roundtrip() {
     CHECK(FramesToSeconds(48000, 48000.0) == 1.0);
 }
 
+// Freeze/unfreeze bakes a track down to one clip and restores it exactly.
+static void test_freeze_track() {
+    Project p;
+    CommandStack s;
+    auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "A");
+    TrackId id = add->CreatedId();
+    s.Execute(std::move(add), p);
+    id = p.Tracks().back().id;
+
+    // Two source clips + an effect + non-unity fader.
+    Clip c1; c1.startFrame = 0;    c1.lengthFrames = 1000; c1.sourcePath = "a.wav";
+    Clip c2; c2.startFrame = 2000; c2.lengthFrames = 1000; c2.sourcePath = "b.wav";
+    s.Execute(std::make_unique<AddClipCommand>(id, c1), p);
+    s.Execute(std::make_unique<AddClipCommand>(id, c2), p);
+    s.Execute(std::make_unique<AddEffectCommand>(id, EffectDesc{EffectType::Delay}), p);
+    s.Execute(std::make_unique<SetTrackGainCommand>(id, 0.5f), p);
+    s.Execute(std::make_unique<SetTrackPanCommand>(id, -0.3f), p);
+
+    // Freeze: one rendered clip, flat fader, no fx; stash holds the originals.
+    Clip frozen; frozen.startFrame = 0; frozen.lengthFrames = 3000;
+    frozen.sourcePath = "frozen-0.wav";
+    s.Execute(std::make_unique<FreezeTrackCommand>(id, true, frozen), p);
+    Track* t = p.FindTrack(id);
+    CHECK(t->frozen);
+    CHECK(t->clips.size() == 1);
+    CHECK(t->clips[0].sourcePath == "frozen-0.wav");
+    CHECK(t->fx.empty());
+    CHECK(t->gain == 1.0f && t->pan == 0.0f);
+    CHECK(t->freezeClips.size() == 2);     // originals stashed
+    CHECK(t->freezeFx.size() == 1);
+
+    // A second freeze is refused (already frozen) — not pushed.
+    CHECK(!s.Execute(std::make_unique<FreezeTrackCommand>(id, true, frozen), p));
+
+    // Undo the freeze: originals restored, stash cleared.
+    s.Undo(p);
+    t = p.FindTrack(id);
+    CHECK(!t->frozen);
+    CHECK(t->clips.size() == 2);
+    CHECK(t->fx.size() == 1);
+    CHECK(t->gain == 0.5f);
+    CHECK(t->freezeClips.empty());
+
+    // Redo, then explicit Unfreeze command: same restored state.
+    s.Redo(p);
+    CHECK(p.FindTrack(id)->frozen);
+    s.Execute(std::make_unique<FreezeTrackCommand>(id, false), p);
+    t = p.FindTrack(id);
+    CHECK(!t->frozen);
+    CHECK(t->clips.size() == 2 && t->fx.size() == 1 && t->gain == 0.5f);
+
+    // Unfreeze on a non-frozen track is refused.
+    CHECK(!s.Execute(std::make_unique<FreezeTrackCommand>(id, false), p));
+}
+
 int main() {
     test_add_and_undo_track();
     test_gain_undo_redo();
@@ -662,6 +717,7 @@ int main() {
     test_undo_unification();
     test_active_take();
     test_review_fixes();
+    test_freeze_track();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

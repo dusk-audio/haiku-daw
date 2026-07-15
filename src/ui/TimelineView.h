@@ -27,6 +27,15 @@
 
 namespace daw {
 
+// Clip region-operation + track-freeze requests posted to the main window,
+// which owns the engine/decode and issues the resulting command(s). Each region
+// message carries int64 "track" + int64 "clip"; freeze carries int64 "track"
+// + bool "freeze".
+constexpr uint32 kMsgRegionNormalize = 'rnrm';
+constexpr uint32 kMsgRegionReverse   = 'rrev';
+constexpr uint32 kMsgRegionStrip     = 'rstp';
+constexpr uint32 kMsgFreezeTrack     = 'frtk';
+
 class TimelineView : public BView {
 public:
     // BView already has a Frame() method; without this typedef every
@@ -144,6 +153,9 @@ private:
     // Clipboard (right-click Copy -> Edit > Paste).
     int      ContextMenu(BPoint where, bool withSplit = false,
                          bool withTake = false) const;   // 0=Copy 1=Delete 2=Split 3=NextTake
+    // Richer audio-clip menu (adds region ops); returns the chosen item's label
+    // ("" if dismissed) so callers switch on meaning, not a fragile index.
+    std::string AudioClipMenu(BPoint where, bool withTake) const;
     bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
     bool     fHasClipClip = false;
