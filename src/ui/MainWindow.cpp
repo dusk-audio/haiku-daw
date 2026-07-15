@@ -637,11 +637,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Apply the edit to the running engine so it takes effect live.
             // Param tweaks sync in place; a structural change (add/remove/
             // reorder/replace) rebuilds the engine at the playhead.
-            if (fEngine && !fEngine->SyncFx(*fProject))
-                ReloadActiveEngine();
+            // Make the edit take effect on the running engine. Param tweaks sync
+            // in place (no seam); if the chain STRUCTURE changed, or we're
+            // playing/monitoring, rebuild so an added/removed effect is
+            // guaranteed to be in the graph.
+            if (fEngine) {
+                const bool synced = fEngine->SyncFx(*fProject);
+                if (!synced || fPlaying || fMonitoring)
+                    ReloadActiveEngine();
+            }
             fTimeline->Invalidate();
             break;
         }
+        case kMsgReloadEngine:   // clip/fade edit: rebuild so it takes effect live
+            ReloadActiveEngine();
+            break;
         case kMsgFxLive: {   // live knob-drag preview into the running engine
             int64 tid = 0; int32 fx = 0, slot = 0; float v = 0.0f;
             msg->FindInt64("track", &tid);

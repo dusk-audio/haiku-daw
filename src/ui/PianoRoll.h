@@ -119,8 +119,10 @@ public:
               std::vector<MidiNote> notes,
               TempoMap tempo, double sampleRate, BMessenger apply);
     void MessageReceived(BMessage* msg) override;   // forwards kMsgRollPlayhead
+    void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 private:
     PianoRollView* fView;
+    BMessenger     fMain;   // to the main window (transport toggle)
 };
 
 } // namespace daw

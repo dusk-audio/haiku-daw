@@ -122,6 +122,11 @@ void SendsWindow::Rebuild() {
     fRoot->AddChild(add);
 }
 
+void SendsWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardSpaceToTransport(m, fApply)) return;
+    BWindow::DispatchMessage(m, h);
+}
+
 void SendsWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_SLVL: {

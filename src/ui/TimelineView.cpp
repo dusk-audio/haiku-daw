@@ -1334,8 +1334,12 @@ void TimelineView::MouseUp(BPoint where) {
                             fDragClip, fin, fout);
             }
         }
-        if (cmd)
+        if (cmd) {
             fStack->Execute(std::move(cmd), *fProject);
+            // A clip/region edit (move/resize/fade/gain) only reaches the engine
+            // at Load; rebuild it so the change takes effect during playback.
+            if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+        }
     }
     const bool wasFader = (fDrag == Drag::Gain || fDrag == Drag::Pan);
     fDrag = Drag::None;

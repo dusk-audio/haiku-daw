@@ -659,10 +659,16 @@ PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
                      TempoMap tempo, double sampleRate, BMessenger apply)
     : BWindow(frame, "Piano Roll", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
+    fMain = apply;
     fView = new PianoRollView(Bounds(), track, clip, clipStart, std::move(notes),
                               tempo, sampleRate, apply);
     AddChild(fView);
     fView->MakeFocus(true);
+}
+
+void PianoRoll::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardSpaceToTransport(m, fMain)) return;
+    BWindow::DispatchMessage(m, h);
 }
 
 void PianoRoll::MessageReceived(BMessage* msg) {

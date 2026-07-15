@@ -2,7 +2,11 @@
 // Kept in one header so the ruler, lanes, and headers agree on geometry.
 #pragma once
 
+#include <AppDefs.h>
 #include <InterfaceDefs.h>
+#include <Message.h>
+#include <Messenger.h>
+#include <TypeConstants.h>
 
 namespace daw {
 
@@ -26,6 +30,21 @@ constexpr uint32 kMsgMonitorRefresh = 'mon?';
 // TimelineView -> MainWindow: spacebar pressed; toggle play/stop.
 constexpr uint32 kMsgTransportToggle = 'xptg';
 
+// Forward a spacebar key-down to the main window as a transport toggle, so any
+// child window (FX, Mixer, piano roll, ...) can start/stop playback. Call from a
+// window's DispatchMessage; returns true if it consumed the event.
+inline bool ForwardSpaceToTransport(BMessage* msg, const BMessenger& main) {
+    if (!msg || msg->what != B_KEY_DOWN) return false;
+    const char* bytes = nullptr;
+    ssize_t len = 0;
+    if (msg->FindData("bytes", B_STRING_TYPE, (const void**)&bytes, &len) == B_OK
+        && len >= 1 && bytes[0] == ' ') {   // space
+        main.SendMessage(kMsgTransportToggle);
+        return true;
+    }
+    return false;
+}
+
 // TimelineView -> MainWindow: a track was selected (int64 "track"); the main
 // window points the inspector at it.
 constexpr uint32 kMsgTrackSelected = 'tsel';
@@ -44,6 +63,11 @@ constexpr uint32 kMsgInputMon = 'moni';
 // Inspector -> MainWindow: cycle the selected track's automation lane mode
 // (Off -> Gain -> Pan -> fx lanes). The timeline owns the mode + curve editing.
 constexpr uint32 kMsgCycleAuto = 'caut';
+
+// TimelineView -> MainWindow: a clip/region edit (move/resize/fade/gain/split)
+// committed; rebuild the running engine at the playhead so it takes effect live
+// (clip fades, positions, etc. are otherwise only read at Load).
+constexpr uint32 kMsgReloadEngine = 'reld';
 
 inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};

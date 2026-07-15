@@ -91,8 +91,10 @@ public:
     MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
                 float masterGain, BMessenger apply);
     void MessageReceived(BMessage* msg) override;
+    void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 private:
     MixerStripsView* fView;
+    BMessenger       fApply;
 };
 
 } // namespace daw

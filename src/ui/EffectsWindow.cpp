@@ -688,6 +688,11 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
     BWindow::MessageReceived(msg);
 }
 
+void EffectsWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardSpaceToTransport(m, fApply)) return;
+    BWindow::DispatchMessage(m, h);
+}
+
 bool EffectsWindow::QuitRequested() {
     BMessage closed(kMsgFxWinClosed);
     closed.AddInt64("track", (int64)fTrack);

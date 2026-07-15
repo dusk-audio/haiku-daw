@@ -23,6 +23,7 @@ public:
                      BMessenger apply);
 
     void MessageReceived(BMessage* msg) override;
+    void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 
 private:
     void Build();

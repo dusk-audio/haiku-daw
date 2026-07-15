@@ -32,6 +32,7 @@ public:
                 TrackId track, BMessenger apply);
 
     void MessageReceived(BMessage* msg) override;
+    void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 
 private:
     void Rebuild();   // (re)build the UI from the local send list

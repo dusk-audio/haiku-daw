@@ -87,6 +87,11 @@ void InstrumentWindow::Build() {
     add("Release (s)", 3, 0.0f, 2.0f, fInst.release);
 }
 
+void InstrumentWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardSpaceToTransport(m, fApply)) return;
+    BWindow::DispatchMessage(m, h);
+}
+
 void InstrumentWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_WAVE: {

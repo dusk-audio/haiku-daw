@@ -102,6 +102,7 @@ public:
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
                   BMessenger apply);
     void MessageReceived(BMessage* msg) override;
+    void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
     bool QuitRequested() override;
 private:
     EffectsView* fView;

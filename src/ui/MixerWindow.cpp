@@ -255,9 +255,15 @@ void MixerStripsView::MouseUp(BPoint) {
 MixerWindow::MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
                          float masterGain, BMessenger apply)
     : BWindow(frame, "Mixer", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
+              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
+      fApply(apply) {
     fView = new MixerStripsView(Bounds(), std::move(strips), masterGain, apply);
     AddChild(fView);
+}
+
+void MixerWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardSpaceToTransport(m, fApply)) return;
+    BWindow::DispatchMessage(m, h);
 }
 
 void MixerWindow::MessageReceived(BMessage* msg) {
