@@ -21,6 +21,7 @@
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
 #include "../model/RegionOps.h"
+#include "../model/SmfIO.h"
 #include "../model/RecordPlan.h"
 
 #include <Alert.h>
@@ -83,6 +84,10 @@ enum {
     MSG_BROWSER   = 'brws',
     MSG_AUTOSAVE  = 'asav',
     MSG_RECOVER   = 'rcvr',   // deferred startup recovery check
+    MSG_IMPORT_MIDI     = 'imid',
+    MSG_IMPORT_MIDI_REF = 'imdr',
+    MSG_EXPORT_MIDI     = 'emid',
+    MSG_EXPORT_MIDI_REF = 'emdr',
 };
 
 // Defined below; used by MessageReceived above its definition.
@@ -111,7 +116,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fileMenu->AddItem(new BMenuItem("Save" B_UTF8_ELLIPSIS, new BMessage(MSG_SAVE), 'S'));
     fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
+    fileMenu->AddItem(new BMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
     fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
+    fileMenu->AddItem(new BMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
     fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
     menuBar->AddItem(fileMenu);
@@ -269,6 +276,8 @@ MainWindow::~MainWindow() {
     delete fOpenPanel;
     delete fExportPanel;
     delete fImportPanel;
+    delete fMidiImportPanel;
+    delete fMidiExportPanel;
     // fEngine / fRecorder destructors stop their threads.
 }
 
@@ -344,6 +353,40 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 if (!ExportWav(*fProject, path.Path(), fProject->sampleRate))
                     std::fprintf(stderr, "MainWindow: export failed: %s\n",
                                  path.Path());
+            }
+            break;
+        }
+        case MSG_IMPORT_MIDI:
+            if (!fMidiImportPanel) {
+                BMessenger to(this);
+                fMidiImportPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0,
+                    false, new BMessage(MSG_IMPORT_MIDI_REF));
+            }
+            fMidiImportPanel->Show();
+            break;
+        case MSG_IMPORT_MIDI_REF: {
+            entry_ref ref;
+            if (msg->FindRef("refs", &ref) == B_OK) {
+                BPath path(&ref);
+                ImportMidi(path.Path());
+            }
+            break;
+        }
+        case MSG_EXPORT_MIDI:
+            if (!fMidiExportPanel) {
+                BMessenger to(this);
+                fMidiExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0,
+                    false, new BMessage(MSG_EXPORT_MIDI_REF));
+            }
+            fMidiExportPanel->Show();
+            break;
+        case MSG_EXPORT_MIDI_REF: {
+            entry_ref dir; const char* name = nullptr;
+            if (msg->FindRef("directory", &dir) == B_OK
+                && msg->FindString("name", &name) == B_OK) {
+                BPath path(&dir);
+                path.Append(name);
+                ExportMidi(path.Path());
             }
             break;
         }
@@ -1129,6 +1172,84 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
 
     (*fPeaks)[path].Build(src);   // waveform envelope (src cursor is at start)
     fTimeline->Invalidate();
+}
+
+void MainWindow::ImportMidi(const char* path) {
+    SmfData d;
+    if (!ReadSmf(path, d)) {
+        std::fprintf(stderr, "MainWindow: cannot import MIDI '%s'\n", path);
+        return;
+    }
+    // Convert ticks -> frames at the project tempo (beat = tick / division). Each
+    // SMF track with notes becomes a new MIDI track holding one region. Undo is
+    // per-track (AddTrack + AddMidiClip) — MacroCommand can't thread the new
+    // track id to the clip add, and per-track granularity is acceptable here.
+    const double perTick = (d.division > 0)
+        ? (fProject->sampleRate * 60.0 / fProject->tempoBPM) / (double)d.division
+        : (fProject->sampleRate * 60.0 / fProject->tempoBPM) / 480.0;
+
+    int added = 0;
+    for (const SmfTrack& st : d.tracks) {
+        if (st.notes.empty()) continue;             // skip conductor/empty tracks
+        MidiClip clip;
+        clip.startFrame = 0;
+        Frame maxEnd = 0;
+        for (const SmfNote& sn : st.notes) {
+            MidiNote mn;
+            mn.pitch      = sn.pitch;
+            mn.velocity   = sn.velocity < 1 ? 1 : (sn.velocity > 127 ? 127 : sn.velocity);
+            mn.startFrame = (Frame)llround(sn.startTick * perTick);
+            mn.lengthFrames = (Frame)llround(sn.lengthTick * perTick);
+            if (mn.lengthFrames < 1) mn.lengthFrames = 1;
+            clip.notes.push_back(mn);
+            if (mn.startFrame + mn.lengthFrames > maxEnd)
+                maxEnd = mn.startFrame + mn.lengthFrames;
+        }
+        clip.lengthFrames = maxEnd;
+
+        char nm[48];
+        if (!st.name.empty()) std::snprintf(nm, sizeof(nm), "%.31s", st.name.c_str());
+        else                  std::snprintf(nm, sizeof(nm), "MIDI %d", added + 1);
+
+        auto add = std::make_unique<AddTrackCommand>(TrackType::Midi, nm);
+        AddTrackCommand* ap = add.get();
+        fStack->Execute(std::move(add), *fProject);
+        fStack->Execute(std::make_unique<AddMidiClipCommand>(ap->CreatedId(), clip),
+                        *fProject);
+        ++added;
+    }
+    if (added == 0)
+        std::fprintf(stderr, "MainWindow: '%s' had no note tracks\n", path);
+    fTimeline->Invalidate();
+}
+
+void MainWindow::ExportMidi(const char* path) {
+    const double fpb = fProject->sampleRate * 60.0 / fProject->tempoBPM;
+    const uint16_t division = 480;
+    SmfData d;
+    d.division = division;
+    d.tempoBpm = fProject->tempoBPM;
+    for (const Track& t : fProject->Tracks()) {
+        if (t.type != TrackType::Midi) continue;
+        SmfTrack st;
+        st.name = t.name;
+        for (const MidiNote& n : t.CollectNotes()) {   // absolute-timeline notes
+            SmfNote sn;
+            sn.pitch      = n.pitch;
+            sn.velocity   = n.velocity;
+            sn.startTick  = (uint32_t)llround((n.startFrame / fpb) * division);
+            sn.lengthTick = (uint32_t)llround((n.lengthFrames / fpb) * division);
+            if (sn.lengthTick < 1) sn.lengthTick = 1;
+            st.notes.push_back(sn);
+        }
+        d.tracks.push_back(std::move(st));
+    }
+    if (d.tracks.empty()) {
+        std::fprintf(stderr, "MainWindow: no MIDI tracks to export\n");
+        return;
+    }
+    if (!WriteSmf(path, d))
+        std::fprintf(stderr, "MainWindow: MIDI export failed: %s\n", path);
 }
 
 void MainWindow::RebuildPeaks() {

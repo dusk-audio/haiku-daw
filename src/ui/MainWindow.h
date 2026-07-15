@@ -70,6 +70,8 @@ private:
     void SaveSettings();
     void ImportAudio(const char* path);   // add a WAV as a clip (first track/playhead)
     void ImportAudioAt(const char* path, TrackId track, Frame start);  // drop target
+    void ImportMidi(const char* path);    // .mid -> new MIDI tracks (tempo-relative)
+    void ExportMidi(const char* path);    // project MIDI tracks -> .mid
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
     // Clip region ops (decode-backed): normalize to unity peak (via clip gain),
@@ -112,6 +114,8 @@ private:
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
     BFilePanel*               fImportPanel = nullptr;
+    BFilePanel*               fMidiImportPanel = nullptr;
+    BFilePanel*               fMidiExportPanel = nullptr;
     BMenuItem*                fMetItem = nullptr;   // metronome toggle
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
