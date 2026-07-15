@@ -22,6 +22,12 @@ namespace daw {
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
 // float[] "ep" (all params concatenated).
 constexpr uint32 kMsgApplyFx = 'fxap';
+
+// Live single-param preview during a knob/handle drag (int64 "track",
+// int32 "fx","slot", float "val"): applied straight to the running engine so
+// the effect responds while you drag; the undoable commit is kMsgApplyFx on
+// mouse-up.
+constexpr uint32 kMsgFxLive = 'fxlv';
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';

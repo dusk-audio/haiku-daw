@@ -510,6 +510,20 @@ bool Engine::SyncFx(const Project& project) {
     return allMatched;
 }
 
+void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
+                            float value) {
+    std::vector<std::unique_ptr<IEffect>>* chain = nullptr;
+    if (master) {
+        chain = &fMasterFx;
+    } else {
+        for (Bus& b : fBuses)
+            if (b.id == track) { chain = &b.fx; break; }
+    }
+    if (!chain || fxIndex < 0 || fxIndex >= (int)chain->size()) return;
+    if ((*chain)[(size_t)fxIndex])
+        (*chain)[(size_t)fxIndex]->SetParam(slot, value);
+}
+
 void Engine::SetFxTempo(double bpm) {
     for (Bus& b : fBuses)
         for (auto& fx : b.fx)

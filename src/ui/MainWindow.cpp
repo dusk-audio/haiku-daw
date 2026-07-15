@@ -573,6 +573,17 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();
             break;
         }
+        case kMsgFxLive: {   // live knob-drag preview into the running engine
+            int64 tid = 0; int32 fx = 0, slot = 0; float v = 0.0f;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            msg->FindInt32("slot", &slot);
+            msg->FindFloat("val", &v);
+            if (fEngine)
+                fEngine->SetFxParamLive((TrackId)tid,
+                    (TrackId)tid == kMasterFxTarget, fx, slot, v);
+            break;
+        }
         case kMsgToggleFxAuto: {
             // Toggle an effect-parameter automation lane (create seeded at the
             // current value, or remove if one already exists for this fx+slot).

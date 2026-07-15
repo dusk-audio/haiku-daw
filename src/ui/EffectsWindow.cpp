@@ -606,9 +606,20 @@ void EffectsView::MouseDown(BPoint where) {
 void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
     if (fDragEffect < 0 || fDragEffect >= (int)fChain.size()) return;
     EffectDesc& d = fChain[fDragEffect];
+    // Push the changed param straight to the running engine so the effect
+    // responds live while dragging (mixing feel); commit is on mouse-up.
+    auto live = [&](int slot, float v) {
+        BMessage m(kMsgFxLive);
+        m.AddInt64("track", (int64)fTrack);
+        m.AddInt32("fx", fDragEffect);
+        m.AddInt32("slot", slot);
+        m.AddFloat("val", v);
+        fApply.SendMessage(&m);
+    };
     auto setP = [&](int slot, float v) {
         if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
         d.params[slot] = v;
+        live(slot, v);
     };
     if (fDragKind == 0) {   // knob: vertical drag over ~160 px = full range
         const float dv = (fDragStart.y - where.y) / 160.0f * (fDragMax - fDragMin);

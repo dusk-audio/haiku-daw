@@ -138,6 +138,12 @@ public:
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
     void SetFxTempo(double bpm);
 
+    // Push a single effect parameter into the running graph live (for smooth
+    // knob-drag response during playback, before the edit is committed). RT-safe
+    // SetParam; `master` targets the master chain, else the track's node.
+    void SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
+                        float value);
+
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
 
