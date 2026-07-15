@@ -12,6 +12,7 @@
 #include <MenuItem.h>
 #include <Window.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <vector>
@@ -55,12 +56,13 @@ void InspectorView::Layout() {
     fInstR  = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
     fAutoR  = BRect(pad, y, pad + bw, y + 20); y += 30;
     // Pan knob (centered) then a tall vertical fader below it.
-    const float knob = 44.0f;
+    const float knob = 46.0f;
     fPanR   = BRect(w * 0.5f - knob * 0.5f, y, w * 0.5f + knob * 0.5f, y + knob);
-    y += knob + 16;
-    const float faderW = 26.0f;
-    fFaderR = BRect(w * 0.5f - faderW * 0.5f, y,
-                    w * 0.5f + faderW * 0.5f, Bounds().bottom - 26);
+    y += knob + 18;
+    // Fader (left) + VU meter (right), side by side, centered as a unit.
+    const float bottom = Bounds().bottom - 26.0f;
+    fFaderR = BRect(w * 0.5f - 42.0f, y, w * 0.5f - 4.0f, bottom);
+    fMeterR = BRect(w * 0.5f + 6.0f,  y, w * 0.5f + 24.0f, bottom);
 }
 
 void InspectorView::Draw(BRect) {
@@ -90,9 +92,10 @@ void InspectorView::Draw(BRect) {
     DrawString(midi ? "MIDI" : t->type == TrackType::Bus ? "Bus" : "Audio",
                BPoint(10, 40));
 
-    DrawButton(this, fMuteR, "M", t->muted,  ColPlayhead());
-    DrawButton(this, fSoloR, "S", t->soloed, Rgb(210, 190, 70));
-    DrawButton(this, fArmR,  "R", t->armed,  Rgb(220, 60, 60));
+    const rgb_color accent = midi ? ColMidiAccent() : ColAudioAccent();
+    DrawButton(this, fMuteR, "M", t->muted,  ColMute());
+    DrawButton(this, fSoloR, "S", t->soloed, ColSolo());
+    DrawButton(this, fArmR,  "R", t->armed,  ColRec());
 
     // Input source.
     char ib[64];
@@ -109,39 +112,40 @@ void InspectorView::Draw(BRect) {
     DrawButton(this, fInputR, ib, t->input.kind != InputSource::kNone,
                Rgb(52, 104, 74));
 
-    DrawButton(this, fMonR, "Input Monitor", false);
+    DrawButton(this, fMonR, "Input Monitor", t->inputMonitor, ColMon());
 
     // Output routing + sends.
     DrawButton(this, fOutR,
                t->output == kInvalidTrackId ? "Out: Mst" : "Out: Bus",
-               t->output != kInvalidTrackId, Rgb(70, 90, 130));
+               t->output != kInvalidTrackId, accent);
     char sb[16];
     std::snprintf(sb, sizeof(sb), "Sends %zu", t->sends.size());
-    DrawButton(this, fSendsR, sb, !t->sends.empty(), Rgb(70, 90, 130));
+    DrawButton(this, fSendsR, sb, !t->sends.empty(), accent);
 
     // Effects + instrument (MIDI).
     char fb[16];
     std::snprintf(fb, sizeof(fb), "FX %zu", t->fx.size());
-    DrawButton(this, fFxR, fb, !t->fx.empty(), Rgb(80, 170, 110));
-    if (midi) DrawButton(this, fInstR, "Instrument", true, Rgb(70, 90, 130));
+    DrawButton(this, fFxR, fb, !t->fx.empty(), accent);
+    if (midi) DrawButton(this, fInstR, "Instrument", true, ColMidiAccent());
 
     DrawButton(this, fAutoR, "Automation", false);
 
-    // Pan knob.
+    // Pan knob (value ring in the track accent).
     SetHighColor(ColTextDim());
     DrawString("Pan", BPoint(fPanR.left - 2, fPanR.top - 4));
-    DrawPanKnob(this, fPanR, t->pan);
+    DrawKnob(this, fPanR, t->pan, accent);
 
-    // Vertical fader + dB readout.
-    DrawVFader(this, fFaderR, GainToFrac(t->gain), kUnityFrac);
+    // Channel fader + VU meter (peak-fed) side by side.
+    DrawFader(this, fFaderR, GainToFrac(t->gain), kUnityFrac);
+    DrawVUMeter(this, fMeterR, std::max(fPeakL, fPeakR));
+
     char db[16];
     const float d = GainToDb(t->gain);
     if (d <= -80.0f) std::snprintf(db, sizeof(db), "-inf");
     else             std::snprintf(db, sizeof(db), "%+.1f dB", d);
     SetHighColor(ColText());
     const float tw = StringWidth(db);
-    DrawString(db, BPoint(Bounds().Width() * 0.5f - tw * 0.5f,
-                          Bounds().bottom - 8));
+    DrawString(db, BPoint(fFaderR.left, Bounds().bottom - 8));
 }
 
 void InspectorView::MouseDown(BPoint where) {
@@ -164,7 +168,9 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fMonR.Contains(where)) {
-        if (BWindow* w = Window()) w->PostMessage(kMsgInputMon);
+        t->inputMonitor = !t->inputMonitor;   // per-track; hear input w/o arming
+        Refresh();
+        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;
     }
     if (fInputR.Contains(where)) {

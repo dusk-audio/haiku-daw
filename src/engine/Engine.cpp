@@ -277,7 +277,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         if (t.type != TrackType::Midi)
             continue;
         std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
-        const bool monitor = t.armed;
+        const bool monitor = t.armed || t.inputMonitor;   // live input synth
         const bool audible = !t.muted && (!anySolo || t.soloed);
         if ((notes.empty() && !monitor) || (!audible && !monitor))
             continue;

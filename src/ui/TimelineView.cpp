@@ -943,9 +943,13 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         return;
     }
     if (MonRect(lane).Contains(where)) {
-        // Input-monitor toggle (global; routing/fx/sends/input live in the
-        // inspector for the selected track).
-        if (BWindow* w = Window()) w->PostMessage(kMsgInputMon);
+        // Per-track input monitor: hear this track's input live without arming.
+        if (Track* tr = fProject->FindTrack(id)) tr->inputMonitor = !tr->inputMonitor;
+        Invalidate(lane);
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgMonitorRefresh);
+            w->PostMessage(kMsgUiRefresh);
+        }
         return;
     }
     if (ArmRect(lane).Contains(where)) {
@@ -1631,44 +1635,44 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     const bool selected = (t.id == fSelectedTrack);
     SetHighColor(selected ? ColHeaderHi() : ColHeader());
     FillRect(hdr);
-    // Left color stripe (track color) for quick visual grouping.
-    SetHighColor(TrackColor(t.colorIndex));
+    // Left color strip by track type: audio = blue, MIDI = green, bus = grey.
+    SetHighColor(t.type == TrackType::Midi ? ColMidiAccent()
+               : t.type == TrackType::Bus  ? ColTextDim() : ColAudioAccent());
     FillRect(BRect(0, lane.top, 4, lane.bottom));
     SetHighColor(ColGrid());
-    StrokeLine(BPoint(kHeaderWidth, lane.top), BPoint(kHeaderWidth, lane.bottom));
+    StrokeLine(BPoint(kHeaderWidth - 1, lane.top),
+               BPoint(kHeaderWidth - 1, lane.bottom));
+    // Selection: subtle blue outline (not a harsh solid block).
+    if (t.id == fSelectedTrack) {
+        SetHighColor(ColAccent());
+        StrokeRect(BRect(1, lane.top + 1, kHeaderWidth - 2, lane.bottom - 1));
+    }
 
     SetHighColor(ColText());
-    DrawString(t.name.c_str(), BPoint(9, lane.top + 14));
+    DrawString(t.name.c_str(), BPoint(10, lane.top + 14));
 
-    // Mute / Solo / Arm / input-Monitor toggle boxes: filled when active.
-    BRect m = MuteRect(lane), s = SoloRect(lane), a = ArmRect(lane), mo = MonRect(lane);
-    SetHighColor(t.muted ? ColPlayhead() : ColLane());  FillRect(m);
-    SetHighColor(t.soloed ? Rgb(210, 190, 70) : ColLane());  FillRect(s);
-    SetHighColor(t.armed ? Rgb(220, 60, 60) : ColLane());  FillRect(a);
-    SetHighColor(fMonitorInput ? Rgb(70, 140, 200) : ColLane());  FillRect(mo);
-    SetHighColor(ColGrid());
-    StrokeRect(m); StrokeRect(s); StrokeRect(a); StrokeRect(mo);
-    SetHighColor(ColText());
-    DrawString("M", BPoint(m.left + 5,  m.bottom - 5));
-    DrawString("S", BPoint(s.left + 6,  s.bottom - 5));
-    DrawString("R", BPoint(a.left + 6,  a.bottom - 5));
-    DrawString("I", BPoint(mo.left + 7, mo.bottom - 5));
+    // Mute / Solo / Record / Input-monitor: rounded state buttons.
+    DrawButton(this, MuteRect(lane), "M", t.muted,        ColMute());
+    DrawButton(this, SoloRect(lane), "S", t.soloed,       ColSolo());
+    DrawButton(this, ArmRect(lane),  "R", t.armed,        ColRec());
+    DrawButton(this, MonRect(lane),  "I", t.inputMonitor, ColMon());
 
-    // Pan knob.
-    DrawPanKnob(this, PanKnobRect(lane), t.pan);
+    // Pan knob (value ring in the track-type accent).
+    DrawKnob(this, PanKnobRect(lane), t.pan,
+             t.type == TrackType::Midi ? ColMidiAccent() : ColAudioAccent());
 
-    // Gain fader: filled proportion = gain / kMaxGain.
+    // Gain fader (horizontal): recessed trough + accent fill.
     BRect g = GainRect(lane);
-    SetHighColor(ColLane());  FillRect(g);
+    SetHighColor(ColGrid());  FillRect(g);
     float gf = t.gain / kMaxGain; if (gf < 0) gf = 0; if (gf > 1) gf = 1;
     BRect gfill = g; gfill.right = g.left + (g.Width()) * gf;
-    SetHighColor(ColClip());  FillRect(gfill);
-    SetHighColor(ColGrid());  StrokeRect(g);
+    SetHighColor(ColAccent());  FillRect(gfill);
+    SetHighColor(ColBtnBorder());  StrokeRect(g);
 
     // Per-track stereo meter at the header's right edge.
     const float mx0 = kHeaderWidth - kHdrMeterW;
     BRect meterBox(mx0, lane.top + 2, kHeaderWidth - 2, lane.bottom - 2);
-    SetHighColor(Rgb(16, 18, 22));
+    SetHighColor(Rgb(16, 16, 20));
     FillRect(meterBox);
     float mPeakL = 0.0f, mPeakR = 0.0f;
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {

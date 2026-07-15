@@ -23,6 +23,7 @@ public:
 
     void SetTrack(TrackId id) { fTrack = id; Invalidate(); }
     TrackId SelectedTrack() const { return fTrack; }
+    void SetMeter(float l, float r) { fPeakL = l; fPeakR = r; Invalidate(fMeterR); }
 
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
@@ -41,7 +42,8 @@ private:
 
     // Control rects (recomputed in Layout()).
     BRect fMuteR, fSoloR, fArmR, fMonR, fInputR, fOutR, fSendsR, fFxR, fInstR;
-    BRect fAutoR, fPanR, fFaderR;
+    BRect fAutoR, fPanR, fFaderR, fMeterR;
+    float fPeakL = 0.0f, fPeakR = 0.0f;   // selected track output level
 
     // Fader / pan drag (preview by writing the model, commit one command on up).
     enum class Drag { None, Fader, Pan };

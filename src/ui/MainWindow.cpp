@@ -997,11 +997,19 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
     // Re-attach input monitoring across an engine restart (loop-record seam).
     if (fRecorder) {
         fEngine->SetMonitorSource(fRecorder.get());
-        fEngine->SetInputMonitor(fMonitorInput);
+        fEngine->SetInputMonitor(AudioMonitorOn());
     }
     if (fMidiIn) fEngine->SetLiveMidi(fMidiIn->MonitorInput());
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
     return true;
+}
+
+bool MainWindow::AudioMonitorOn() const {
+    if (fMonitorInput) return true;
+    for (TrackId id : fRecTracks)
+        if (const Track* t = fProject->FindTrack(id))
+            if (t->inputMonitor) return true;
+    return false;
 }
 
 void MainWindow::StartCapture() {
@@ -1025,10 +1033,11 @@ void MainWindow::StartCapture() {
         } else {
             // Wire input monitoring: the engine mixes the recorder's live input
             // (only if the input rate matches the output rate).
-            fRecorder->SetMonitor(fMonitorInput);
+            const bool audMon = AudioMonitorOn();
+            fRecorder->SetMonitor(audMon);
             if (fEngine) {
                 fEngine->SetMonitorSource(fRecorder.get());
-                fEngine->SetInputMonitor(fMonitorInput);
+                fEngine->SetInputMonitor(audMon);
             }
         }
     }
@@ -1036,22 +1045,27 @@ void MainWindow::StartCapture() {
     StartMidiCapture();
 }
 
-// Open a MIDI consumer, connect every armed MIDI track's input endpoint (by
-// name) to it, and begin the note-pairing recorder at the record point.
+// Open a MIDI consumer, connect the input endpoint of every MIDI track that is
+// armed OR input-monitored (so you hear yourself either way), and begin the
+// note-pairing recorder. Recorded clips still drop only on armed tracks.
 void MainWindow::StartMidiCapture() {
-    if (fMidiRecTracks.empty()) return;
+    std::vector<TrackId> monitor;   // armed OR input-monitor, with a MIDI input
+    for (const Track& t : fProject->Tracks())
+        if (t.type == TrackType::Midi && (t.armed || t.inputMonitor)
+            && t.input.kind == InputSource::kMidi)
+            monitor.push_back(t.id);
+    if (monitor.empty()) return;
     fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
     if (fMidiIn->Register() != B_OK) {
         std::fprintf(stderr, "MainWindow: MIDI input register failed\n");
         fMidiIn.reset();
-        fMidiRecTracks.clear();
         return;
     }
     const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
-    std::set<int32> connected;   // dedupe: two armed tracks may share an endpoint
-    for (TrackId id : fMidiRecTracks) {
+    std::set<int32> connected;   // dedupe: tracks may share an endpoint
+    for (TrackId id : monitor) {
         const Track* t = fProject->FindTrack(id);
-        if (!t || t->input.kind != InputSource::kMidi) continue;
+        if (!t) continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t->input.name) {
                 if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
@@ -1134,9 +1148,9 @@ void MainWindow::UpdateMidiMonitor() {
     StopMidiMonitor();
     if (fPlaying || fRecMode) return;   // playback / record own the engine + input
 
-    std::vector<TrackId> armed;
+    std::vector<TrackId> armed;   // MIDI tracks to monitor: armed OR input-monitor
     for (const Track& t : fProject->Tracks())
-        if (t.type == TrackType::Midi && t.armed
+        if (t.type == TrackType::Midi && (t.armed || t.inputMonitor)
             && t.input.kind == InputSource::kMidi)
             armed.push_back(t.id);
     if (armed.empty()) return;
@@ -1808,6 +1822,13 @@ void MainWindow::PushTrackPeaks() {
     for (const Track& t : fProject->Tracks())
         tp[t.id] = { fEngine->TrackPeakL(t.id), fEngine->TrackPeakR(t.id) };
     fTimeline->SetTrackPeaks(tp);
+
+    // Feed the inspector's VU meter for the selected track.
+    if (fInspector) {
+        auto it = tp.find(fInspector->SelectedTrack());
+        if (it != tp.end()) fInspector->SetMeter(it->second.first, it->second.second);
+        else                fInspector->SetMeter(0.0f, 0.0f);
+    }
 
     // Also feed the mixer window (its own looper) if one is open.
     if (fMixerMsgr.IsValid()) {

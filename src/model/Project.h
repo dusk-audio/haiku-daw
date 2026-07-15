@@ -98,6 +98,7 @@ struct Track {
     bool              muted = false;
     bool              soloed = false;
     bool              armed  = false;
+    bool              inputMonitor = false;  // hear the input live w/o record-enable
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     int               colorIndex = 0;   // index into the UI track-color palette
     int               height     = 72;  // lane height in pixels (UI)

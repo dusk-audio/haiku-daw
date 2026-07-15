@@ -1,71 +1,139 @@
-// Small shared custom-drawn widgets (pan knob, vertical fader, button) used by
-// both the track-lane header and the inspector. Header-only inline helpers so
-// the two views draw identical controls. Kit UI (Haiku-only).
+// Small shared custom-drawn widgets (pan knob, fader, VU meter, button) used by
+// both the track-lane header and the inspector, in the Logic-Slate dark theme.
+// Header-only inline helpers so the two views draw identical controls.
+// Haiku-only (BeAPI drawing).
 #pragma once
 
 #include "UiMetrics.h"
 
 #include <View.h>
+#include <GradientLinear.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
 namespace daw {
 
-// A rotary pan knob in `r`, pointer angle from pan [-1 (L) .. +1 (R)] (0 = 12
-// o'clock). Draws a dial with a tick and an L/C/R hint below.
-inline void DrawPanKnob(BView* v, BRect r, float pan) {
-    if (!(pan >= -1.0f)) pan = -1.0f;   // also catches NaN
-    if (pan >  1.0f)     pan =  1.0f;
+// A rotary knob: dark body + outline, a colored value ring (FillArc-style, drawn
+// as a thick stroked arc) from 12 o'clock to the value, and a crisp white
+// pointer. `val` in [-1,1] (bipolar, e.g. pan; 0 = 12 o'clock). `accent` colors
+// the value ring. The knob sweeps +/- 140 degrees from top.
+inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent) {
+    if (!(val >= -1.0f)) val = -1.0f;   // NaN/low -> -1
+    if (val > 1.0f) val = 1.0f;
     const float cx = (r.left + r.right) * 0.5f;
     const float cy = (r.top + r.bottom) * 0.5f;
-    const float rad = std::min(r.Width(), r.Height()) * 0.5f - 1.0f;
+    const float rad = std::min(r.Width(), r.Height()) * 0.5f - 3.0f;
+    if (rad < 2.0f) return;
+    const float ringR = rad + 2.0f;
 
-    v->SetHighColor(ColHeaderHi());
-    v->FillEllipse(BPoint(cx, cy), rad, rad);
+    // Value-ring track (dim full sweep) then the lit value portion. BeAPI arc
+    // angles: degrees CCW, 0 = 3 o'clock, 90 = 12 o'clock (top).
+    v->SetPenSize(2.5f);
     v->SetHighColor(ColGrid());
+    v->StrokeArc(BPoint(cx, cy), ringR, ringR, -50.0f, 280.0f);   // full track
+    v->SetHighColor(accent);
+    v->StrokeArc(BPoint(cx, cy), ringR, ringR, 90.0f, -val * 140.0f);
+    v->SetPenSize(1.0f);
+
+    // Body.
+    v->SetHighColor(ColKnobBody());
+    v->FillEllipse(BPoint(cx, cy), rad, rad);
+    v->SetHighColor(ColKnobOutline());
     v->StrokeEllipse(BPoint(cx, cy), rad, rad);
 
-    // Pointer: pan maps to +/- 140 degrees around 12 o'clock.
-    const float ang = (float)(-M_PI / 2.0 + pan * (140.0 * M_PI / 180.0));
-    v->SetHighColor(pan == 0.0f ? ColText() : ColAccent());
+    // Pointer (standard math angle; screen y is down, so subtract sin).
+    const double ang = (90.0 - val * 140.0) * M_PI / 180.0;
+    v->SetHighColor(Rgb(235, 235, 240));
     v->SetPenSize(2.0f);
     v->StrokeLine(BPoint(cx, cy),
-                  BPoint(cx + std::cos(ang) * rad * 0.85f,
-                         cy + std::sin(ang) * rad * 0.85f));
+                  BPoint(cx + std::cos(ang) * rad * 0.78f,
+                         cy - std::sin(ang) * rad * 0.78f));
     v->SetPenSize(1.0f);
 }
 
-// A vertical fader in `r` filled from the bottom to `frac` [0,1]. Draws a unity
-// tick at `unityFrac`. Returns nothing; the caller labels it.
-inline void DrawVFader(BView* v, BRect r, float frac, float unityFrac) {
-    if (!(frac > 0)) frac = 0; if (frac > 1) frac = 1;   // NaN -> 0
-    v->SetHighColor(ColLcd());
-    v->FillRect(r);
-    BRect fill = r;
-    fill.top = r.bottom - r.Height() * frac;
-    v->SetHighColor(ColAccent());
-    v->FillRect(fill);
-    v->SetHighColor(ColGrid());
-    v->StrokeRect(r);
-    // Unity tick.
-    const float uy = r.bottom - r.Height() * unityFrac;
-    v->SetHighColor(ColTextDim());
-    v->StrokeLine(BPoint(r.left - 3, uy), BPoint(r.left, uy));
-    v->StrokeLine(BPoint(r.right, uy), BPoint(r.right + 3, uy));
+inline void DrawPanKnob(BView* v, BRect r, float pan) {
+    DrawKnob(v, r, pan, ColAccent());
 }
 
-// A labelled button box; `lit` fills it with an accent/`on` color.
-inline void DrawButton(BView* v, BRect r, const char* label, bool lit,
+// A rounded button. Inactive: dark fill + subtle border + dim text. Active:
+// `onColor` fill with auto-contrast (black on bright, white on dark) text.
+inline void DrawButton(BView* v, BRect r, const char* label, bool active,
                        rgb_color onColor = ColAccent()) {
-    v->SetHighColor(lit ? onColor : ColLane());
-    v->FillRect(r);
-    v->SetHighColor(ColGrid());
-    v->StrokeRect(r);
-    v->SetHighColor(lit ? ColBackground() : ColText());
+    if (active) {
+        v->SetHighColor(onColor);
+        v->FillRoundRect(r, 3.0f, 3.0f);
+    } else {
+        v->SetHighColor(ColBtnOff());
+        v->FillRoundRect(r, 3.0f, 3.0f);
+        v->SetHighColor(ColBtnBorder());
+        v->StrokeRoundRect(r, 3.0f, 3.0f);
+    }
+    rgb_color txt = ColBtnText();
+    if (active) {
+        const float lum = 0.299f * onColor.red + 0.587f * onColor.green
+                        + 0.114f * onColor.blue;
+        txt = lum > 140.0f ? Rgb(20, 20, 22) : Rgb(240, 240, 240);
+    }
+    v->SetHighColor(txt);
     const float tw = v->StringWidth(label);
     v->DrawString(label, BPoint((r.left + r.right) * 0.5f - tw * 0.5f,
-                                r.bottom - 5));
+                                r.bottom - 6.0f));
+}
+
+// A vertical channel fader in `r`: a narrow dark trough with a unity tick and a
+// metallic rectangular cap (24x12) carrying a white indicator line. `frac` is
+// the fader position [0,1]; `unityFrac` marks 0 dB.
+inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
+    if (!(frac > 0)) frac = 0; if (frac > 1) frac = 1;
+    const float cx = (r.left + r.right) * 0.5f;
+
+    // Trough (4px, recessed near-black).
+    BRect trough(cx - 2, r.top, cx + 2, r.bottom);
+    v->SetHighColor(ColGrid());
+    v->FillRect(trough);
+    v->SetHighColor(Rgb(10, 10, 13));
+    v->StrokeLine(BPoint(cx - 2, r.top), BPoint(cx - 2, r.bottom));
+
+    // Unity (0 dB) tick.
+    const float uy = r.bottom - r.Height() * unityFrac;
+    v->SetHighColor(ColTextDim());
+    v->StrokeLine(BPoint(cx - 8, uy), BPoint(cx - 4, uy));
+    v->StrokeLine(BPoint(cx + 4, uy), BPoint(cx + 8, uy));
+
+    // Cap: metallic vertical gradient, rounded, white indicator line.
+    const float cy = r.bottom - r.Height() * frac;
+    BRect cap(cx - 12, cy - 6, cx + 12, cy + 6);
+    BGradientLinear grad(BPoint(cap.left, cap.top), BPoint(cap.left, cap.bottom));
+    grad.AddColor(Rgb(96, 96, 106), 0);
+    grad.AddColor(Rgb(62, 62, 70), 128);
+    grad.AddColor(Rgb(44, 44, 52), 255);
+    v->FillRoundRect(cap, 2.0f, 2.0f, grad);
+    v->SetHighColor(ColKnobOutline());
+    v->StrokeRoundRect(cap, 2.0f, 2.0f);
+    v->SetHighColor(Rgb(232, 232, 238));
+    v->StrokeLine(BPoint(cap.left + 3, cy), BPoint(cap.right - 3, cy));
+}
+
+// A vertical VU meter in `r`: recessed well filled bottom-up with a green ->
+// yellow -> red gradient to `level` [0,1].
+inline void DrawVUMeter(BView* v, BRect r, float level) {
+    if (level < 0) level = 0; if (level > 1) level = 1;
+    v->SetHighColor(Rgb(16, 16, 20));
+    v->FillRect(r);
+    if (level > 0.001f) {
+        BRect fill = r;
+        fill.top = r.bottom - r.Height() * level;
+        BGradientLinear grad(BPoint(r.left, r.bottom), BPoint(r.left, r.top));
+        grad.AddColor(Rgb(52, 199, 89), 0);      // green bottom
+        grad.AddColor(Rgb(52, 199, 89), 150);
+        grad.AddColor(Rgb(255, 204, 0), 205);    // yellow ~-6 dB
+        grad.AddColor(Rgb(255, 59, 48), 255);    // red at top
+        v->FillRect(fill, grad);
+    }
+    v->SetHighColor(ColGrid());
+    v->StrokeRect(r);
 }
 
 // Linear gain <-> fader fraction. Unity (1.0) sits at kUnityFrac so there's

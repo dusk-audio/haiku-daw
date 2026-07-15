@@ -39,10 +39,10 @@ void TransportBar::Draw(BRect) {
     SetHighColor(ColGrid());
     StrokeRoundRect(LcdRect(H), 5, 5);
 
-    // Play: triangle, lit green when playing.
+    // Play: triangle, lit bright green when playing.
     BRect p = PlayRect();
-    DrawButton(this, p, Rgb(60, 140, 90), fPlaying);
-    SetHighColor(fPlaying ? ColBackground() : Rgb(90, 200, 130));
+    DrawButton(this, p, ColPlay(), fPlaying);
+    SetHighColor(fPlaying ? ColBackground() : ColPlay());
     const float cy = (p.top + p.bottom) / 2;
     BPoint tri[3] = { BPoint(p.left + 24, cy - 7), BPoint(p.left + 24, cy + 7),
                       BPoint(p.left + 38, cy) };
@@ -55,10 +55,10 @@ void TransportBar::Draw(BRect) {
     const float scy = (s.top + s.bottom) / 2;
     FillRect(BRect(s.left + 26, scy - 6, s.left + 38, scy + 6));
 
-    // Rec: circle, lit red when recording.
+    // Rec: circle, lit bright red when recording.
     BRect rc = RecRect();
-    DrawButton(this, rc, Rgb(200, 62, 62), fRecording);
-    SetHighColor(fRecording ? Rgb(255, 210, 210) : Rgb(220, 84, 84));
+    DrawButton(this, rc, ColRec(), fRecording);
+    SetHighColor(fRecording ? Rgb(255, 220, 216) : ColRec());
     const float rcy = (rc.top + rc.bottom) / 2;
     FillEllipse(BPoint(rc.left + 32, rcy), 7, 7);
 
