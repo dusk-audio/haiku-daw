@@ -668,10 +668,12 @@ void TimelineView::MouseDown(BPoint where) {
             const float xStart = FrameToX(c.startFrame);
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
             const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
+            // Fade grips: the top name-strip band within 14px of either edge
+            // (checked before move/resize so the corner always grabs the fade).
             const bool  topBand = where.y <= lane.top + 16;
-            if (topBand && where.x <= xStart + 12) {
+            if (topBand && where.x <= xStart + 14) {
                 fDrag = Drag::ClipFadeIn;    // top-left grip = fade in
-            } else if (topBand && where.x >= xEnd - 12) {
+            } else if (topBand && where.x >= xEnd - 14) {
                 fDrag = Drag::ClipFadeOut;   // top-right grip = fade out
             } else if (wide && where.x >= xEnd - kEdgeGrab) {
                 fDrag = Drag::ClipResize;
