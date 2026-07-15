@@ -41,7 +41,7 @@ private:
 
     // Control rects (recomputed in Layout()).
     BRect fMuteR, fSoloR, fArmR, fMonR, fInputR, fOutR, fSendsR, fFxR, fInstR;
-    BRect fPanR, fFaderR;
+    BRect fAutoR, fPanR, fFaderR;
 
     // Fader / pan drag (preview by writing the model, commit one command on up).
     enum class Drag { None, Fader, Pan };

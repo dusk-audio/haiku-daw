@@ -86,6 +86,11 @@ public:
     // poll doesn't repaint the whole view each tick.
     void SetPlayhead(Frame f);
     void SetFollow(bool on) { fFollow = on; }   // chase the playhead in view
+    void SetMonitorInput(bool on) { fMonitorInput = on; Invalidate(); }  // lane "I" lamp
+    void CycleAuto(TrackId id);                 // inspector Auto button
+
+    // Currently selected track (drives the inspector; -1 if none).
+    TrackId SelectedTrack() const { return fSelectedTrack; }
 
     // Per-track output peaks (from the engine) for the header meters. Cleared
     // when playback stops. Keyed by TrackId -> (peakL, peakR) in [0, 1+].
@@ -245,6 +250,7 @@ private:
     bool           fRecording = false;
     bool           fFollow    = true;   // auto-scroll to keep the playhead in view
     TrackId        fSelectedTrack = kInvalidTrackId;  // inspector focus + highlight
+    bool           fMonitorInput  = false;            // global input-monitor lamp
     Frame          fRecStart  = 0;
     Frame          fRecLen    = 0;
     // Live take content while recording (see SetLiveMidiNotes / SetLiveAudio).

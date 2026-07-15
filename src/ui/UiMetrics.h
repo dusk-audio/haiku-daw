@@ -10,7 +10,7 @@ namespace daw {
 constexpr float kRulerHeight  = 28.0f;   // top time-ruler strip
 constexpr float kTrackHeight  = 74.0f;   // one track lane
 constexpr float kTrackGap     = 1.0f;    // divider between lanes
-constexpr float kHeaderWidth  = 210.0f;  // left track-header column (incl. meter + In box)
+constexpr float kHeaderWidth  = 150.0f;  // slim per-lane header (full controls in the inspector)
 constexpr float kHdrMeterW    = 16.0f;   // per-track meter strip width (right edge)
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.
@@ -40,6 +40,10 @@ constexpr float kInspectorWidth = 190.0f;
 // Inspector -> MainWindow: toggle the global input monitor (same as the View
 // menu item; shares the fourcc so the existing handler catches it).
 constexpr uint32 kMsgInputMon = 'moni';
+
+// Inspector -> MainWindow: cycle the selected track's automation lane mode
+// (Off -> Gain -> Pan -> fx lanes). The timeline owns the mode + curve editing.
+constexpr uint32 kMsgCycleAuto = 'caut';
 
 inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};

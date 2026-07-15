@@ -52,7 +52,8 @@ void InspectorView::Layout() {
     fOutR   = BRect(pad,           y, pad + hw,     y + 20);
     fSendsR = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
     fFxR    = BRect(pad,           y, pad + hw,     y + 20);
-    fInstR  = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 32;
+    fInstR  = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
+    fAutoR  = BRect(pad, y, pad + bw, y + 20); y += 30;
     // Pan knob (centered) then a tall vertical fader below it.
     const float knob = 44.0f;
     fPanR   = BRect(w * 0.5f - knob * 0.5f, y, w * 0.5f + knob * 0.5f, y + knob);
@@ -123,6 +124,8 @@ void InspectorView::Draw(BRect) {
     std::snprintf(fb, sizeof(fb), "FX %zu", t->fx.size());
     DrawButton(this, fFxR, fb, !t->fx.empty(), Rgb(80, 170, 110));
     if (midi) DrawButton(this, fInstR, "Instrument", true, Rgb(70, 90, 130));
+
+    DrawButton(this, fAutoR, "Automation", false);
 
     // Pan knob.
     SetHighColor(ColTextDim());
@@ -237,6 +240,10 @@ void InspectorView::MouseDown(BPoint where) {
         BPoint p = ConvertToScreen(where);
         BRect wr(p.x, p.y, p.x + 280, p.y + 190);
         (new InstrumentWindow(wr, t->instrument, id, BMessenger(Window())))->Show();
+        return;
+    }
+    if (fAutoR.Contains(where)) {   // cycle the timeline's automation lane mode
+        if (BWindow* w = Window()) w->PostMessage(kMsgCycleAuto);
         return;
     }
 

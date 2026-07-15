@@ -7,8 +7,8 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
-#include "../midi/MidiPort.h"   // EnumerateMidiEndpoints (input picker)
 #include "../engine/Recorder.h" // live capture waveform envelope
+#include "Widgets.h"            // shared pan knob draw
 
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -49,32 +49,15 @@ static constexpr int kSnapDivision = 4;
 // Defined below; used by TrackIndexAt/LaneRect above its definition.
 static float LaneHeightOf(const Track& t);
 
-static BRect RouteRect(BRect lane) { return BRect(84,  lane.top + 2,  112, lane.top + 17); }
-static BRect FxRect(BRect lane)    { return BRect(116, lane.top + 2,  152, lane.top + 17); }
-static BRect MuteRect(BRect lane)  { return BRect(6,  lane.top + 20, 26,  lane.top + 38); }
-static BRect SoloRect(BRect lane)  { return BRect(30, lane.top + 20, 50,  lane.top + 38); }
-static BRect ArmRect(BRect lane)   { return BRect(54, lane.top + 20, 74,  lane.top + 38); }
-static BRect GainRect(BRect lane)  { return BRect(80, lane.top + 22, 154, lane.top + 34); }
-static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.top + 52); }
-static BRect SndRect(BRect lane)   { return BRect(6,  lane.top + 54, 60,  lane.top + 69); }
-static BRect AutoRect(BRect lane)  { return BRect(64, lane.top + 54, 118, lane.top + 69); }
-static BRect InstRect(BRect lane)  { return BRect(120, lane.top + 54, 154, lane.top + 69); }
-// Input selector: a tall box on the right of the header (before the meter),
-// visible on every track. Click to choose the record input.
-static BRect InputRect(BRect lane) { return BRect(158, lane.top + 2,  190, lane.top + 38); }
-
-// Short label for a track's assigned input source (fits the In box).
-static std::string InputLabel(const Track& t) {
-    if (t.input.kind == InputSource::kAudioDefault) return "Dflt";
-    if (t.input.kind == InputSource::kMidi) {
-        std::string n = t.input.name;
-        const std::string pfx = "/dev/midi/";
-        if (n.compare(0, pfx.size(), pfx) == 0) n = n.substr(pfx.size());
-        if (n.size() > 7) n = n.substr(n.size() - 7);   // keep the tail (port id)
-        return n.empty() ? std::string("set") : n;
-    }
-    return "\xE2\x80\x94";   // em dash: no input
-}
+// Slim per-lane header controls: name, M/S/R + input-monitor, a pan knob, and a
+// horizontal gain fader. Everything else (routing, fx, sends, instrument, input)
+// lives in the left inspector for the selected track.
+static BRect MuteRect(BRect lane)    { return BRect(6,   lane.top + 20, 24,  lane.top + 38); }
+static BRect SoloRect(BRect lane)    { return BRect(28,  lane.top + 20, 46,  lane.top + 38); }
+static BRect ArmRect(BRect lane)     { return BRect(50,  lane.top + 20, 68,  lane.top + 38); }
+static BRect MonRect(BRect lane)     { return BRect(72,  lane.top + 20, 90,  lane.top + 38); }
+static BRect PanKnobRect(BRect lane) { return BRect(100, lane.top + 15, 128, lane.top + 43); }
+static BRect GainRect(BRect lane)    { return BRect(6,   lane.top + 50, 128, lane.top + 62); }
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -137,6 +120,15 @@ void TimelineView::ZoomToFit() {
     if (fpp > 65536.0) fpp = 65536.0;
     fFramesPerPixel = fpp;
     fScrollFrame = 0;
+    Invalidate();
+}
+
+void TimelineView::CycleAuto(TrackId id) {
+    const Track* t = fProject ? fProject->FindTrack(id) : nullptr;
+    if (!t) return;
+    // Off -> Gain -> Pan -> each fx-param lane -> Off (same as the old box).
+    int& m = fAutoMode[id];
+    m = (m + 1) % (3 + (int)t->fxAuto.size());
     Invalidate();
 }
 
@@ -941,118 +933,20 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         fStack->Execute(std::make_unique<SetTrackMuteCommand>(id, !t.muted),
                         *fProject);
         Invalidate(lane);
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
     if (SoloRect(lane).Contains(where)) {
         fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
                         *fProject);
         Invalidate(lane);
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
-    if (RouteRect(lane).Contains(where)) {
-        // Output routing: Master + every bus track (except this one).
-        BPopUpMenu* menu = new BPopUpMenu("route", false, false);
-        menu->AddItem(new BMenuItem("Master", NULL));
-        std::vector<TrackId> targets;   // parallel to items after index 0
-        for (const Track& bt : fProject->Tracks()) {
-            if (bt.type != TrackType::Bus || bt.id == id) continue;
-            menu->AddItem(new BMenuItem(bt.name.c_str(), NULL));
-            targets.push_back(bt.id);
-        }
-        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-        const int32 pick = sel ? menu->IndexOf(sel) : -1;
-        delete menu;
-        if (pick == 0) {
-            fStack->Execute(std::make_unique<SetTrackOutputCommand>(
-                id, kInvalidTrackId), *fProject);
-            Invalidate(lane);
-        } else if (pick > 0 && (size_t)(pick - 1) < targets.size()) {
-            fStack->Execute(std::make_unique<SetTrackOutputCommand>(
-                id, targets[(size_t)(pick - 1)]), *fProject);
-            Invalidate(lane);
-        }
-        return;
-    }
-    if (FxRect(lane).Contains(where)) {
-        // Open the per-track effects editor. It runs on its own thread with a
-        // snapshot of the chain and posts edits back to the window (main
-        // thread) via kMsgApplyFx. Effects apply on the next Play.
-        BPoint p = ConvertToScreen(where);
-        BRect  wr(p.x, p.y, p.x + 480, p.y + 620);   // room for graphs + knobs
-        EffectsWindow* w = new EffectsWindow(wr, t.fx, id, BMessenger(Window()));
-        w->Show();
-        return;
-    }
-    if (SndRect(lane).Contains(where)) {
-        // Open the aux-sends editor: snapshot of this track's sends + the list
-        // of bus targets. Edits post back via kMsgApplySends.
-        std::vector<std::pair<TrackId, std::string>> buses;
-        for (const Track& bt : fProject->Tracks())
-            if (bt.type == TrackType::Bus && bt.id != id)
-                buses.push_back({bt.id, bt.name});
-        BPoint p = ConvertToScreen(where);
-        BRect  wr(p.x, p.y, p.x + 340, p.y + 320);
-        SendsWindow* w = new SendsWindow(wr, t.sends, buses, id,
-                                         BMessenger(Window()));
-        w->Show();
-        return;
-    }
-    if (AutoRect(lane).Contains(where)) {
-        // Cycle: Off -> Gain -> Pan -> each fx-param lane -> Off.
-        int& m = fAutoMode[id];
-        m = (m + 1) % (3 + (int)t.fxAuto.size());
-        Invalidate(lane);
-        return;
-    }
-    if (t.type == TrackType::Midi && InstRect(lane).Contains(where)) {
-        // Open the instrument editor (waveform + ADSR). Posts back via
-        // kMsgApplyInstrument.
-        BPoint p = ConvertToScreen(where);
-        BRect  wr(p.x, p.y, p.x + 280, p.y + 190);
-        (new InstrumentWindow(wr, t.instrument, id,
-                              BMessenger(Window())))->Show();
-        return;
-    }
-    if (InputRect(lane).Contains(where)) {
-        // Unified input selector. MIDI tracks list the system's MIDI producer
-        // endpoints (keyboards/ports); audio tracks offer the default input
-        // (per-channel device selection for multichannel interfaces is later).
-        // Chosen by NAME, so it survives midi_server id reassignment.
-        BPopUpMenu* menu = new BPopUpMenu("input", false, false);
-        BMenuItem* none = new BMenuItem("None", NULL);
-        if (t.input.kind == InputSource::kNone) none->SetMarked(true);
-        menu->AddItem(none);
-        std::vector<InputSource> choices;   // parallel to items after index 0
-        if (t.type == TrackType::Midi) {
-            for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
-                if (!e.isProducer) continue;
-                if (e.name.find("HaikuDAW") != std::string::npos) continue;  // our own ports
-                BMenuItem* it = new BMenuItem(e.name.c_str(), NULL);
-                if (t.input.kind == InputSource::kMidi && t.input.name == e.name)
-                    it->SetMarked(true);
-                menu->AddItem(it);
-                choices.push_back(InputSource{ InputSource::kMidi, e.name, 0 });
-            }
-        } else if (t.type == TrackType::Audio) {
-            BMenuItem* def = new BMenuItem("Default Input", NULL);
-            if (t.input.kind == InputSource::kAudioDefault) def->SetMarked(true);
-            menu->AddItem(def);
-            choices.push_back(InputSource{ InputSource::kAudioDefault, "", 0 });
-        }
-        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-        const int32 pick = sel ? menu->IndexOf(sel) : -1;
-        delete menu;
-        if (pick == 0) {
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                id, InputSource{}), *fProject);
-            Invalidate(lane);
-        } else if (pick > 0 && (size_t)(pick - 1) < choices.size()) {
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                id, choices[(size_t)(pick - 1)]), *fProject);
-            Invalidate(lane);
-        }
-        // Re-evaluate monitoring: a new input on an armed track reconnects it.
-        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
+    if (MonRect(lane).Contains(where)) {
+        // Input-monitor toggle (global; routing/fx/sends/input live in the
+        // inspector for the selected track).
+        if (BWindow* w = Window()) w->PostMessage(kMsgInputMon);
         return;
     }
     if (ArmRect(lane).Contains(where)) {
@@ -1063,15 +957,18 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
             tr->armed = !tr->armed;
         Invalidate(lane);
         // Arming an MIDI track with an input starts/stops idle monitoring.
-        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgMonitorRefresh);
+            w->PostMessage(kMsgUiRefresh);
+        }
         return;
     }
 
     // Gain / pan: begin a drag. Grab the pointer so we keep getting move/up
     // events even if the cursor leaves the fader.
     Drag mode = Drag::None;
-    if (GainRect(lane).Contains(where))     mode = Drag::Gain;
-    else if (PanRect(lane).Contains(where)) mode = Drag::Pan;
+    if (GainRect(lane).Contains(where))         mode = Drag::Gain;
+    else if (PanKnobRect(lane).Contains(where)) mode = Drag::Pan;
     if (mode == Drag::None)
         return;
 
@@ -1118,8 +1015,10 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
         t->gain = v;
     } else if (fDrag == Drag::Pan) {
-        BRect pr = PanRect(lane);
-        float v = ((where.x - pr.left) / pr.Width()) * 2.0f - 1.0f;
+        // Pan knob: horizontal drag across its width spans full L..R.
+        BRect pr = PanKnobRect(lane);
+        const float cx = (pr.left + pr.right) * 0.5f;
+        float v = (where.x - cx) / (pr.Width() * 0.5f);
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
     } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
@@ -1428,12 +1327,15 @@ void TimelineView::MouseUp(BPoint where) {
         if (cmd)
             fStack->Execute(std::move(cmd), *fProject);
     }
+    const bool wasFader = (fDrag == Drag::Gain || fDrag == Drag::Pan);
     fDrag = Drag::None;
     fDragNote = -1;
     fDragIsMidiClip = false;
     fDragCurLane = -1;
     fMultiMove = false;
     Invalidate();   // a clip may have moved to another lane
+    if (wasFader)   // keep the inspector's fader/pan in sync
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
 }
 
 void TimelineView::SetRecording(bool active, Frame start, Frame length) {
@@ -1739,51 +1641,22 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     SetHighColor(ColText());
     DrawString(t.name.c_str(), BPoint(9, lane.top + 14));
 
-    // Output routing box: "->M" master, "->B" a bus.
-    BRect rr = RouteRect(lane);
-    SetHighColor(t.output == kInvalidTrackId ? ColLane() : Rgb(70, 90, 130));
-    FillRect(rr);
+    // Mute / Solo / Arm / input-Monitor toggle boxes: filled when active.
+    BRect m = MuteRect(lane), s = SoloRect(lane), a = ArmRect(lane), mo = MonRect(lane);
+    SetHighColor(t.muted ? ColPlayhead() : ColLane());  FillRect(m);
+    SetHighColor(t.soloed ? Rgb(210, 190, 70) : ColLane());  FillRect(s);
+    SetHighColor(t.armed ? Rgb(220, 60, 60) : ColLane());  FillRect(a);
+    SetHighColor(fMonitorInput ? Rgb(70, 140, 200) : ColLane());  FillRect(mo);
     SetHighColor(ColGrid());
-    StrokeRect(rr);
+    StrokeRect(m); StrokeRect(s); StrokeRect(a); StrokeRect(mo);
     SetHighColor(ColText());
-    DrawString(t.output == kInvalidTrackId ? "\xE2\x86\x92" "M" : "\xE2\x86\x92" "B",
-               BPoint(rr.left + 4, rr.bottom - 4));
+    DrawString("M", BPoint(m.left + 5,  m.bottom - 5));
+    DrawString("S", BPoint(s.left + 6,  s.bottom - 5));
+    DrawString("R", BPoint(a.left + 6,  a.bottom - 5));
+    DrawString("I", BPoint(mo.left + 7, mo.bottom - 5));
 
-    // FX toggle box: lit green when the track has an effect chain.
-    BRect fxr = FxRect(lane);
-    SetHighColor(t.fx.empty() ? ColLane() : Rgb(80, 170, 110));
-    FillRect(fxr);
-    SetHighColor(ColGrid());
-    StrokeRect(fxr);
-    SetHighColor(ColText());
-    DrawString("FX", BPoint(fxr.left + 9, fxr.bottom - 4));
-
-    // Mute / Solo / Arm toggle boxes: filled when active.
-    BRect m = MuteRect(lane), s = SoloRect(lane), a = ArmRect(lane);
-    SetHighColor(t.muted ? ColPlayhead() : ColLane());
-    FillRect(m);
-    SetHighColor(t.soloed ? Rgb(210, 190, 70) : ColLane());
-    FillRect(s);
-    SetHighColor(t.armed ? Rgb(220, 60, 60) : ColLane());
-    FillRect(a);
-    SetHighColor(ColGrid());
-    StrokeRect(m); StrokeRect(s); StrokeRect(a);
-    SetHighColor(ColText());
-    DrawString("M", BPoint(m.left + 5, m.bottom - 5));
-    DrawString("S", BPoint(s.left + 6, s.bottom - 5));
-    DrawString("R", BPoint(a.left + 6, a.bottom - 5));
-
-    // Input selector: label ("In") over the assigned source; greened when set.
-    BRect inb = InputRect(lane);
-    const bool hasIn = t.input.kind != InputSource::kNone;
-    SetHighColor(hasIn ? Rgb(52, 104, 74) : ColLane());
-    FillRect(inb);
-    SetHighColor(ColGrid());
-    StrokeRect(inb);
-    SetHighColor(ColTextDim());
-    DrawString("In", BPoint(inb.left + 4, inb.top + 13));
-    SetHighColor(ColText());
-    DrawString(InputLabel(t).c_str(), BPoint(inb.left + 3, inb.bottom - 5));
+    // Pan knob.
+    DrawPanKnob(this, PanKnobRect(lane), t.pan);
 
     // Gain fader: filled proportion = gain / kMaxGain.
     BRect g = GainRect(lane);
@@ -1792,63 +1665,6 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     BRect gfill = g; gfill.right = g.left + (g.Width()) * gf;
     SetHighColor(ColClip());  FillRect(gfill);
     SetHighColor(ColGrid());  StrokeRect(g);
-
-    // Pan bar: a marker at the pan position, center line for reference.
-    BRect pr = PanRect(lane);
-    SetHighColor(ColLane());  FillRect(pr);
-    const float cx = (pr.left + pr.right) * 0.5f;
-    SetHighColor(ColGrid());
-    StrokeLine(BPoint(cx, pr.top), BPoint(cx, pr.bottom));
-    float px = cx + (t.pan * 0.5f) * pr.Width();
-    SetHighColor(ColClipBorder());
-    FillRect(BRect(px - 2, pr.top, px + 2, pr.bottom));
-    SetHighColor(ColGrid());  StrokeRect(pr);
-
-    // Sends box: lit amber when the track has aux sends, shows the count.
-    BRect sr = SndRect(lane);
-    SetHighColor(t.sends.empty() ? ColLane() : Rgb(180, 140, 60));
-    FillRect(sr);
-    SetHighColor(ColGrid());  StrokeRect(sr);
-    SetHighColor(ColText());
-    char sl[16];
-    std::snprintf(sl, sizeof(sl), "Snd %d", (int)t.sends.size());
-    DrawString(sl, BPoint(sr.left + 4, sr.bottom - 4));
-
-    // Automation mode box: Off / Gain / Pan (lit when editing).
-    BRect ar = AutoRect(lane);
-    int amode = 0;
-    if (auto it = fAutoMode.find(t.id); it != fAutoMode.end()) amode = it->second;
-    SetHighColor(amode == 0 ? ColLane() : Rgb(90, 130, 90));
-    FillRect(ar);
-    SetHighColor(ColGrid());  StrokeRect(ar);
-    SetHighColor(ColText());
-    char ab[24];
-    if (amode == 0)      std::snprintf(ab, sizeof(ab), "Auto: -");
-    else if (amode == 1) std::snprintf(ab, sizeof(ab), "Auto:Gain");
-    else if (amode == 2) std::snprintf(ab, sizeof(ab), "Auto:Pan");
-    else {
-        const int fi = amode - 3;
-        if (fi >= 0 && fi < (int)t.fxAuto.size())
-            std::snprintf(ab, sizeof(ab), "Auto:Fx%d.%d",
-                          t.fxAuto[(size_t)fi].fxIndex, t.fxAuto[(size_t)fi].slot);
-        else std::snprintf(ab, sizeof(ab), "Auto:Fx");
-    }
-    DrawString(ab, BPoint(ar.left + 4, ar.bottom - 4));
-
-    // Instrument box (MIDI tracks): opens the waveform/ADSR editor.
-    if (t.type == TrackType::Midi) {
-        BRect ir = InstRect(lane);
-        SetHighColor(Rgb(70, 90, 130));
-        FillRect(ir);
-        SetHighColor(ColGrid());  StrokeRect(ir);
-        SetHighColor(ColText());
-        const char* wn[4] = { "Sin", "Saw", "Sqr", "Tri" };
-        int wi = t.instrument.waveform;
-        if (wi < 0 || wi > 3) wi = 0;
-        char ib[16];
-        std::snprintf(ib, sizeof(ib), "\xE2\x99\xAA%s", wn[wi]);
-        DrawString(ib, BPoint(ir.left + 3, ir.bottom - 4));
-    }
 
     // Per-track stereo meter at the header's right edge.
     const float mx0 = kHeaderWidth - kHdrMeterW;

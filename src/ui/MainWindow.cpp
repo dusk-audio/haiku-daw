@@ -318,6 +318,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fInspector) fInspector->Invalidate();
             if (fTimeline)  fTimeline->Invalidate();
             break;
+        case kMsgCycleAuto:        // inspector Auto button -> cycle timeline mode
+            if (fInspector && fTimeline)
+                fTimeline->CycleAuto(fInspector->SelectedTrack());
+            break;
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
@@ -351,6 +355,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_MONITOR_IN:
             fMonitorInput = !fMonitorInput;
             if (fMonInItem) fMonInItem->SetMarked(fMonitorInput);
+            if (fTimeline)  fTimeline->SetMonitorInput(fMonitorInput);  // lane "I" lamp
             // Live toggle while a take is running.
             if (fRecorder) fRecorder->SetMonitor(fMonitorInput);
             if (fEngine)   fEngine->SetInputMonitor(fMonitorInput);
@@ -1738,6 +1743,7 @@ void MainWindow::LoadSettings() {
     fCountInBars  = s.countInBars;
     fMetronome    = s.metronome;
     fMonitorInput = s.monitorInput;
+    if (fTimeline) fTimeline->SetMonitorInput(fMonitorInput);
     fLastDir      = s.lastDir;
     MarkRadio(fBufMenu, "frames", (int32)fBufferFrames);
     MarkRadio(fCountInMenu, "bars", fCountInBars);
