@@ -244,6 +244,7 @@ private:
     // Live recording region (no clips yet); drawn on every armed track.
     bool           fRecording = false;
     bool           fFollow    = true;   // auto-scroll to keep the playhead in view
+    TrackId        fSelectedTrack = kInvalidTrackId;  // inspector focus + highlight
     Frame          fRecStart  = 0;
     Frame          fRecLen    = 0;
     // Live take content while recording (see SetLiveMidiNotes / SetLiveAudio).

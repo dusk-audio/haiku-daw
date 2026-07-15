@@ -179,6 +179,7 @@ if(HAIKU)
     add_executable(daw
         src/main.cpp
         src/ui/TimelineView.cpp
+        src/ui/InspectorView.cpp
         src/ui/MainWindow.cpp
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp

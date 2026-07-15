@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "TimelineView.h"
+#include "InspectorView.h"
 #include "TransportBar.h"
 #include "MeterView.h"
 #include "EffectsWindow.h"
@@ -261,8 +262,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                  kTransportH - 5));
     bar->AddChild(fMeter);
 
-    // --- Timeline (fills the rest) ---
-    BRect tlRect(0, barTop + kTransportH + 1, bounds.right, bounds.bottom);
+    // --- Inspector column (left) + timeline (fills the rest) ---
+    const float contentTop = barTop + kTransportH + 1;
+    BRect inspRect(0, contentTop, kInspectorWidth, bounds.bottom);
+    fInspector = new InspectorView(inspRect, project, stack);
+    AddChild(fInspector);
+
+    BRect tlRect(kInspectorWidth + 1, contentTop, bounds.right, bounds.bottom);
     fTimeline = new TimelineView(tlRect, project, stack);
     fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
@@ -301,6 +307,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
             UpdateMidiMonitor();
+            break;
+        case kMsgTrackSelected: {  // point the inspector at the clicked track
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (fInspector) fInspector->SetTrack((TrackId)tid);
+            break;
+        }
+        case kMsgUiRefresh:        // a track edit: keep both panes consistent
+            if (fInspector) fInspector->Invalidate();
+            if (fTimeline)  fTimeline->Invalidate();
             break;
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;

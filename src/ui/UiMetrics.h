@@ -26,6 +26,21 @@ constexpr uint32 kMsgMonitorRefresh = 'mon?';
 // TimelineView -> MainWindow: spacebar pressed; toggle play/stop.
 constexpr uint32 kMsgTransportToggle = 'xptg';
 
+// TimelineView -> MainWindow: a track was selected (int64 "track"); the main
+// window points the inspector at it.
+constexpr uint32 kMsgTrackSelected = 'tsel';
+
+// Either view -> MainWindow: a track edit happened; refresh both the timeline
+// and the inspector so they stay consistent.
+constexpr uint32 kMsgUiRefresh = 'uref';
+
+// Left inspector column width (Logic-style track inspector).
+constexpr float kInspectorWidth = 190.0f;
+
+// Inspector -> MainWindow: toggle the global input monitor (same as the View
+// menu item; shares the fourcc so the existing handler catches it).
+constexpr uint32 kMsgInputMon = 'moni';
+
 inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};
 }

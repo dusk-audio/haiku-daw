@@ -38,6 +38,7 @@ class BMenu;
 namespace daw {
 
 class TimelineView;
+class InspectorView;
 class MeterView;
 
 class MainWindow : public BWindow {
@@ -101,6 +102,7 @@ private:
     PeakMap*        fPeaks;          // non-owning; new takes add entries here
 
     TimelineView*   fTimeline;
+    InspectorView*  fInspector = nullptr;   // left track-inspector column
     class TransportBar* fTransport = nullptr;
     BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout

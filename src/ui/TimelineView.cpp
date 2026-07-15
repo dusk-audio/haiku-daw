@@ -601,6 +601,16 @@ void TimelineView::MouseDown(BPoint where) {
     const Track& t = fProject->Tracks()[idx];
 
     if (where.x < kHeaderWidth) {
+        // Any header click selects the track (drives the left inspector).
+        if (fSelectedTrack != t.id) {
+            fSelectedTrack = t.id;
+            if (BWindow* w = Window()) {
+                BMessage sel(kMsgTrackSelected);
+                sel.AddInt64("track", (int64)t.id);
+                w->PostMessage(&sel);
+            }
+            Invalidate();
+        }
         // Track name strip: right-click deletes the track, double-click renames.
         if (where.y <= lane.top + 18 && where.x < 114) {
             if (rightClick) {
@@ -1717,7 +1727,8 @@ void TimelineView::DrawLanes(BRect update) {
 // needs no per-track child-view bookkeeping.
 void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     BRect hdr(0, lane.top, kHeaderWidth, lane.bottom);
-    SetHighColor(ColHeader());
+    const bool selected = (t.id == fSelectedTrack);
+    SetHighColor(selected ? ColHeaderHi() : ColHeader());
     FillRect(hdr);
     // Left color stripe (track color) for quick visual grouping.
     SetHighColor(TrackColor(t.colorIndex));
