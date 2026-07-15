@@ -1733,7 +1733,22 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
         size_t slash = p.find_last_of('/');
         std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
         SetHighColor(Rgb(245, 246, 248));
-        DrawString(name.c_str(), BPoint(strip.left + 4, strip.top + 11));
+        DrawString(name.c_str(), BPoint(strip.left + 12, strip.top + 11));
+    }
+
+    // Fade grips: small triangles at the top corners (drag left corner for
+    // fade-in, right for fade-out). Always shown on wide clips so the gesture
+    // is discoverable; the diagonal ramps above show the current fade.
+    if (block.Width() > 30) {
+        SetHighColor(Rgb(232, 238, 248));
+        BPoint li[3] = { BPoint(block.left + 1, block.top + 1),
+                         BPoint(block.left + 8, block.top + 1),
+                         BPoint(block.left + 1, block.top + 8) };
+        FillPolygon(li, 3);
+        BPoint ri[3] = { BPoint(block.right - 1, block.top + 1),
+                         BPoint(block.right - 8, block.top + 1),
+                         BPoint(block.right - 1, block.top + 8) };
+        FillPolygon(ri, 3);
     }
 
     // Border / selection highlight (rounded).
