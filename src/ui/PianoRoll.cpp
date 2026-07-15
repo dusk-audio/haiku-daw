@@ -33,10 +33,11 @@ static const char* NoteName(int pitch, char* buf, size_t n) {
 }
 
 PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
-                             std::vector<MidiNote> notes, TempoMap tempo,
-                             double sampleRate, BMessenger apply)
+                             Frame clipStart, std::vector<MidiNote> notes,
+                             TempoMap tempo, double sampleRate, BMessenger apply)
     : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
-      fNotes(std::move(notes)), fTrack(track), fClip(clip), fTempo(tempo),
+      fNotes(std::move(notes)), fTrack(track), fClip(clip),
+      fClipStart(clipStart), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
     SetViewColor(ColBackground());
     fTempo.sampleRate = sampleRate;
@@ -73,11 +74,14 @@ float PianoRollView::PitchToY(int pitch) const {
 int PianoRollView::YToPitch(float y) const {
     return fTopPitch - (int)std::floor(y / kRowH);
 }
-Frame PianoRollView::Snapped(Frame f) const {
+Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
     if (modifiers() & B_SHIFT_KEY) return f < 0 ? 0 : f;
-    const double beat = fTempo.BeatAt(f < 0 ? 0 : f);
+    // Snap in absolute-timeline space so notes align to the song grid even when
+    // the region doesn't start on a bar; convert back to clip-relative.
+    Frame af = f + fClipStart; if (af < 0) af = 0;
+    const double beat = fTempo.BeatAt(af);
     const double snapped = std::llround(beat * kSnapDiv) / (double)kSnapDiv;
-    const Frame out = fTempo.FrameAt(snapped);
+    const Frame out = fTempo.FrameAt(snapped) - fClipStart;
     return out < 0 ? 0 : out;
 }
 
@@ -108,19 +112,26 @@ void PianoRollView::Draw(BRect) {
     SetHighColor(ColGrid());
     StrokeLine(BPoint(kKbdW, 0), BPoint(kKbdW, velTop));
 
-    // Vertical bar/beat gridlines (through note area + velocity lane).
-    const Frame left = XToFrame(kKbdW), right = XToFrame(w);
+    // Vertical bar/beat gridlines, computed in absolute-timeline space so the
+    // bar numbering + snap reflect where the region actually sits in the song.
+    const Frame left = XToFrame(kKbdW), right = XToFrame(w);   // clip-relative
     if (right > left) {
-        long beat = (long)std::floor(fTempo.BeatAt(left < 0 ? 0 : left));
+        const Frame aLeft = left + fClipStart, aRight = right + fClipStart;
+        long beat = (long)std::floor(fTempo.BeatAt(aLeft < 0 ? 0 : aLeft));
         if (beat < 0) beat = 0;
         for (;; beat++) {
-            const Frame f = fTempo.FrameAt((double)beat);
-            if (f > right) break;
-            const float x = FrameToX(f);
+            const Frame af = fTempo.FrameAt((double)beat);   // absolute
+            if (af > aRight) break;
+            const float x = FrameToX(af - fClipStart);        // -> relative X
             if (x < kKbdW) continue;
-            int bar = 1, bb = 1; fTempo.BarBeat(f, &bar, &bb);
+            int bar = 1, bb = 1; fTempo.BarBeat(af, &bar, &bb);
             SetHighColor(bb == 1 ? ColGrid() : ColLaneAlt());
             StrokeLine(BPoint(x, 0), BPoint(x, h));
+            if (bb == 1) {   // absolute bar number at each bar line
+                char bl[12]; std::snprintf(bl, sizeof(bl), "%d", bar);
+                SetHighColor(ColTextDim());
+                DrawString(bl, BPoint(x + 3, 11));
+            }
         }
     }
 
@@ -438,12 +449,12 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
 // --- window ---------------------------------------------------------------
 
 PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
-                     std::vector<MidiNote> notes,
+                     daw::Frame clipStart, std::vector<MidiNote> notes,
                      TempoMap tempo, double sampleRate, BMessenger apply)
     : BWindow(frame, "Piano Roll", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
-    fView = new PianoRollView(Bounds(), track, clip, std::move(notes), tempo,
-                              sampleRate, apply);
+    fView = new PianoRollView(Bounds(), track, clip, clipStart, std::move(notes),
+                              tempo, sampleRate, apply);
     AddChild(fView);
     fView->MakeFocus(true);
 }

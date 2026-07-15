@@ -28,7 +28,7 @@ constexpr uint32 kMsgApplyNotes = 'ntap';
 class PianoRollView : public BView {
 public:
     using Frame = daw::Frame;
-    PianoRollView(BRect frame, TrackId track, ClipId clip,
+    PianoRollView(BRect frame, TrackId track, ClipId clip, Frame clipStart,
                   std::vector<MidiNote> notes,
                   TempoMap tempo, double sampleRate, BMessenger apply);
 
@@ -62,6 +62,7 @@ private:
     std::vector<char>     fSel;   // 1 = selected, parallel to fNotes
     TrackId    fTrack;
     ClipId     fClip;
+    Frame      fClipStart = 0;    // region start (notes are relative to it)
     TempoMap   fTempo;
     double     fSampleRate;
     BMessenger fApply;
@@ -90,7 +91,7 @@ private:
 
 class PianoRoll : public BWindow {
 public:
-    PianoRoll(BRect frame, TrackId track, ClipId clip,
+    PianoRoll(BRect frame, TrackId track, ClipId clip, daw::Frame clipStart,
               std::vector<MidiNote> notes,
               TempoMap tempo, double sampleRate, BMessenger apply);
 private:
