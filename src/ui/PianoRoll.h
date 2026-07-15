@@ -4,7 +4,9 @@
 // looper thread. Edits a local snapshot of the track's notes and posts the full
 // updated list to the main window (kMsgApplyNotes), which owns model mutation.
 // Add (click empty), move/resize (drag), delete (right-click), velocity
-// (Ctrl-drag). Tempo-map-aware grid + snap.
+// (Ctrl-drag). Tempo-map-aware grid + snap. Multi-select: Command-click toggles
+// a note, drag on empty space marquee-selects, and move/resize/velocity/delete
+// act on the whole selection.
 #pragma once
 
 #include "../model/Project.h"
@@ -44,7 +46,15 @@ private:
     int   NoteAt(BPoint where) const;   // -1 none
     void  Apply();
 
+    // Selection helpers (fSel is index-aligned with fNotes).
+    void  SelectOnly(int i);
+    void  ClearSelection();
+    int   SelectedCount() const;
+    void  DeleteSelected();
+    void  CaptureDragOrigin();
+
     std::vector<MidiNote> fNotes;
+    std::vector<char>     fSel;   // 1 = selected, parallel to fNotes
     TrackId    fTrack;
     TempoMap   fTempo;
     double     fSampleRate;
@@ -54,11 +64,21 @@ private:
     Frame  fScrollFrame    = 0;
     int    fTopPitch       = 96;   // highest pitch row at the top
 
-    enum class Drag { None, Move, Resize, Velocity };
+    enum class Drag { None, Move, Resize, Velocity, Marquee };
     Drag  fDrag = Drag::None;
     int   fDragNote = -1;
     Frame fGrabOffset = 0;
     int   fPitchOffset = 0;
+    BPoint fDownPoint;             // where the current drag began
+
+    // Per-note snapshot captured at drag start so a group move/resize applies
+    // one consistent delta to every selected note (no cumulative drift).
+    struct Orig { Frame start; Frame len; int pitch; int velocity; };
+    std::vector<Orig> fDragOrig;   // index-aligned with fNotes
+
+    // Marquee (rubber-band) selection.
+    BPoint            fMarqueeCur;
+    std::vector<char> fPreMarquee;   // selection before an additive marquee
 };
 
 class PianoRoll : public BWindow {

@@ -39,6 +39,25 @@ PianoRollView::PianoRollView(BRect frame, TrackId track,
       fSampleRate(sampleRate), fApply(apply) {
     SetViewColor(ColBackground());
     fTempo.sampleRate = sampleRate;
+    fSel.assign(fNotes.size(), 0);
+}
+
+void PianoRollView::SelectOnly(int i) {
+    fSel.assign(fNotes.size(), 0);
+    if (i >= 0 && (size_t)i < fSel.size()) fSel[(size_t)i] = 1;
+}
+void PianoRollView::ClearSelection() { fSel.assign(fNotes.size(), 0); }
+int PianoRollView::SelectedCount() const {
+    int c = 0; for (char s : fSel) c += s ? 1 : 0; return c;
+}
+void PianoRollView::DeleteSelected() {
+    std::vector<MidiNote> keep;
+    for (size_t i = 0; i < fNotes.size(); i++)
+        if (!fSel[i]) keep.push_back(fNotes[i]);
+    if (keep.size() == fNotes.size()) return;   // nothing selected
+    fNotes.swap(keep);
+    fSel.assign(fNotes.size(), 0);
+    Apply(); Invalidate();
 }
 
 float PianoRollView::FrameToX(Frame f) const {
@@ -102,17 +121,31 @@ void PianoRollView::Draw(BRect) {
     }
 
     // Notes.
-    for (const MidiNote& n : fNotes) {
+    for (size_t i = 0; i < fNotes.size(); i++) {
+        const MidiNote& n = fNotes[i];
         const float x0 = FrameToX(n.startFrame);
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
         const float y  = PitchToY(n.pitch);
         if (x1 < kKbdW || x0 > w || y + kRowH < 0 || y > h) continue;
+        const bool sel = i < fSel.size() && fSel[i];
         const float s = 0.45f + 0.55f * (n.velocity / 127.0f);
         BRect nr(std::max(x0, kKbdW), y + 1, x1, y + kRowH - 1);
-        SetHighColor(Rgb((uint8)(70 * s), (uint8)(150 * s), (uint8)(220 * s)));
+        if (sel) SetHighColor(Rgb((uint8)(120 * s), (uint8)(190 * s), (uint8)(255 * s)));
+        else     SetHighColor(Rgb((uint8)(70 * s),  (uint8)(150 * s), (uint8)(220 * s)));
         FillRect(nr);
-        SetHighColor(ColClipBorder());
+        SetHighColor(sel ? Rgb(255, 240, 140) : ColClipBorder());
         StrokeRect(nr);
+    }
+
+    // Marquee rectangle (rubber-band selection in progress).
+    if (fDrag == Drag::Marquee) {
+        BRect m(std::min(fDownPoint.x, fMarqueeCur.x),
+                std::min(fDownPoint.y, fMarqueeCur.y),
+                std::max(fDownPoint.x, fMarqueeCur.x),
+                std::max(fDownPoint.y, fMarqueeCur.y));
+        SetHighColor(255, 240, 140);
+        SetPenSize(1.0f);
+        StrokeRect(m, B_MIXED_COLORS);
     }
 }
 
@@ -140,69 +173,164 @@ void PianoRollView::Apply() {
     fApply.SendMessage(&m);
 }
 
+// Snapshot every note's geometry so a group move/resize applies one delta.
+void PianoRollView::CaptureDragOrigin() {
+    fDragOrig.resize(fNotes.size());
+    for (size_t i = 0; i < fNotes.size(); i++)
+        fDragOrig[i] = { fNotes[i].startFrame, fNotes[i].lengthFrames,
+                         fNotes[i].pitch, fNotes[i].velocity };
+}
+
 void PianoRollView::MouseDown(BPoint where) {
     if (where.x < kKbdW) return;
     int32 buttons = 0;
     if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
         m->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
+    const bool additive   = (modifiers() & B_COMMAND_KEY) != 0;
 
     const int hit = NoteAt(where);
+    fDownPoint = where;
+
     if (rightClick) {
-        if (hit >= 0) { fNotes.erase(fNotes.begin() + hit); Apply(); Invalidate(); }
+        if (hit >= 0) {
+            // Delete the whole selection if the clicked note is part of it,
+            // otherwise just the clicked note.
+            if ((size_t)hit < fSel.size() && fSel[(size_t)hit]
+                && SelectedCount() > 1) {
+                DeleteSelected();
+            } else {
+                fNotes.erase(fNotes.begin() + hit);
+                if ((size_t)hit < fSel.size()) fSel.erase(fSel.begin() + hit);
+                Apply(); Invalidate();
+            }
+        }
         return;
     }
+
     if (hit >= 0) {
+        if (additive) {   // toggle this note in/out of the selection, no drag
+            fSel[(size_t)hit] = fSel[(size_t)hit] ? 0 : 1;
+            Invalidate();
+            return;
+        }
+        // Plain click: if the note isn't already selected, make it the sole
+        // selection; a click on an already-selected note keeps the group.
+        if ((size_t)hit >= fSel.size() || !fSel[(size_t)hit])
+            SelectOnly(hit);
+
         const MidiNote& n = fNotes[(size_t)hit];
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
         fDragNote = hit;
+        CaptureDragOrigin();
         if (modifiers() & B_CONTROL_KEY)      fDrag = Drag::Velocity;
         else if (where.x >= x1 - kEdge)       fDrag = Drag::Resize;
         else {
             fDrag = Drag::Move;
-            fGrabOffset = XToFrame(where.x) - n.startFrame;
+            fGrabOffset  = XToFrame(where.x) - n.startFrame;
             fPitchOffset = n.pitch - YToPitch(where.y);
         }
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        Invalidate();
         return;
     }
-    // Empty: add a note (1 beat long, snapped).
-    MidiNote n;
-    Frame start = Snapped(XToFrame(where.x));
-    if (start < 0) start = 0;
-    n.startFrame = start;
-    n.pitch = std::clamp(YToPitch(where.y), 0, 127);
-    n.velocity = 100;
-    n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start);
-    fNotes.push_back(n);
-    Apply();
+
+    // Empty space: begin a marquee. If the pointer doesn't move, MouseUp
+    // treats it as a click and adds a note. Additive keeps prior selection.
+    fDrag = Drag::Marquee;
+    fMarqueeCur = where;
+    fPreMarquee = additive ? fSel : std::vector<char>(fNotes.size(), 0);
+    if (!additive) ClearSelection();
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     Invalidate();
 }
 
 void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
-    if (fDrag == Drag::None || fDragNote < 0
-        || (size_t)fDragNote >= fNotes.size()) return;
-    MidiNote& n = fNotes[(size_t)fDragNote];
+    if (fDrag == Drag::None) return;
+
+    if (fDrag == Drag::Marquee) {
+        fMarqueeCur = where;
+        BRect m(std::min(fDownPoint.x, where.x), std::min(fDownPoint.y, where.y),
+                std::max(fDownPoint.x, where.x), std::max(fDownPoint.y, where.y));
+        for (size_t i = 0; i < fNotes.size(); i++) {
+            const MidiNote& n = fNotes[i];
+            const float x0 = FrameToX(n.startFrame);
+            const float x1 = FrameToX(n.startFrame + n.lengthFrames);
+            const float y  = PitchToY(n.pitch);
+            const bool inside = x1 >= m.left && x0 <= m.right
+                                && y + kRowH >= m.top && y <= m.bottom;
+            const char prev = i < fPreMarquee.size() ? fPreMarquee[i] : 0;
+            fSel[i] = (inside || prev) ? 1 : 0;   // union with prior selection
+        }
+        Invalidate();
+        return;
+    }
+
+    if (fDragNote < 0 || (size_t)fDragNote >= fNotes.size()
+        || fDragOrig.size() != fNotes.size()) return;
+
     if (fDrag == Drag::Move) {
-        Frame start = Snapped(XToFrame(where.x) - fGrabOffset);
-        if (start < 0) start = 0;
-        n.startFrame = start;
-        n.pitch = std::clamp(YToPitch(where.y) + fPitchOffset, 0, 127);
+        // One snapped delta (frames + pitch) from the grabbed note, applied to
+        // every selected note from its captured origin.
+        const Orig& g = fDragOrig[(size_t)fDragNote];
+        Frame newStart = Snapped(XToFrame(where.x) - fGrabOffset);
+        if (newStart < 0) newStart = 0;
+        const Frame dFrame = newStart - g.start;
+        const int   dPitch = std::clamp(YToPitch(where.y) + fPitchOffset, 0, 127)
+                             - g.pitch;
+        for (size_t i = 0; i < fNotes.size(); i++) {
+            if (!fSel[i]) continue;
+            Frame s = fDragOrig[i].start + dFrame;
+            if (s < 0) s = 0;
+            fNotes[i].startFrame = s;
+            fNotes[i].pitch = std::clamp(fDragOrig[i].pitch + dPitch, 0, 127);
+        }
     } else if (fDrag == Drag::Resize) {
-        Frame len = Snapped(XToFrame(where.x)) - n.startFrame;
-        if (len < 1) len = 1;
-        n.lengthFrames = len;
-    } else {   // Velocity: map vertical pointer position over the view height
+        const Orig& g = fDragOrig[(size_t)fDragNote];
+        Frame newLen = Snapped(XToFrame(where.x)) - g.start;
+        if (newLen < 1) newLen = 1;
+        const Frame dLen = newLen - g.len;
+        for (size_t i = 0; i < fNotes.size(); i++) {
+            if (!fSel[i]) continue;
+            Frame len = fDragOrig[i].len + dLen;
+            if (len < 1) len = 1;
+            fNotes[i].lengthFrames = len;
+        }
+    } else {   // Velocity: same absolute value across the selection
         const float t = 1.0f - where.y / Bounds().Height();
-        n.velocity = std::clamp((int)(t * 127.0f + 0.5f), 1, 127);
+        const int vel = std::clamp((int)(t * 127.0f + 0.5f), 1, 127);
+        for (size_t i = 0; i < fNotes.size(); i++)
+            if (fSel[i]) fNotes[i].velocity = vel;
     }
     Invalidate();
 }
 
-void PianoRollView::MouseUp(BPoint) {
-    if (fDrag != Drag::None) { Apply(); Invalidate(); }
+void PianoRollView::MouseUp(BPoint where) {
+    const Drag was = fDrag;
     fDrag = Drag::None;
     fDragNote = -1;
+
+    if (was == Drag::Marquee) {
+        const float moved = std::fabs(where.x - fDownPoint.x)
+                          + std::fabs(where.y - fDownPoint.y);
+        if (moved < 4.0f) {
+            // A click on empty space (no marquee drag): add a note, selected.
+            MidiNote n;
+            Frame start = Snapped(XToFrame(fDownPoint.x));
+            if (start < 0) start = 0;
+            n.startFrame   = start;
+            n.pitch        = std::clamp(YToPitch(fDownPoint.y), 0, 127);
+            n.velocity     = 100;
+            n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start);
+            fNotes.push_back(n);
+            fSel.assign(fNotes.size(), 0);
+            fSel.back() = 1;
+            Apply();
+        }
+        Invalidate();
+        return;
+    }
+    if (was != Drag::None) { Apply(); Invalidate(); }
 }
 
 void PianoRollView::MessageReceived(BMessage* msg) {
@@ -227,6 +355,12 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
         case B_RIGHT_ARROW: fScrollFrame += page / 4; Invalidate(); break;
         case '+': case '=': fFramesPerPixel *= 0.5; if (fFramesPerPixel < 8) fFramesPerPixel = 8; Invalidate(); break;
         case '-': case '_': fFramesPerPixel *= 2.0; if (fFramesPerPixel > 8192) fFramesPerPixel = 8192; Invalidate(); break;
+        case B_DELETE: case B_BACKSPACE: DeleteSelected(); break;
+        case 1: case 'a': case 'A':   // Command-A: select all
+            if (modifiers() & B_COMMAND_KEY) {
+                fSel.assign(fNotes.size(), 1); Invalidate();
+            } else BView::KeyDown(bytes, numBytes);
+            break;
         default: BView::KeyDown(bytes, numBytes);
     }
 }
