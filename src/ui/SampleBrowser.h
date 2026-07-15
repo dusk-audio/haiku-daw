@@ -18,8 +18,12 @@ class BTextControl;
 
 namespace daw {
 
-// Posted to the main window to import a browsed file. Field: string "path".
+// Posted to the main window to import a browsed file. Fields: string "path";
+// optional int64 "tid" + int64 "start" (drop target from a timeline drag-drop).
 constexpr uint32 kMsgBrowserImport = 'bimp';
+// The drag message a browser list row initiates; the timeline accepts it as a
+// drop. Field: string "path".
+constexpr uint32 kMsgSampleDrag = 'bsdg';
 
 class SampleBrowser : public BWindow {
 public:

@@ -5,6 +5,7 @@
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
 #include "PianoRoll.h"
+#include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
 
 #include <MenuItem.h>
@@ -128,6 +129,26 @@ void TimelineView::MessageReceived(BMessage* msg) {
             ScrollVerticalBy(dy * 40.0f);   // ~40 px per notch
             return;
         }
+    }
+    // A sample dragged from the browser + dropped here: import it onto the
+    // track under the cursor at the snapped drop position.
+    if (msg->what == kMsgSampleDrag && fProject) {
+        const char* path = nullptr;
+        if (msg->FindString("path", &path) == B_OK && path) {
+            const BPoint where = ConvertFromScreen(msg->DropPoint());
+            const int idx = TrackIndexAt(where);
+            TrackId tid = kInvalidTrackId;
+            if (idx >= 0 && idx < (int)fProject->Tracks().size())
+                tid = fProject->Tracks()[(size_t)idx].id;
+            Frame start = Snapped(XToFrame(where.x));
+            if (start < 0) start = 0;
+            BMessage imp(kMsgBrowserImport);
+            imp.AddString("path", path);
+            imp.AddInt64("tid", (int64)tid);
+            imp.AddInt64("start", (int64)start);
+            if (Window()) BMessenger(Window()).SendMessage(&imp);
+        }
+        return;
     }
     BView::MessageReceived(msg);
 }

@@ -26,6 +26,22 @@ enum {
     MSG_TAGBPM = 'tbpm',   // write DAW:bpm on the selection
 };
 
+// A list view whose rows can be dragged onto the timeline. It carries a pointer
+// to the browser's parallel path vector so the drag message holds the file path.
+class DragListView : public BListView {
+public:
+    DragListView(BRect f, const char* n, list_view_type t, uint32 mode)
+        : BListView(f, n, t, mode) {}
+    const std::vector<std::string>* fPaths = nullptr;
+    bool InitiateDrag(BPoint, int32 index, bool) override {
+        if (!fPaths || index < 0 || index >= (int)fPaths->size()) return false;
+        BMessage drag(kMsgSampleDrag);
+        drag.AddString("path", (*fPaths)[(size_t)index].c_str());
+        DragMessage(&drag, ItemFrame(index), this);
+        return true;
+    }
+};
+
 // True if the path looks like an audio file we can import.
 static bool IsAudioPath(const char* p) {
     const char* dot = std::strrchr(p, '.');
@@ -52,8 +68,10 @@ SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
     root->AddChild(search);
 
     BRect lr(8, 38, w - 8 - B_V_SCROLL_BAR_WIDTH, Bounds().Height() - 40);
-    fList = new BListView(lr, "list", B_SINGLE_SELECTION_LIST,
-                          B_FOLLOW_ALL_SIDES);
+    DragListView* dlv = new DragListView(lr, "list", B_SINGLE_SELECTION_LIST,
+                                         B_FOLLOW_ALL_SIDES);
+    dlv->fPaths = &fPaths;   // stable member; drag rows carry their path
+    fList = dlv;
     fList->SetInvocationMessage(new BMessage(MSG_PICK));
     BScrollView* sv = new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);

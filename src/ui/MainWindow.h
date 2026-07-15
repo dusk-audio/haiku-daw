@@ -68,7 +68,8 @@ private:
     void LoadFrom(const char* path);
     void LoadSettings();             // ~/config/settings/HaikuDAW/settings
     void SaveSettings();
-    void ImportAudio(const char* path);   // add a WAV as a clip
+    void ImportAudio(const char* path);   // add a WAV as a clip (first track/playhead)
+    void ImportAudioAt(const char* path, TrackId track, Frame start);  // drop target
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
     Project*        fProject;        // non-owning (the session)

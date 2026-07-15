@@ -581,8 +581,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case kMsgBrowserImport: {
             const char* path = nullptr;
-            if (msg->FindString("path", &path) == B_OK && path)
-                ImportAudio(path);
+            if (msg->FindString("path", &path) == B_OK && path) {
+                int64 tid = 0, start = 0;
+                if (msg->FindInt64("tid", &tid) == B_OK) {   // drag-drop target
+                    msg->FindInt64("start", &start);
+                    ImportAudioAt(path, (TrackId)tid, (Frame)start);
+                } else {
+                    ImportAudio(path);   // double-click: first track / playhead
+                }
+            }
             break;
         }
         case MSG_SHORTCUTS: {
@@ -1053,15 +1060,24 @@ void MainWindow::LoadFrom(const char* path) {
 }
 
 void MainWindow::ImportAudio(const char* path) {
+    // Default target: the first audio track (created if none), at the playhead.
+    ImportAudioAt(path, kInvalidTrackId, fProject->transport.playhead);
+}
+
+void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
     WavSource src;
     if (!src.Open(path)) {
         std::fprintf(stderr, "MainWindow: cannot import '%s'\n", path);
         return;
     }
-    // Target the first audio track; create one if the project has none.
+    // Resolve the target track: the requested one if it's audio, else the first
+    // audio track, creating one if the project has none.
     TrackId tid = kInvalidTrackId;
-    for (const Track& t : fProject->Tracks())
-        if (t.type == TrackType::Audio) { tid = t.id; break; }
+    if (const Track* t = fProject->FindTrack(track))
+        if (t->type == TrackType::Audio) tid = track;
+    if (tid == kInvalidTrackId)
+        for (const Track& t : fProject->Tracks())
+            if (t.type == TrackType::Audio) { tid = t.id; break; }
     if (tid == kInvalidTrackId) {
         auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "Audio 1");
         AddTrackCommand* ap = add.get();
@@ -1072,7 +1088,7 @@ void MainWindow::ImportAudio(const char* path) {
     const double srcRate = src.FrameRate();
     const double ratio = srcRate > 0 ? fProject->sampleRate / srcRate : 1.0;
     Clip clip;
-    clip.startFrame   = fProject->transport.playhead;
+    clip.startFrame   = start < 0 ? 0 : start;
     clip.lengthFrames = (int64_t)llround(src.TotalFrames() * ratio);
     clip.sourceOffset = 0;
     clip.sourcePath   = path;
