@@ -449,6 +449,28 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();
             break;
         }
+        case kMsgToggleFxAuto: {
+            // Toggle an effect-parameter automation lane (create seeded at the
+            // current value, or remove if one already exists for this fx+slot).
+            int64 tid = 0; int32 fx = 0, slot = 0; float val = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            msg->FindInt32("slot", &slot);
+            msg->FindFloat("val", &val);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                auto it = std::find_if(t->fxAuto.begin(), t->fxAuto.end(),
+                    [&](const FxAutoLane& fa) {
+                        return fa.fxIndex == fx && fa.slot == slot; });
+                if (it != t->fxAuto.end()) t->fxAuto.erase(it);
+                else {
+                    FxAutoLane fa; fa.fxIndex = fx; fa.slot = slot;
+                    fa.lane.AddPoint(0, val);   // seed constant; edit in timeline
+                    t->fxAuto.push_back(fa);
+                }
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgApplySends: {
             // A SendsWindow posts the edited send list. Undoable via a coalescing
             // SetSendsCommand (its native sliders post continuously -> one undo

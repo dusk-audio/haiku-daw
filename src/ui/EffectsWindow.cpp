@@ -340,6 +340,23 @@ void EffectsView::MouseDown(BPoint where) {
     Hit h;
     const int kind = HitTest(where, &h);
     if (kind < 0) return;
+
+    // Right-click a knob toggles automation of that parameter (per-track only;
+    // the master chain has no per-track automation lanes).
+    int32 buttons = 0;
+    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+        m->FindInt32("buttons", &buttons);
+    if ((buttons & B_SECONDARY_MOUSE_BUTTON) && kind == 0
+        && h.effect >= 0 && h.effect < (int)fChain.size()) {
+        BMessage m(kMsgToggleFxAuto);
+        m.AddInt64("track", (int64)fTrack);
+        m.AddInt32("fx", h.effect);
+        m.AddInt32("slot", h.slot);
+        m.AddFloat("val", fChain[h.effect].p((size_t)h.slot));
+        fApply.SendMessage(&m);
+        return;
+    }
+
     switch (kind) {
         case 0:   // knob: begin a vertical drag
         case 5: { // eq handle: 2D drag

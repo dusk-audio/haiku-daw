@@ -510,6 +510,21 @@ private:
     AutomationLane fOld;
 };
 
+// Replace one effect-parameter automation lane (Track.fxAuto[index].lane). One
+// undo step per timeline gesture (same restore-on-mouse-up pattern).
+class SetFxAutoLaneCommand : public Command {
+public:
+    SetFxAutoLaneCommand(TrackId track, int fxAutoIndex, AutomationLane lane)
+        : fTrack(track), fIdx(fxAutoIndex), fNew(std::move(lane)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Fx Automation"; }
+private:
+    TrackId        fTrack;
+    int            fIdx;
+    AutomationLane fNew, fOld;
+};
+
 // Group several commands into one undoable step (multi-select edits: delete /
 // move / paste many clips at once). Do() applies them in order; Undo() reverses
 // in the opposite order. Do() fails only if the group is empty or the first

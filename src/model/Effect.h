@@ -8,6 +8,9 @@
 // they need (e.g. the parametric EQ's 15).
 #pragma once
 
+#include <initializer_list>
+#include <utility>
+
 #include <cstddef>
 #include <vector>
 
@@ -82,6 +85,40 @@ inline EffectDesc EqDesc() {
         750.0f,  0.0f, 0.90f,
         2200.0f, 0.0f, 0.90f,
         6500.0f, 0.0f, 0.70f }};
+}
+
+// Value range of effect parameter `slot` (same slot order as the editor knobs).
+// Used by the automation UI to map a lane value <-> pixels. Mirrors the editor
+// knob ranges. Unknown slots default to [0, 1].
+inline void FxParamRange(EffectType t, int slot, float* mn, float* mx) {
+    float lo = 0.0f, hi = 1.0f;
+    auto pick = [&](std::initializer_list<std::pair<float, float>> r) {
+        int i = 0;
+        for (auto& p : r) { if (i == slot) { lo = p.first; hi = p.second; } i++; }
+    };
+    switch (t) {
+        case EffectType::Delay:      pick({{0.01f,1},{0,0.95f},{0,1}}); break;
+        case EffectType::Reverb:     pick({{0,1},{0,1}}); break;
+        case EffectType::Compressor: pick({{-60,0},{1,20},{0.1f,100},{5,1000},{0,24}}); break;
+        case EffectType::Saturator:  pick({{0,1},{0,1},{-24,24}}); break;
+        case EffectType::Gate:       pick({{-80,0},{1,20},{0.1f,100},{5,1000},{0,80}}); break;
+        case EffectType::Widener:    pick({{0,2},{-1,1},{0,2}}); break;
+        case EffectType::Eq: {
+            const int w = slot % 3;
+            if (w == 0) { lo = 20; hi = 18000; }
+            else if (w == 1) { lo = -18; hi = 18; }
+            else { lo = 0.3f; hi = 8; }
+            break;
+        }
+        case EffectType::Biquad:
+        default:
+            if (slot == 1) { lo = 20; hi = 16000; }
+            else if (slot == 2) { lo = 0.1f; hi = 10; }
+            else { lo = -24; hi = 24; }
+            break;
+    }
+    if (mn) *mn = lo;
+    if (mx) *mx = hi;
 }
 
 } // namespace daw

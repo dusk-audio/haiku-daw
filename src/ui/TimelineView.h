@@ -152,18 +152,26 @@ private:
     MidiNote fClipNote;                // copied MIDI note
     TrackType fClipType = TrackType::Audio;  // source track type (paste target)
 
-    // Automation editing. fAutoMode[track] = 0 off / 1 gain / 2 pan; toggled by
-    // the header "Auto" box. When on, the lane's content area edits that curve.
+    // Automation editing. fAutoMode[track] = 0 off / 1 gain / 2 pan /
+    // 3+ = fx-parameter lane (fxAuto[mode-3]); cycled by the header "Auto" box.
+    // A resolved lane reference: the lane + its value range + static default.
+    struct AutoRef { const AutomationLane* lane = nullptr;
+                     float mn = 0, mx = 1, def = 0; int fxIndex = -1; };
+    bool  AutoRefFor(const Track& t, int mode, AutoRef* out) const;
     void  DrawAutomation(const Track& t, BRect lane, int mode);
     void  HandleAutoMouseDown(const Track& t, BRect lane, int idx, BPoint where,
                               bool rightClick);
-    int   AutoPointAt(const Track& t, BRect lane, int mode, BPoint where) const;
-    float AutoValueToY(BRect lane, int mode, float v) const;
-    float AutoYToValue(BRect lane, int mode, float y) const;
+    void  CommitAuto(TrackId track, int mode, int fxIndex,
+                     const AutomationLane& lane);
+    int   AutoPointAt(const AutomationLane& al, BRect lane, float mn, float mx,
+                      BPoint where) const;
+    float AutoValueToY(BRect lane, float mn, float mx, float v) const;
+    float AutoYToValue(BRect lane, float mn, float mx, float y) const;
     std::map<TrackId, int> fAutoMode;
     bool           fAutoDragging = false;
     TrackId        fAutoTrack = kInvalidTrackId;
-    AutoLaneKind   fAutoKind  = AutoLaneKind::Gain;
+    int            fAutoFx = -1;            // >=0 = fxAuto index (else gain/pan)
+    float          fAutoMn = 0, fAutoMx = 1;
     Frame          fAutoDragFrame = 0;      // frame-key of the dragged breakpoint
     AutomationLane fAutoOrig;               // lane at drag start (for undo)
 

@@ -22,6 +22,9 @@ namespace daw {
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
 // float[] "ep" (all params concatenated).
 constexpr uint32 kMsgApplyFx = 'fxap';
+// Right-click a knob to toggle automation of that param. Fields: int64 "track",
+// int32 "fx" (effect index), int32 "slot", float "val" (current value).
+constexpr uint32 kMsgToggleFxAuto = 'fxat';
 
 class EffectsView : public BView {
 public:

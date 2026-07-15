@@ -470,6 +470,21 @@ void SetAutoLaneCommand::Undo(Project& p) {
     ((fKind == AutoLaneKind::Gain) ? t->gainAuto : t->panAuto) = fOld;
 }
 
+// --- SetFxAutoLaneCommand ---------------------------------------------
+
+bool SetFxAutoLaneCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || fIdx < 0 || fIdx >= (int)t->fxAuto.size()) return false;
+    fOld = t->fxAuto[(size_t)fIdx].lane;
+    t->fxAuto[(size_t)fIdx].lane = fNew;
+    return true;
+}
+void SetFxAutoLaneCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t && fIdx >= 0 && fIdx < (int)t->fxAuto.size())
+        t->fxAuto[(size_t)fIdx].lane = fOld;
+}
+
 // --- SetFxCommand -----------------------------------------------------
 
 bool SetFxCommand::Do(Project& p) {
