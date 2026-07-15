@@ -335,9 +335,9 @@ void EffectsView::Draw(BRect) {
         if (d.type == EffectType::Plugin) title = d.pluginName.c_str();
         else if (d.type == EffectType::Reverb) {
             const int algo = (int)(d.p(2) + 0.5f);
-            title = algo == 1 ? "Reverb — Dusk Plate"
-                  : algo == 2 ? "Reverb — Dusk Hall"
-                  : algo == 3 ? "Reverb — Dusk FDN" : "Reverb";
+            title = algo == 1 ? "Reverb - Plate"
+                  : algo == 2 ? "Reverb - Hall"
+                  : algo == 3 ? "Reverb - FDN" : "Reverb";
         }
         DrawString(title, BPoint(panel.left + 8, panel.top + 15));
 
@@ -379,10 +379,10 @@ void EffectsView::Draw(BRect) {
                                 knobTop + kGraphH - 6), d, (int)i);
             knobTop += kGraphH;
         } else if (d.type == EffectType::Reverb) {
-            // Reverb type dropdown (Classic / Dusk Plate / Hall / FDN).
+            // Reverb type dropdown (Classic / Plate / Hall / FDN).
             const int algo = (int)(d.p(2) + 0.5f);
-            const char* nm = algo == 1 ? "Dusk Plate" : algo == 2 ? "Dusk Hall"
-                           : algo == 3 ? "Dusk FDN" : "Classic";
+            const char* nm = algo == 1 ? "Plate" : algo == 2 ? "Hall"
+                           : algo == 3 ? "FDN" : "Classic";
             BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
             SetHighColor(ColHeaderHi()); FillRect(sel);
             SetHighColor(ColGrid());     StrokeRect(sel);
@@ -505,8 +505,8 @@ void EffectsView::MouseDown(BPoint where) {
         case 7: {   // reverb type dropdown
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
             BPopUpMenu* menu = new BPopUpMenu("type", false, false);
-            const char* names[4] = { "Classic", "Dusk Plate", "Dusk Hall",
-                                     "Dusk FDN" };
+            const char* names[4] = { "Classic", "Plate", "Hall",
+                                     "FDN" };
             EffectDesc& d = fChain[h.effect];
             const int cur = (int)(d.p(2) + 0.5f);
             for (int a = 0; a < 4; a++) {
