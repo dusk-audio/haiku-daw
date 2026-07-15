@@ -46,6 +46,9 @@ private:
     int   YToPitch(float y) const;
     Frame Snapped(Frame f) const;
     int   NoteAt(BPoint where) const;   // -1 none
+    float VelLaneTop() const;           // y where the velocity lane begins
+    int   VelNoteAtX(float x) const;    // nearest note to a velocity-lane click
+    void  SetVelocityFromLane(float y); // set dragged/selected note velocity
     void  Apply();
 
     // Selection helpers (fSel is index-aligned with fNotes).
@@ -72,6 +75,7 @@ private:
     int   fDragNote = -1;
     Frame fGrabOffset = 0;
     int   fPitchOffset = 0;
+    bool  fVelLaneDrag = false;    // velocity drag started in the bottom lane
     BPoint fDownPoint;             // where the current drag began
 
     // Per-note snapshot captured at drag start so a group move/resize applies

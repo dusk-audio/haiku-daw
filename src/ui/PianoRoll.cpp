@@ -16,6 +16,7 @@ static constexpr float kKbdW = 54.0f;   // piano keyboard column width
 static constexpr float kRowH = 12.0f;   // pixels per semitone
 static constexpr int   kSnapDiv = 4;    // 16th-note snap
 static constexpr float kEdge = 5.0f;    // resize grab zone
+static constexpr float kVelLaneH = 64.0f;   // bottom velocity (lollipop) lane
 
 static bool IsBlackKey(int pitch) {
     switch (((pitch % 12) + 12) % 12) {
@@ -80,11 +81,14 @@ Frame PianoRollView::Snapped(Frame f) const {
     return out < 0 ? 0 : out;
 }
 
+float PianoRollView::VelLaneTop() const { return Bounds().Height() - kVelLaneH; }
+
 void PianoRollView::Draw(BRect) {
     const float w = Bounds().Width(), h = Bounds().Height();
+    const float velTop = VelLaneTop();
 
-    // Rows (pitch lanes) with octave shading + keyboard column.
-    for (float y = 0; y < h; y += kRowH) {
+    // Rows (pitch lanes) with octave shading + keyboard column (note area only).
+    for (float y = 0; y < velTop; y += kRowH) {
         const int pitch = YToPitch(y + 1);
         SetHighColor(IsBlackKey(pitch) ? ColLaneAlt() : ColLane());
         FillRect(BRect(kKbdW, y, w, y + kRowH));
@@ -102,9 +106,9 @@ void PianoRollView::Draw(BRect) {
         }
     }
     SetHighColor(ColGrid());
-    StrokeLine(BPoint(kKbdW, 0), BPoint(kKbdW, h));
+    StrokeLine(BPoint(kKbdW, 0), BPoint(kKbdW, velTop));
 
-    // Vertical bar/beat gridlines.
+    // Vertical bar/beat gridlines (through note area + velocity lane).
     const Frame left = XToFrame(kKbdW), right = XToFrame(w);
     if (right > left) {
         long beat = (long)std::floor(fTempo.BeatAt(left < 0 ? 0 : left));
@@ -120,21 +124,41 @@ void PianoRollView::Draw(BRect) {
         }
     }
 
-    // Notes.
+    // Notes (clipped to the note area above the velocity lane).
     for (size_t i = 0; i < fNotes.size(); i++) {
         const MidiNote& n = fNotes[i];
         const float x0 = FrameToX(n.startFrame);
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
         const float y  = PitchToY(n.pitch);
-        if (x1 < kKbdW || x0 > w || y + kRowH < 0 || y > h) continue;
+        if (x1 < kKbdW || x0 > w || y + kRowH < 0 || y > velTop) continue;
         const bool sel = i < fSel.size() && fSel[i];
         const float s = 0.45f + 0.55f * (n.velocity / 127.0f);
-        BRect nr(std::max(x0, kKbdW), y + 1, x1, y + kRowH - 1);
+        BRect nr(std::max(x0, kKbdW), y + 1, x1, std::min(y + kRowH - 1, velTop));
         if (sel) SetHighColor(Rgb((uint8)(120 * s), (uint8)(190 * s), (uint8)(255 * s)));
         else     SetHighColor(Rgb((uint8)(70 * s),  (uint8)(150 * s), (uint8)(220 * s)));
         FillRect(nr);
         SetHighColor(sel ? Rgb(255, 240, 140) : ColClipBorder());
         StrokeRect(nr);
+    }
+
+    // Velocity lane: one "lollipop" (stem + dot) per note, height = velocity.
+    SetHighColor(Rgb(18, 20, 25));
+    FillRect(BRect(0, velTop, w, h));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(0, velTop), BPoint(w, velTop));
+    SetHighColor(Rgb(150, 156, 165));
+    DrawString("Vel", BPoint(6, velTop + 13));
+    const float base = h - 5.0f;
+    const float span = kVelLaneH - 12.0f;
+    for (size_t i = 0; i < fNotes.size(); i++) {
+        const MidiNote& n = fNotes[i];
+        const float x = FrameToX(n.startFrame);
+        if (x < kKbdW || x > w) continue;
+        const bool sel = i < fSel.size() && fSel[i];
+        const float top = base - (n.velocity / 127.0f) * span;
+        SetHighColor(sel ? Rgb(255, 240, 140) : Rgb(110, 180, 250));
+        StrokeLine(BPoint(x, base), BPoint(x, top));           // stem
+        FillEllipse(BRect(x - 3, top - 3, x + 3, top + 3));    // lollipop head
     }
 
     // Marquee rectangle (rubber-band selection in progress).
@@ -182,7 +206,47 @@ void PianoRollView::CaptureDragOrigin() {
                          fNotes[i].pitch, fNotes[i].velocity };
 }
 
+int PianoRollView::VelNoteAtX(float x) const {
+    int best = -1; float bestd = 8.0f;
+    for (size_t i = 0; i < fNotes.size(); i++) {
+        const float d = std::fabs(FrameToX(fNotes[i].startFrame) - x);
+        if (d < bestd) { bestd = d; best = (int)i; }
+    }
+    return best;
+}
+
+// Map a y in the velocity lane to a velocity and apply it to the dragged note
+// (and, if it's part of the selection, every selected note).
+void PianoRollView::SetVelocityFromLane(float y) {
+    if (fDragNote < 0 || (size_t)fDragNote >= fNotes.size()) return;
+    const float base = Bounds().Height() - 5.0f;
+    const float span = kVelLaneH - 12.0f;
+    int vel = (int)std::lround((base - y) / span * 127.0f);
+    if (vel < 1) vel = 1; if (vel > 127) vel = 127;
+    if (fDragNote < (int)fSel.size() && fSel[(size_t)fDragNote]) {
+        for (size_t i = 0; i < fNotes.size(); i++)
+            if (fSel[i]) fNotes[i].velocity = vel;
+    } else {
+        fNotes[(size_t)fDragNote].velocity = vel;
+    }
+}
+
 void PianoRollView::MouseDown(BPoint where) {
+    // Velocity lane (bottom strip): grab the nearest note's lollipop and drag
+    // its velocity. Works across the full width (including the keyboard column).
+    if (where.y >= VelLaneTop()) {
+        const int vn = VelNoteAtX(where.x);
+        if (vn >= 0) {
+            fDrag = Drag::Velocity;
+            fDragNote = vn;
+            fVelLaneDrag = true;
+            CaptureDragOrigin();   // satisfy the MouseMoved drag guard
+            SetVelocityFromLane(where.y);
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            Invalidate();
+        }
+        return;
+    }
     if (where.x < kKbdW) return;
     int32 buttons = 0;
     if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
@@ -224,7 +288,7 @@ void PianoRollView::MouseDown(BPoint where) {
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
         fDragNote = hit;
         CaptureDragOrigin();
-        if (modifiers() & B_CONTROL_KEY)      fDrag = Drag::Velocity;
+        if (modifiers() & B_CONTROL_KEY)    { fDrag = Drag::Velocity; fVelLaneDrag = false; }
         else if (where.x >= x1 - kEdge)       fDrag = Drag::Resize;
         else {
             fDrag = Drag::Move;
@@ -297,11 +361,15 @@ void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
             if (len < 1) len = 1;
             fNotes[i].lengthFrames = len;
         }
-    } else {   // Velocity: same absolute value across the selection
-        const float t = 1.0f - where.y / Bounds().Height();
-        const int vel = std::clamp((int)(t * 127.0f + 0.5f), 1, 127);
-        for (size_t i = 0; i < fNotes.size(); i++)
-            if (fSel[i]) fNotes[i].velocity = vel;
+    } else {   // Velocity
+        if (fVelLaneDrag) {
+            SetVelocityFromLane(where.y);   // lane baseline mapping
+        } else {   // note-area Ctrl-drag: whole-height mapping, across selection
+            const float t = 1.0f - where.y / Bounds().Height();
+            const int vel = std::clamp((int)(t * 127.0f + 0.5f), 1, 127);
+            for (size_t i = 0; i < fNotes.size(); i++)
+                if (fSel[i]) fNotes[i].velocity = vel;
+        }
     }
     Invalidate();
 }
@@ -310,6 +378,7 @@ void PianoRollView::MouseUp(BPoint where) {
     const Drag was = fDrag;
     fDrag = Drag::None;
     fDragNote = -1;
+    fVelLaneDrag = false;
 
     if (was == Drag::Marquee) {
         const float moved = std::fabs(where.x - fDownPoint.x)
