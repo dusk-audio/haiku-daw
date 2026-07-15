@@ -50,6 +50,32 @@ int main() {
         }
     }
 
+    // Tempo RAMP: linear 120 -> 240 BPM over [0, 96000), then constant 240.
+    {
+        TempoMap m; m.sampleRate = SR;
+        m.SetTempoAt(0, 120.0, /*ramp=*/true);
+        m.SetTempoAt(96000, 240.0);          // ramp target; constant afterward
+        // Instantaneous tempo interpolates linearly in frames.
+        CHECK(std::fabs(m.BpmAt(0)     - 120.0) < 1e-9);
+        CHECK(std::fabs(m.BpmAt(48000) - 180.0) < 1e-9);   // midpoint
+        CHECK(std::fabs(m.BpmAt(96000) - 240.0) < 1e-9);
+        // Beats = integral of tempo. Average tempo 180 over the ramp -> 6 beats
+        // across 96000 frames (vs 4 for a constant 120).
+        CHECK(std::fabs(m.BeatAt(96000) - 6.0) < 1e-6);
+        CHECK(std::fabs(m.BeatAt(48000) - 2.5) < 1e-6);    // avg 150 over half
+        // Constant 240 after the ramp: +12000 frames = +1 beat.
+        CHECK(std::fabs(m.BeatAt(108000) - 7.0) < 1e-6);
+        // FrameAt inverts BeatAt within and past the ramp.
+        CHECK(std::llabs((long long)(m.FrameAt(6.0) - 96000)) <= 1);
+        CHECK(std::llabs((long long)(m.FrameAt(2.5) - 48000)) <= 1);
+        CHECK(std::llabs((long long)(m.FrameAt(7.0) - 108000)) <= 1);
+        for (Frame f : { (Frame)0, (Frame)20000, (Frame)48000, (Frame)96000,
+                         (Frame)108000, (Frame)150000 }) {
+            const double b = m.BeatAt(f);
+            CHECK(std::llabs((long long)(m.FrameAt(b) - f)) <= 1);
+        }
+    }
+
     // Meter change: 4/4 for two bars (8 beats @ 120 = 192000 frames), then 3/4.
     {
         TempoMap m; m.sampleRate = SR;               // 24000 frames/beat

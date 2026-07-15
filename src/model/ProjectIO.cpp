@@ -52,7 +52,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 
     f << "DAW 1\n";
     f << "sampleRate " << p.sampleRate << "\n";
-    f << "tempo " << p.tempoBPM << "\n";
+    f << "tempo " << p.tempoBPM << " "
+      << (p.tempoMap.Tempos().front().ramp ? 1 : 0) << "\n";
     f << "master " << p.masterGain << "\n";
     f << "timesig " << p.timeSig.numerator << " " << p.timeSig.denominator << "\n";
     f << "transport "
@@ -76,7 +77,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     // changes at frame > 0 are written.
     for (const TempoChange& tc : p.tempoMap.Tempos())
         if (tc.frame > 0)
-            f << "tempochange " << (long long)tc.frame << " " << tc.bpm << "\n";
+            f << "tempochange " << (long long)tc.frame << " " << tc.bpm << " "
+              << (tc.ramp ? 1 : 0) << "\n";
     for (const MeterChange& mc : p.tempoMap.Meters())
         if (mc.frame > 0)
             f << "meterchange " << (long long)mc.frame << " "
@@ -173,6 +175,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     // read (frame-0 seed depends on `tempo`/`timesig`, which may appear anywhere).
     std::vector<TempoChange> tempoChanges;
     std::vector<MeterChange> meterChanges;
+    bool tempo0Ramp = false;   // ramp flag for the frame-0 tempo
 
     auto commit = [&]() {
         if (!haveTrack) return;
@@ -194,7 +197,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         if (kw.empty()) continue;
 
         if (kw == "sampleRate") { iss >> p.sampleRate; }
-        else if (kw == "tempo") { iss >> p.tempoBPM; }
+        else if (kw == "tempo") {
+            iss >> p.tempoBPM;
+            int r = 0; if (iss >> r) tempo0Ramp = (r != 0);
+        }
         else if (kw == "master") { iss >> p.masterGain; }
         else if (kw == "masterfx") {
             EffectDesc e;
@@ -208,9 +214,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "tempochange") {
-            long long fr = 0; double bpm = 120.0;
+            long long fr = 0; double bpm = 120.0; int r = 0;
             iss >> fr >> bpm;
-            if (fr > 0) tempoChanges.push_back({(Frame)fr, bpm});
+            iss >> r;   // optional ramp flag (absent in older files -> 0)
+            if (fr > 0) tempoChanges.push_back({(Frame)fr, bpm, r != 0});
         }
         else if (kw == "meterchange") {
             long long fr = 0; int n = 4, d = 4;
@@ -341,7 +348,9 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     // rate, then apply the collected changes.
     p.tempoMap.sampleRate = p.sampleRate;
     p.tempoMap.Reset(p.tempoBPM, p.timeSig.numerator, p.timeSig.denominator);
-    for (const TempoChange& tc : tempoChanges) p.tempoMap.SetTempoAt(tc.frame, tc.bpm);
+    p.tempoMap.SetTempoAt(0, p.tempoBPM, tempo0Ramp);
+    for (const TempoChange& tc : tempoChanges)
+        p.tempoMap.SetTempoAt(tc.frame, tc.bpm, tc.ramp);
     for (const MeterChange& mc : meterChanges) p.tempoMap.SetMeterAt(mc.frame, mc.num, mc.denom);
 
     p.ReserveIds(maxTrack, maxClip);

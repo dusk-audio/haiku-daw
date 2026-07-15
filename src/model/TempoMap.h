@@ -24,6 +24,10 @@ namespace daw {
 struct TempoChange {
     Frame  frame = 0;
     double bpm   = 120.0;
+    // When true, tempo ramps linearly (in frames) from this change's bpm to the
+    // next change's bpm across the segment; when false it holds constant (a step
+    // jump at the next change). Ignored on the last change (no target).
+    bool   ramp  = false;
 };
 
 struct MeterChange {
@@ -46,12 +50,12 @@ public:
 
     // Insert or replace the tempo/meter at a frame. A change at frame 0 always
     // exists and can be replaced but not added twice. Kept sorted by frame.
-    void SetTempoAt(Frame f, double bpm) {
+    void SetTempoAt(Frame f, double bpm, bool ramp = false) {
         if (f < 0) f = 0;
         if (bpm < 1.0) bpm = 1.0;
         for (auto& t : fTempos)
-            if (t.frame == f) { t.bpm = bpm; return; }
-        fTempos.push_back({f, bpm});
+            if (t.frame == f) { t.bpm = bpm; t.ramp = ramp; return; }
+        fTempos.push_back({f, bpm, ramp});
         std::sort(fTempos.begin(), fTempos.end(),
                   [](const TempoChange& a, const TempoChange& b) {
                       return a.frame < b.frame;
@@ -88,30 +92,47 @@ public:
         fMeters.assign(1, {0, num < 1 ? 1 : num, denom < 1 ? 1 : denom});
     }
 
+    // Instantaneous tempo at `f`. In a ramp segment it interpolates linearly
+    // (in frames) between the segment's bpm and the next change's bpm.
     double BpmAt(Frame f) const {
-        double bpm = fTempos.front().bpm;
-        for (const auto& t : fTempos) {
-            if (t.frame > f) break;
-            bpm = t.bpm;
+        if (f < 0) f = 0;
+        std::size_t i = SegIndex(f);
+        const bool last = (i + 1 >= fTempos.size());
+        if (fTempos[i].ramp && !last) {
+            const Frame s = fTempos[i].frame, e = fTempos[i + 1].frame;
+            if (e > s) {
+                double t = (double)(f - s) / (double)(e - s);
+                if (t < 0) t = 0; if (t > 1) t = 1;
+                return fTempos[i].bpm + (fTempos[i + 1].bpm - fTempos[i].bpm) * t;
+            }
         }
-        return bpm;
+        return fTempos[i].bpm;
     }
     double FramesPerBeatAt(Frame f) const {
         return sampleRate * 60.0 / BpmAt(f);
     }
 
-    // Cumulative beats from frame 0 to `f` (integral of tempo).
+    // Cumulative beats from frame 0 to `f` (integral of tempo over frames).
     double BeatAt(Frame f) const {
         if (f <= 0) return 0.0;
+        const double k = 1.0 / (sampleRate * 60.0);   // beats per (bpm*frame)
         double beats = 0.0;
         for (std::size_t i = 0; i < fTempos.size(); i++) {
             const Frame segStart = fTempos[i].frame;
-            const Frame segEnd = (i + 1 < fTempos.size())
-                                 ? fTempos[i + 1].frame : f;
             if (f <= segStart) break;
+            const bool  last = (i + 1 >= fTempos.size());
+            const Frame segEnd = last ? f : fTempos[i + 1].frame;
             const Frame end = std::min(f, segEnd);
-            const double fpb = sampleRate * 60.0 / fTempos[i].bpm;
-            beats += (double)(end - segStart) / fpb;
+            const double b0 = fTempos[i].bpm;
+            if (fTempos[i].ramp && !last && segEnd > segStart) {
+                const double b1 = fTempos[i + 1].bpm;
+                const double N = (double)(segEnd - segStart);
+                const double x = (double)(end - segStart);
+                // integral of (b0 + (b1-b0)*t/N) dt from 0..x, times k
+                beats += k * (b0 * x + (b1 - b0) * x * x / (2.0 * N));
+            } else {
+                beats += k * b0 * (double)(end - segStart);
+            }
             if (f <= segEnd) break;
         }
         return beats;
@@ -120,20 +141,56 @@ public:
     // Inverse of BeatAt: the frame at a cumulative beat position.
     Frame FrameAt(double beat) const {
         if (beat <= 0.0) return 0;
+        const double k = 1.0 / (sampleRate * 60.0);
         double acc = 0.0;
         for (std::size_t i = 0; i < fTempos.size(); i++) {
             const Frame segStart = fTempos[i].frame;
             const bool  last = (i + 1 >= fTempos.size());
             const Frame segEnd = last ? 0 : fTempos[i + 1].frame;
-            const double fpb = sampleRate * 60.0 / fTempos[i].bpm;
-            const double segBeats = last ? 1e18
-                                         : (double)(segEnd - segStart) / fpb;
-            if (last || acc + segBeats >= beat)
-                return segStart + (Frame)std::llround((beat - acc) * fpb);
-            acc += segBeats;
+            const double b0 = fTempos[i].bpm;
+
+            if (fTempos[i].ramp && !last && segEnd > segStart) {
+                const double b1 = fTempos[i + 1].bpm;
+                const double N = (double)(segEnd - segStart);
+                const double segBeats = k * N * (b0 + b1) / 2.0;   // avg tempo
+                if (acc + segBeats >= beat) {
+                    // Solve k*(b0*x + (b1-b0)*x^2/(2N)) = beat-acc for x>=0.
+                    const double rhs = beat - acc;
+                    const double A = k * (b1 - b0) / (2.0 * N);
+                    const double B = k * b0;
+                    double x;
+                    if (std::fabs(A) < 1e-18) {
+                        x = rhs / B;
+                    } else {
+                        double disc = B * B + 4.0 * A * rhs;
+                        if (disc < 0) disc = 0;
+                        x = (-B + std::sqrt(disc)) / (2.0 * A);
+                    }
+                    return segStart + (Frame)std::llround(x);
+                }
+                acc += segBeats;
+            } else {
+                const double fpb = sampleRate * 60.0 / b0;
+                const double segBeats = last ? 1e18
+                                             : (double)(segEnd - segStart) / fpb;
+                if (last || acc + segBeats >= beat)
+                    return segStart + (Frame)std::llround((beat - acc) * fpb);
+                acc += segBeats;
+            }
         }
         return 0;
     }
+
+private:
+    // Index of the tempo segment containing frame `f` (last change at or before).
+    std::size_t SegIndex(Frame f) const {
+        std::size_t idx = 0;
+        for (std::size_t i = 0; i < fTempos.size(); i++) {
+            if (fTempos[i].frame <= f) idx = i; else break;
+        }
+        return idx;
+    }
+public:
 
     void Meter(Frame f, int* num, int* denom) const {
         const MeterChange* m = &fMeters.front();

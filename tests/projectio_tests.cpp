@@ -47,7 +47,8 @@ int main() {
     a.FindTrack(t1)->height     = 104;
     a.tempoMap.sampleRate = a.sampleRate;
     a.tempoMap.Reset(a.tempoBPM, 4, 4);
-    a.tempoMap.SetTempoAt(48000, 90.0);   // a tempo change
+    a.tempoMap.SetTempoAt(0, a.tempoBPM, true);   // frame-0 ramp flag
+    a.tempoMap.SetTempoAt(48000, 90.0, true);     // a tempo change (ramp)
     a.tempoMap.SetMeterAt(96000, 3, 4);   // a meter change
     stack.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(700.0f)), a);
     stack.Execute(std::make_unique<AddEffectCommand>(t1,
@@ -85,7 +86,9 @@ int main() {
     CHECK(b.masterFx[1].pluginName == "Cool Plugin");
     CHECK(std::abs(b.masterFx[1].p(1) - 0.25f) < 1e-4f);
     CHECK(b.tempoMap.Tempos().size() == 2);          // frame-0 seed + change
+    CHECK(b.tempoMap.Tempos()[0].ramp == true);      // frame-0 ramp persisted
     CHECK(b.tempoMap.Tempos()[1].frame == 48000);
+    CHECK(b.tempoMap.Tempos()[1].ramp == true);      // change ramp persisted
     CHECK(std::abs(b.tempoMap.Tempos()[1].bpm - 90.0) < 1e-6);
     CHECK(b.tempoMap.Meters().size() == 2);
     CHECK(b.tempoMap.Meters()[1].frame == 96000);

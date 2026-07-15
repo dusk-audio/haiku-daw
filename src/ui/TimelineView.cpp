@@ -433,6 +433,25 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     const char* mets[] = { "4/4", "3/4", "2/4", "6/8", "5/4", "7/8" };
     for (const char* mm : mets) msub->AddItem(new BMenuItem(mm, NULL));
     menu->AddItem(msub);
+
+    // Ramp toggle for the tempo change governing the click's segment (needs a
+    // following change to ramp toward, so hide it on the last segment).
+    Frame clickFrame = XToFrame(where.x); if (clickFrame < 0) clickFrame = 0;
+    Frame  segFrame = 0; double segBpm = tm.Tempos().front().bpm;
+    bool   segRamp = false;
+    for (const TempoChange& t : tm.Tempos()) {
+        if (t.frame <= clickFrame) { segFrame = t.frame; segBpm = t.bpm;
+                                     segRamp = t.ramp; }
+        else break;
+    }
+    const bool segHasNext = segFrame != tm.Tempos().back().frame;
+    BMenuItem* rampItem = nullptr;
+    if (segHasNext) {
+        rampItem = new BMenuItem("Ramp to next tempo", NULL);
+        rampItem->SetMarked(segRamp);
+        menu->AddItem(rampItem);
+    }
+
     if (nearTempo >= 0 || nearMeter >= 0) {
         menu->AddSeparatorItem();
         menu->AddItem(new BMenuItem("Remove change here", NULL));
@@ -449,6 +468,8 @@ void TimelineView::HandleRulerMenu(BPoint where) {
         } else if (parent == msub) {
             int n = 4, d = 4; std::sscanf(label, "%d/%d", &n, &d);
             tm.SetMeterAt(BarStartFrameAt(XToFrame(where.x)), n, d);
+        } else if (rampItem && sel == rampItem) {
+            tm.SetTempoAt(segFrame, segBpm, !segRamp);   // toggle ramp
         } else if (label && std::strcmp(label, "Remove change here") == 0) {
             if (nearTempo >= 0) tm.RemoveTempoAt(nearTempo);
             else if (nearMeter >= 0) tm.RemoveMeterAt(nearMeter);
@@ -1209,12 +1230,29 @@ void TimelineView::DrawRuler(BRect update) {
 
     // Tempo/meter change markers (right-click the ruler to add/remove).
     const TempoMap& tm = fProject->tempoMap;
-    for (const TempoChange& t : tm.Tempos()) {
+    const auto& tempos = tm.Tempos();
+    for (std::size_t i = 0; i < tempos.size(); i++) {
+        const TempoChange& t = tempos[i];
         const float x = FrameToX(t.frame);
-        if (x < kHeaderWidth || x > r.right) continue;
+        const bool  onScreen = (x >= kHeaderWidth && x <= r.right);
+        // A ramp draws a diagonal from this marker to the next, sloping up when
+        // accelerating; may start off the left edge, so don't gate purely on x.
+        if (t.ramp && i + 1 < tempos.size()) {
+            const float nx = FrameToX(tempos[i + 1].frame);
+            if (nx >= kHeaderWidth && x <= r.right) {
+                const float x0 = std::max(x, (float)kHeaderWidth);
+                const float x1 = std::min(nx, r.right);
+                const bool  up = tempos[i + 1].bpm > t.bpm;
+                SetHighColor(Rgb(230, 170, 70));
+                StrokeLine(BPoint(x0, up ? kRulerHeight - 3 : 3),
+                           BPoint(x1, up ? 3 : kRulerHeight - 3));
+            }
+        }
+        if (!onScreen) continue;
         SetHighColor(Rgb(230, 170, 70));
         StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
-        char s[16]; std::snprintf(s, sizeof(s), "%.0f", t.bpm);
+        char s[16];
+        std::snprintf(s, sizeof(s), t.ramp ? "%.0f~" : "%.0f", t.bpm);
         DrawString(s, BPoint(x + 2, 9));
     }
     for (const MeterChange& m : tm.Meters()) {
