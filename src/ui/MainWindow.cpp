@@ -322,6 +322,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fInspector && fTimeline)
                 fTimeline->CycleAuto(fInspector->SelectedTrack());
             break;
+        case kMsgRollOpened: {     // a piano roll opened; remember it for the playhead
+            BMessenger m;
+            if (msg->FindMessenger("m", &m) == B_OK) fRollMsgr = m;
+            break;
+        }
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
@@ -861,6 +866,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     const bool capturing = fRecorder && fRecorder->IsRecording();
                     const bool midiCap   = fMidiIn && !fCapturePending;
                     fTimeline->SetPlayhead(ph);
+                    PushRollPlayhead(ph);
                     UpdateTimeReadout(ph);
                     if (capturing || midiCap) {
                         // Growing recording region + its live content.
@@ -888,6 +894,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     break;
                 }
                 fTimeline->SetPlayhead(ph);
+                PushRollPlayhead(ph);
                 UpdateTimeReadout(ph);
                 fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
                 UpdateLoudnessReadout(fEngine->LufsMomentary(),
@@ -981,6 +988,7 @@ void MainWindow::StopPlayback(bool resumeMonitor) {
     fPlaying = false;
     if (fTransport) fTransport->SetPlaying(false);
     UpdatePulse();
+    PushRollPlayhead(-1);   // hide the roll playhead when stopped
     fMeter->SetLevels(0.0f, 0.0f);
     fTimeline->ClearTrackPeaks();
     UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
@@ -1826,6 +1834,13 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
     char buf[48];
     std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
     fTimeView->SetText(buf);
+}
+
+void MainWindow::PushRollPlayhead(Frame ph) {
+    if (!fRollMsgr.IsValid()) return;
+    BMessage m(kMsgRollPlayhead);
+    m.AddInt64("ph", (int64)ph);
+    fRollMsgr.SendMessage(&m);
 }
 
 void MainWindow::PushTrackPeaks() {

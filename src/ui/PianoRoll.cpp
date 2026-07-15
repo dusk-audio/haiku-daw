@@ -1,6 +1,7 @@
 #include "PianoRoll.h"
 
 #include "UiMetrics.h"
+#include "Widgets.h"
 
 #include <PopUpMenu.h>
 #include <MenuItem.h>
@@ -17,6 +18,24 @@ static constexpr float kRowH = 12.0f;   // pixels per semitone
 static constexpr int   kSnapDiv = 4;    // 16th-note snap
 static constexpr float kEdge = 5.0f;    // resize grab zone
 static constexpr float kVelLaneH = 64.0f;   // bottom velocity (lollipop) lane
+static constexpr float kToolbarH = 28.0f;   // top tool palette strip
+
+static const char* kToolNames[7] = { "Ptr", "Pen", "Brush", "Erase",
+                                     "Split", "Glue", "Vel" };
+static BRect ZoomOutRectR() { return BRect(360, 5, 384, 23); }
+static BRect ZoomInRectR()  { return BRect(388, 5, 412, 23); }
+
+// Note fill color by velocity: cool (blue) when soft, hot (red) when loud.
+static rgb_color VelHeat(int vel) {
+    float t = vel / 127.0f;
+    if (t < 0) t = 0; if (t > 1) t = 1;
+    float r, g, b;
+    if (t < 0.25f)      { float u = t / 0.25f;          r = 40;          g = 120 + 90 * u; b = 235; }
+    else if (t < 0.5f)  { float u = (t - 0.25f) / 0.25f; r = 40;          g = 210;          b = 235 - 175 * u; }
+    else if (t < 0.75f) { float u = (t - 0.5f) / 0.25f;  r = 40 + 215 * u; g = 210;          b = 60; }
+    else                { float u = (t - 0.75f) / 0.25f; r = 255;         g = 210 - 155 * u; b = 60 - 20 * u; }
+    return Rgb((uint8)r, (uint8)g, (uint8)b);
+}
 
 static bool IsBlackKey(int pitch) {
     switch (((pitch % 12) + 12) % 12) {
@@ -69,10 +88,26 @@ Frame PianoRollView::XToFrame(float x) const {
     return fScrollFrame + (Frame)((double)(x - kKbdW) * fFramesPerPixel);
 }
 float PianoRollView::PitchToY(int pitch) const {
-    return (float)(fTopPitch - pitch) * kRowH;
+    return kToolbarH + (float)(fTopPitch - pitch) * kRowH;
 }
 int PianoRollView::YToPitch(float y) const {
-    return fTopPitch - (int)std::floor(y / kRowH);
+    return fTopPitch - (int)std::floor((y - kToolbarH) / kRowH);
+}
+
+BRect PianoRollView::ToolRect(int i) const {
+    return BRect(4 + i * 48, 5, 4 + i * 48 + 46, 23);
+}
+int PianoRollView::ToolAt(BPoint where) const {
+    for (int i = 0; i < 7; i++)
+        if (ToolRect(i).Contains(where)) return i;
+    return -1;
+}
+void PianoRollView::ZoomBy(double factor) {
+    // Zoom about the view's left edge (keeps the left-visible frame anchored).
+    fFramesPerPixel *= factor;
+    if (fFramesPerPixel < 8)    fFramesPerPixel = 8;
+    if (fFramesPerPixel > 8192) fFramesPerPixel = 8192;
+    Invalidate();
 }
 Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
     if (modifiers() & B_SHIFT_KEY) return f < 0 ? 0 : f;
@@ -92,7 +127,7 @@ void PianoRollView::Draw(BRect) {
     const float velTop = VelLaneTop();
 
     // Rows (pitch lanes) with octave shading + keyboard column (note area only).
-    for (float y = 0; y < velTop; y += kRowH) {
+    for (float y = kToolbarH; y < velTop; y += kRowH) {
         const int pitch = YToPitch(y + 1);
         SetHighColor(IsBlackKey(pitch) ? ColLaneAlt() : ColLane());
         FillRect(BRect(kKbdW, y, w, y + kRowH));
@@ -100,9 +135,12 @@ void PianoRollView::Draw(BRect) {
             SetHighColor(ColGrid());
             StrokeLine(BPoint(kKbdW, y + kRowH), BPoint(w, y + kRowH));
         }
-        // Keyboard key.
-        SetHighColor(IsBlackKey(pitch) ? Rgb(28, 30, 35) : Rgb(210, 214, 220));
+        // Keyboard key + a dark separator line so adjacent white keys read as
+        // distinct keys (not one white blob).
+        SetHighColor(IsBlackKey(pitch) ? Rgb(28, 30, 35) : Rgb(214, 218, 224));
         FillRect(BRect(0, y, kKbdW - 2, y + kRowH));
+        SetHighColor(Rgb(20, 20, 24));
+        StrokeLine(BPoint(0, y + kRowH - 1), BPoint(kKbdW - 2, y + kRowH - 1));
         if (((pitch % 12) + 12) % 12 == 0) {   // label C notes
             char nb[8]; NoteName(pitch, nb, sizeof(nb));
             SetHighColor(Rgb(40, 44, 50));
@@ -110,7 +148,7 @@ void PianoRollView::Draw(BRect) {
         }
     }
     SetHighColor(ColGrid());
-    StrokeLine(BPoint(kKbdW, 0), BPoint(kKbdW, velTop));
+    StrokeLine(BPoint(kKbdW, kToolbarH), BPoint(kKbdW, velTop));
 
     // Vertical bar/beat gridlines, computed in absolute-timeline space so the
     // bar numbering + snap reflect where the region actually sits in the song.
@@ -126,30 +164,38 @@ void PianoRollView::Draw(BRect) {
             if (x < kKbdW) continue;
             int bar = 1, bb = 1; fTempo.BarBeat(af, &bar, &bb);
             SetHighColor(bb == 1 ? ColGrid() : ColLaneAlt());
-            StrokeLine(BPoint(x, 0), BPoint(x, h));
+            StrokeLine(BPoint(x, kToolbarH), BPoint(x, h));
             if (bb == 1) {   // absolute bar number at each bar line
                 char bl[12]; std::snprintf(bl, sizeof(bl), "%d", bar);
                 SetHighColor(ColTextDim());
-                DrawString(bl, BPoint(x + 3, 11));
+                DrawString(bl, BPoint(x + 3, kToolbarH + 11));
             }
         }
     }
 
-    // Notes (clipped to the note area above the velocity lane).
+    // Notes (velocity-heat colored, clipped to the note area).
     for (size_t i = 0; i < fNotes.size(); i++) {
         const MidiNote& n = fNotes[i];
         const float x0 = FrameToX(n.startFrame);
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
         const float y  = PitchToY(n.pitch);
-        if (x1 < kKbdW || x0 > w || y + kRowH < 0 || y > velTop) continue;
+        if (x1 < kKbdW || x0 > w || y + kRowH < kToolbarH || y > velTop) continue;
         const bool sel = i < fSel.size() && fSel[i];
-        const float s = 0.45f + 0.55f * (n.velocity / 127.0f);
-        BRect nr(std::max(x0, kKbdW), y + 1, x1, std::min(y + kRowH - 1, velTop));
-        if (sel) SetHighColor(Rgb((uint8)(120 * s), (uint8)(190 * s), (uint8)(255 * s)));
-        else     SetHighColor(Rgb((uint8)(70 * s),  (uint8)(150 * s), (uint8)(220 * s)));
+        BRect nr(std::max(x0, kKbdW), std::max(y + 1, kToolbarH),
+                 x1, std::min(y + kRowH - 1, velTop));
+        SetHighColor(VelHeat(n.velocity));
         FillRect(nr);
-        SetHighColor(sel ? Rgb(255, 240, 140) : ColClipBorder());
+        SetHighColor(sel ? Rgb(255, 240, 140) : ColGrid());
         StrokeRect(nr);
+    }
+
+    // Playhead ("tapehead"): a bright vertical line at the transport position.
+    if (fPlayhead >= 0) {
+        const float px = FrameToX(fPlayhead - fClipStart);
+        if (px >= kKbdW && px <= w) {
+            SetHighColor(ColPlayhead());
+            StrokeLine(BPoint(px, kToolbarH), BPoint(px, h));
+        }
     }
 
     // Velocity lane: one "lollipop" (stem + dot) per note, height = velocity.
@@ -182,6 +228,16 @@ void PianoRollView::Draw(BRect) {
         SetPenSize(1.0f);
         StrokeRect(m, B_MIXED_COLORS);
     }
+
+    // Tool palette (drawn last, on top). Buttons + zoom out/in.
+    SetHighColor(ColHeader());
+    FillRect(BRect(0, 0, w, kToolbarH - 1));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(0, kToolbarH - 1), BPoint(w, kToolbarH - 1));
+    for (int i = 0; i < 7; i++)
+        DrawButton(this, ToolRect(i), kToolNames[i], i == (int)fTool, ColAccent());
+    DrawButton(this, ZoomOutRectR(), "\xE2\x88\x92", false);   // minus
+    DrawButton(this, ZoomInRectR(),  "+", false);
 }
 
 int PianoRollView::NoteAt(BPoint where) const {
@@ -217,6 +273,92 @@ void PianoRollView::CaptureDragOrigin() {
                          fNotes[i].pitch, fNotes[i].velocity };
 }
 
+void PianoRollView::AddNoteAt(BPoint where, bool resizeDrag) {
+    MidiNote n;
+    Frame start = Snapped(XToFrame(where.x));
+    if (start < 0) start = 0;
+    n.startFrame   = start;
+    n.pitch        = std::clamp(YToPitch(where.y), 0, 127);
+    n.velocity     = 100;
+    n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start + fClipStart);
+    if (n.lengthFrames < 1) n.lengthFrames = 1;
+    fNotes.push_back(n);
+    fSel.assign(fNotes.size(), 0);
+    fSel.back() = 1;
+    if (resizeDrag) {   // pencil: drag right to size the new note
+        fDragNote = (int)fNotes.size() - 1;
+        CaptureDragOrigin();
+        fDrag = Drag::Resize;
+        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    } else {
+        Apply();
+    }
+    Invalidate();
+}
+
+void PianoRollView::PaintBrush(BPoint where) {
+    if (where.x < kKbdW || where.y < kToolbarH || where.y >= VelLaneTop()) return;
+    Frame start = Snapped(XToFrame(where.x));
+    if (start < 0) start = 0;
+    const int pitch = std::clamp(YToPitch(where.y), 0, 127);
+    for (const MidiNote& n : fNotes)               // skip if a note is already here
+        if (n.pitch == pitch && n.startFrame == start) return;
+    MidiNote n;
+    n.startFrame   = start;
+    n.pitch        = pitch;
+    n.velocity     = 100;
+    n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start + fClipStart) / kSnapDiv;
+    if (n.lengthFrames < 1) n.lengthFrames = 1;    // one grid step
+    fNotes.push_back(n);
+    fSel.assign(fNotes.size(), 0);
+    Invalidate();   // committed on mouse-up
+}
+
+void PianoRollView::EraseAt(BPoint where) {
+    const int h = NoteAt(where);
+    if (h < 0) return;
+    fNotes.erase(fNotes.begin() + h);
+    if ((size_t)h < fSel.size()) fSel.erase(fSel.begin() + h);
+    Invalidate();   // committed on mouse-up
+}
+
+void PianoRollView::SplitNoteAt(int i, float x) {
+    if (i < 0 || (size_t)i >= fNotes.size()) return;
+    const Frame cut = Snapped(XToFrame(x));   // clip-relative
+    MidiNote& n = fNotes[(size_t)i];
+    if (cut <= n.startFrame || cut >= n.startFrame + n.lengthFrames) return;
+    MidiNote right = n;
+    right.startFrame   = cut;
+    right.lengthFrames = n.startFrame + n.lengthFrames - cut;
+    n.lengthFrames     = cut - n.startFrame;
+    fNotes.push_back(right);
+    fSel.assign(fNotes.size(), 0);
+    Apply(); Invalidate();
+}
+
+void PianoRollView::GlueNoteAt(int i) {
+    if (i < 0 || (size_t)i >= fNotes.size()) return;
+    const int   pitch = fNotes[(size_t)i].pitch;
+    const Frame start = fNotes[(size_t)i].startFrame;
+    // Nearest same-pitch note that starts at/after this one.
+    int best = -1; Frame bestStart = 0;
+    for (size_t j = 0; j < fNotes.size(); j++) {
+        if ((int)j == i || fNotes[j].pitch != pitch) continue;
+        if (fNotes[j].startFrame >= start
+            && (best < 0 || fNotes[j].startFrame < bestStart)) {
+            best = (int)j; bestStart = fNotes[j].startFrame;
+        }
+    }
+    if (best < 0) return;
+    const Frame end = std::max(start + fNotes[(size_t)i].lengthFrames,
+                               fNotes[(size_t)best].startFrame
+                               + fNotes[(size_t)best].lengthFrames);
+    fNotes[(size_t)i].lengthFrames = end - start;   // extend the kept note
+    fNotes.erase(fNotes.begin() + best);            // remove the merged one
+    fSel.assign(fNotes.size(), 0);
+    Apply(); Invalidate();
+}
+
 int PianoRollView::VelNoteAtX(float x) const {
     int best = -1; float bestd = 8.0f;
     for (size_t i = 0; i < fNotes.size(); i++) {
@@ -243,6 +385,15 @@ void PianoRollView::SetVelocityFromLane(float y) {
 }
 
 void PianoRollView::MouseDown(BPoint where) {
+    // Tool palette strip (top): pick a tool or zoom.
+    if (where.y < kToolbarH) {
+        const int t = ToolAt(where);
+        if (t >= 0)                              { fTool = (Tool)t; Invalidate(); }
+        else if (ZoomOutRectR().Contains(where)) ZoomBy(2.0);
+        else if (ZoomInRectR().Contains(where))  ZoomBy(0.5);
+        return;
+    }
+
     // Velocity lane (bottom strip): grab the nearest note's lollipop and drag
     // its velocity. Works across the full width (including the keyboard column).
     if (where.y >= VelLaneTop()) {
@@ -284,6 +435,42 @@ void PianoRollView::MouseDown(BPoint where) {
         return;
     }
 
+    // Non-pointer tools: each has its own click behavior.
+    if (fTool != Tool::Pointer) {
+        switch (fTool) {
+            case Tool::Pencil:
+                if (hit < 0) { AddNoteAt(where, true); return; }
+                break;   // on a note: fall through to pointer move/resize below
+            case Tool::Brush:
+                fDrag = Drag::Brush;
+                PaintBrush(where);
+                SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+                return;
+            case Tool::Eraser:
+                if (hit >= 0) EraseAt(where);
+                fDrag = Drag::Erase;
+                SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+                return;
+            case Tool::Scissors:
+                if (hit >= 0) SplitNoteAt(hit, where.x);
+                return;
+            case Tool::Glue:
+                if (hit >= 0) GlueNoteAt(hit);
+                return;
+            case Tool::Velocity:
+                if (hit >= 0) {
+                    if ((size_t)hit >= fSel.size() || !fSel[(size_t)hit]) SelectOnly(hit);
+                    fDragNote = hit;
+                    CaptureDragOrigin();
+                    fDrag = Drag::Velocity; fVelLaneDrag = false;
+                    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+                    Invalidate();
+                }
+                return;
+            default: break;
+        }
+    }
+
     if (hit >= 0) {
         if (additive) {   // toggle this note in/out of the selection, no drag
             fSel[(size_t)hit] = fSel[(size_t)hit] ? 0 : 1;
@@ -323,6 +510,9 @@ void PianoRollView::MouseDown(BPoint where) {
 
 void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
     if (fDrag == Drag::None) return;
+
+    if (fDrag == Drag::Brush) { PaintBrush(where); return; }
+    if (fDrag == Drag::Erase) { EraseAt(where);   return; }
 
     if (fDrag == Drag::Marquee) {
         fMarqueeCur = where;
@@ -420,9 +610,16 @@ void PianoRollView::MessageReceived(BMessage* msg) {
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         float dy = 0.0f;
         if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
-            fTopPitch -= (int)dy * 3;
-            if (fTopPitch > 127) fTopPitch = 127;
-            if (fTopPitch < 24)  fTopPitch = 24;
+            if (modifiers() & B_SHIFT_KEY) {          // Shift+wheel: scroll time
+                fScrollFrame += (Frame)((double)dy * 8.0 * fFramesPerPixel);
+                if (fScrollFrame < 0) fScrollFrame = 0;
+            } else if (modifiers() & B_CONTROL_KEY) { // Ctrl+wheel: zoom time
+                ZoomBy(dy > 0 ? 1.2 : 1.0 / 1.2);
+            } else {                                   // wheel: scroll pitch
+                fTopPitch -= (int)dy * 3;
+                if (fTopPitch > 127) fTopPitch = 127;
+                if (fTopPitch < 24)  fTopPitch = 24;
+            }
             Invalidate();
             return;
         }
@@ -439,6 +636,13 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
         case '+': case '=': fFramesPerPixel *= 0.5; if (fFramesPerPixel < 8) fFramesPerPixel = 8; Invalidate(); break;
         case '-': case '_': fFramesPerPixel *= 2.0; if (fFramesPerPixel > 8192) fFramesPerPixel = 8192; Invalidate(); break;
         case B_DELETE: case B_BACKSPACE: DeleteSelected(); break;
+        case '1': fTool = Tool::Pointer;  Invalidate(); break;
+        case '2': fTool = Tool::Pencil;   Invalidate(); break;
+        case '3': fTool = Tool::Brush;    Invalidate(); break;
+        case '4': fTool = Tool::Eraser;   Invalidate(); break;
+        case '5': fTool = Tool::Scissors; Invalidate(); break;
+        case '6': fTool = Tool::Glue;     Invalidate(); break;
+        case '7': fTool = Tool::Velocity; Invalidate(); break;
         case 1: case 'a': case 'A':   // Command-A: select all
             if (modifiers() & B_COMMAND_KEY) {
                 fSel.assign(fNotes.size(), 1); Invalidate();
@@ -459,6 +663,16 @@ PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
                               tempo, sampleRate, apply);
     AddChild(fView);
     fView->MakeFocus(true);
+}
+
+void PianoRoll::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgRollPlayhead) {
+        int64 ph = -1;
+        msg->FindInt64("ph", &ph);
+        if (fView) fView->SetPlayhead((daw::Frame)ph);
+        return;
+    }
+    BWindow::MessageReceived(msg);
 }
 
 } // namespace daw

@@ -25,12 +25,22 @@ namespace daw {
 // + int64 "ns","nl" (note frames are clip-relative).
 constexpr uint32 kMsgApplyNotes = 'ntap';
 
+// MainWindow -> piano roll: current playhead (int64 "ph", absolute frames; a
+// negative value hides it).
+constexpr uint32 kMsgRollPlayhead = 'rlph';
+
+// TimelineView -> MainWindow: a piano roll opened; carries BMessenger "m" so the
+// main window can push the playhead to it during transport.
+constexpr uint32 kMsgRollOpened = 'rlop';
+
 class PianoRollView : public BView {
 public:
     using Frame = daw::Frame;
     PianoRollView(BRect frame, TrackId track, ClipId clip, Frame clipStart,
                   std::vector<MidiNote> notes,
                   TempoMap tempo, double sampleRate, BMessenger apply);
+
+    void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
 
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
@@ -51,6 +61,17 @@ private:
     void  SetVelocityFromLane(float y); // set dragged/selected note velocity
     void  Apply();
 
+    // Editing tools (a toolbar across the top selects the active one).
+    enum class Tool { Pointer, Pencil, Brush, Eraser, Scissors, Glue, Velocity };
+    Tool  fTool = Tool::Pointer;
+    BRect ToolRect(int i) const;        // toolbar button rect
+    int   ToolAt(BPoint where) const;   // -1 if not on a toolbar button
+    void  AddNoteAt(BPoint where, bool resizeDrag);   // pencil / brush
+    void  EraseAt(BPoint where);        // eraser
+    void  SplitNoteAt(int note, float x);   // scissors
+    void  GlueNoteAt(int note);         // glue (merge next same-pitch)
+    void  PaintBrush(BPoint where);     // brush: add along the drag path
+
     // Selection helpers (fSel is index-aligned with fNotes).
     void  SelectOnly(int i);
     void  ClearSelection();
@@ -70,8 +91,11 @@ private:
     double fFramesPerPixel = 128.0;
     Frame  fScrollFrame    = 0;
     int    fTopPitch       = 96;   // highest pitch row at the top
+    Frame  fPlayhead       = -1;   // absolute frames; <0 = hidden ("tapehead")
 
-    enum class Drag { None, Move, Resize, Velocity, Marquee };
+    void ZoomBy(double factor);    // horizontal zoom about the view
+
+    enum class Drag { None, Move, Resize, Velocity, Marquee, Brush, Erase };
     Drag  fDrag = Drag::None;
     int   fDragNote = -1;
     Frame fGrabOffset = 0;
@@ -94,6 +118,7 @@ public:
     PianoRoll(BRect frame, TrackId track, ClipId clip, daw::Frame clipStart,
               std::vector<MidiNote> notes,
               TempoMap tempo, double sampleRate, BMessenger apply);
+    void MessageReceived(BMessage* msg) override;   // forwards kMsgRollPlayhead
 private:
     PianoRollView* fView;
 };

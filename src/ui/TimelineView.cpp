@@ -284,8 +284,16 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
     if (!c) return;
     BPoint sp = ConvertToScreen(BPoint(kHeaderWidth + 40, kRulerHeight + 40));
     BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
-    (new PianoRoll(wr, track, clip, c->startFrame, c->notes, fProject->tempoMap,
-                   fProject->sampleRate, BMessenger(Window())))->Show();
+    PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame, c->notes,
+                                    fProject->tempoMap, fProject->sampleRate,
+                                    BMessenger(Window()));
+    roll->Show();
+    // Register the roll so the main window can push the playhead ("tapehead").
+    if (BWindow* w = Window()) {
+        BMessage m(kMsgRollOpened);
+        m.AddMessenger("m", BMessenger(roll));
+        w->PostMessage(&m);
+    }
 }
 
 void TimelineView::PasteAtPlayhead() {

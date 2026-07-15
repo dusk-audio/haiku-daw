@@ -73,6 +73,7 @@ private:
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
+    void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
@@ -126,6 +127,7 @@ private:
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
+    BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
     BFilePanel*               fSavePanel = nullptr;
