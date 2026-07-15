@@ -164,8 +164,16 @@ if(HAIKU)
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/storage/BfsAttr.cpp
+        src/plugin/PluginHost.cpp
     )
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.
     target_link_libraries(daw PRIVATE daw_engine be tracker)
+
+    # --- Sample effect add-on (plugin ABI demo) -----------------------
+    # A Haiku shared add-on (.so) the host loads at runtime. Only needs the
+    # kit-free IEffect/PluginApi headers, so it links nothing from the app.
+    add_library(tremolo_plugin MODULE src/plugin/sample/TremoloPlugin.cpp)
+    set_target_properties(tremolo_plugin PROPERTIES
+        PREFIX "" OUTPUT_NAME "tremolo" SUFFIX ".so")
 endif()

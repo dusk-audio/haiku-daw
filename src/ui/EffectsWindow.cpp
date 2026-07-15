@@ -2,6 +2,7 @@
 
 #include "UiMetrics.h"
 #include "../dsp/Eq.h"
+#include "../plugin/PluginHost.h"
 
 #include <ScrollBar.h>
 
@@ -55,6 +56,26 @@ static std::vector<KnobDef> KnobsFor(EffectType t) {
     }
 }
 
+static const PluginInfo* FindPlugin(const std::string& name) {
+    for (const PluginInfo& pi : PluginHost::Instance().Plugins())
+        if (pi.name == name) return &pi;
+    return nullptr;
+}
+
+// Knob row for a descriptor. Plugins derive their knobs (label + range) from
+// the loaded add-on's parameter metadata; built-ins use the static table.
+static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin) {
+        std::vector<KnobDef> ks;
+        if (const PluginInfo* pi = FindPlugin(d.pluginName))
+            for (size_t i = 0; i < pi->params.size() && i < 5; i++)
+                ks.push_back({ pi->params[i].name.c_str(), (int)i,
+                               pi->params[i].mn, pi->params[i].mx });
+        return ks;
+    }
+    return KnobsFor(d.type);
+}
+
 EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
                          TrackId track, BMessenger apply)
     : BView(frame, "fx", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
@@ -80,7 +101,9 @@ float EffectsView::PanelTop(size_t i) const {
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    y += 8 * 26 + 12;   // the Add-effect buttons
+    // 7 built-in add buttons + one per loaded plugin.
+    const int addRows = 7 + (int)PluginHost::Instance().Plugins().size();
+    y += addRows * 26 + 12;
     return y;
 }
 
@@ -90,6 +113,7 @@ void EffectsView::Apply() {
     for (const EffectDesc& d : fChain) {
         m.AddInt32("et", (int32)(int)d.type);
         m.AddInt32("ec", (int32)d.params.size());
+        m.AddString("en", d.pluginName.c_str());   // empty for built-ins
         for (float v : d.params) m.AddFloat("ep", v);
     }
     fApply.SendMessage(&m);
@@ -258,7 +282,9 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColHeaderHi());
         FillRect(BRect(panel.left, panel.top, panel.right, panel.top + kTitleH));
         SetHighColor(ColText());
-        DrawString(EffName(d.type), BPoint(panel.left + 8, panel.top + 15));
+        DrawString(d.type == EffectType::Plugin ? d.pluginName.c_str()
+                                                : EffName(d.type),
+                   BPoint(panel.left + 8, panel.top + 15));
 
         // Up / Down / Remove buttons in the title bar.
         auto btn = [&](float rx, const char* lbl, int kind) {
@@ -288,7 +314,7 @@ void EffectsView::Draw(BRect) {
         }
 
         // Knob row.
-        const std::vector<KnobDef> knobs = KnobsFor(d.type);
+        const std::vector<KnobDef> knobs = KnobsForDesc(d);
         float kx = panel.left + 8;
         for (const KnobDef& k : knobs) {
             BRect kr(kx, knobTop, kx + kKnobW, knobTop + kKnobH);
@@ -311,6 +337,19 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColGrid());     StrokeRect(b);
         SetHighColor(ColAccent());   DrawString(adds[k], BPoint(b.left + 10, b.bottom - 6));
         fHits.push_back({ (int)at[k], 4, 0, b, 0, 0 });
+        ay += 26;
+    }
+
+    // One button per loaded plugin add-on (slot carries the plugin index).
+    const std::vector<PluginInfo>& plugins = PluginHost::Instance().Plugins();
+    for (size_t k = 0; k < plugins.size(); k++) {
+        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
+        SetHighColor(ColHeaderHi()); FillRect(b);
+        SetHighColor(ColGrid());     StrokeRect(b);
+        SetHighColor(ColAccent());
+        std::string lbl = "Add " + plugins[k].name;
+        DrawString(lbl.c_str(), BPoint(b.left + 10, b.bottom - 6));
+        fHits.push_back({ (int)EffectType::Plugin, 4, (int)k, b, 0, 0 });
         ay += 26;
     }
 }
@@ -383,9 +422,23 @@ void EffectsView::MouseDown(BPoint where) {
                 Apply(); Invalidate();
             }
             break;
-        case 4:   // add (h.effect carries the EffectType)
-            fChain.push_back(MakeDefault((EffectType)h.effect));
-            Apply(); Invalidate();
+        case 4:   // add (h.effect carries the EffectType; slot = plugin index)
+            if ((EffectType)h.effect == EffectType::Plugin) {
+                const std::vector<PluginInfo>& pl =
+                    PluginHost::Instance().Plugins();
+                if (h.slot >= 0 && h.slot < (int)pl.size()) {
+                    EffectDesc d;
+                    d.type = EffectType::Plugin;
+                    d.pluginName = pl[h.slot].name;
+                    for (const PluginParamInfo& pp : pl[h.slot].params)
+                        d.params.push_back(pp.def);   // seed defaults
+                    fChain.push_back(d);
+                    Apply(); Invalidate();
+                }
+            } else {
+                fChain.push_back(MakeDefault((EffectType)h.effect));
+                Apply(); Invalidate();
+            }
             break;
     }
 }

@@ -11,7 +11,18 @@
 
 namespace daw {
 
+static PluginFactoryFn gPluginFactory = nullptr;
+void SetPluginFactory(PluginFactoryFn fn) { gPluginFactory = fn; }
+
 std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin) {
+        if (!gPluginFactory) return nullptr;
+        auto e = gPluginFactory(d.pluginName);
+        if (e)   // apply stored params
+            for (size_t i = 0; i < d.params.size(); i++)
+                e->SetParam((int)i, d.params[i]);
+        return e;
+    }
     switch (d.type) {
         case EffectType::Biquad: {
             Biquad::Type mode = Biquad::Type::LowPass;

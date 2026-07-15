@@ -12,9 +12,13 @@
 #include "model/Commands.h"
 #include "model/PeakCache.h"
 #include "engine/WavSource.h"
+#include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
 
 #include <Application.h>
+#include <FindDirectory.h>
+#include <Path.h>
+#include <Roster.h>
 
 #include <cmath>
 #include <cstdio>
@@ -88,8 +92,32 @@ static void BuildPeaks(const Project& project,
     }
 }
 
+// Load native effect add-ons from a "plugins" dir next to the executable and
+// from the user settings dir, so both a build-tree run and an installed run
+// find them. Missing dirs are harmless.
+static void InstallPlugins() {
+    PluginHost& host = PluginHost::Instance();
+
+    app_info info;
+    if (be_app->GetAppInfo(&info) == B_OK) {
+        BPath exe(&info.ref);
+        BPath dir;
+        if (exe.GetParent(&dir) == B_OK) {
+            std::string p = std::string(dir.Path()) + "/plugins";
+            host.ScanDir(p);
+        }
+    }
+
+    BPath settings;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings) == B_OK) {
+        std::string p = std::string(settings.Path()) + "/HaikuDAW/plugins";
+        host.ScanDir(p);
+    }
+}
+
 int main(int argc, char** argv) {
     BApplication app("application/x-vnd.DuskAudio-HaikuDAW");
+    InstallPlugins();
 
     std::vector<std::string> wavs;
     for (int i = 1; i < argc; i++)

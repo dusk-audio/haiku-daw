@@ -27,6 +27,9 @@ int main() {
     a.tempoBPM   = 90.0;
     a.masterGain = 0.75f;
     a.masterFx.push_back(ReverbDesc(0.6f, 0.25f));   // master bus chain
+    { EffectDesc pl; pl.type = EffectType::Plugin;    // plugin effect on master
+      pl.pluginName = "Cool Plugin"; pl.params = {0.5f, 0.25f};
+      a.masterFx.push_back(pl); }
     a.transport.playhead = 12345;
     a.transport.punchEnabled = true;
     a.transport.punchIn = 2000; a.transport.punchOut = 8000;
@@ -76,8 +79,11 @@ int main() {
     CHECK(b.sampleRate == 44100.0);
     CHECK(b.tempoBPM == 90.0);
     CHECK(std::abs(b.masterGain - 0.75f) < 1e-4f);
-    CHECK(b.masterFx.size() == 1);
+    CHECK(b.masterFx.size() == 2);
     CHECK(b.masterFx[0].type == EffectType::Reverb);
+    CHECK(b.masterFx[1].type == EffectType::Plugin);
+    CHECK(b.masterFx[1].pluginName == "Cool Plugin");
+    CHECK(std::abs(b.masterFx[1].p(1) - 0.25f) < 1e-4f);
     CHECK(b.tempoMap.Tempos().size() == 2);          // frame-0 seed + change
     CHECK(b.tempoMap.Tempos()[1].frame == 48000);
     CHECK(std::abs(b.tempoMap.Tempos()[1].bpm - 90.0) < 1e-6);

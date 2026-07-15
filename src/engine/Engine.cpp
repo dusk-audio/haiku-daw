@@ -314,10 +314,12 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         // works); a bus node is gated here (rebuild-on-play) and skips routing
         // its sum when muted / solo'd out.
         b.audible = b.isBus ? (!t->muted && (!anySolo || t->soloed)) : true;
+        // Keep b.fx index-aligned with t->fx (nullptr placeholder for any
+        // effect that fails to build, e.g. a missing plugin add-on) so
+        // fxAuto's fxIndex addresses the right effect. Process skips nulls.
         for (const EffectDesc& d : t->fx) {
             auto fx = MakeEffect(d);
-            if (!fx) continue;
-            fx->Prepare(fOutputRate);
+            if (fx) fx->Prepare(fOutputRate);
             b.fx.push_back(std::move(fx));
         }
         // Automation snapshot (RT-owned copy of the lanes).
@@ -537,11 +539,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
         // at the block start before the chain processes (per block, RT-safe).
         for (const FxAutoLane& fa : b.fxAuto) {
             if (fa.fxIndex < 0 || fa.fxIndex >= (int)b.fx.size()) continue;
-            if (fa.lane.Count() == 0) continue;
+            if (!b.fx[fa.fxIndex] || fa.lane.Count() == 0) continue;
             b.fx[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(blockStart, 0.0f));
         }
         for (auto& fx : b.fx)
-            fx->Process(nb, static_cast<int>(frames));
+            if (fx) fx->Process(nb, static_cast<int>(frames));
 
         // Per-node peak (post-FX) for the track meter.
         {

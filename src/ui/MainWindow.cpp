@@ -33,6 +33,7 @@
 #include <MessageRunner.h>
 #include <Path.h>
 #include <Slider.h>
+#include <String.h>
 #include <StringView.h>
 #include <TextControl.h>
 
@@ -433,8 +434,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int32 type = 0, epIdx = 0;
             for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                 EffectDesc d;
-                d.type = (type >= 0 && type <= 7) ? (EffectType)type
+                d.type = (type >= 0 && type <= 8) ? (EffectType)type
                                                   : EffectType::Biquad;
+                BString pn;
+                if (msg->FindString("en", i, &pn) == B_OK)
+                    d.pluginName = pn.String();
                 int32 count = 0;
                 msg->FindInt32("ec", i, &count);
                 for (int32 j = 0; j < count; j++) {

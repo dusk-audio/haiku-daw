@@ -12,19 +12,21 @@
 #include <utility>
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace daw {
 
-// Order is the serialized id (0..7); do not reorder without bumping the file
+// Order is the serialized id (0..8); do not reorder without bumping the file
 // format (see ProjectIO). Biquad is kept for loading older projects; new tone
 // shaping uses the parametric Eq.
 enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq,
-                        Saturator, Gate, Widener };
+                        Saturator, Gate, Widener, Plugin };
 
 struct EffectDesc {
     EffectType         type = EffectType::Biquad;
     std::vector<float> params;
+    std::string        pluginName;   // set when type == Plugin (add-on id)
     // Per-type param layout:
     //   Biquad:     [mode(0 LP,1 HP,2 Peak), freq Hz, Q, gain dB]
     //   Delay:      [time s, feedback [0,1), mix [0,1]]

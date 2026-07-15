@@ -68,6 +68,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     for (const EffectDesc& e : p.masterFx) {
         f << "masterfx " << (int)e.type << " " << e.params.size();
         for (float v : e.params) f << " " << v;
+        if (e.type == EffectType::Plugin) f << " \"" << e.pluginName << "\"";
         f << "\n";
     }
 
@@ -107,6 +108,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         for (const EffectDesc& e : t.fx) {
             f << "fx " << (int)e.type << " " << e.params.size();
             for (float v : e.params) f << " " << v;
+            if (e.type == EffectType::Plugin) f << " \"" << e.pluginName << "\"";
             f << "\n";
         }
 
@@ -198,9 +200,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             EffectDesc e;
             int type = 0, count = 0;
             iss >> type >> count;
-            if (type < 0 || type > 7) type = 0;
+            if (type < 0 || type > 8) type = 0;
             e.type = (EffectType)type;
             for (int i = 0; i < count; i++) { float v = 0.0f; iss >> v; e.params.push_back(v); }
+            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line);
             p.masterFx.push_back(e);
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
@@ -283,13 +286,14 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             EffectDesc e;
             int type = 0, count = 0;
             iss >> type >> count;
-            if (type < 0 || type > 7) type = 0;
+            if (type < 0 || type > 8) type = 0;
             e.type = (EffectType)type;
             for (int i = 0; i < count; i++) {
                 float v = 0.0f;
                 iss >> v;
                 e.params.push_back(v);
             }
+            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line);
             cur.fx.push_back(e);
         }
         else if (kw == "fxauto" && haveTrack) {
