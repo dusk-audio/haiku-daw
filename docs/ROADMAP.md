@@ -118,7 +118,11 @@ with the local cross-compiler, runtime pending on the VM.
   triangle) + ADSR with a release tail past note-off. Stateless Synth; engine +
   Exporter + IO wired; `InstrumentWindow` editor from the "Inst" header box.
   Host-tested + VM-verified.
-- *Deferred:* sample/wavetable synth; band-limited oscillators (naive now).
+- ✅ Band-limited oscillators: saw/square use PolyBLEP (no aliasing on high
+  notes); triangle/sine clean. *Deferred:* sample/wavetable synth.
+- ✅ SMF (`.mid`) import/export: kit-free `model/SmfIO` (format 0/1, varlen,
+  running status, tempo + name meta; host round-trip tested). File menu Import
+  MIDI / Export MIDI; ticks<->frames at the project tempo.
 - **External Midi Kit 2 I/O** (keyboards, hardware synths) — *deferred until the
   VM can pass through MIDI; `scripts/midi_probe.sh` is ready to characterize it.*
 
