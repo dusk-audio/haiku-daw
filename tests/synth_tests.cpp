@@ -115,6 +115,41 @@ int main() {
         CHECK(rms(gone) < 1e-6f);
     }
 
+    // Band-limiting: a high-pitched saw has (almost) no real harmonic below its
+    // fundamental, so energy in a sub-fundamental band is pure aliasing. PolyBLEP
+    // should keep it small. A naive saw would fold strong aliases down here.
+    {
+        // Goertzel single-bin magnitude at frequency f (mono, left channel).
+        auto goertzel = [&](const std::vector<float>& buf, double f) {
+            const double w = 2.0 * M_PI * f / SR;
+            const double cr = 2.0 * std::cos(w);
+            double s1 = 0, s2 = 0;
+            const size_t N = buf.size() / 2;
+            for (size_t i = 0; i < N; i++) {
+                const double s0 = buf[i * 2] + cr * s1 - s2;
+                s2 = s1; s1 = s0;
+            }
+            return std::sqrt(s1 * s1 + s2 * s2 - cr * s1 * s2) / N;
+        };
+
+        Instrument saw = inst; saw.waveform = (int)Waveform::Saw;
+        saw.attack = 0.0f;   // steady tone, no ramp coloring the spectrum
+        std::vector<MidiNote> hi;
+        MidiNote h; h.pitch = 120; h.velocity = 100; h.startFrame = 0;
+        h.lengthFrames = 8192; hi.push_back(h);   // f0 ~= 8372 Hz (< Nyquist)
+
+        std::vector<float> buf(8192 * 2, 0.0f);
+        synth.Render(hi, saw, buf.data(), 8192, 0, 1.0f);
+
+        // Sum magnitude in a sub-fundamental band [500, 4000] Hz — all aliasing.
+        double aliasE = 0;
+        for (double f = 500; f <= 4000; f += 250) aliasE += goertzel(buf, f);
+        // Fundamental is present for reference.
+        const double fundE = goertzel(buf, 8372.0);
+        CHECK(fundE > 1e-3);                 // the note actually sounds
+        CHECK(aliasE < 0.1 * fundE);         // aliases well below the fundamental
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

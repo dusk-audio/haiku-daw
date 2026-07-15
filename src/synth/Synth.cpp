@@ -10,12 +10,39 @@ static double NoteFreq(int pitch) {
     return 440.0 * std::pow(2.0, (pitch - 69) / 12.0);
 }
 
-// Naive (non-band-limited) oscillator for a phase in cycles (0..1 = one period).
-static double Osc(int wave, double cycles) {
+// PolyBLEP residual: the correction added around a phase discontinuity to
+// band-limit it (removes most of the aliasing a naive saw/square emits). `t`
+// is the fractional phase [0,1); `dt` is the per-sample phase increment.
+static double PolyBlep(double t, double dt) {
+    if (dt <= 0.0) return 0.0;
+    if (t < dt) {                       // just after the step
+        t /= dt;
+        return t + t - t * t - 1.0;
+    }
+    if (t > 1.0 - dt) {                 // just before the next step
+        t = (t - 1.0) / dt;
+        return t * t + t + t + 1.0;
+    }
+    return 0.0;
+}
+
+// Oscillator for a phase in cycles (0..1 = one period). `dt` = phase increment
+// per sample (freq/sampleRate); saw and square are band-limited with PolyBLEP,
+// so high notes no longer alias. Sine is inherently clean; triangle's aliasing
+// is weak (harmonics fall 12 dB/oct) so it stays naive.
+static double Osc(int wave, double cycles, double dt) {
     const double p = cycles - std::floor(cycles);   // fractional phase [0,1)
     switch (wave) {
-        case (int)Waveform::Saw:      return 2.0 * p - 1.0;
-        case (int)Waveform::Square:   return p < 0.5 ? 1.0 : -1.0;
+        case (int)Waveform::Saw:
+            return (2.0 * p - 1.0) - PolyBlep(p, dt);
+        case (int)Waveform::Square: {
+            double v = p < 0.5 ? 1.0 : -1.0;
+            v += PolyBlep(p, dt);                    // rising edge at p=0
+            double p2 = p + 0.5;                     // falling edge at p=0.5
+            p2 -= std::floor(p2);
+            v -= PolyBlep(p2, dt);
+            return v;
+        }
         case (int)Waveform::Triangle: return 2.0 * std::fabs(2.0 * p - 1.0) - 1.0;
         case (int)Waveform::Sine:
         default:                      return std::sin(2.0 * M_PI * p);
@@ -68,8 +95,8 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
             const double rel = (double)(g - n.startFrame);
             const double env = Envelope(rel, noteLen, a, d, s, r);
             if (env <= 0.0) continue;
-            const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * rel)
-                                      * env) * amp;
+            const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * rel,
+                                          cyclesPerFrame) * env) * amp;
             out[i * 2 + 0] += smp;
             out[i * 2 + 1] += smp;
         }
