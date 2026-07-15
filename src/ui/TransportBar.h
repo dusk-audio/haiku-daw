@@ -12,7 +12,8 @@ namespace daw {
 class TransportBar : public BView {
 public:
     TransportBar(BRect frame, BMessenger target,
-                 uint32 playWhat, uint32 stopWhat, uint32 recWhat);
+                 uint32 playWhat, uint32 stopWhat, uint32 recWhat,
+                 uint32 zoomOutWhat, uint32 zoomInWhat);
 
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
@@ -22,7 +23,7 @@ public:
 
 private:
     BMessenger fTarget;
-    uint32 fPlay, fStop, fRec;
+    uint32 fPlay, fStop, fRec, fZoomOut, fZoomIn;
     bool   fPlaying = false, fRecording = false;
 };
 

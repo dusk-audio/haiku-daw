@@ -4,15 +4,21 @@
 
 namespace daw {
 
-// Button rects (match the old layout so the other widgets keep their x).
-static BRect PlayRect() { return BRect(6, 5, 70, 27); }
-static BRect StopRect() { return BRect(74, 5, 138, 27); }
-static BRect RecRect()  { return BRect(142, 5, 206, 27); }
+// Button rects (match the layout so the other widgets keep their x).
+static BRect PlayRect()    { return BRect(6, 5, 70, 27); }
+static BRect StopRect()    { return BRect(74, 5, 138, 27); }
+static BRect RecRect()     { return BRect(142, 5, 206, 27); }
+static BRect ZoomOutRect() { return BRect(366, 6, 392, 27); }
+static BRect ZoomInRect()  { return BRect(394, 6, 420, 27); }
+// LCD display well around the bar/beat + time readout only.
+static BRect LcdRect(float h) { return BRect(212, 4, 360, h - 4); }
 
 TransportBar::TransportBar(BRect frame, BMessenger target,
-                           uint32 playWhat, uint32 stopWhat, uint32 recWhat)
+                           uint32 playWhat, uint32 stopWhat, uint32 recWhat,
+                           uint32 zoomOutWhat, uint32 zoomInWhat)
     : BView(frame, "transport", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
-      fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat) {
+      fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat),
+      fZoomOut(zoomOutWhat), fZoomIn(zoomInWhat) {
     SetViewColor(ColChrome());
 }
 
@@ -25,12 +31,13 @@ static void DrawButton(BView* v, BRect r, rgb_color fill, bool lit) {
 
 void TransportBar::Draw(BRect) {
     const rgb_color icon = ColText();
+    const float H = Bounds().Height();
 
-    // LCD-style display well behind the time / tempo readouts (Logic look).
+    // LCD-style display well behind the bar/beat + time readout (Logic look).
     SetHighColor(ColLcd());
-    FillRoundRect(BRect(210, 4, 668, Bounds().Height() - 4), 5, 5);
+    FillRoundRect(LcdRect(H), 5, 5);
     SetHighColor(ColGrid());
-    StrokeRoundRect(BRect(210, 4, 668, Bounds().Height() - 4), 5, 5);
+    StrokeRoundRect(LcdRect(H), 5, 5);
 
     // Play: triangle, lit green when playing.
     BRect p = PlayRect();
@@ -54,12 +61,29 @@ void TransportBar::Draw(BRect) {
     SetHighColor(fRecording ? Rgb(255, 210, 210) : Rgb(220, 84, 84));
     const float rcy = (rc.top + rc.bottom) / 2;
     FillEllipse(BPoint(rc.left + 32, rcy), 7, 7);
+
+    // Zoom out / in: small dark buttons with legible glyphs.
+    auto zoomBtn = [&](BRect r, char glyph) {
+        SetHighColor(ColChromeHi());
+        FillRoundRect(r, 4, 4);
+        SetHighColor(ColGrid());
+        StrokeRoundRect(r, 4, 4);
+        SetHighColor(Rgb(226, 230, 236));
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        FillRect(BRect(cx - 5, cy - 1, cx + 5, cy + 1));       // minus bar
+        if (glyph == '+')
+            FillRect(BRect(cx - 1, cy - 5, cx + 1, cy + 5));   // plus stem
+    };
+    zoomBtn(ZoomOutRect(), '-');
+    zoomBtn(ZoomInRect(),  '+');
 }
 
 void TransportBar::MouseDown(BPoint where) {
-    if (PlayRect().Contains(where))      fTarget.SendMessage(fPlay);
-    else if (StopRect().Contains(where)) fTarget.SendMessage(fStop);
-    else if (RecRect().Contains(where))  fTarget.SendMessage(fRec);
+    if (PlayRect().Contains(where))         fTarget.SendMessage(fPlay);
+    else if (StopRect().Contains(where))    fTarget.SendMessage(fStop);
+    else if (RecRect().Contains(where))     fTarget.SendMessage(fRec);
+    else if (ZoomOutRect().Contains(where)) fTarget.SendMessage(fZoomOut);
+    else if (ZoomInRect().Contains(where))  fTarget.SendMessage(fZoomIn);
 }
 
 } // namespace daw

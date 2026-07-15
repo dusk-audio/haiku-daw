@@ -185,34 +185,33 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     const float barTop = menuH + 1;
     BRect barRect(0, barTop, bounds.right, barTop + kTransportH);
     fTransport = new TransportBar(barRect, BMessenger(this),
-                                  MSG_PLAY, MSG_STOP, MSG_REC);
+                                  MSG_PLAY, MSG_STOP, MSG_REC,
+                                  MSG_ZOOM_OUT, MSG_ZOOM_IN);
     BView* bar = fTransport;
     AddChild(bar);
 
-    fTimeView = new BStringView(BRect(218, 6, 352, kTransportH - 5),
+    BFont lcdFont(be_bold_font);
+    lcdFont.SetSize(15.0f);
+    fTimeView = new BStringView(BRect(218, 6, 354, kTransportH - 5),
                                 "time", "1.1   0:00.000");
     fTimeView->SetViewColor(ColLcd());
     fTimeView->SetHighColor(ColLcdText());
-    BFont lcdFont(be_bold_font);
-    lcdFont.SetSize(15.0f);
     fTimeView->SetFont(&lcdFont);
+    fTimeView->SetAlignment(B_ALIGN_CENTER);
     bar->AddChild(fTimeView);
+    // (Zoom -/+ buttons are drawn by the TransportBar at x366..420.)
 
-    // Horizontal zoom buttons (keyboard +/- and arrows also work).
-    BButton* zoomOut = new BButton(BRect(346, 5, 374, kTransportH - 5), "zoomout",
-                                   "-", new BMessage(MSG_ZOOM_OUT));
-    BButton* zoomIn  = new BButton(BRect(378, 5, 406, kTransportH - 5), "zoomin",
-                                   "+", new BMessage(MSG_ZOOM_IN));
-    bar->AddChild(zoomOut);
-    bar->AddChild(zoomIn);
-
-    // Master volume slider (0..150% -> gain 0..1.5), live/non-undoable.
-    fMaster = new BSlider(BRect(414, 4, 538, kTransportH - 4),
-                          "master", "Vol", new BMessage(MSG_MASTER),
+    // "Vol" label + master volume slider (0..150% -> gain 0..1.5).
+    BStringView* volLbl = new BStringView(BRect(430, 8, 460, kTransportH - 6),
+                                          "vollbl", "Vol");
+    volLbl->SetViewColor(ColChrome());
+    volLbl->SetHighColor(ColText());
+    bar->AddChild(volLbl);
+    fMaster = new BSlider(BRect(462, 4, 588, kTransportH - 4),
+                          "master", NULL, new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
-    // Dark theme: accent fill below the thumb, dark groove/background.
     fMaster->SetViewColor(ColChrome());
     fMaster->SetLowColor(ColChrome());
     rgb_color fill = ColAccent();
@@ -220,24 +219,25 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fMaster->SetBarColor(Rgb(20, 22, 26));
     bar->AddChild(fMaster);
 
-    // Tempo (BPM) — affects the grid/snap and the metronome (next Play).
+    // "BPM" label + tempo field (light field for legibility; affects grid/snap
+    // + metronome on the next Play).
+    BStringView* bpmLbl = new BStringView(BRect(602, 8, 636, kTransportH - 6),
+                                          "bpmlbl", "BPM");
+    bpmLbl->SetViewColor(ColChrome());
+    bpmLbl->SetHighColor(ColText());
+    bar->AddChild(bpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
-    fTempo = new BTextControl(BRect(548, 6, 664, kTransportH - 6),
-                              "tempo", "BPM", bpm, new BMessage(MSG_TEMPO));
-    fTempo->SetDivider(32.0f);
-    fTempo->SetViewColor(ColLcd());
-    if (BView* tt = fTempo->ChildAt(0)) {   // the inner text field
-        tt->SetViewColor(ColLcd());
-        tt->SetHighColor(ColLcdText());
-    }
+    fTempo = new BTextControl(BRect(638, 6, 704, kTransportH - 6),
+                              "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
+    fTempo->SetDivider(0.0f);
     bar->AddChild(fTempo);
 
     // Loudness readout (momentary / short-term LUFS + true peak dBTP).
-    fLoudView = new BStringView(BRect(676, 8, 904, kTransportH - 6),
-                                "loud", "M --  S --  TP --");
+    fLoudView = new BStringView(BRect(722, 8, 858, kTransportH - 6),
+                                "loud", "M -- S -- TP --");
     fLoudView->SetViewColor(ColChrome());
-    fLoudView->SetHighColor(ColTextDim());
+    fLoudView->SetHighColor(ColText());
     bar->AddChild(fLoudView);
 
     // Master output meter, pinned to the right of the transport bar.
