@@ -62,10 +62,16 @@ sort, with sends, a monitor section, and BS.1770 metering.
   gain*pan envelope (host-tested ramp); the RT engine drives the gain path per
   block from an RT-owned lane snapshot (`ValueAt(blockStart)`), UpdateMix
   refreshes only audibility for automated tracks.
-- **B3.** ✅ Header "Auto" box (Off/Gain/Pan); the lane content area draws the
-  curve and edits breakpoints (click add / drag move / right-click delete),
-  one undoable gesture per drag.
-- *Deferred:* per-effect-param + send-level lanes (model generalizes cleanly).
+- **B3.** ✅ Header "Auto" box (Off/Gain/Pan/**fx-param lanes**); the lane
+  content area draws the curve and edits breakpoints (click add / drag move /
+  right-click delete), one undoable gesture per drag.
+- **B4.** ✅ Effect-parameter automation: `IEffect::SetParam` (RT-safe) across all
+  effects; `Track.fxAuto` lanes (fxIndex+slot); engine + Exporter drive params
+  per block; right-click a knob in the effects editor to create a lane, edit it
+  via the timeline Auto box. Host + VM-verified.
+- ✅ Undo unified: fx / sends / instrument / notes / color / height edits are now
+  undoable (command coalescing folds a drag into one step).
+- *Deferred:* send-level automation lanes.
 
 ## Phase C — Editing depth  ✅ DONE
 

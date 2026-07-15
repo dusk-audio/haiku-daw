@@ -120,6 +120,11 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   Full-codebase code review fixed 8 real bugs (EQ NaN, delay Inf, self-send
   routing collapse, MacroCommand data-loss undo, AppSettings zero-clobber,
   WavSource OOB, WavWriter race, monitor UAF) — all with regression tests.
+- **Undo unification + effect-param automation** ✅ (VM-verified): command
+  coalescing makes fx/sends/instrument/notes/color/height undoable;
+  `IEffect::SetParam` + `Track.fxAuto` + engine/Exporter per-block drive + timeline
+  Auto-box editing give full effect-parameter automation. `Eq::MagnitudeResponseDb`
+  drives the EQ graph; custom effects editor (knobs/EQ graph/comp curve).
 - **NEXT** — Phase I (plugins, long-term) or clear the deferred list: external
   Midi Kit 2 I/O (class-compliant USB; midi_probe.sh), MIDI-note multi-select,
   tempo ramps, band-limited osc, resampled input monitor, drag-drop from the
