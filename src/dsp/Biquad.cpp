@@ -80,6 +80,22 @@ void Biquad::Reset() {
     }
 }
 
+void Biquad::SetParam(int slot, float value) {
+    // Mirror the editor/EffectDesc layout: 0 mode (0 LP,1 HP,2 Peak), 1 freq,
+    // 2 Q, 3 gain dB. Recompute() is pure math (RT-safe).
+    Type   type = fType;
+    double freq = fFreq, q = fQ, gainDb = fGainDb;
+    switch (slot) {
+        case 0: type = value >= 1.5f ? Type::Peaking
+                     : value >= 0.5f ? Type::HighPass : Type::LowPass; break;
+        case 1: freq = value; break;
+        case 2: q = value; break;
+        case 3: gainDb = value; break;
+        default: return;
+    }
+    SetParams(type, freq, q, gainDb);
+}
+
 void Biquad::Process(float* stereo, int frames) {
     for (int i = 0; i < frames; i++) {
         for (int c = 0; c < 2; c++) {

@@ -25,6 +25,7 @@ public:
     void Prepare(double sampleRate) override;
     void Process(float* stereo, int frames) override;
     void Reset() override;
+    void SetParam(int slot, float value) override;   // 0 mode,1 freq,2 Q,3 gainDb
     const char* Name() const override { return "Biquad"; }
 
 private:

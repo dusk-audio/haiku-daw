@@ -212,14 +212,15 @@ bool SplitClipCommand::Do(Project& p) {
     fOldLen     = c->lengthFrames;
     fOldFadeOut = c->fadeOutFrames;
 
-    // Right half: remainder, fade-in cleared, source offset advanced.
+    // Right half: remainder, fade-in cleared, source offset advanced. Allocate
+    // the id once (cached) so redo reuses it and never leaks/reassigns ids.
+    if (fNewClip == kInvalidClipId) fNewClip = p.NextClipId();
     Clip right = *c;
-    right.id            = p.NextClipId();
+    right.id            = fNewClip;
     right.startFrame    = fAt;
     right.lengthFrames  = end - fAt;
     right.sourceOffset  = c->sourceOffset + (fAt - start);
     right.fadeInFrames  = 0;
-    fNewClip = right.id;
 
     // Left half: shorten, drop the fade-out (now an interior cut).
     c->lengthFrames  = fAt - start;
@@ -354,9 +355,11 @@ bool SplitMidiClipCommand::Do(Project& p) {
     fOldNotes = c->notes;
     const Frame rel = fAt - start;   // cut point relative to the clip start
 
-    // Right half: notes at/after the cut, re-based to the new start.
+    // Right half: notes at/after the cut, re-based to the new start. Allocate
+    // the id once (cached) so redo reuses it and never leaks/reassigns ids.
+    if (fRightId == kInvalidClipId) fRightId = p.NextClipId();
     MidiClip right;
-    right.id           = p.NextClipId();
+    right.id           = fRightId;
     right.startFrame   = fAt;
     right.lengthFrames = end - fAt;
     right.colorIndex   = c->colorIndex;
@@ -364,7 +367,6 @@ bool SplitMidiClipCommand::Do(Project& p) {
         if (n.startFrame >= rel) {
             MidiNote m = n; m.startFrame -= rel; right.notes.push_back(m);
         }
-    fRightId = right.id;
 
     // Left half: shorten + drop notes at/after the cut.
     c->lengthFrames = rel;
@@ -654,7 +656,7 @@ bool SetTrackHeightCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
     fOld = t->height;
-    t->height = fNew;
+    t->height = fNew < 24 ? 24 : fNew;   // match ProjectIO's load floor (24)
     return true;
 }
 void SetTrackHeightCommand::Undo(Project& p) {

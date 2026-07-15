@@ -402,7 +402,9 @@ void PianoRollView::MouseUp(BPoint where) {
             n.startFrame   = start;
             n.pitch        = std::clamp(YToPitch(fDownPoint.y), 0, 127);
             n.velocity     = 100;
-            n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start);
+            // Beat length at the note's ABSOLUTE position (start is clip-relative)
+            // so variable tempo before the region gives the right length.
+            n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start + fClipStart);
             fNotes.push_back(n);
             fSel.assign(fNotes.size(), 0);
             fSel.back() = 1;

@@ -84,8 +84,11 @@ private:
     BSlider*        fMaster;
     BTextControl*   fTempo;
 
-    std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
+    // Declared recorder-first so the engine (which RT-references the recorder as
+    // its monitor source) is destroyed FIRST — members die in reverse order, so
+    // the RT thread is stopped before the recorder it may read is freed.
     std::unique_ptr<Recorder> fRecorder;  // active while recording
+    std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)

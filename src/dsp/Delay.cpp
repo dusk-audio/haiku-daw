@@ -37,7 +37,9 @@ void Delay::Process(float* stereo, int frames) {
     float fb = (float)fFeedback;
     if (fb < 0.0f) fb = 0.0f;
     if (fb > 0.99f) fb = 0.99f;
-    const float wet = (float)fMix;
+    float wet = (float)fMix;
+    if (wet < 0.0f) wet = 0.0f;
+    if (wet > 1.0f) wet = 1.0f;   // clamp like the other effects (no phase flip)
     const float dry = 1.0f - wet;
 
     for (int i = 0; i < frames; i++) {

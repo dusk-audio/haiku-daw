@@ -46,6 +46,7 @@ public:
     void MouseUp(BPoint where) override;
 
     float ContentHeight() const;    // total stacked height (for the scroll bar)
+    void  UpdateScrollRange();      // re-fit the enclosing scroll bar to content
 
     // Live meters from the engine (per-fx gain reduction + one EQ spectrum).
     void SetMeters(const float* gr, int grN,

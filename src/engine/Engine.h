@@ -180,19 +180,32 @@ public:
         return (fxIndex >= 0 && fxIndex < kMeterFxMax)
                ? fMeterGr[fxIndex].load(std::memory_order_relaxed) : 0.0f;
     }
-    // Spectrum of the analyzing effect + which fx index it belongs to.
+    // Spectrum of the analyzing effect + which fx index it belongs to. The
+    // spectrum array is published with a seqlock: the RT thread rewrites it
+    // every block, so the UI retries its copy until it reads a stable frame
+    // (avoids a torn mix of two frames — a data race on the plain-float array).
     int MeterSpectrum(float* out, int maxBins, int* fxIndex) const {
+        uint32_t g0, g1;
+        int c = 0;
+        do {
+            g0 = fMeterSpecGen.load(std::memory_order_acquire);
+            if (g0 & 1u) continue;   // odd = mid-write; retry
+            const int n = fMeterSpecN.load(std::memory_order_relaxed);
+            c = n < maxBins ? n : maxBins;
+            for (int i = 0; i < c; i++) out[i] = fMeterSpec[i];
+            g1 = fMeterSpecGen.load(std::memory_order_acquire);
+        } while ((g0 & 1u) || g0 != g1);
         if (fxIndex) *fxIndex = fMeterSpecFx.load(std::memory_order_relaxed);
-        const int n = fMeterSpecN.load(std::memory_order_acquire);
-        const int c = n < maxBins ? n : maxBins;
-        for (int i = 0; i < c; i++) out[i] = fMeterSpec[i];
         return c;
     }
 
 private:
-    // RT helper: copy the given chain's meters into the flat UI storage.
+    // RT helper: copy the given chain's meters into the flat UI storage. The
+    // spectrum write is bracketed by a seqlock generation bump (odd while
+    // writing) so the UI reader can detect a torn copy and retry.
     template <class Chain>
     void CaptureFxMeters(const Chain& fx) {
+        fMeterSpecGen.fetch_add(1, std::memory_order_acq_rel);   // -> odd
         int specFx = -1, specN = 0;
         for (int i = 0; i < (int)fx.size() && i < kMeterFxMax; i++) {
             if (!fx[i]) { fMeterGr[i].store(0.0f, std::memory_order_relaxed); continue; }
@@ -202,8 +215,9 @@ private:
                 if (n > 0) { specFx = i; specN = n; }
             }
         }
+        fMeterSpecN.store(specN, std::memory_order_relaxed);
         fMeterSpecFx.store(specFx, std::memory_order_relaxed);
-        fMeterSpecN.store(specN, std::memory_order_release);
+        fMeterSpecGen.fetch_add(1, std::memory_order_acq_rel);   // -> even
     }
 
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
@@ -286,6 +300,7 @@ private:
     float                fMeterSpec[kMeterSpecMax] = {};
     std::atomic<int>     fMeterSpecN{0};
     std::atomic<int>     fMeterSpecFx{-1};
+    std::atomic<uint32_t> fMeterSpecGen{0};   // seqlock generation (odd = writing)
     Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;

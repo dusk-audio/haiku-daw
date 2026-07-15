@@ -286,7 +286,7 @@ void TimelineView::PasteAtPlayhead() {
 
 Track* TimelineView::TrackOfClip(ClipId id) const {
     for (Track& t : fProject->Tracks())
-        if (t.FindClip(id))
+        if (t.FindClip(id) || t.FindMidiClip(id))   // audio or MIDI region
             return &t;
     return nullptr;
 }
@@ -295,8 +295,12 @@ void TimelineView::DeleteSelection() {
     if (fSelClips.empty()) return;
     auto macro = std::make_unique<MacroCommand>("Delete Clips");
     for (ClipId id : fSelClips)
-        if (Track* t = TrackOfClip(id))
-            macro->Add(std::make_unique<RemoveClipCommand>(t->id, id));
+        if (Track* t = TrackOfClip(id)) {
+            if (t->FindClip(id))
+                macro->Add(std::make_unique<RemoveClipCommand>(t->id, id));
+            else if (t->FindMidiClip(id))
+                macro->Add(std::make_unique<RemoveMidiClipCommand>(t->id, id));
+        }
     if (!macro->Empty())
         fStack->Execute(std::move(macro), *fProject);
     fSelClips.clear();
@@ -307,25 +311,34 @@ void TimelineView::DuplicateSelection() {
     if (fSelClips.empty()) return;
     // Offset the copies by the selection's total span so they land just after.
     bool have = false; Frame minStart = 0, maxEnd = 0;
+    auto span = [&](Frame s, Frame len) {
+        const Frame e = s + len;
+        if (!have) { minStart = s; maxEnd = e; have = true; }
+        else { if (s < minStart) minStart = s; if (e > maxEnd) maxEnd = e; }
+    };
     for (ClipId id : fSelClips)
-        if (Track* t = TrackOfClip(id))
-            if (Clip* c = t->FindClip(id)) {
-                const Frame e = c->startFrame + c->lengthFrames;
-                if (!have) { minStart = c->startFrame; maxEnd = e; have = true; }
-                else { if (c->startFrame < minStart) minStart = c->startFrame;
-                       if (e > maxEnd) maxEnd = e; }
-            }
+        if (Track* t = TrackOfClip(id)) {
+            if (Clip* c = t->FindClip(id)) span(c->startFrame, c->lengthFrames);
+            else if (MidiClip* m = t->FindMidiClip(id))
+                span(m->startFrame, m->lengthFrames);
+        }
     if (!have) return;
     const Frame off = maxEnd - minStart;
     auto macro = std::make_unique<MacroCommand>("Duplicate Clips");
     for (ClipId id : fSelClips)
-        if (Track* t = TrackOfClip(id))
+        if (Track* t = TrackOfClip(id)) {
             if (Clip* c = t->FindClip(id)) {
                 Clip nc = *c;
                 nc.id = kInvalidClipId;         // AddClipCommand assigns a fresh id
                 nc.startFrame = c->startFrame + off;
                 macro->Add(std::make_unique<AddClipCommand>(t->id, nc));
+            } else if (MidiClip* m = t->FindMidiClip(id)) {
+                MidiClip nc = *m;
+                nc.id = kInvalidClipId;
+                nc.startFrame = m->startFrame + off;
+                macro->Add(std::make_unique<AddMidiClipCommand>(t->id, nc));
             }
+        }
     if (!macro->Empty())
         fStack->Execute(std::move(macro), *fProject);
     Invalidate();
@@ -723,6 +736,7 @@ void TimelineView::MouseDown(BPoint where) {
                 if (pick == 0) {          // Copy
                     fClipClip = c;
                     fHasClipClip = true; fHasClipNote = false;
+                    fHasClipMidi = false;   // audio copy invalidates MIDI clipboard
                     fClipType = TrackType::Audio;
                 } else if (pick == 1) {   // Delete
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
@@ -929,20 +943,22 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
 // model for live feedback. This is a transient preview only; the undoable
 // command is pushed in MouseUp.
 void TimelineView::PreviewDrag(BPoint where) {
-    // Ruler loop / punch drags aren't tied to a track.
+    // Ruler loop / punch drags aren't tied to a track. Ignore sub-threshold
+    // jitter so a plain click (which may wobble a frame during button-down)
+    // still seeks on release instead of creating a 1-frame loop region.
     if (fDrag == Drag::RulerLoop || fDrag == Drag::RulerPunch) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fLoopDragged = true;
         Transport& tr = fProject->transport;
         const Frame lo = fLoopAnchor < f ? fLoopAnchor : f;
         const Frame hi = fLoopAnchor < f ? f : fLoopAnchor;
+        const Frame minDrag = (Frame)(4.0 * fFramesPerPixel);   // ~4 px
+        if (hi - lo <= minDrag) return;   // not a real drag yet
+        fLoopDragged = true;
         if (fDrag == Drag::RulerPunch) {
-            tr.punchIn = lo; tr.punchOut = hi;
-            tr.punchEnabled = (hi > lo);
+            tr.punchIn = lo; tr.punchOut = hi; tr.punchEnabled = true;
         } else {
-            tr.loopStart = lo; tr.loopEnd = hi;
-            tr.loopEnabled = (hi > lo);
+            tr.loopStart = lo; tr.loopEnd = hi; tr.loopEnabled = true;
         }
         Invalidate(BRect(0, 0, Bounds().right, kRulerHeight));
         return;

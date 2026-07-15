@@ -809,6 +809,9 @@ void MainWindow::StartPlayback() {
     fEngine->SetMetronome(fMetronome);
     fEngine->SetMonitorDim(fMonDim);
     fEngine->SetMonitorMono(fMonMono);
+    // Re-apply the effect-meter focus onto the fresh engine (else an open FX
+    // editor's GR/FFT meters die on every play / loop-wrap / seek rebuild).
+    if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
     fPlaying = true;
     if (fTransport) fTransport->SetPlaying(true);
     UpdatePulse();
@@ -848,6 +851,7 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
         fEngine->SetMonitorSource(fRecorder.get());
         fEngine->SetInputMonitor(fMonitorInput);
     }
+    if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
     return true;
 }
 

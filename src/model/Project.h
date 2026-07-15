@@ -153,8 +153,18 @@ public:
     ClipId  NextClipId()  { return ++fLastClipId; }
 
     // Reset to an empty session (used before loading a project from disk).
+    // Resets ALL project state — otherwise reloading into a reused Project
+    // instance would accumulate master effects and inherit stale scalars for
+    // any line an older/partial file omits.
     void Clear() {
         fTracks.clear();
+        masterFx.clear();
+        sampleRate = 48000.0;
+        tempoBPM   = 120.0;
+        masterGain = 1.0f;
+        timeSig    = TimeSignature{};
+        tempoMap   = TempoMap{};
+        transport  = Transport{};
         fLastTrackId = kInvalidTrackId;
         fLastClipId  = kInvalidClipId;
     }

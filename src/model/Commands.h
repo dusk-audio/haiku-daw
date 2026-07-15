@@ -370,12 +370,8 @@ public:
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Move MIDI Clip"; }
-    bool CoalesceInto(Command* prev) override {
-        auto* p = dynamic_cast<MoveMidiClipCommand*>(prev);
-        if (!p || p->fClip != fClip) return false;
-        p->fNewStart = fNewStart; p->fNewTrack = fNewTrack;
-        return true;
-    }
+    // No coalescing: the timeline commits one command per drag gesture (on
+    // mouse-up), so coalescing would merge two separate drags into one undo.
 
 private:
     TrackId fTrack, fNewTrack;
@@ -395,12 +391,7 @@ public:
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Resize MIDI Clip"; }
-    bool CoalesceInto(Command* prev) override {
-        auto* p = dynamic_cast<ResizeMidiClipCommand*>(prev);
-        if (!p || p->fClip != fClip) return false;
-        p->fNewLen = fNewLen;
-        return true;
-    }
+    // No coalescing (one command per drag gesture; see MoveMidiClipCommand).
 
 private:
     TrackId fTrack;
@@ -418,12 +409,7 @@ public:
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Set MIDI Fade"; }
-    bool CoalesceInto(Command* prev) override {
-        auto* p = dynamic_cast<SetMidiClipFadeCommand*>(prev);
-        if (!p || p->fClip != fClip) return false;
-        p->fIn = fIn; p->fOut = fOut;
-        return true;
-    }
+    // No coalescing (one command per drag gesture; see MoveMidiClipCommand).
 private:
     TrackId fTrack;
     ClipId  fClip;

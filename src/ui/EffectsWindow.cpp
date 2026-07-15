@@ -87,6 +87,15 @@ EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
     SetViewColor(ColBackground());
 }
 
+void EffectsView::UpdateScrollRange() {
+    if (BScrollView* sv = dynamic_cast<BScrollView*>(Parent()))
+        if (BScrollBar* bar = sv->ScrollBar(B_VERTICAL)) {
+            const float vh = Bounds().Height();
+            bar->SetRange(0, std::max(0.0f, ContentHeight() - vh));
+            bar->SetSteps(16, vh);
+        }
+}
+
 void EffectsView::SetMeters(const float* gr, int grN,
                             const float* spec, int specN, int specFx) {
     fGrN = grN < 16 ? grN : 16;
@@ -528,7 +537,7 @@ void EffectsView::MouseDown(BPoint where) {
         case 3:   // remove
             if (h.effect >= 0 && h.effect < (int)fChain.size()) {
                 fChain.erase(fChain.begin() + h.effect);
-                Apply(); Invalidate();
+                Apply(); Invalidate(); UpdateScrollRange();
             }
             break;
         case 4:   // add (h.effect carries the EffectType; slot = plugin index)
@@ -542,11 +551,11 @@ void EffectsView::MouseDown(BPoint where) {
                     for (const PluginParamInfo& pp : pl[h.slot].params)
                         d.params.push_back(pp.def);   // seed defaults
                     fChain.push_back(d);
-                    Apply(); Invalidate();
+                    Apply(); Invalidate(); UpdateScrollRange();
                 }
             } else {
                 fChain.push_back(MakeDefault((EffectType)h.effect));
-                Apply(); Invalidate();
+                Apply(); Invalidate(); UpdateScrollRange();
             }
             break;
     }

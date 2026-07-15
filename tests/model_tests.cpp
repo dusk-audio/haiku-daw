@@ -138,6 +138,7 @@ static void test_split_clip() {
     CHECK(L.fadeOutFrames == 0);              // interior cut clears left fade-out
     CHECK(R.fadeOutFrames == 300);            // right keeps the original fade-out
     CHECK(std::fabs(R.gain - 0.8f) < 1e-4f);  // gain copied
+    const ClipId rId = R.id;                  // right-half id (cached)
 
     // Split outside the clip is a no-op.
     CHECK(!SplitClipCommand(tid, aId, 500).Do(p));
@@ -148,6 +149,11 @@ static void test_split_clip() {
     CHECK(t->clips.size() == 1);
     CHECK(t->clips[0].lengthFrames == 4000);
     CHECK(t->clips[0].fadeOutFrames == 300);
+    // Redo re-uses the cached right-half id (no new id per redo).
+    stack.Redo(p);
+    CHECK(p.FindTrack(tid)->clips.size() == 2);
+    CHECK(p.FindTrack(tid)->clips[1].id == rId);
+    stack.Undo(p);
 
     // MIDI region split: notes divide by absolute position; right re-bases.
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), p);
@@ -191,6 +197,29 @@ static void test_split_clip() {
         CHECK(cn[0].velocity == 50);    // 100 * 100/200
         CHECK(cn[1].velocity == 100);   // full
         CHECK(cn[2].velocity == 50);    // 100 * (1000-900)/200
+    }
+}
+
+static void test_review_fixes() {
+    std::printf("test_review_fixes\n");
+    // Project::Clear resets master state (else reloading into a reused Project
+    // instance accumulates master effects).
+    {
+        Project p;
+        p.masterFx.push_back(ReverbDesc());
+        p.masterGain = 0.5f;
+        p.Clear();
+        CHECK(p.masterFx.empty());
+        CHECK(std::fabs(p.masterGain - 1.0f) < 1e-6f);
+    }
+    // SetTrackHeightCommand clamps to the loader's floor (24) so height
+    // round-trips through save/load.
+    {
+        Project p; CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "T"), p);
+        TrackId id = p.Tracks().front().id;
+        s.Execute(std::make_unique<SetTrackHeightCommand>(id, 10), p);
+        CHECK(p.FindTrack(id)->height == 24);
     }
 }
 
@@ -632,6 +661,7 @@ int main() {
     test_macro_command();
     test_undo_unification();
     test_active_take();
+    test_review_fixes();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
