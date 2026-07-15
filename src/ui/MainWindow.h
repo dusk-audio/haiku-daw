@@ -63,6 +63,7 @@ private:
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
+    void PushFxMeters();             // engine fx meters -> effects window
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     void LoadSettings();             // ~/config/settings/HaikuDAW/settings
@@ -87,6 +88,8 @@ private:
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
+    BMessenger                fFxMsgr;       // open effects window (for live meters)
+    TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;

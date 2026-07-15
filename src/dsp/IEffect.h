@@ -37,6 +37,14 @@ public:
     // no-op (an effect opts in by overriding).
     virtual void SetParam(int /*slot*/, float /*value*/) {}
 
+    // Live metering for the effect editor (read off the RT thread; effects
+    // update these in Process). Default: no meter.
+    //   MeterDb  — a single scalar (e.g. a compressor's gain reduction, <= 0).
+    //   Spectrum — up to `maxBins` magnitude values in dB (newest analysis);
+    //              returns the count written, 0 if the effect has no spectrum.
+    virtual float MeterDb() const { return 0.0f; }
+    virtual int   Spectrum(float* /*magDb*/, int /*maxBins*/) const { return 0; }
+
     virtual const char* Name() const = 0;
 };
 

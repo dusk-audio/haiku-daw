@@ -548,6 +548,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
         for (auto& fx : b.fx)
             if (fx) fx->Process(nb, static_cast<int>(frames));
 
+        // Effect metering: if this bus's track is the editor's focus, copy the
+        // whole chain's meters into flat storage for the UI.
+        if (b.id == fMeterTrack.load(std::memory_order_relaxed))
+            CaptureFxMeters(b.fx);
+
         // Per-node peak (post-FX) for the track meter.
         {
             float pl = 0.0f, pr = 0.0f;
@@ -583,6 +588,9 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Master bus FX on the summed output (before gain/metering).
     for (auto& fx : fMasterFx)
         fx->Process(out, static_cast<int>(frames));
+    // Effect metering for the master chain (UI focus sentinel = ~0).
+    if (fMeterTrack.load(std::memory_order_relaxed) == ~(TrackId)0)
+        CaptureFxMeters(fMasterFx);
 
     // Master gain on the summed output (before metering so the meter reflects
     // what actually leaves the engine).

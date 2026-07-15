@@ -15,6 +15,8 @@
 
 #include "IEffect.h"
 
+#include <atomic>
+
 namespace daw {
 
 class Compressor : public IEffect {
@@ -35,6 +37,9 @@ public:
     void Process(float* stereo, int frames) override;
     void Reset() override;
     void SetParam(int slot, float value) override;
+    // Current gain reduction in dB (<= 0), smoothed for the meter. RT-writer,
+    // UI-reader.
+    float MeterDb() const override { return fGrDb.load(std::memory_order_relaxed); }
     const char* Name() const override { return "Compressor"; }
 
 private:
@@ -54,6 +59,10 @@ private:
 
     // Stereo-linked smoothed GAIN envelope (linear, 1 = no reduction).
     double fEnv = 1.0;
+
+    // Gain-reduction meter (dB, <= 0), peak-held over each block then decayed
+    // toward 0 so the editor can show live reduction.
+    std::atomic<float> fGrDb{0.0f};
 };
 
 } // namespace daw

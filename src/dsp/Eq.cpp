@@ -111,7 +111,59 @@ void Eq::SetBand(int band, float freqHz, float gainDb, float q) {
 void Eq::Prepare(double sampleRate) {
     if (sampleRate > 0) fSampleRate = sampleRate;
     for (int b = 0; b < kBands; b++) ComputeBand(b);
+    for (int i = 0; i < kFftSize; i++)                 // Hann window
+        fWin[i] = 0.5f - 0.5f * (float)std::cos(2.0 * kPi * i / (kFftSize - 1));
+    fCapPos = 0;
+    fMagCount.store(0, std::memory_order_relaxed);
     Reset();
+}
+
+// Iterative radix-2 Cooley-Tukey FFT in place (kit-free). n must be a power of 2.
+static void Fft(double* re, double* im, int n) {
+    for (int i = 1, j = 0; i < n; i++) {               // bit-reversal permutation
+        int bit = n >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
+    }
+    for (int len = 2; len <= n; len <<= 1) {
+        const double ang = -2.0 * kPi / len;
+        const double wr = std::cos(ang), wi = std::sin(ang);
+        for (int i = 0; i < n; i += len) {
+            double cwr = 1.0, cwi = 0.0;
+            for (int k = 0; k < len / 2; k++) {
+                const int a = i + k, b = i + k + len / 2;
+                const double tr = re[b] * cwr - im[b] * cwi;
+                const double ti = re[b] * cwi + im[b] * cwr;
+                re[b] = re[a] - tr; im[b] = im[a] - ti;
+                re[a] += tr;        im[a] += ti;
+                const double ncwr = cwr * wr - cwi * wi;
+                cwi = cwr * wi + cwi * wr; cwr = ncwr;
+            }
+        }
+    }
+}
+
+// Capture one mono input sample; when the buffer fills, window + FFT it and
+// store the magnitude spectrum (dB) for the editor. Called from Process (RT).
+void Eq::PushSpectrumSample(float mono) {
+    fCap[fCapPos++] = mono;
+    if (fCapPos < kFftSize) return;
+    fCapPos = 0;
+    for (int i = 0; i < kFftSize; i++) { fRe[i] = fCap[i] * fWin[i]; fIm[i] = 0.0; }
+    Fft(fRe, fIm, kFftSize);
+    for (int k = 0; k < kBins; k++) {
+        const double mag = std::sqrt(fRe[k] * fRe[k] + fIm[k] * fIm[k]) / (kFftSize * 0.5);
+        fMag[k] = (float)(20.0 * std::log10(mag > 1e-7 ? mag : 1e-7));
+    }
+    fMagCount.store(kBins, std::memory_order_release);
+}
+
+int Eq::Spectrum(float* magDb, int maxBins) const {
+    const int n = fMagCount.load(std::memory_order_acquire);
+    const int cnt = n < maxBins ? n : maxBins;
+    for (int i = 0; i < cnt; i++) magDb[i] = fMag[i];
+    return cnt;
 }
 
 void Eq::ComputeBand(int b) {
@@ -162,6 +214,7 @@ float Eq::MagnitudeResponseDb(float freqHz) const {
 
 void Eq::Process(float* stereo, int frames) {
     for (int i = 0; i < frames; i++) {
+        PushSpectrumSample(0.5f * (stereo[i * 2] + stereo[i * 2 + 1]));  // pre-EQ
         for (int ch = 0; ch < 2; ch++) {
             double x = stereo[i * 2 + ch];
             for (int b = 0; b < kBands; b++) {

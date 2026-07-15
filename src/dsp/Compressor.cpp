@@ -54,6 +54,8 @@ void Compressor::Process(float* stereo, int frames) {
     const double slope    = 1.0 - 1.0 / ratio;   // dB reduction per dB over
     const double threshDb = fThresholdDb;
 
+    double minEnv = 1.0;   // most reduction (smallest gain) over this block
+
     for (int i = 0; i < frames; i++) {
         const double l = stereo[i * 2 + 0];
         const double r = stereo[i * 2 + 1];
@@ -76,10 +78,20 @@ void Compressor::Process(float* stereo, int frames) {
         if (fEnv < 1.0e-4) fEnv = 1.0e-4;
         if (fEnv > 1.0)    fEnv = 1.0;
 
+        if (fEnv < minEnv) minEnv = fEnv;
+
         const double g = fEnv * fMakeupLin;
         stereo[i * 2 + 0] = static_cast<float>(l * g);
         stereo[i * 2 + 1] = static_cast<float>(r * g);
     }
+
+    // Gain-reduction meter (dB, <= 0). Peak-hold this block against a decayed
+    // previous value so brief reductions stay readable.
+    const float blockGr = (minEnv < 1.0)
+                          ? (float)(20.0 * std::log10(minEnv)) : 0.0f;
+    float prev = fGrDb.load(std::memory_order_relaxed);
+    prev *= 0.6f;                                   // decay toward 0
+    fGrDb.store(blockGr < prev ? blockGr : prev, std::memory_order_relaxed);
 }
 
 void Compressor::SetParam(int slot, float v) {

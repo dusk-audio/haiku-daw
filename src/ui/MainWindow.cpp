@@ -365,6 +365,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                BMessenger(this)))->Show();
             break;
         }
+        case kMsgFxWinOpen: {   // an effects editor opened: meter its track
+            int64 tid = 0; BMessenger m;
+            msg->FindInt64("track", &tid);
+            msg->FindMessenger("msgr", &m);
+            fFxMsgr = m;
+            fFxTrack = (TrackId)tid;
+            if (fEngine) fEngine->SetMeterFocus((TrackId)tid);
+            break;
+        }
+        case kMsgFxWinClosed: {
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            if (fFxTrack == (TrackId)tid) {
+                fFxMsgr = BMessenger();
+                fFxTrack = kInvalidTrackId;
+                if (fEngine) fEngine->SetMeterFocus(kInvalidTrackId);
+            }
+            break;
+        }
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips;
             for (const Track& t : fProject->Tracks())
@@ -693,6 +712,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
                     }
                     PushTrackPeaks();
+                    PushFxMeters();
                     break;
                 }
 
@@ -710,6 +730,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                       fEngine->LufsShort(),
                                       fEngine->TruePeakDb());
                 PushTrackPeaks();
+                PushFxMeters();
                 if (fEngine->IsFinished())
                     StopPlayback();
             }
@@ -1197,6 +1218,20 @@ void MainWindow::PushTrackPeaks() {
         m.AddFloat("mpr", fEngine->PeakR());
         fMixerMsgr.SendMessage(&m);
     }
+}
+
+void MainWindow::PushFxMeters() {
+    if (!fEngine || !fFxMsgr.IsValid()) return;
+    BMessage m(kMsgFxMeter);
+    float gr[16];
+    for (int i = 0; i < 16; i++) gr[i] = fEngine->MeterGrDb(i);
+    m.AddData("gr", B_FLOAT_TYPE, gr, sizeof(gr));
+    float spec[256]; int specFx = -1;
+    const int n = fEngine->MeterSpectrum(spec, 256, &specFx);
+    if (n > 0) m.AddData("spec", B_FLOAT_TYPE, spec, n * sizeof(float));
+    m.AddInt32("specfx", specFx);
+    m.AddInt32("specn", n);
+    fFxMsgr.SendMessage(&m);
 }
 
 void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,

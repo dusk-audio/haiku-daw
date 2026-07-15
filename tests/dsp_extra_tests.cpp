@@ -85,6 +85,7 @@ int main() {
             loudPeak = std::max(loudPeak, std::fabs(loud[i * 2 + 1]));
         }
         CHECK(loudPeak < 0.8f - 0.05f);   // meaningfully reduced
+        CHECK(comp.MeterDb() < -0.5f);    // GR meter shows reduction
 
         // Quiet steady signal at 0.02 (~ -34 dB, below threshold): near unity.
         comp.Reset();
@@ -96,6 +97,26 @@ int main() {
             quietPeak = std::max(quietPeak, std::fabs(quiet[i * 2 + 1]));
         }
         CHECK(std::fabs(quietPeak - 0.02f) < 0.001f);   // essentially unchanged
+    }
+
+    // 3b. EQ FFT analyzer: a 1 kHz sine puts the most energy in the bin nearest
+    // 1 kHz, well above a far-away bin.
+    {
+        Eq eq; eq.Prepare(SR);
+        const double binHz = SR / (double)Eq::kFftSize;
+        const int N = Eq::kFftSize * 3;   // fill the FFT buffer a few times
+        std::vector<float> buf(N * 2);
+        for (int i = 0; i < N; i++) {
+            const float s = 0.5f * (float)std::sin(2.0 * M_PI * 1000.0 * i / SR);
+            buf[i * 2] = buf[i * 2 + 1] = s;
+        }
+        eq.Process(buf.data(), N);
+        float spec[Eq::kBins];
+        const int n = eq.Spectrum(spec, Eq::kBins);
+        CHECK(n == Eq::kBins);
+        const int kTone = (int)(1000.0 / binHz + 0.5);
+        const int kFar  = (int)(8000.0 / binHz + 0.5);
+        CHECK(spec[kTone] > spec[kFar] + 20.0f);   // tone bin dominates (dB)
     }
 
     // 4. Compressor makeup gain lifts a below-threshold signal.

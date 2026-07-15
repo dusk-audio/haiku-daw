@@ -15,7 +15,7 @@ namespace daw {
 static constexpr float kPanelPad = 8.0f;
 static constexpr float kTitleH   = 22.0f;
 static constexpr float kKnobW    = 68.0f;
-static constexpr float kKnobH    = 78.0f;
+static constexpr float kKnobH    = 86.0f;
 static constexpr float kGraphH   = 156.0f;
 static constexpr float kBtnW     = 22.0f;
 
@@ -83,6 +83,16 @@ EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
     SetViewColor(ColBackground());
 }
 
+void EffectsView::SetMeters(const float* gr, int grN,
+                            const float* spec, int specN, int specFx) {
+    fGrN = grN < 16 ? grN : 16;
+    for (int i = 0; i < fGrN; i++) fGr[i] = gr[i];
+    fSpecN = specN < kSpecMax ? specN : kSpecMax;
+    if (spec) for (int i = 0; i < fSpecN; i++) fSpec[i] = spec[i];
+    fSpecFx = specFx;
+    Invalidate();
+}
+
 float EffectsView::PanelHeight(const EffectDesc& d) const {
     float h = kTitleH + 6;
     if (d.type == EffectType::Eq || d.type == EffectType::Compressor)
@@ -124,14 +134,14 @@ void EffectsView::Apply() {
 void EffectsView::DrawKnob(BRect r, const char* label, float value,
                            float mn, float mx) {
     const float cx = (r.left + r.right) * 0.5f;
-    const float cy = r.top + 30;
-    const float rad = 21.0f;
+    const float cy = r.top + 42;      // pushed down so the dial clears the label
+    const float rad = 20.0f;
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
 
-    // Label (centered above).
+    // Label (centered above, clear of the dial + its tick ring).
     SetHighColor(ColText());
-    DrawString(label, BPoint(cx - StringWidth(label) * 0.5f, r.top + 11));
+    DrawString(label, BPoint(cx - StringWidth(label) * 0.5f, r.top + 10));
 
     // Tick scale around the -135..+135 sweep; the reached ticks are lit.
     for (int i = 0; i <= 10; i++) {
@@ -190,6 +200,22 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
         StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
     }
 
+    // Live FFT analyzer overlay (input spectrum), drawn behind the EQ curve.
+    if (fFftOn && fSpecFx == effIdx && fSpecN > 1) {
+        const double binHz = 48000.0 / (double)Eq::kFftSize;
+        auto specY = [&](float db) {
+            if (db < -84) db = -84; if (db > 0) db = 0;
+            return r.bottom - (db + 84.0f) / 84.0f * r.Height();
+        };
+        SetHighColor(Rgb(46, 96, 86));   // dim teal spectrum fill
+        for (float x = r.left + 1; x <= r.right; x += 1.0f) {
+            const double f = xToFreq(x);
+            const int k = (int)(f / binHz + 0.5);
+            if (k < 1 || k >= fSpecN) continue;
+            StrokeLine(BPoint(x, r.bottom), BPoint(x, specY(fSpec[k])));
+        }
+    }
+
     // Build an Eq from the params and stroke its magnitude response.
     Eq eq;
     for (int b = 0; b < 5; b++)
@@ -236,9 +262,26 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
     StrokeRect(r);
 }
 
-void EffectsView::DrawCompCurve(BRect r, const EffectDesc& d) {
+void EffectsView::DrawCompCurve(BRect r, const EffectDesc& d, int effIdx) {
     SetHighColor(Rgb(16, 18, 22));
     FillRect(r);
+    // Gain-reduction meter strip down the right edge (live), 0..-24 dB.
+    const float grDb = (effIdx >= 0 && effIdx < fGrN) ? -fGr[effIdx] : 0.0f;  // >=0
+    const float meterW = 14.0f;
+    BRect gm(r.right - meterW, r.top, r.right, r.bottom);
+    SetHighColor(Rgb(12, 14, 17));
+    FillRect(gm);
+    const float grN = grDb / 24.0f > 1.0f ? 1.0f : grDb / 24.0f;   // fraction
+    SetHighColor(Rgb(232, 150, 70));
+    FillRect(BRect(gm.left + 2, gm.top, gm.right - 1, gm.top + grN * gm.Height()));
+    SetHighColor(ColGrid());
+    StrokeRect(gm);
+    SetHighColor(ColTextDim());
+    DrawString("GR", BPoint(gm.left - 1, r.top + 10));
+    char grl[16]; std::snprintf(grl, sizeof(grl), "-%.1f", grDb);
+    DrawString(grl, BPoint(gm.left - StringWidth(grl) - 3, r.bottom - 3));
+    r.right -= meterW + 2;   // curve area excludes the meter
+
     const float thr = d.p(0);     // dB
     const float ratio = d.p(1) < 1 ? 1 : d.p(1);
     const float makeup = d.p(4);
@@ -302,6 +345,18 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColText());        DrawString("Del", BPoint(rm.left + 12, rm.bottom - 5));
         fHits.push_back({ (int)i, 3, 0, rm, 0, 0 });
 
+        // EQ analyzer (FFT) on/off toggle in the title bar.
+        if (d.type == EffectType::Eq) {
+            BRect fb(panel.left + 96, panel.top + 3, panel.left + 132,
+                     panel.top + kTitleH - 3);
+            SetHighColor(fFftOn ? ColAccent() : ColHeaderHi());
+            FillRect(fb);
+            SetHighColor(ColGrid()); StrokeRect(fb);
+            SetHighColor(fFftOn ? ColBackground() : ColTextDim());
+            DrawString("FFT", BPoint(fb.left + 8, fb.bottom - 5));
+            fHits.push_back({ (int)i, 6, 0, fb, 0, 0 });   // kind 6 = FFT toggle
+        }
+
         float knobTop = panel.top + kTitleH + 4;
         if (d.type == EffectType::Eq) {
             DrawEqGraph(BRect(panel.left + 6, knobTop, panel.right - 6,
@@ -309,7 +364,7 @@ void EffectsView::Draw(BRect) {
             knobTop += kGraphH;
         } else if (d.type == EffectType::Compressor) {
             DrawCompCurve(BRect(panel.left + 6, knobTop, panel.right - 6,
-                                knobTop + kGraphH - 6), d);
+                                knobTop + kGraphH - 6), d, (int)i);
             knobTop += kGraphH;
         }
 
@@ -416,6 +471,10 @@ void EffectsView::MouseDown(BPoint where) {
             }
             break;
         }
+        case 6:   // FFT analyzer on/off
+            fFftOn = !fFftOn;
+            Invalidate();
+            break;
         case 3:   // remove
             if (h.effect >= 0 && h.effect < (int)fChain.size()) {
                 fChain.erase(fChain.begin() + h.effect);
@@ -481,7 +540,8 @@ void EffectsView::MouseUp(BPoint) {
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
                              TrackId track, BMessenger apply)
     : BWindow(frame, "Effects", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
+              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
+      fTrack(track), fApply(apply) {
     BRect b = Bounds();
     BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
     fView = new EffectsView(vr, std::move(chain), track, apply);
@@ -493,10 +553,34 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
         bar->SetRange(0, std::max(0.0f, ch - vr.Height()));
         bar->SetSteps(16, vr.Height());
     }
+    // Tell the main window to meter this track's effects while we're open.
+    BMessage open(kMsgFxWinOpen);
+    open.AddInt64("track", (int64)track);
+    open.AddMessenger("msgr", BMessenger(this));
+    fApply.SendMessage(&open);
 }
 
 void EffectsWindow::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgFxMeter) {
+        const float* gr = nullptr; ssize_t grBytes = 0;
+        const float* sp = nullptr; ssize_t spBytes = 0;
+        int32 specFx = -1, specN = 0;
+        msg->FindData("gr", B_FLOAT_TYPE, (const void**)&gr, &grBytes);
+        msg->FindData("spec", B_FLOAT_TYPE, (const void**)&sp, &spBytes);
+        msg->FindInt32("specfx", &specFx);
+        msg->FindInt32("specn", &specN);
+        fView->SetMeters(gr, gr ? (int)(grBytes / sizeof(float)) : 0,
+                         sp, specN, specFx);
+        return;
+    }
     BWindow::MessageReceived(msg);
+}
+
+bool EffectsWindow::QuitRequested() {
+    BMessage closed(kMsgFxWinClosed);
+    closed.AddInt64("track", (int64)fTrack);
+    fApply.SendMessage(&closed);
+    return true;
 }
 
 } // namespace daw

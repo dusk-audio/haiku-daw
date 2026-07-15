@@ -103,7 +103,10 @@ private:
 
 class Engine {
 public:
-    Engine() = default;
+    Engine() {
+        for (int i = 0; i < kMeterFxMax; i++)
+            fMeterGr[i].store(0.0f, std::memory_order_relaxed);
+    }
     ~Engine();
 
     // Build streams from the project's audio clips and open the output.
@@ -164,7 +167,45 @@ public:
 
     float OutputRate() const { return fOutputRate; }
 
+    // Effect metering for the editor. The UI names one track to watch; the RT
+    // thread copies each of that track's effects' meter (scalar) + the spectrum
+    // of one analyzing effect (e.g. the EQ) into flat storage the UI reads, so
+    // the UI never touches the RT-owned effect objects. ~0 = master chain,
+    // kInvalidTrackId = disabled.
+    void SetMeterFocus(TrackId track) {
+        fMeterTrack.store(track, std::memory_order_relaxed);
+    }
+    static constexpr int kMeterFxMax = 16;
+    float MeterGrDb(int fxIndex) const {
+        return (fxIndex >= 0 && fxIndex < kMeterFxMax)
+               ? fMeterGr[fxIndex].load(std::memory_order_relaxed) : 0.0f;
+    }
+    // Spectrum of the analyzing effect + which fx index it belongs to.
+    int MeterSpectrum(float* out, int maxBins, int* fxIndex) const {
+        if (fxIndex) *fxIndex = fMeterSpecFx.load(std::memory_order_relaxed);
+        const int n = fMeterSpecN.load(std::memory_order_acquire);
+        const int c = n < maxBins ? n : maxBins;
+        for (int i = 0; i < c; i++) out[i] = fMeterSpec[i];
+        return c;
+    }
+
 private:
+    // RT helper: copy the given chain's meters into the flat UI storage.
+    template <class Chain>
+    void CaptureFxMeters(const Chain& fx) {
+        int specFx = -1, specN = 0;
+        for (int i = 0; i < (int)fx.size() && i < kMeterFxMax; i++) {
+            if (!fx[i]) { fMeterGr[i].store(0.0f, std::memory_order_relaxed); continue; }
+            fMeterGr[i].store(fx[i]->MeterDb(), std::memory_order_relaxed);
+            if (specFx < 0) {
+                const int n = fx[i]->Spectrum(fMeterSpec, kMeterSpecMax);
+                if (n > 0) { specFx = i; specN = n; }
+            }
+        }
+        fMeterSpecFx.store(specFx, std::memory_order_relaxed);
+        fMeterSpecN.store(specN, std::memory_order_release);
+    }
+
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
                                const media_raw_audio_format& format);
     void FillBuffer(float* out, size_t frames);
@@ -232,6 +273,14 @@ private:
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
     std::atomic<float> fMasterGain{1.0f};
+
+    // Effect meter focus + flat storage (RT writes, UI reads).
+    std::atomic<TrackId> fMeterTrack{kInvalidTrackId};
+    std::atomic<float>   fMeterGr[kMeterFxMax];   // per-fx scalar meter (GR dB)
+    static constexpr int kMeterSpecMax = 256;
+    float                fMeterSpec[kMeterSpecMax] = {};
+    std::atomic<int>     fMeterSpecN{0};
+    std::atomic<int>     fMeterSpecFx{-1};
     Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;

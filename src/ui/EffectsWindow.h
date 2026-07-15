@@ -25,6 +25,15 @@ constexpr uint32 kMsgApplyFx = 'fxap';
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';
+// EffectsWindow -> MainWindow: this editor opened/closed for a track. Fields:
+// int64 "track", messenger "msgr" (open only). MainWindow sets the engine meter
+// focus and pushes kMsgFxMeter here while playing.
+constexpr uint32 kMsgFxWinOpen   = 'fxwo';
+constexpr uint32 kMsgFxWinClosed = 'fxwc';
+// MainWindow -> EffectsWindow: live effect meters. Fields: float[] "gr" (per-fx
+// gain reduction dB), float[] "spec" (EQ spectrum dB), int32 "specfx" (which fx
+// the spectrum belongs to), int32 "specn" (bin count).
+constexpr uint32 kMsgFxMeter     = 'fxmt';
 
 class EffectsView : public BView {
 public:
@@ -38,6 +47,10 @@ public:
 
     float ContentHeight() const;    // total stacked height (for the scroll bar)
 
+    // Live meters from the engine (per-fx gain reduction + one EQ spectrum).
+    void SetMeters(const float* gr, int grN,
+                   const float* spec, int specN, int specFx);
+
 private:
     void  Apply();
     float PanelHeight(const EffectDesc& d) const;
@@ -49,7 +62,7 @@ private:
                                             // 4 add,5 eq-handle
     void  DrawKnob(BRect r, const char* label, float value, float mn, float mx);
     void  DrawEqGraph(BRect r, const EffectDesc& d, int effIdx);
-    void  DrawCompCurve(BRect r, const EffectDesc& d);
+    void  DrawCompCurve(BRect r, const EffectDesc& d, int effIdx);
     int   HitTest(BPoint where, Hit* out) const;
 
     std::vector<EffectDesc> fChain;
@@ -66,6 +79,15 @@ private:
     float fDragMin = 0, fDragMax = 1;
     BPoint fDragStart;
     float fDragStartVal = 0;
+
+    // Live meters (set from the engine via SetMeters).
+    static constexpr int kSpecMax = 256;
+    float fGr[16] = {};       // per-fx gain reduction (dB, <= 0)
+    int   fGrN = 0;
+    float fSpec[kSpecMax] = {};
+    int   fSpecN = 0;
+    int   fSpecFx = -1;       // which effect the spectrum belongs to
+    bool  fFftOn = true;      // EQ analyzer overlay toggle
 };
 
 class EffectsWindow : public BWindow {
@@ -73,8 +95,11 @@ public:
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
                   BMessenger apply);
     void MessageReceived(BMessage* msg) override;
+    bool QuitRequested() override;
 private:
     EffectsView* fView;
+    TrackId      fTrack;
+    BMessenger   fApply;   // to MainWindow (open/close notices)
 };
 
 } // namespace daw
