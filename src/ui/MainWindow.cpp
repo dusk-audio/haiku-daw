@@ -477,15 +477,79 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips;
-            for (const Track& t : fProject->Tracks())
-                strips.push_back(MixerStripInfo{ (uint64)t.id, t.name,
-                    t.gain, t.pan, t.muted, t.soloed, t.colorIndex });
-            const float ww = 24 + (strips.size() + 1) * 90;   // + master
-            BRect wr(120, 120, 120 + ww, 120 + 300);
+            for (const Track& t : fProject->Tracks()) {
+                MixerStripInfo s{};
+                s.trackId = (uint64)t.id;
+                s.name = t.name;
+                s.gain = t.gain; s.pan = t.pan;
+                s.muted = t.muted; s.soloed = t.soloed;
+                s.armed = t.armed; s.inputMonitor = t.inputMonitor;
+                s.colorIndex = t.colorIndex;
+                s.type = t.type == TrackType::Midi ? 1
+                       : t.type == TrackType::Bus  ? 2 : 0;
+                s.fxCount = (int)t.fx.size();
+                s.sendCount = (int)t.sends.size();
+                s.hasInput = t.input.kind != InputSource::kNone;
+                if (t.output == kInvalidTrackId) s.outLabel = "Mst";
+                else if (const Track* bt = fProject->FindTrack(t.output))
+                    s.outLabel = bt->name.substr(0, 6);
+                else s.outLabel = "Bus";
+                strips.push_back(std::move(s));
+            }
+            const float ww = 24 + (strips.size() + 1) * (96 + 4);   // + master
+            BRect wr(120, 90, 120 + ww, 90 + 560);   // tall enough for the strip
             MixerWindow* mx = new MixerWindow(wr, strips, fProject->masterGain,
                                               BMessenger(this));
             fMixerMsgr = BMessenger(mx);
             mx->Show();
+            break;
+        }
+        case kMsgMixArm: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) t->armed = !t->armed;
+            UpdateMidiMonitor();
+            if (fInspector) fInspector->Invalidate();
+            fTimeline->Invalidate();
+            break;
+        }
+        case kMsgMixMon: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid))
+                t->inputMonitor = !t->inputMonitor;
+            UpdateMidiMonitor();
+            if (fInspector) fInspector->Invalidate();
+            fTimeline->Invalidate();
+            break;
+        }
+        case kMsgMixFx: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid))
+                (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
+                                   (TrackId)tid, BMessenger(this)))->Show();
+            break;
+        }
+        case kMsgMixSends: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                std::vector<std::pair<TrackId, std::string>> buses;
+                for (const Track& bt : fProject->Tracks())
+                    if (bt.type == TrackType::Bus && bt.id != (TrackId)tid)
+                        buses.push_back({bt.id, bt.name});
+                (new SendsWindow(BRect(200, 150, 540, 470), t->sends, buses,
+                                 (TrackId)tid, BMessenger(this)))->Show();
+            }
+            break;
+        }
+        case kMsgMixInst: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (Track* t = fProject->FindTrack((TrackId)tid))
+                (new InstrumentWindow(BRect(200, 150, 480, 340), t->instrument,
+                                      (TrackId)tid, BMessenger(this)))->Show();
+            break;
+        }
+        case kMsgMixSelect: {
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (fInspector) fInspector->SetTrack((TrackId)tid);
             break;
         }
         case kMsgApplyMaster:

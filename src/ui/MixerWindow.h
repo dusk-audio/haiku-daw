@@ -25,7 +25,14 @@ struct MixerStripInfo {
     float       pan;     // -1..+1 (0 == center)
     bool        muted;
     bool        soloed;
+    bool        armed = false;
+    bool        inputMonitor = false;
     int         colorIndex = 0;
+    int         type = 0;        // 0 audio, 1 midi, 2 bus
+    int         fxCount = 0;
+    int         sendCount = 0;
+    bool        hasInput = false;
+    std::string outLabel;        // "Mst" or a bus name
 };
 
 // One strip's edited state -> the model. Fields: int64 "track", float "gain",
@@ -36,6 +43,14 @@ constexpr uint32 kMsgApplyMaster = 'mmst';
 // Live peaks pushed from the main window. Per track: int64 "tid", float "pl",
 // "pr"; plus master float "mpl","mpr".
 constexpr uint32 kMsgMixPeaks    = 'mpks';
+// Strip section buttons -> the main window (which owns the model + editors).
+// All carry int64 "track".
+constexpr uint32 kMsgMixArm      = 'mxar';   // toggle record-enable
+constexpr uint32 kMsgMixMon      = 'mxmn';   // toggle input monitor
+constexpr uint32 kMsgMixFx       = 'mxfx';   // open the effects editor
+constexpr uint32 kMsgMixSends    = 'mxsn';   // open the sends editor
+constexpr uint32 kMsgMixInst     = 'mxis';   // open the instrument editor
+constexpr uint32 kMsgMixSelect   = 'mxse';   // select the track (inspector focus)
 
 class MixerStripsView : public BView {
 public:
@@ -52,11 +67,11 @@ public:
 
 private:
     float StripX(int i) const;       // left x of strip i (i == count -> master)
-    void  DrawStrip(int i, const char* name, float gain, float pan,
-                    bool muted, bool soloed, int colorIndex,
+    void  DrawStrip(int i, const MixerStripInfo* info, float gain,
                     float peakL, float peakR, bool master);
     int   StripAt(BPoint where) const;   // -1 none, count == master
     void  ApplyStrip(int i);
+    void  Post(uint32 what, uint64 track);   // section-button message helper
 
     std::vector<MixerStripInfo> fStrips;
     std::map<uint64, std::pair<float, float>> fPeaks;
@@ -65,8 +80,10 @@ private:
     BMessenger fApply;
 
     enum class Drag { None, Fader, Pan };
-    Drag fDrag = Drag::None;
-    int  fDragStrip = -1;   // count == master
+    Drag  fDrag = Drag::None;
+    int   fDragStrip = -1;   // count == master
+    float fPanGrabY = 0.0f;  // pan knob drags vertically
+    float fPanOrig  = 0.0f;
 };
 
 class MixerWindow : public BWindow {
