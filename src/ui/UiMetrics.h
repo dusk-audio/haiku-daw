@@ -19,6 +19,10 @@ constexpr double kDefaultFramesPerPixel = 512.0;
 // TimelineView -> MainWindow: user clicked the ruler to move the playhead.
 constexpr uint32 kMsgSeek = 'seek';
 
+// TimelineView -> MainWindow: arming or a track's input changed; re-evaluate
+// idle MIDI monitoring (start/stop the monitor engine).
+constexpr uint32 kMsgMonitorRefresh = 'mon?';
+
 inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};
 }

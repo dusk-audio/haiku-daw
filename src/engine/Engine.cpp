@@ -217,9 +217,11 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     // non-soloed) so mute/solo can be toggled live; audibility is a per-stream
     // flag the RT mix honors, not a build-time filter.
     fEndFrame = 0;
+    fMonFrame = startFrame;   // free-running clock for monitor-only mode
+    const bool monitorOnly = fMonitorOnly.load();
     for (const Track& t : project.Tracks()) {
-        if (t.type != TrackType::Audio)
-            continue;
+        if (t.type != TrackType::Audio || monitorOnly)
+            continue;   // monitor-only: no clip streams (no disk I/O)
         const bool audible = !t.muted && (!anySolo || t.soloed);
         const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
         for (size_t ci = 0; ci < t.clips.size(); ci++) {
@@ -545,6 +547,38 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
 
 void Engine::FillBuffer(float* out, size_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));   // stereo silence
+
+    // Monitor-only: render just the live keyboard voices through each armed
+    // MIDI track's instrument + fader + FX. No clips, no playhead advance.
+    if (fMonitorOnly.load(std::memory_order_relaxed)) {
+        const Frame bs = fMonFrame;
+        fMonFrame += (Frame)frames;
+        UpdateLiveVoices(bs);
+        const size_t nfloats = frames * 2;
+        float pl = 0.0f, pr = 0.0f;
+        for (size_t idx = 0; idx < fBuses.size(); idx++) {
+            Bus& b = fBuses[idx];
+            if (!b.liveMonitor || fLiveNotes.empty()) continue;
+            float* nb = fNodeBufs[idx].data();
+            std::memset(nb, 0, nfloats * sizeof(float));
+            fSynth.Render(fLiveNotes, b.instrument, nb, frames, bs, 1.0f);
+            for (size_t i = 0; i < frames; i++) {
+                nb[i * 2 + 0] *= b.midiGainL;
+                nb[i * 2 + 1] *= b.midiGainR;
+            }
+            for (auto& fx : b.fx)
+                if (fx) fx->Process(nb, static_cast<int>(frames));
+            for (size_t i = 0; i < nfloats; i++) out[i] += nb[i];
+        }
+        const float mg = fMasterGain.load(std::memory_order_relaxed);
+        for (size_t i = 0; i < nfloats; i++) {
+            if (mg != 1.0f) out[i] *= mg;
+            const float a = std::fabs(out[i]);
+            if (i & 1) { if (a > pr) pr = a; } else { if (a > pl) pl = a; }
+        }
+        fPeakL.store(pl); fPeakR.store(pr);
+        return;
+    }
 
     if (!fPlaying.load()) {
         fPeakL.store(0.0f); fPeakR.store(0.0f);

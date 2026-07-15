@@ -1021,6 +1021,8 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
                 id, choices[(size_t)(pick - 1)]), *fProject);
             Invalidate(lane);
         }
+        // Re-evaluate monitoring: a new input on an armed track reconnects it.
+        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;
     }
     if (ArmRect(lane).Contains(where)) {
@@ -1030,6 +1032,8 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         if (Track* tr = fProject->FindTrack(id))
             tr->armed = !tr->armed;
         Invalidate(lane);
+        // Arming an MIDI track with an input starts/stops idle monitoring.
+        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;
     }
 

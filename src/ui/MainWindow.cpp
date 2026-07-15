@@ -294,6 +294,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fRecMode) StopRecording();
             else          StartRecording();
             break;
+        case kMsgMonitorRefresh:   // arming / input changed in the timeline
+            UpdateMidiMonitor();
+            break;
         case kMsgSeek: {
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
@@ -855,6 +858,7 @@ static Frame ProjectEndFrame(const Project& p) {
 void MainWindow::StartPlayback() {
     if (fRecMode)
         return;   // recording runs its own engine (overdub)
+    StopMidiMonitor();   // playback owns the engine + MIDI input
     // Rebuild the engine from the current model each time (RT-safe: no live
     // mutation of a running graph). Playback begins at the current playhead;
     // if it's already at/after the end (and not looping), rewind first.
@@ -908,6 +912,7 @@ void MainWindow::StopPlayback() {
     UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
                           Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
+    UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
 }
 
 // Start the playback engine from `engineStart` for overdub monitoring during a
@@ -1027,10 +1032,68 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
     fTimeline->Invalidate();
 }
 
+void MainWindow::StopMidiMonitor() {
+    if (!fMonitoring) return;
+    if (fEngine) {
+        fEngine->SetLiveMidi(nullptr);
+        fEngine->Stop();
+        fEngine.reset();
+    }
+    fMidiIn.reset();
+    fMonitoring = false;
+}
+
+// Reconcile idle live-monitoring with the current arming. When idle (not
+// playing / recording) and at least one MIDI track is armed with a MIDI input,
+// run a monitor-only engine so the player hears themselves before pressing
+// record. Rebuilt on every change (cheap) to pick up new arming / inputs.
+void MainWindow::UpdateMidiMonitor() {
+    StopMidiMonitor();
+    if (fPlaying || fRecMode) return;   // playback / record own the engine + input
+
+    std::vector<TrackId> armed;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == TrackType::Midi && t.armed
+            && t.input.kind == InputSource::kMidi)
+            armed.push_back(t.id);
+    if (armed.empty()) return;
+
+    // Open a consumer and connect each armed track's endpoint by name.
+    fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
+    if (fMidiIn->Register() != B_OK) { fMidiIn.reset(); return; }
+    const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
+    for (TrackId id : armed) {
+        const Track* t = fProject->FindTrack(id);
+        if (!t) continue;
+        for (const MidiEndpointInfo& e : eps)
+            if (e.isProducer && e.name == t->input.name) {
+                fMidiIn->ConnectFrom(e.id);
+                break;
+            }
+    }
+
+    // A monitor-only engine: renders live voices through the armed instruments,
+    // no clip playback, no playhead advance.
+    const Frame ph = fProject->transport.playhead;
+    const Frame tenMin = (Frame)(fProject->sampleRate * 600.0);
+    fEngine.reset(new Engine());
+    fEngine->SetBufferFrames(fBufferFrames);
+    fEngine->SetMonitorOnly(true);
+    if (fEngine->Load(*fProject, ph, ph + tenMin) != B_OK) {
+        fEngine.reset();
+        fMidiIn.reset();
+        return;
+    }
+    fEngine->SetLiveMidi(fMidiIn->MonitorInput());
+    fEngine->Start();
+    fMonitoring = true;
+}
+
 void MainWindow::StartRecording() {
     if (fRecMode || (fRecorder && fRecorder->IsRecording()))
         return;
     if (fPlaying) StopPlayback();
+    StopMidiMonitor();   // the record engine takes over monitoring
 
     // Record onto every armed audio track (one input take, dropped on each),
     // and capture live MIDI onto every armed MIDI track that has a MIDI input.
@@ -1112,6 +1175,9 @@ void MainWindow::StopRecording() {
     // record has no audio recorder / targets, so this must run before the
     // audio empty-take early-out below).
     StopMidiCapture(endPh);
+    // Resume idle monitoring if a MIDI track is still armed (runs on every
+    // StopRecording exit path, since the clip-drop code below may early-return).
+    UpdateMidiMonitor();
 
     if (!captured || frames <= 0 || targets.empty()) {
         if (fRecorder) std::fprintf(stderr, "MainWindow: empty take, no clip added\n");

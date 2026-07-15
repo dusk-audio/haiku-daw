@@ -62,6 +62,8 @@ private:
     void StartCapture();             // open the Recorder (after any count-in)
     void StartMidiCapture();         // connect armed MIDI inputs, begin the take
     void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
+    void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
+    void StopMidiMonitor();          // tear down the idle monitor engine + input
     bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
@@ -115,6 +117,7 @@ private:
     MidiRecorder              fMidiRec;
     std::vector<TrackId>      fMidiRecTracks; // armed MIDI targets for the take
     bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
+    bool                      fMonitoring = false;  // idle live-monitor engine up
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)

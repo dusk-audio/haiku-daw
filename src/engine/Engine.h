@@ -148,6 +148,12 @@ public:
     // drain, so the RT thread is the sole consumer).
     void SetLiveMidi(IMidiInput* in) { fLiveMidi.store(in); }
 
+    // Monitor-only: run the output for live MIDI monitoring WITHOUT playing the
+    // project (no clips, no playhead advance) — used to hear an armed MIDI track
+    // while idle. Set before Load()/Start(). The RT callback renders only the
+    // live voices through each armed MIDI track's instrument + fader.
+    void SetMonitorOnly(bool on) { fMonitorOnly.store(on); }
+
     // Output buffer size in frames (per channel); applied at the next Load.
     // Smaller = lower latency, higher xrun risk. Call before Load().
     void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
@@ -295,6 +301,8 @@ private:
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
+    std::atomic<bool>                         fMonitorOnly{false}; // idle monitor mode
+    Frame                                     fMonFrame = 0;       // free-running monitor clock
     LiveVoice                                 fVoices[kMaxLiveVoices];
     std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
     Metronome                                 fMetronome; // click generator
