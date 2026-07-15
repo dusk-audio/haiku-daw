@@ -261,16 +261,23 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         bus->streams.push_back(s.get());
     }
 
+    // Live-monitor state: reset the held-voice pool for this (re)load and make
+    // sure the note scratch has capacity so the RT rebuild never allocates.
+    for (LiveVoice& v : fVoices) v.active = false;
+    fLiveNotes.clear();
+    fLiveNotes.reserve(kMaxLiveVoices);
+
     // Add a bus per audible MIDI track: snapshot its notes for the synth to
-    // render (rebuild-on-play, so MIDI edits apply on the next Start).
+    // render (rebuild-on-play, so MIDI edits apply on the next Start). An armed
+    // MIDI track also gets a bus even with no notes, so live input can be
+    // monitored (synthesized) through its instrument while recording.
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Midi)
             continue;
         std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
-        if (notes.empty())
-            continue;
+        const bool monitor = t.armed;
         const bool audible = !t.muted && (!anySolo || t.soloed);
-        if (!audible)
+        if ((notes.empty() && !monitor) || (!audible && !monitor))
             continue;
         Bus b;
         b.id    = t.id;
@@ -279,6 +286,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 fEndFrame = n.startFrame + n.lengthFrames;
         b.notes = std::move(notes);
         b.instrument = t.instrument;
+        b.liveMonitor = monitor;             // synth live input into this bus
+        b.audible     = audible || monitor;  // monitoring overrides mute/solo
         EqualPowerGains(t.gain, t.pan, &b.midiGainL, &b.midiGainR);
         fBuses.push_back(std::move(b));
     }
@@ -481,6 +490,59 @@ float Engine::TrackPeakR(TrackId id) const {
     return 0.0f;
 }
 
+void Engine::UpdateLiveVoices(Frame blockStart) {
+    fLiveNotes.clear();
+    IMidiInput* in = fLiveMidi.load(std::memory_order_relaxed);
+    if (!in) {                       // monitoring off: release every voice
+        for (LiveVoice& v : fVoices) v.active = false;
+        return;
+    }
+
+    // Drain events (RT-safe: stack buffer, lock-free ring). A note-on takes a
+    // free voice (or steals the oldest); a note-off starts that voice's release.
+    MidiEvent ev[64];
+    std::size_t n;
+    while ((n = in->ReadEvents(ev, 64)) > 0) {
+        for (std::size_t i = 0; i < n; i++) {
+            const MidiEvent& e = ev[i];
+            if (e.IsNoteOn()) {
+                int slot = -1;
+                for (int k = 0; k < kMaxLiveVoices; k++)
+                    if (!fVoices[k].active) { slot = k; break; }
+                if (slot < 0) {                       // steal the oldest voice
+                    slot = 0;
+                    for (int k = 1; k < kMaxLiveVoices; k++)
+                        if (fVoices[k].start < fVoices[slot].start) slot = k;
+                }
+                fVoices[slot] = LiveVoice{ true, false, e.data1, e.data2,
+                                           e.channel, blockStart, 0 };
+            } else if (e.IsNoteOff()) {
+                for (int k = 0; k < kMaxLiveVoices; k++)
+                    if (fVoices[k].active && !fVoices[k].releasing
+                        && fVoices[k].pitch == e.data1
+                        && fVoices[k].channel == e.channel) {
+                        fVoices[k].releasing = true;
+                        fVoices[k].off       = blockStart;
+                        break;
+                    }
+            }
+        }
+    }
+
+    // Rebuild the note list: a held voice sustains (huge length); a releasing
+    // voice ends at its note-off so the Synth rings out its release tail. Free
+    // voices whose tail is long past (a generous fixed window; the pool is small).
+    const Frame kHeld = (Frame)(3600.0f * fOutputRate);   // "still down"
+    const Frame kTail = (Frame)(4.0f * fOutputRate);      // release lingers <= 4 s
+    for (LiveVoice& v : fVoices) {
+        if (!v.active) continue;
+        if (v.releasing && blockStart - v.off > kTail) { v.active = false; continue; }
+        Frame len = v.releasing ? (v.off - v.start) : kHeld;
+        if (len < 1) len = 1;
+        fLiveNotes.push_back(MidiNote{ (int)v.pitch, (int)v.vel, v.start, len });
+    }
+}
+
 void Engine::FillBuffer(float* out, size_t frames) {
     std::memset(out, 0, frames * 2 * sizeof(float));   // stereo silence
 
@@ -495,6 +557,10 @@ void Engine::FillBuffer(float* out, size_t frames) {
         fPeakL.store(0.0f); fPeakR.store(0.0f);
         return;
     }
+
+    // Live MIDI monitoring: drain incoming events and advance held voices, then
+    // rebuild fLiveNotes for this block. Rendered per armed MIDI bus below.
+    UpdateLiveVoices(blockStart);
 
     // Routing graph: process nodes in topo order, each into its output bus or
     // the master. Node buffers accumulate upstream inputs across the pass.
@@ -527,8 +593,12 @@ void Engine::FillBuffer(float* out, size_t frames) {
 
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
             s->Mix(nb, frames, blockStart);
-        if (!b.notes.empty()) {             // MIDI: render dry then fader
-            fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, 1.0f);
+        const bool live = b.liveMonitor && !fLiveNotes.empty();
+        if (!b.notes.empty() || live) {     // MIDI: render dry then fader
+            if (!b.notes.empty())
+                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, 1.0f);
+            if (live)                        // live keyboard through this voice
+                fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);
             for (size_t i = 0; i < frames; i++) {
                 nb[i * 2 + 0] *= b.midiGainL;
                 nb[i * 2 + 1] *= b.midiGainR;

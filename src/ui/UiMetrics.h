@@ -10,7 +10,7 @@ namespace daw {
 constexpr float kRulerHeight  = 28.0f;   // top time-ruler strip
 constexpr float kTrackHeight  = 74.0f;   // one track lane
 constexpr float kTrackGap     = 1.0f;    // divider between lanes
-constexpr float kHeaderWidth  = 178.0f;  // left track-header column (incl. meter)
+constexpr float kHeaderWidth  = 210.0f;  // left track-header column (incl. meter + In box)
 constexpr float kHdrMeterW    = 16.0f;   // per-track meter strip width (right edge)
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.

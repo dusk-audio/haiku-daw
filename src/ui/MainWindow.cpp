@@ -931,6 +931,7 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
         fEngine->SetMonitorSource(fRecorder.get());
         fEngine->SetInputMonitor(fMonitorInput);
     }
+    if (fMidiIn) fEngine->SetLiveMidi(fMidiIn->MonitorInput());
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
     return true;
 }
@@ -993,6 +994,8 @@ void MainWindow::StartMidiCapture() {
     while (fMidiIn->ReadEvents(tmp, 64) > 0) {}
     fMidiRec.Begin(fRecStart);
     fMidiT0 = system_time();
+    // Route live events to the engine so armed MIDI tracks sound as you play.
+    if (fEngine) fEngine->SetLiveMidi(fMidiIn->MonitorInput());
 }
 
 // End the MIDI take at `endFrame` and drop the resulting region onto each armed
@@ -1010,6 +1013,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
             fMidiRec.OnEvent(ev[i], mf);
         }
     const MidiClip take = fMidiRec.End(endFrame);
+    if (fEngine) fEngine->SetLiveMidi(nullptr);   // stop monitoring this source
     fMidiIn.reset();   // disconnect + unregister the consumer
 
     std::vector<TrackId> targets;

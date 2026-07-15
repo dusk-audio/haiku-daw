@@ -30,19 +30,20 @@ std::vector<MidiEndpointInfo> EnumerateMidiEndpoints() {
 // ---------------------------------------------------------------------------
 class MidiInputPort::Consumer : public BMidiLocalConsumer {
 public:
-    Consumer(const char* name, MidiEventRing* ring)
-        : BMidiLocalConsumer(name), fRing(ring) {}
+    Consumer(const char* name, MidiEventRing* rec, MidiEventRing* mon)
+        : BMidiLocalConsumer(name), fRec(rec), fMon(mon) {}
 
-    // These hooks run on a Midi Kit delivery thread. Pushing to the SPSC ring
-    // is the lock-free handoff to the app thread; a full ring drops the event.
+    // These hooks run on a Midi Kit delivery thread (the single producer). Each
+    // event is pushed to both the record ring (drained by the UI) and the
+    // monitor ring (drained by the RT audio thread); a full ring drops it.
     void NoteOn(uchar ch, uchar note, uchar vel, bigtime_t t) override {
-        fRing->Push(MidiEvent::NoteOn(ch, note, vel, (int64_t)t));
+        Emit(MidiEvent::NoteOn(ch, note, vel, (int64_t)t));
     }
     void NoteOff(uchar ch, uchar note, uchar vel, bigtime_t t) override {
-        fRing->Push(MidiEvent::NoteOff(ch, note, vel, (int64_t)t));
+        Emit(MidiEvent::NoteOff(ch, note, vel, (int64_t)t));
     }
     void ControlChange(uchar ch, uchar cc, uchar val, bigtime_t t) override {
-        fRing->Push(MidiEvent::ControlChange(ch, cc, val, (int64_t)t));
+        Emit(MidiEvent::ControlChange(ch, cc, val, (int64_t)t));
     }
     void PitchBend(uchar ch, uchar lsb, uchar msb, bigtime_t t) override {
         MidiEvent e;
@@ -50,15 +51,17 @@ public:
         e.channel = ch;
         e.bend    = (int16_t)((((int)msb << 7) | (int)lsb) - 8192);
         e.timeUs  = (int64_t)t;
-        fRing->Push(e);
+        Emit(e);
     }
 
 private:
-    MidiEventRing* fRing;
+    void Emit(const MidiEvent& e) { fRec->Push(e); fMon->Push(e); }
+    MidiEventRing* fRec;
+    MidiEventRing* fMon;
 };
 
 MidiInputPort::MidiInputPort(const char* name) {
-    fConsumer = new Consumer(name, &fRing);
+    fConsumer = new Consumer(name, &fRing, &fMonitor.ring);
 }
 
 MidiInputPort::~MidiInputPort() {

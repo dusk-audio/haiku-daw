@@ -22,6 +22,7 @@
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
 #include "../synth/Synth.h"
+#include "../midi/IMidiInput.h"
 #include "Metronome.h"
 #include "IMonitorSource.h"
 
@@ -140,6 +141,13 @@ public:
     void SetMonitorSource(IMonitorSource* src) { fMonSource.store(src); }
     void SetInputMonitor(bool on) { fInputMonitor.store(on); }
 
+    // Live MIDI monitoring: while recording, incoming events from this input are
+    // synthesized in real time through each armed MIDI track's instrument, so
+    // the player hears themselves. RT-safe atomic; nullptr disables. The events
+    // come from MidiInputPort::MonitorInput() (a ring separate from the record
+    // drain, so the RT thread is the sole consumer).
+    void SetLiveMidi(IMidiInput* in) { fLiveMidi.store(in); }
+
     // Output buffer size in frames (per channel); applied at the next Load.
     // Smaller = lower latency, higher xrun risk. Call before Load().
     void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
@@ -224,6 +232,22 @@ private:
                                const media_raw_audio_format& format);
     void FillBuffer(float* out, size_t frames);
 
+    // Drain the live-MIDI ring, advance the held-voice pool, and rebuild
+    // fLiveNotes for this block. RT-only; called once per FillBuffer.
+    void UpdateLiveVoices(Frame blockStart);
+
+    // A live-monitored note held on the keyboard (or in its release tail).
+    struct LiveVoice {
+        bool    active    = false;
+        bool    releasing = false;   // note-off seen; ringing out the tail
+        uint8_t pitch     = 0;
+        uint8_t vel       = 0;
+        uint8_t channel   = 0;
+        Frame   start     = 0;       // engine frame the note-on landed on
+        Frame   off       = 0;       // engine frame of note-off (if releasing)
+    };
+    static constexpr int kMaxLiveVoices = 64;
+
     // One mix bus per audio track: its clips' streams summed into a scratch
     // buffer, then the track's effect chain applied, then added to master.
     // One mix node per track (audio / midi / bus). It sums its content (and,
@@ -241,6 +265,7 @@ private:
         float                                 busGainR  = 1.0f;
         bool                                  isBus   = false;
         bool                                  audible = true;
+        bool                                  liveMonitor = false;  // armed MIDI: synth live input
         std::vector<std::unique_ptr<IEffect>> fx;
         // Aux sends: (destination node index into fBuses, linear level). Taps
         // this node's post-FX output. Dest node indices are resolved at Load,
@@ -269,6 +294,9 @@ private:
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
+    std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
+    LiveVoice                                 fVoices[kMaxLiveVoices];
+    std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
     Metronome                                 fMetronome; // click generator
     Loudness                                  fLoudness;  // master BS.1770 meter
     std::atomic<bool>                         fMetronomeOn{false};

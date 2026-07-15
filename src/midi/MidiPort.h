@@ -52,19 +52,34 @@ public:
     // Connect a producer endpoint (a keyboard/hardware port) to this consumer.
     status_t ConnectFrom(int32 producerId);
 
-    // IMidiInput — drain queued events (app thread).
+    // IMidiInput — drain queued events for RECORDING (app/UI thread).
     std::size_t ReadEvents(MidiEvent* dst, std::size_t max) override {
         return fRing.Read(dst, max);
     }
+
+    // A second, independent drain of the same event stream for live MONITORING
+    // on the RT audio thread. Recording (ReadEvents, above) and monitoring each
+    // consume their own ring, so neither violates the single-consumer rule —
+    // the consumer hook is the single producer feeding both.
+    IMidiInput* MonitorInput() { return &fMonitor; }
 
     // Underlying kit consumer, so a local producer can Connect() directly
     // (loopback / tests) without going through the roster.
     BMidiLocalConsumer* KitConsumer() const;
 
 private:
+    // Monitor drain: a plain second ring exposed as its own IMidiInput.
+    struct MonitorView : public IMidiInput {
+        MidiEventRing ring{1024};
+        std::size_t ReadEvents(MidiEvent* dst, std::size_t max) override {
+            return ring.Read(dst, max);
+        }
+    };
+
     class Consumer;                 // BMidiLocalConsumer subclass (in the .cpp)
     Consumer*     fConsumer = nullptr;
-    MidiEventRing fRing{1024};
+    MidiEventRing fRing{1024};      // record drain (UI thread)
+    MonitorView   fMonitor;         // monitor drain (RT thread)
 };
 
 class MidiOutputPort : public IMidiOutput {

@@ -58,6 +58,22 @@ static BRect PanRect(BRect lane)   { return BRect(80, lane.top + 40, 154, lane.t
 static BRect SndRect(BRect lane)   { return BRect(6,  lane.top + 54, 60,  lane.top + 69); }
 static BRect AutoRect(BRect lane)  { return BRect(64, lane.top + 54, 118, lane.top + 69); }
 static BRect InstRect(BRect lane)  { return BRect(120, lane.top + 54, 154, lane.top + 69); }
+// Input selector: a tall box on the right of the header (before the meter),
+// visible on every track. Click to choose the record input.
+static BRect InputRect(BRect lane) { return BRect(158, lane.top + 2,  190, lane.top + 38); }
+
+// Short label for a track's assigned input source (fits the In box).
+static std::string InputLabel(const Track& t) {
+    if (t.input.kind == InputSource::kAudioDefault) return "Dflt";
+    if (t.input.kind == InputSource::kMidi) {
+        std::string n = t.input.name;
+        const std::string pfx = "/dev/midi/";
+        if (n.compare(0, pfx.size(), pfx) == 0) n = n.substr(pfx.size());
+        if (n.size() > 7) n = n.substr(n.size() - 7);   // keep the tail (port id)
+        return n.empty() ? std::string("set") : n;
+    }
+    return "\xE2\x80\x94";   // em dash: no input
+}
 
 float TimelineView::FrameToX(Frame f) const {
     return kHeaderWidth
@@ -635,40 +651,6 @@ void TimelineView::MouseDown(BPoint where) {
                 return;
             }
         }
-        // MIDI track: right-click the Arm box to pick its record input endpoint
-        // (left-click arms). The endpoint is matched by name, so the choice
-        // survives across sessions even as midi_server reassigns ids.
-        if (rightClick && t.type == TrackType::Midi && ArmRect(lane).Contains(where)) {
-            BPopUpMenu* menu = new BPopUpMenu("midiin", false, false);
-            BMenuItem* none = new BMenuItem("None", NULL);
-            if (t.input.kind != InputSource::kMidi) none->SetMarked(true);
-            menu->AddItem(none);
-            std::vector<std::string> names;
-            for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
-                if (!e.isProducer) continue;
-                if (e.name.find("HaikuDAW") != std::string::npos) continue;  // our own ports
-                BMenuItem* it = new BMenuItem(e.name.c_str(), NULL);
-                if (t.input.kind == InputSource::kMidi && t.input.name == e.name)
-                    it->SetMarked(true);
-                menu->AddItem(it);
-                names.push_back(e.name);
-            }
-            BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-            const int32 pick = sel ? menu->IndexOf(sel) : -1;
-            delete menu;
-            if (pick == 0) {
-                fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                    t.id, InputSource{}), *fProject);
-            } else if (pick > 0 && (size_t)(pick - 1) < names.size()) {
-                InputSource src;
-                src.kind = InputSource::kMidi;
-                src.name = names[(size_t)(pick - 1)];
-                fStack->Execute(std::make_unique<SetTrackInputCommand>(t.id, src),
-                                *fProject);
-            }
-            Invalidate(lane);
-            return;
-        }
         HandleHeaderClick(t, lane, where);
         return;
     }
@@ -999,6 +981,46 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         BRect  wr(p.x, p.y, p.x + 280, p.y + 190);
         (new InstrumentWindow(wr, t.instrument, id,
                               BMessenger(Window())))->Show();
+        return;
+    }
+    if (InputRect(lane).Contains(where)) {
+        // Unified input selector. MIDI tracks list the system's MIDI producer
+        // endpoints (keyboards/ports); audio tracks offer the default input
+        // (per-channel device selection for multichannel interfaces is later).
+        // Chosen by NAME, so it survives midi_server id reassignment.
+        BPopUpMenu* menu = new BPopUpMenu("input", false, false);
+        BMenuItem* none = new BMenuItem("None", NULL);
+        if (t.input.kind == InputSource::kNone) none->SetMarked(true);
+        menu->AddItem(none);
+        std::vector<InputSource> choices;   // parallel to items after index 0
+        if (t.type == TrackType::Midi) {
+            for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
+                if (!e.isProducer) continue;
+                if (e.name.find("HaikuDAW") != std::string::npos) continue;  // our own ports
+                BMenuItem* it = new BMenuItem(e.name.c_str(), NULL);
+                if (t.input.kind == InputSource::kMidi && t.input.name == e.name)
+                    it->SetMarked(true);
+                menu->AddItem(it);
+                choices.push_back(InputSource{ InputSource::kMidi, e.name, 0 });
+            }
+        } else if (t.type == TrackType::Audio) {
+            BMenuItem* def = new BMenuItem("Default Input", NULL);
+            if (t.input.kind == InputSource::kAudioDefault) def->SetMarked(true);
+            menu->AddItem(def);
+            choices.push_back(InputSource{ InputSource::kAudioDefault, "", 0 });
+        }
+        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+        const int32 pick = sel ? menu->IndexOf(sel) : -1;
+        delete menu;
+        if (pick == 0) {
+            fStack->Execute(std::make_unique<SetTrackInputCommand>(
+                id, InputSource{}), *fProject);
+            Invalidate(lane);
+        } else if (pick > 0 && (size_t)(pick - 1) < choices.size()) {
+            fStack->Execute(std::make_unique<SetTrackInputCommand>(
+                id, choices[(size_t)(pick - 1)]), *fProject);
+            Invalidate(lane);
+        }
         return;
     }
     if (ArmRect(lane).Contains(where)) {
@@ -1653,12 +1675,18 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     DrawString("M", BPoint(m.left + 5, m.bottom - 5));
     DrawString("S", BPoint(s.left + 6, s.bottom - 5));
     DrawString("R", BPoint(a.left + 6, a.bottom - 5));
-    // A MIDI track with an assigned input endpoint shows a green corner marker
-    // on the Arm box (right-click the box to choose the endpoint).
-    if (t.type == TrackType::Midi && t.input.kind == InputSource::kMidi) {
-        SetHighColor(Rgb(80, 210, 90));
-        FillRect(BRect(a.left + 1, a.top + 1, a.left + 4, a.top + 4));
-    }
+
+    // Input selector: label ("In") over the assigned source; greened when set.
+    BRect inb = InputRect(lane);
+    const bool hasIn = t.input.kind != InputSource::kNone;
+    SetHighColor(hasIn ? Rgb(52, 104, 74) : ColLane());
+    FillRect(inb);
+    SetHighColor(ColGrid());
+    StrokeRect(inb);
+    SetHighColor(ColTextDim());
+    DrawString("In", BPoint(inb.left + 4, inb.top + 13));
+    SetHighColor(ColText());
+    DrawString(InputLabel(t).c_str(), BPoint(inb.left + 3, inb.bottom - 5));
 
     // Gain fader: filled proportion = gain / kMaxGain.
     BRect g = GainRect(lane);
