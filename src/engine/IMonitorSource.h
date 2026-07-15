@@ -17,8 +17,8 @@ public:
     // allocation-free: the engine calls this from the RT audio callback.
     virtual std::size_t ReadMonitor(float* dst, std::size_t maxFloats) = 0;
 
-    // Sample rate of the monitor samples. The engine only mixes them when this
-    // matches its output rate (no RT-side resampling in this version).
+    // Sample rate of the monitor samples. The engine mixes them at any rate,
+    // resampling to its output rate on the RT thread when they differ.
     virtual float MonitorRate() const = 0;
 };
 

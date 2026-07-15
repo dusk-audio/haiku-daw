@@ -263,6 +263,11 @@ private:
     std::atomic<IMonitorSource*>              fMonSource{nullptr};
     std::atomic<bool>                         fInputMonitor{false};
     std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
+    // Resampled-monitor state (when the monitor rate != output rate): a linear
+    // pull-resampler carried across blocks. RT-only.
+    std::vector<float>                        fMonSrc;   // source-rate scratch
+    double                                    fMonPhase = 0.0;
+    float                                     fMonPrevL = 0.0f, fMonPrevR = 0.0f;
     std::atomic<float>                        fLufsM{Loudness::kSilenceLufs};
     std::atomic<float>                        fLufsS{Loudness::kSilenceLufs};
     std::atomic<float>                        fTpDb{Loudness::kSilenceDb};

@@ -411,6 +411,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     if (maxFrames < 8192) maxFrames = 8192;
     fScratch.assign(maxFrames * 2, 0.0f);
     fMonBuf.assign(maxFrames * 2, 0.0f);
+    fMonSrc.assign(maxFrames * 2 * 8, 0.0f);   // source-rate scratch (<=8x down)
+    fMonPhase = 0.0; fMonPrevL = fMonPrevR = 0.0f;
     fNodeBufs.assign(fBuses.size(), std::vector<float>(maxFrames * 2, 0.0f));
     // Per-node peak meters (one atomic pair per node).
     fNodePeakL.reset(new std::atomic<float>[fBuses.size()]);
@@ -603,15 +605,39 @@ void Engine::FillBuffer(float* out, size_t frames) {
     if (fMetronomeOn.load(std::memory_order_relaxed))
         fMetronome.Render(out, frames, blockStart, 0.3f);
 
-    // Input monitoring: mix the live input into the output. Only when its rate
-    // matches ours (no RT resampling) and the scratch is big enough.
+    // Input monitoring: mix the live input into the output. Equal rate is a
+    // direct copy; otherwise a linear resampler (carried across blocks) brings
+    // the source to the output rate. RT-safe: no allocation, no locks.
     if (fInputMonitor.load(std::memory_order_relaxed)) {
         IMonitorSource* src = fMonSource.load(std::memory_order_relaxed);
-        if (src && std::fabs(src->MonitorRate() - fOutputRate) < 1.0f
+        const float mr = src ? src->MonitorRate() : 0.0f;
+        if (src && std::fabs(mr - fOutputRate) < 1.0f
             && fMonBuf.size() >= nfloats) {
             const size_t got = src->ReadMonitor(fMonBuf.data(), nfloats);
             for (size_t i = 0; i < got; i++)
                 out[i] += fMonBuf[i];
+        } else if (src && mr > 0.0f && !fMonSrc.empty()) {
+            const double step = (double)mr / fOutputRate;   // src frames / out
+            size_t need = (size_t)(fMonPhase + step * frames);
+            const size_t cap = fMonSrc.size() / 2;
+            if (need > cap) need = cap;
+            const size_t gotF = src->ReadMonitor(fMonSrc.data(), need * 2) / 2;
+            size_t si = 0;
+            for (size_t i = 0; i < frames; i++) {
+                float nL, nR;
+                if (si < gotF) { nL = fMonSrc[si * 2]; nR = fMonSrc[si * 2 + 1]; }
+                else           { nL = fMonPrevL;       nR = fMonPrevR; }
+                out[i * 2 + 0] += fMonPrevL + (nL - fMonPrevL) * (float)fMonPhase;
+                out[i * 2 + 1] += fMonPrevR + (nR - fMonPrevR) * (float)fMonPhase;
+                fMonPhase += step;
+                while (fMonPhase >= 1.0) {
+                    fMonPhase -= 1.0;
+                    if (si < gotF) {
+                        fMonPrevL = fMonSrc[si * 2]; fMonPrevR = fMonSrc[si * 2 + 1];
+                        si++;
+                    } else { fMonPhase = 0.0; break; }   // underrun: hold
+                }
+            }
         }
     }
 
