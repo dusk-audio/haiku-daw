@@ -412,6 +412,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         TempoMap tm = project.tempoMap;
         tm.sampleRate = fOutputRate;
         fMetronome.SetTempoMap(tm);
+        fTempoMap = tm;          // for tempo-synced effects (delay)
+        fLastFxBpm = 0.0;        // force a push on the first block
     }
 
     fLoudness.Prepare(fOutputRate);
@@ -462,16 +464,22 @@ void Engine::UpdateMix(const Project& project) {
     }
 }
 
-void Engine::SyncFx(const Project& project) {
+bool Engine::SyncFx(const Project& project) {
     // Push each effect's params from the model into the live objects. SetParam
-    // is RT-safe (the RT thread may run concurrently). Only structurally-matched
-    // chains are synced; a changed shape waits for the next Load.
-    auto sync = [](std::vector<std::unique_ptr<IEffect>>& fx,
-                   const std::vector<EffectType>& types,
-                   const std::vector<EffectDesc>& descs) {
-        if (fx.size() != descs.size()) return;   // add/remove/reorder -> rebuild
+    // is RT-safe (the RT thread may run concurrently). A chain whose structure
+    // changed (different types/count) can't be updated in place -> report it so
+    // the caller rebuilds.
+    bool allMatched = true;
+    auto sync = [&](std::vector<std::unique_ptr<IEffect>>& fx,
+                    const std::vector<EffectType>& types,
+                    const std::vector<EffectDesc>& descs) {
+        if (fx.size() != descs.size()) { allMatched = false; return; }
         for (size_t i = 0; i < fx.size(); i++) {
-            if (!fx[i] || i >= types.size() || types[i] != descs[i].type) continue;
+            if (i >= types.size() || types[i] != descs[i].type) {
+                allMatched = false;   // an effect was replaced at this slot
+                continue;
+            }
+            if (!fx[i]) continue;
             for (size_t s = 0; s < descs[i].params.size(); s++)
                 fx[i]->SetParam((int)s, descs[i].params[s]);
         }
@@ -481,6 +489,7 @@ void Engine::SyncFx(const Project& project) {
         if (t) sync(b.fx, b.fxTypes, t->fx);
     }
     sync(fMasterFx, fMasterFxTypes, project.masterFx);
+    return allMatched;
 }
 
 void Engine::SetFxTempo(double bpm) {
@@ -641,6 +650,12 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Live MIDI monitoring: drain incoming events and advance held voices, then
     // rebuild fLiveNotes for this block. Rendered per armed MIDI bus below.
     UpdateLiveVoices(blockStart);
+
+    // Tempo-synced effects (e.g. a delay) follow the tempo MAP: push the BPM at
+    // this block to every effect when it changes (RT-safe: integer retune, no
+    // alloc). Guarded so it only fires when crossing a tempo change.
+    const double bpm = fTempoMap.BpmAt(blockStart);
+    if (bpm != fLastFxBpm) { SetFxTempo(bpm); fLastFxBpm = bpm; }
 
     // Routing graph: process nodes in topo order, each into its output bus or
     // the master. Node buffers accumulate upstream inputs across the pass.

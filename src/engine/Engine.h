@@ -129,9 +129,10 @@ public:
     // Push effect-parameter edits into the running graph without a rebuild, so
     // knob tweaks take effect during playback. Only chains whose structure still
     // matches (same effect types, same count) are updated via SetParam (RT-safe);
-    // add/remove/reorder still needs the next Load. Also refreshes tempo-synced
-    // params. Safe to call from the UI thread while playing.
-    void SyncFx(const Project& project);
+    // add/remove/reorder still needs the next Load. Returns true if every chain
+    // matched and was synced; false if any chain's structure changed (the caller
+    // should rebuild). Safe to call from the UI thread while playing.
+    bool SyncFx(const Project& project);
 
     // Tell every effect the current tempo (for tempo-synced params, e.g. a
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
@@ -319,6 +320,8 @@ private:
     LiveVoice                                 fVoices[kMaxLiveVoices];
     std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
     Metronome                                 fMetronome; // click generator
+    TempoMap                                  fTempoMap;  // for tempo-synced fx
+    double                                     fLastFxBpm = 0.0;  // last pushed bpm
     Loudness                                  fLoudness;  // master BS.1770 meter
     std::atomic<bool>                         fMetronomeOn{false};
     std::atomic<bool>                         fMonitorDim{false};

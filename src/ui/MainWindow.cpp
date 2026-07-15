@@ -544,9 +544,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             fStack->Execute(std::make_unique<SetFxCommand>(
                 (TrackId)tid, master, std::move(chain)), *fProject);
-            // Apply the edit to the running engine so it takes effect live
-            // (knob tweaks; structural changes still wait for the next Play).
-            if (fEngine) fEngine->SyncFx(*fProject);
+            // Apply the edit to the running engine so it takes effect live.
+            // Param tweaks sync in place; a structural change (add/remove/
+            // reorder/replace) rebuilds the engine at the playhead.
+            if (fEngine && !fEngine->SyncFx(*fProject))
+                ReloadActiveEngine();
             fTimeline->Invalidate();
             break;
         }
@@ -726,9 +728,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);
             fTimeline->Invalidate();   // grid + ruler follow tempo
-            // Update tempo-synced effects (e.g. a delay) in the running engine.
-            if (fEngine) fEngine->SetFxTempo(bpm);
-            // Metronome/engine otherwise picks up the new tempo on the next Play.
+            // Rebuild the running engine so the metronome + tempo-synced effects
+            // (delay) pick up the new tempo live; stopped, it applies next Play.
+            ReloadActiveEngine();
             break;
         }
         case MSG_SAVE:
@@ -1065,6 +1067,19 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
         fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
     }
     fTimeline->Invalidate();
+}
+
+void MainWindow::ReloadActiveEngine() {
+    // Rebuild whatever engine is running, at the current position, so a change
+    // that can't be applied in place (adding/removing an effect, a tempo edit)
+    // takes effect without a manual stop/play. A brief seam is expected.
+    if (fPlaying) {
+        if (fEngine) fProject->transport.playhead = fEngine->Playhead();
+        StartPlayback();          // rebuilds at the playhead and keeps playing
+    } else if (fMonitoring) {
+        UpdateMidiMonitor();      // rebuilds the idle monitor engine
+    }
+    // Stopped / recording: the change applies on the next Play / take.
 }
 
 void MainWindow::StopMidiMonitor() {

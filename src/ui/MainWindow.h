@@ -64,6 +64,8 @@ private:
     void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
     void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
     void StopMidiMonitor();          // tear down the idle monitor engine + input
+    void ReloadActiveEngine();       // rebuild the running engine at the playhead
+                                     // (structural fx / tempo change, keep going)
     bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
