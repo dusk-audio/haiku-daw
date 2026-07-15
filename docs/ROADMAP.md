@@ -85,7 +85,15 @@ sort, with sends, a monitor section, and BS.1770 metering.
   fade-out/in; engine + Exporter derive effective fades. Host-tested.
 - ✅ Multi-select + range ops (C6): clip selection (click / Shift-click /
   rubber-band / Esc), group move, Delete, Ctrl-D duplicate — each one undo step
-  via `MacroCommand`. (MIDI-note multi-select deferred.)
+  via `MacroCommand`. (MIDI-note multi-select deferred.) MIDI regions also
+  group-move as a unit.
+- ✅ Region ops (C7): audio-clip right-click Normalize (peak → clip gain),
+  Reverse (render a mirrored WAV), Strip Silence (split at ≥250 ms gaps),
+  Clear Fades. Kit-free DSP in `model/RegionOps` (host-tested).
+- ✅ Freeze / bounce a track (C8): render a track through its fader + FX to a
+  stereo WAV (isolated routing) and swap in one clip with a flat fader;
+  Unfreeze restores the stashed pre-freeze content. `FreezeTrackCommand`
+  (host-tested), reuses the offline `Exporter`.
 
 ## Phase D — Recording depth  ✅ DONE (audio; runtime-verify on VM)
 
@@ -220,10 +228,10 @@ native-feeling, and not blocked by the plugin-less VM:
   (kit-free loudness math, host-testable). → extend Phase A / Phase G.
 - **Export upgrade** — stem / per-track / per-bus bounce, export ranges,
   dithering, loudness-normalize; FLAC/Ogg encoders later. → extend the exporter.
-- **Freeze / bounce a track** — render a track through its FX to audio (reuse
-  the offline `Exporter`). → Phase C.
-- **Region ops** — normalize / reverse / gain / strip-silence / fade presets on
-  a clip (kit-free DSP, host-testable). → Phase C.
+- ~~**Freeze / bounce a track**~~ ✅ done (Phase C8).
+- **Region ops** — ✅ normalize / reverse / strip-silence / clear-fades done
+  (Phase C7); gain (Ctrl-drag) already existed. *Later:* fade presets, region
+  reverse-with-gain, per-clip normalize target level.
 - **SMF (MIDI file) import/export + CC lanes** — standard `.mid` read/write
   (kit-free) and controller lanes that feed automation. → Phase B / E.
 - **Snapshots + autosave** — cheap given `ProjectIO`. → Phase H.
