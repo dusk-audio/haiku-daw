@@ -4,6 +4,8 @@
 #include "../dsp/Eq.h"
 #include "../plugin/PluginHost.h"
 
+#include <MenuItem.h>
+#include <PopUpMenu.h>
 #include <ScrollBar.h>
 
 #include <algorithm>
@@ -17,6 +19,7 @@ static constexpr float kTitleH   = 22.0f;
 static constexpr float kKnobW    = 68.0f;
 static constexpr float kKnobH    = 86.0f;
 static constexpr float kGraphH   = 156.0f;
+static constexpr float kSelH     = 26.0f;    // reverb type-selector row
 static constexpr float kBtnW     = 22.0f;
 
 struct KnobDef { const char* label; int slot; float mn; float mx; };
@@ -98,6 +101,8 @@ float EffectsView::PanelHeight(const EffectDesc& d) const {
     float h = kTitleH + 6;
     if (d.type == EffectType::Eq || d.type == EffectType::Compressor)
         h += kGraphH;
+    if (d.type == EffectType::Reverb)
+        h += kSelH;   // reverb type selector row
     h += kKnobH;   // one knob row (all effects have <= 5 knobs)
     return h + 8;
 }
@@ -112,8 +117,8 @@ float EffectsView::PanelTop(size_t i) const {
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    // 7 built-in + 3 DuskVerb add buttons + one per loaded plugin.
-    const int addRows = 10 + (int)PluginHost::Instance().Plugins().size();
+    // 7 built-in add buttons + one per loaded plugin.
+    const int addRows = 7 + (int)PluginHost::Instance().Plugins().size();
     y += addRows * 26 + 12;
     return y;
 }
@@ -373,6 +378,22 @@ void EffectsView::Draw(BRect) {
             DrawCompCurve(BRect(panel.left + 6, knobTop, panel.right - 6,
                                 knobTop + kGraphH - 6), d, (int)i);
             knobTop += kGraphH;
+        } else if (d.type == EffectType::Reverb) {
+            // Reverb type dropdown (Classic / Dusk Plate / Hall / FDN).
+            const int algo = (int)(d.p(2) + 0.5f);
+            const char* nm = algo == 1 ? "Dusk Plate" : algo == 2 ? "Dusk Hall"
+                           : algo == 3 ? "Dusk FDN" : "Classic";
+            BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
+            SetHighColor(ColHeaderHi()); FillRect(sel);
+            SetHighColor(ColGrid());     StrokeRect(sel);
+            SetHighColor(ColTextDim());
+            DrawString("Type:", BPoint(sel.left + 8, sel.bottom - 6));
+            SetHighColor(ColAccent());
+            DrawString(nm, BPoint(sel.left + 52, sel.bottom - 6));
+            SetHighColor(ColText());
+            DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));   // dropdown arrow
+            fHits.push_back({ (int)i, 7, 0, sel, 0, 0 });   // kind 7 = reverb type
+            knobTop += kSelH;
         }
 
         // Knob row.
@@ -401,19 +422,6 @@ void EffectsView::Draw(BRect) {
         fHits.push_back({ (int)at[k], 4, 0, b, 0, 0 });
         ay += 26;
     }
-    // DuskVerb engine presets (a Reverb with a DuskVerb engine selected).
-    // slot carries the algorithm (1 plate, 2 hall, 3 FDN).
-    const char* duskLbls[3] = { "Add Dusk Plate", "Add Dusk Hall", "Add Dusk FDN" };
-    for (int k = 0; k < 3; k++) {
-        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
-        SetHighColor(ColHeaderHi()); FillRect(b);
-        SetHighColor(ColGrid());     StrokeRect(b);
-        SetHighColor(ColAccent());   DrawString(duskLbls[k],
-                                                BPoint(b.left + 10, b.bottom - 6));
-        fHits.push_back({ (int)EffectType::Reverb, 4, k + 1, b, 0, 0 });
-        ay += 26;
-    }
-
     // One button per loaded plugin add-on (slot carries the plugin index).
     const std::vector<PluginInfo>& plugins = PluginHost::Instance().Plugins();
     for (size_t k = 0; k < plugins.size(); k++) {
@@ -439,7 +447,7 @@ int EffectsView::HitTest(BPoint where, Hit* out) const {
 static EffectDesc MakeDefault(EffectType t) {
     switch (t) {
         case EffectType::Delay:      return DelayDesc();
-        case EffectType::Reverb:     return ReverbDesc();
+        case EffectType::Reverb:     return DuskPlateDesc();   // type via dropdown
         case EffectType::Compressor: return CompressorDesc();
         case EffectType::Saturator:  return SaturatorDesc();
         case EffectType::Gate:       return GateDesc();
@@ -494,6 +502,29 @@ void EffectsView::MouseDown(BPoint where) {
             fFftOn = !fFftOn;
             Invalidate();
             break;
+        case 7: {   // reverb type dropdown
+            if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
+            BPopUpMenu* menu = new BPopUpMenu("type", false, false);
+            const char* names[4] = { "Classic", "Dusk Plate", "Dusk Hall",
+                                     "Dusk FDN" };
+            EffectDesc& d = fChain[h.effect];
+            const int cur = (int)(d.p(2) + 0.5f);
+            for (int a = 0; a < 4; a++) {
+                BMenuItem* it = new BMenuItem(names[a], nullptr);
+                if (a == cur) it->SetMarked(true);
+                menu->AddItem(it);
+            }
+            BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+            if (sel) {
+                const int a = menu->IndexOf(sel);
+                if (d.params.size() < 5) d.params.resize(5, 0.0f);
+                if (d.params[3] <= 0.0f) d.params[3] = 2.6f;  // decay default
+                d.params[2] = (float)a;
+                Apply(); Invalidate();
+            }
+            delete menu;
+            break;
+        }
         case 3:   // remove
             if (h.effect >= 0 && h.effect < (int)fChain.size()) {
                 fChain.erase(fChain.begin() + h.effect);
@@ -513,10 +544,6 @@ void EffectsView::MouseDown(BPoint where) {
                     fChain.push_back(d);
                     Apply(); Invalidate();
                 }
-            } else if ((EffectType)h.effect == EffectType::Reverb && h.slot >= 1) {
-                fChain.push_back(h.slot == 1 ? DuskPlateDesc()
-                                 : h.slot == 2 ? DuskHallDesc() : DuskFdnDesc());
-                Apply(); Invalidate();
             } else {
                 fChain.push_back(MakeDefault((EffectType)h.effect));
                 Apply(); Invalidate();
