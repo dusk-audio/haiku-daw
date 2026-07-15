@@ -8,6 +8,7 @@
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
 #include "../midi/MidiPort.h"   // EnumerateMidiEndpoints (input picker)
+#include "../engine/Recorder.h" // live capture waveform envelope
 
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -1410,7 +1411,63 @@ void TimelineView::SetRecording(bool active, Frame start, Frame length) {
     fRecording = active;
     fRecStart  = start;
     fRecLen    = length;
+    if (!active) {                 // take finished: drop live content
+        fLiveNoteTracks.clear();
+        fLiveNotes.clear();
+        fLiveRec = nullptr;
+    }
     Invalidate();   // simplest; the region grows every poll anyway
+}
+
+void TimelineView::DrawLiveMidi(BRect region) {
+    // Map a fixed pitch window across the region height (same span the piano
+    // roll centers on). Notes are clip-relative to fRecStart.
+    const int   loPitch = 36, hiPitch = 96;       // 5 octaves
+    const float h = region.Height();
+    SetHighColor(Rgb(240, 230, 150));
+    for (const MidiNote& n : fLiveNotes) {
+        float x0 = FrameToX(fRecStart + n.startFrame);
+        float x1 = FrameToX(fRecStart + n.startFrame + n.lengthFrames);
+        if (x1 < region.left)  continue;
+        if (x0 > region.right) continue;
+        if (x0 < region.left)  x0 = region.left;
+        if (x1 > region.right) x1 = region.right;
+        if (x1 < x0 + 1)       x1 = x0 + 1;
+        int p = n.pitch;
+        if (p < loPitch) p = loPitch;
+        if (p > hiPitch) p = hiPitch;
+        const float frac = 1.0f - (float)(p - loPitch) / (float)(hiPitch - loPitch);
+        const float y = region.top + 2 + frac * (h - 6);
+        FillRect(BRect(x0, y, x1, y + 3));
+    }
+}
+
+void TimelineView::DrawLiveAudio(BRect region) {
+    const size_t count = fLiveRec->EnvCount();
+    const float  recRate = fLiveRec->SampleRate();
+    if (count == 0 || recRate <= 0.0f) return;
+    const double ratio = fLiveProjRate / recRate;         // timeline / source frames
+    const double bucketTFrames = (double)Recorder::kEnvBucketFrames * ratio;
+    if (bucketTFrames <= 0.0) return;
+    // Draw ~one column per pixel: stride buckets by how many fall in a pixel.
+    size_t step = (size_t)(fFramesPerPixel / bucketTFrames);
+    if (step < 1) step = 1;
+    const float mid = (region.top + region.bottom) * 0.5f;
+    const float half = region.Height() * 0.5f - 2.0f;
+    SetHighColor(ColWave());
+    for (size_t i = 0; i < count; i += step) {
+        // Peak over the buckets this column spans (so striding loses nothing).
+        float lo = 0.0f, hi = 0.0f;
+        for (size_t j = i; j < i + step && j < count; j++) {
+            const float mn = fLiveRec->EnvMin(j), mx = fLiveRec->EnvMax(j);
+            if (mn < lo) lo = mn;
+            if (mx > hi) hi = mx;
+        }
+        const float x = FrameToX(fRecStart + (Frame)((double)i * bucketTFrames));
+        if (x < region.left)  continue;
+        if (x > region.right) break;
+        StrokeLine(BPoint(x, mid - hi * half), BPoint(x, mid - lo * half));
+    }
 }
 
 void TimelineView::DrawPlayhead() {
@@ -1614,6 +1671,12 @@ void TimelineView::DrawLanes(BRect update) {
                 FillRect(rb);
                 SetHighColor(ColPlayhead());
                 StrokeRect(rb);
+                // Live take content: MIDI notes (armed MIDI tracks) or the audio
+                // waveform envelope streamed from the recorder, drawn as it grows.
+                if (t.type == TrackType::Midi && fLiveNoteTracks.count(t.id))
+                    DrawLiveMidi(rb);
+                else if (t.type == TrackType::Audio && fLiveRec)
+                    DrawLiveAudio(rb);
                 SetHighColor(ColText());
                 DrawString("\xE2\x97\x8F REC", BPoint(rb.left + 4, rb.top + 14));
             }

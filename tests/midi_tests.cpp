@@ -119,6 +119,25 @@ int main() {
         CHECK(clip.notes.size() == 2);
     }
 
+    // --- MidiRecorder::SnapshotNotes: in-progress take (closed + held) -------
+    {
+        MidiRecorder rec;
+        rec.Begin(0);
+        rec.OnEvent(MidiEvent::NoteOn(0, 60, 100), 0);
+        rec.OnEvent(MidiEvent::NoteOff(0, 60, 0), 1000);   // closed
+        rec.OnEvent(MidiEvent::NoteOn(0, 64, 90), 500);    // still held
+        std::vector<MidiNote> snap = rec.SnapshotNotes(2000);
+        CHECK(snap.size() == 2);
+        // Closed C4.
+        CHECK(snap[0].pitch == 60 && snap[0].startFrame == 0 && snap[0].lengthFrames == 1000);
+        // Held E4 extended to now (2000 - 500).
+        CHECK(snap[1].pitch == 64 && snap[1].startFrame == 500 && snap[1].lengthFrames == 1500);
+        // Snapshot does not finalize: End still closes the held note.
+        MidiClip clip = rec.End(3000);
+        CHECK(clip.notes.size() == 2);
+        CHECK(clip.notes[1].lengthFrames == 2500);   // 3000 - 500
+    }
+
     // --- SetTrackInputCommand: assign / undo a track's record input ----------
     {
         Project p;

@@ -56,6 +56,15 @@ public:
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
 
+    // Live capture waveform envelope: one min/max pair per kEnvBucketFrames
+    // source frames, appended by the disk thread (single producer) as it writes
+    // and read by the UI (single consumer) to draw the take as it grows.
+    // Append-only with an atomic count, so already-published buckets are stable.
+    static constexpr int kEnvBucketFrames = 256;
+    size_t EnvCount() const { return fEnvCount.load(std::memory_order_acquire); }
+    float  EnvMin(size_t i) const { return fEnvMin[i]; }
+    float  EnvMax(size_t i) const { return fEnvMax[i]; }
+
 private:
     static void RecordHook(void* cookie, bigtime_t time, void* data,
                            size_t size, const media_format& format);
@@ -80,6 +89,11 @@ private:
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
     std::atomic<bool>  fXrun{false}; // ring overflowed (disk not keeping up)
+
+    // Live waveform envelope (disk thread writes by index, UI reads < count).
+    std::vector<float>  fEnvMin;
+    std::vector<float>  fEnvMax;
+    std::atomic<size_t> fEnvCount{0};
 };
 
 } // namespace daw

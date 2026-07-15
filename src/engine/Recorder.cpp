@@ -98,6 +98,11 @@ void Recorder::DiskLoop() {
 
     float   fbuf[4096];
     int16_t ibuf[4096];
+    // Waveform-envelope accumulation across Read() calls: min/max over the
+    // current bucket of source frames (ch samples each), published on fill.
+    const size_t envCap = fEnvMin.size();
+    float bMin = 0.0f, bMax = 0.0f;
+    int   bFrames = 0, bChan = 0;
     // Drain until stopped AND the ring is empty (flush the tail).
     while (true) {
         const size_t got = fRing.Read(fbuf, 4096);
@@ -113,6 +118,22 @@ void Recorder::DiskLoop() {
             if (v < -1.0f) v = -1.0f;
             int s = (int)std::lround(v * 32767.0f);
             ibuf[i] = (int16_t)s;
+
+            // Envelope: track min/max across a bucket of source frames.
+            if (v < bMin) bMin = v;
+            if (v > bMax) bMax = v;
+            if (++bChan >= ch) {                 // one source frame consumed
+                bChan = 0;
+                if (++bFrames >= kEnvBucketFrames) {
+                    const size_t n = fEnvCount.load(std::memory_order_relaxed);
+                    if (n < envCap) {
+                        fEnvMin[n] = bMin;
+                        fEnvMax[n] = bMax;
+                        fEnvCount.store(n + 1, std::memory_order_release);
+                    }
+                    bMin = 0.0f; bMax = 0.0f; bFrames = 0;
+                }
+            }
         }
         fWriter.WriteInt16(ibuf, got);
     }
@@ -167,6 +188,12 @@ status_t Recorder::Start(const std::string& path) {
     fPath = path;
     fFormatReady.store(false);
     fXrun.store(false);
+    // Preallocate the waveform envelope to a fixed capacity so the disk thread
+    // writes by index (never reallocates) while the UI reads published buckets.
+    // ~13 min at 96 kHz / 256 frames-per-bucket.
+    fEnvCount.store(0, std::memory_order_relaxed);
+    fEnvMin.assign(300000, 0.0f);
+    fEnvMax.assign(300000, 0.0f);
     fRunning.store(true);
     fDiskThread = std::thread(&Recorder::DiskLoop, this);
 

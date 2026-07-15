@@ -38,6 +38,17 @@ void MidiRecorder::OnEvent(const MidiEvent& e, Frame frameNow) {
     fOpen[key] = Open{ e.data1, e.data2, rel };
 }
 
+std::vector<MidiNote> MidiRecorder::SnapshotNotes(Frame nowFrame) const {
+    std::vector<MidiNote> out = fNotes;   // closed notes (clip-relative)
+    for (const auto& kv : fOpen) {
+        const Open& o = kv.second;
+        Frame len = nowFrame - (fStart + o.start);
+        if (len < 1) len = 1;
+        out.push_back(MidiNote{ (int)o.pitch, (int)o.velocity, o.start, len });
+    }
+    return out;
+}
+
 MidiClip MidiRecorder::End(Frame endFrame) {
     // End all still-held notes at the take boundary. Collect keys first so we
     // don't mutate the map while iterating.

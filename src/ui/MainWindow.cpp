@@ -46,6 +46,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <set>
 
 namespace daw {
 
@@ -793,14 +794,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         break;
                     }
                     const bool capturing = fRecorder && fRecorder->IsRecording();
+                    const bool midiCap   = fMidiIn && !fCapturePending;
                     fTimeline->SetPlayhead(ph);
                     UpdateTimeReadout(ph);
-                    if (capturing) {
+                    if (capturing || midiCap) {
+                        // Growing recording region + its live content.
                         fTimeline->SetRecording(true, fRecStart, ph - fRecStart);
-                        fMeter->SetLevels(fRecorder->PeakL(), fRecorder->PeakR());
-                    } else {
-                        fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
+                        if (capturing)
+                            fTimeline->SetLiveAudio(fRecorder.get(), fProject->sampleRate);
+                        if (midiCap) {
+                            std::set<TrackId> mt(fMidiRecTracks.begin(),
+                                                 fMidiRecTracks.end());
+                            fTimeline->SetLiveMidiNotes(mt, fMidiRec.SnapshotNotes(ph));
+                        }
                     }
+                    fMeter->SetLevels(capturing ? fRecorder->PeakL() : fEngine->PeakL(),
+                                      capturing ? fRecorder->PeakR() : fEngine->PeakR());
                     PushTrackPeaks();
                     PushFxMeters();
                     break;

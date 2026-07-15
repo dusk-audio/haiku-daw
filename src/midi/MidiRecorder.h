@@ -40,6 +40,11 @@ public:
     size_t ClosedNoteCount() const { return fNotes.size(); }
     bool   HasOpenNotes()    const { return !fOpen.empty(); }
 
+    // A live snapshot of the take in progress (for drawing it while recording):
+    // every closed note plus each still-held note extended to `nowFrame`. Notes
+    // are clip-relative (same frame base as End()). Const — does not finalize.
+    std::vector<MidiNote> SnapshotNotes(Frame nowFrame) const;
+
 private:
     // Key a held note by channel+pitch so overlapping keys are independent.
     static int Key(uint8_t channel, uint8_t pitch) {

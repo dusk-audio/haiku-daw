@@ -27,6 +27,8 @@
 
 namespace daw {
 
+class Recorder;   // engine capture source (live waveform envelope)
+
 // Clip region-operation + track-freeze requests posted to the main window,
 // which owns the engine/decode and issues the resulting command(s). Each region
 // message carries int64 "track" + int64 "clip"; freeze carries int64 "track"
@@ -96,12 +98,28 @@ public:
     // active=false to clear it.
     void SetRecording(bool active, Frame start, Frame length);
 
+    // Live take content drawn inside the recording region while capturing:
+    // MIDI notes (clip-relative to the record start) for the armed MIDI tracks,
+    // and the audio waveform envelope streamed from the Recorder. Cleared by
+    // SetRecording(false, ...).
+    void SetLiveMidiNotes(const std::set<TrackId>& tracks,
+                          std::vector<MidiNote> notes) {
+        fLiveNoteTracks = tracks;
+        fLiveNotes      = std::move(notes);
+    }
+    void SetLiveAudio(const Recorder* rec, double projectRate) {
+        fLiveRec      = rec;
+        fLiveProjRate = projectRate;
+    }
+
 private:
     void DrawRuler(BRect update);
     void DrawLanes(BRect update);
     // Iterate visible bar/beat gridlines: fn(x, isBar, barNumber).
     void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
     void DrawTrackHeader(const Track& t, BRect lane);
+    void DrawLiveMidi(BRect region);   // in-progress notes while recording
+    void DrawLiveAudio(BRect region);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
     void DrawClip(const Clip& c, BRect lane, rgb_color base);
     void DrawClipWave(const Clip& c, BRect block);
@@ -226,6 +244,11 @@ private:
     bool           fRecording = false;
     Frame          fRecStart  = 0;
     Frame          fRecLen    = 0;
+    // Live take content while recording (see SetLiveMidiNotes / SetLiveAudio).
+    std::set<TrackId>     fLiveNoteTracks;
+    std::vector<MidiNote> fLiveNotes;         // clip-relative to fRecStart
+    const Recorder*       fLiveRec = nullptr; // non-owning; valid during capture
+    double                fLiveProjRate = 48000.0;
 };
 
 } // namespace daw
