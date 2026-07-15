@@ -23,22 +23,29 @@ inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};
 }
 
-// Palette (dark, DAW-ish). Cohesive blue-grey; used across timeline + mixer +
-// dialogs so nothing falls back to the light OS default.
-inline rgb_color ColBackground() { return Rgb(24, 26, 31); }
-inline rgb_color ColLane()       { return Rgb(37, 40, 47); }
-inline rgb_color ColLaneAlt()    { return Rgb(32, 35, 41); }
-inline rgb_color ColRuler()      { return Rgb(18, 20, 24); }
-inline rgb_color ColGrid()       { return Rgb(52, 56, 64); }
-inline rgb_color ColClip()       { return Rgb(64, 108, 160); }
-inline rgb_color ColClipBorder() { return Rgb(128, 176, 226); }
-inline rgb_color ColWave()       { return Rgb(198, 220, 244); }
-inline rgb_color ColText()       { return Rgb(214, 218, 226); }
-inline rgb_color ColTextDim()    { return Rgb(140, 146, 158); }
-inline rgb_color ColPlayhead()   { return Rgb(236, 96, 74); }
-inline rgb_color ColHeader()     { return Rgb(41, 44, 52); }
-inline rgb_color ColHeaderHi()   { return Rgb(52, 56, 66); }   // raised control
-inline rgb_color ColAccent()     { return Rgb(90, 150, 220); } // active/selected
+// Palette (dark, Logic-style). Neutral graphite greys with vivid track-colored
+// regions; used across timeline + mixer + dialogs so nothing falls back to the
+// light OS default.
+inline rgb_color ColBackground() { return Rgb(30, 31, 34); }
+inline rgb_color ColLane()       { return Rgb(58, 60, 64); }   // lane (neutral)
+inline rgb_color ColLaneAlt()    { return Rgb(52, 54, 58); }
+inline rgb_color ColRuler()      { return Rgb(38, 39, 43); }
+inline rgb_color ColGrid()       { return Rgb(74, 77, 83); }
+inline rgb_color ColClip()       { return Rgb(74, 120, 172); }
+inline rgb_color ColClipBorder() { return Rgb(150, 190, 232); }
+inline rgb_color ColWave()       { return Rgb(232, 240, 250); }
+inline rgb_color ColText()       { return Rgb(222, 225, 230); }
+inline rgb_color ColTextDim()    { return Rgb(150, 154, 162); }
+inline rgb_color ColPlayhead()   { return Rgb(240, 240, 240); } // Logic white head
+inline rgb_color ColHeader()     { return Rgb(48, 50, 54); }
+inline rgb_color ColHeaderHi()   { return Rgb(66, 69, 74); }   // raised control
+inline rgb_color ColAccent()     { return Rgb(74, 144, 217); } // Logic blue
+
+// Control-bar / mixer chrome.
+inline rgb_color ColChrome()     { return Rgb(42, 43, 47); }   // bar background
+inline rgb_color ColChromeHi()   { return Rgb(60, 62, 67); }
+inline rgb_color ColLcd()        { return Rgb(20, 22, 25); }   // LCD display well
+inline rgb_color ColLcdText()    { return Rgb(228, 232, 238); }
 
 // A level -> meter color (green below -6 dBish, yellow, red near clip).
 inline rgb_color MeterColor(float level) {
@@ -49,13 +56,14 @@ inline rgb_color MeterColor(float level) {
 
 // Per-track color palette (Track::colorIndex). Index 0 = the default clip blue.
 inline rgb_color TrackColor(int i) {
+    // Vivid, Logic-like region colors.
     static const rgb_color pal[] = {
-        Rgb(64, 108, 160),   // blue (default)
-        Rgb(160, 84, 84),    // red
-        Rgb(84, 150, 90),    // green
-        Rgb(150, 120, 70),   // amber
-        Rgb(120, 90, 160),   // purple
-        Rgb(70, 140, 150),   // teal
+        Rgb(74, 144, 217),   // blue (default)
+        Rgb(224, 85, 154),   // pink
+        Rgb(92, 184, 92),    // green
+        Rgb(232, 147, 58),   // orange
+        Rgb(155, 108, 212),  // purple
+        Rgb(64, 178, 188),   // teal
     };
     const int n = (int)(sizeof(pal) / sizeof(pal[0]));
     if (i < 0) i = 0;

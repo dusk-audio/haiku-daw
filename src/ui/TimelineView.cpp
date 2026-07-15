@@ -1682,7 +1682,7 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
 
     BRect block(x0, lane.top + 3, x1, lane.bottom - 3);
     SetHighColor(base);
-    FillRect(block);
+    FillRoundRect(block, 5, 5);        // Logic-style rounded region
 
     DrawClipWave(c, block);
 
@@ -1717,21 +1717,31 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
         }
     }
 
-    if (ClipSelected(c.id)) {           // selection highlight
-        SetHighColor(Rgb(255, 255, 255));
-        StrokeRect(block);
-        StrokeRect(block.InsetByCopy(1, 1));
-    } else {
-        SetHighColor(ColClipBorder());
-        StrokeRect(block);
+    // Name strip across the top (darker shade of the track color), like Logic.
+    const float stripH = 15.0f;
+    if (block.Height() > stripH + 2 && block.Width() > 10) {
+        BRect strip(block.left + 1, block.top + 1, block.right - 1,
+                    block.top + stripH);
+        SetHighColor(Rgb((uint8)(base.red * 0.5f), (uint8)(base.green * 0.5f),
+                         (uint8)(base.blue * 0.5f)));
+        FillRect(strip);
+        const std::string& p = c.sourcePath;
+        size_t slash = p.find_last_of('/');
+        std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
+        SetHighColor(Rgb(245, 246, 248));
+        DrawString(name.c_str(), BPoint(strip.left + 4, strip.top + 11));
     }
 
-    // Clip label (source file basename), clipped to the block width.
-    const std::string& p = c.sourcePath;
-    size_t slash = p.find_last_of('/');
-    std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
-    SetHighColor(ColText());
-    DrawString(name.c_str(), BPoint(block.left + 4, block.top + 14));
+    // Border / selection highlight (rounded).
+    if (ClipSelected(c.id)) {
+        SetHighColor(Rgb(255, 255, 255));
+        StrokeRoundRect(block, 5, 5);
+        StrokeRoundRect(block.InsetByCopy(1, 1), 4, 4);
+    } else {
+        SetHighColor(Rgb((uint8)(base.red * 0.7f), (uint8)(base.green * 0.7f),
+                         (uint8)(base.blue * 0.7f)));
+        StrokeRoundRect(block, 5, 5);
+    }
 }
 
 // Draw a Midi track's regions: each MidiClip is a block (like an audio clip)
@@ -1743,18 +1753,29 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
         float x1 = FrameToX(mc.startFrame + mc.lengthFrames);
         if (x1 < kHeaderWidth || x0 > lane.right)
             continue;
-        BRect block(std::max(x0, (float)kHeaderWidth), lane.top + 2,
-                    std::min(x1, lane.right),         lane.bottom - 2);
+        BRect block(std::max(x0, (float)kHeaderWidth), lane.top + 3,
+                    std::min(x1, lane.right),         lane.bottom - 3);
 
         rgb_color base = TrackColor(mc.colorIndex ? mc.colorIndex : t.colorIndex);
-        SetHighColor(Rgb((uint8)(base.red * 0.45f),
-                         (uint8)(base.green * 0.45f + 24),
-                         (uint8)(base.blue * 0.45f)));
-        FillRect(block);
+        SetHighColor(Rgb((uint8)(base.red * 0.55f), (uint8)(base.green * 0.55f),
+                         (uint8)(base.blue * 0.55f)));
+        FillRoundRect(block, 5, 5);
+        // Name strip across the top.
+        if (block.Height() > 17 && block.Width() > 10) {
+            BRect strip(block.left + 1, block.top + 1, block.right - 1,
+                        block.top + 15);
+            SetHighColor(Rgb((uint8)(base.red * 0.32f), (uint8)(base.green * 0.32f),
+                             (uint8)(base.blue * 0.32f)));
+            FillRect(strip);
+            SetHighColor(Rgb(240, 242, 245));
+            DrawString(t.name.c_str(), BPoint(strip.left + 4, strip.top + 11));
+        }
 
-        // In-window notes: relative -> absolute frame -> x, pitch -> y.
+        // In-window notes as a light preview below the name strip.
+        const float noteTop = block.top + 16;
+        const float noteH   = block.bottom - noteTop;
         for (const MidiNote& n : mc.notes) {
-            if (n.startFrame < 0 || n.startFrame >= mc.lengthFrames)
+            if (n.startFrame < 0 || n.startFrame >= mc.lengthFrames || noteH < 4)
                 continue;
             const Frame a = mc.startFrame + n.startFrame;
             float nx0 = FrameToX(a);
@@ -1766,20 +1787,21 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             int p = n.pitch - kMidiLow;
             if (p < 0) p = 0;
             if (p >= kMidiRange) p = kMidiRange - 1;
-            const float ny = block.bottom - (float)p / kMidiRange * block.Height();
-            const float nh = block.Height() / kMidiRange + 1.0f;
-            const float s = 0.4f + 0.6f * (n.velocity / 127.0f);
-            SetHighColor(Rgb((uint8)(150 * s), (uint8)(220 * s), (uint8)(160 * s)));
+            const float ny = block.bottom - (float)p / kMidiRange * noteH;
+            const float nh = noteH / kMidiRange + 1.0f;
+            const float s = 0.55f + 0.45f * (n.velocity / 127.0f);
+            SetHighColor(Rgb((uint8)(235 * s), (uint8)(240 * s), (uint8)(245 * s)));
             FillRect(BRect(nx0, ny - nh, nx1, ny));
         }
 
         if (ClipSelected(mc.id)) {           // selection highlight (shared)
             SetHighColor(Rgb(255, 255, 255));
-            StrokeRect(block);
-            StrokeRect(block.InsetByCopy(1, 1));
+            StrokeRoundRect(block, 5, 5);
+            StrokeRoundRect(block.InsetByCopy(1, 1), 4, 4);
         } else {
-            SetHighColor(ColClipBorder());
-            StrokeRect(block);
+            SetHighColor(Rgb((uint8)(base.red * 0.75f), (uint8)(base.green * 0.75f),
+                             (uint8)(base.blue * 0.75f)));
+            StrokeRoundRect(block, 5, 5);
         }
     }
 }

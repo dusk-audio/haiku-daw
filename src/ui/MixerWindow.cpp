@@ -57,12 +57,15 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
     const float h  = Bounds().Height();
     BRect strip(x0, 4, x0 + kStripW, h - 6);
 
+    const rgb_color tc = master ? Rgb(150, 120, 70) : TrackColor(colorIndex);
+
     SetHighColor(ColHeader());
     FillRect(strip);
-    SetHighColor(master ? Rgb(150, 120, 70) : TrackColor(colorIndex));
+    // Top: neutral chrome band with a thin colored accent (Logic look).
+    SetHighColor(ColHeaderHi());
     FillRect(BRect(strip.left, strip.top, strip.right, strip.top + kPadT - 6));
-    SetHighColor(ColText());
-    DrawString(name, BPoint(strip.left + 6, strip.top + 15));
+    SetHighColor(tc);
+    FillRect(BRect(strip.left, strip.top, strip.right, strip.top + 3));
 
     // Fader groove + fill.
     BRect fr = FaderRect(x0, h);
@@ -77,6 +80,13 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
     StrokeLine(BPoint(fr.left, uy), BPoint(fr.right, uy));
     SetHighColor(ColGrid());
     StrokeRect(fr);
+    // dB scale: short notches down the right edge of the fader at gain marks.
+    for (float gm : { 1.5f, 1.0f, 0.5f, 0.25f, 0.12f }) {
+        const float yy = fr.bottom - fr.Height() * (gm / kMaxGain);
+        if (yy < fr.top || yy > fr.bottom) continue;
+        SetHighColor(ColTextDim());
+        StrokeLine(BPoint(fr.right + 1, yy), BPoint(fr.right + 4, yy));
+    }
     // Fader thumb (cap at the current level). Kept inside the fader rect so it
     // stays fully clickable (MouseDown hit-tests FaderRect).
     float ty = fill.top;
@@ -140,6 +150,14 @@ void MixerStripsView::DrawStrip(int i, const char* name, float gain, float pan,
         DrawString("M", BPoint(m.left + 12, m.bottom - 6));
         DrawString("S", BPoint(s.left + 12, s.bottom - 6));
     }
+
+    // Colored name label along the bottom (Logic channel-strip signature).
+    BRect nameBar(strip.left, h - 24, strip.right, strip.bottom);
+    SetHighColor(tc);
+    FillRect(nameBar);
+    const int lum = (tc.red * 30 + tc.green * 59 + tc.blue * 11) / 100;
+    SetHighColor(lum > 140 ? Rgb(20, 20, 22) : Rgb(245, 246, 248));
+    DrawString(name, BPoint(nameBar.left + 5, nameBar.bottom - 6));
 
     SetHighColor(ColGrid());
     StrokeRect(strip);

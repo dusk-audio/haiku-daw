@@ -13,18 +13,24 @@ TransportBar::TransportBar(BRect frame, BMessenger target,
                            uint32 playWhat, uint32 stopWhat, uint32 recWhat)
     : BView(frame, "transport", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
       fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat) {
-    SetViewColor(ColHeader());
+    SetViewColor(ColChrome());
 }
 
 static void DrawButton(BView* v, BRect r, rgb_color fill, bool lit) {
-    v->SetHighColor(lit ? fill : ColHeaderHi());
-    v->FillRect(r);
+    v->SetHighColor(lit ? fill : ColChromeHi());
+    v->FillRoundRect(r, 4, 4);
     v->SetHighColor(lit ? fill : ColGrid());
-    v->StrokeRect(r);
+    v->StrokeRoundRect(r, 4, 4);
 }
 
 void TransportBar::Draw(BRect) {
     const rgb_color icon = ColText();
+
+    // LCD-style display well behind the time / tempo readouts (Logic look).
+    SetHighColor(ColLcd());
+    FillRoundRect(BRect(210, 4, 668, Bounds().Height() - 4), 5, 5);
+    SetHighColor(ColGrid());
+    StrokeRoundRect(BRect(210, 4, 668, Bounds().Height() - 4), 5, 5);
 
     // Play: triangle, lit green when playing.
     BRect p = PlayRect();
@@ -44,14 +50,10 @@ void TransportBar::Draw(BRect) {
 
     // Rec: circle, lit red when recording.
     BRect rc = RecRect();
-    DrawButton(this, rc, Rgb(180, 60, 60), fRecording);
-    SetHighColor(fRecording ? Rgb(255, 210, 210) : Rgb(210, 80, 80));
+    DrawButton(this, rc, Rgb(200, 62, 62), fRecording);
+    SetHighColor(fRecording ? Rgb(255, 210, 210) : Rgb(220, 84, 84));
     const float rcy = (rc.top + rc.bottom) / 2;
     FillEllipse(BPoint(rc.left + 32, rcy), 7, 7);
-
-    // Divider before the readouts.
-    SetHighColor(ColGrid());
-    StrokeLine(BPoint(208, 3), BPoint(208, Bounds().Height() - 3));
 }
 
 void TransportBar::MouseDown(BPoint where) {
