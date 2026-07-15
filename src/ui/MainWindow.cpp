@@ -806,8 +806,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_PULSE: {
             if (fEngine && fMonitoring && !fPlaying && !fRecMode) {
-                // Idle live-monitoring: drive the meters from the monitor engine
-                // (no playhead / transport — nothing is playing back).
+                // Idle live-monitoring: apply live gain/pan/mute edits, then
+                // drive the meters (no playhead / transport).
+                fEngine->UpdateMix(*fProject);
                 fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
                 PushTrackPeaks();
                 break;

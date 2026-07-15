@@ -462,6 +462,24 @@ void Engine::UpdateMix(const Project& project) {
                 else           s->SetMix(t.gain, t.pan, audible);
             }
     }
+
+    // MIDI + bus nodes: update gain/pan/audibility live (the RT reads these
+    // plain fields — a torn write is at most a one-block transient, benign).
+    for (Bus& b : fBuses) {
+        const Track* t = project.FindTrack(b.id);
+        if (!t) continue;
+        const bool audible = !t->muted && (!anySolo || t->soloed);
+        const bool automated = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
+        if (t->type == TrackType::Midi) {
+            b.audible = audible || b.liveMonitor;   // keep monitored input audible
+            if (!automated)
+                EqualPowerGains(t->gain, t->pan, &b.midiGainL, &b.midiGainR);
+        } else if (b.isBus) {
+            b.audible = audible;
+            if (!automated)
+                EqualPowerGains(t->gain, t->pan, &b.busGainL, &b.busGainR);
+        }
+    }
 }
 
 bool Engine::SyncFx(const Project& project) {
