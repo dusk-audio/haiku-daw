@@ -317,6 +317,52 @@ void ResizeMidiClipCommand::Undo(Project& p) {
             c->lengthFrames = fOldLen;
 }
 
+// --- SplitMidiClipCommand ---------------------------------------------
+
+bool SplitMidiClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    const Frame start = c->startFrame;
+    const Frame end   = start + c->lengthFrames;
+    if (fAt <= start || fAt >= end) return false;   // must fall strictly inside
+
+    fOldLen   = c->lengthFrames;
+    fOldNotes = c->notes;
+    const Frame rel = fAt - start;   // cut point relative to the clip start
+
+    // Right half: notes at/after the cut, re-based to the new start.
+    MidiClip right;
+    right.id           = p.NextClipId();
+    right.startFrame   = fAt;
+    right.lengthFrames = end - fAt;
+    right.colorIndex   = c->colorIndex;
+    for (const MidiNote& n : fOldNotes)
+        if (n.startFrame >= rel) {
+            MidiNote m = n; m.startFrame -= rel; right.notes.push_back(m);
+        }
+    fRightId = right.id;
+
+    // Left half: shorten + drop notes at/after the cut.
+    c->lengthFrames = rel;
+    c->notes.clear();
+    for (const MidiNote& n : fOldNotes)
+        if (n.startFrame < rel) c->notes.push_back(n);
+
+    return p.AddMidiClip(fTrack, right);
+}
+
+void SplitMidiClipCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    p.RemoveMidiClip(fTrack, fRightId);
+    if (MidiClip* c = t->FindMidiClip(fClip)) {
+        c->lengthFrames = fOldLen;
+        c->notes        = fOldNotes;
+    }
+}
+
 // --- MoveClipCommand --------------------------------------------------
 
 // Moving changes startFrame, which is the sort key. To preserve the

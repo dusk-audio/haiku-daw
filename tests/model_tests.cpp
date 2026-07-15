@@ -148,6 +148,31 @@ static void test_split_clip() {
     CHECK(t->clips.size() == 1);
     CHECK(t->clips[0].lengthFrames == 4000);
     CHECK(t->clips[0].fadeOutFrames == 300);
+
+    // MIDI region split: notes divide by absolute position; right re-bases.
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), p);
+    TrackId tm = p.Tracks().back().id;
+    MidiClip mc; mc.startFrame = 1000; mc.lengthFrames = 4000;
+    { MidiNote n; n.pitch = 60; n.startFrame = 500;  n.lengthFrames = 100; mc.notes.push_back(n); }  // abs 1500 (left)
+    { MidiNote n; n.pitch = 64; n.startFrame = 2500; n.lengthFrames = 100; mc.notes.push_back(n); }  // abs 3500 (right)
+    auto amc = std::make_unique<AddMidiClipCommand>(tm, mc);
+    auto* amcp = amc.get(); stack.Execute(std::move(amc), p);
+    const ClipId mcId = amcp->CreatedId();
+    stack.Execute(std::make_unique<SplitMidiClipCommand>(tm, mcId, 3000), p);   // cut at abs 3000 (rel 2000)
+    const Track* tmt = p.FindTrack(tm);
+    CHECK(tmt->midiClips.size() == 2);
+    const MidiClip& ML = tmt->midiClips[0];
+    const MidiClip& MR = tmt->midiClips[1];
+    CHECK(ML.startFrame == 1000 && ML.lengthFrames == 2000);
+    CHECK(MR.startFrame == 3000 && MR.lengthFrames == 2000);
+    CHECK(ML.notes.size() == 1 && ML.notes[0].pitch == 60);
+    CHECK(MR.notes.size() == 1 && MR.notes[0].pitch == 64);
+    CHECK(MR.notes[0].startFrame == 500);   // re-based: 2500 - 2000
+    stack.Undo(p);   // restores one region with both notes
+    tmt = p.FindTrack(tm);
+    CHECK(tmt->midiClips.size() == 1);
+    CHECK(tmt->midiClips[0].notes.size() == 2);
+    CHECK(tmt->midiClips[0].lengthFrames == 4000);
 }
 
 static void test_active_take() {

@@ -409,6 +409,28 @@ private:
     Frame   fOldLen = 0;
 };
 
+// Split a MIDI region at absolute frame `at` into two regions: the left half
+// keeps notes starting before the cut, the right half (new id) gets the rest,
+// re-based to its own start. Undo restores the original region (length + notes)
+// and removes the right half.
+class SplitMidiClipCommand : public Command {
+public:
+    SplitMidiClipCommand(TrackId track, ClipId clip, Frame at)
+        : fTrack(track), fClip(clip), fAt(at) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Split MIDI Clip"; }
+
+private:
+    TrackId               fTrack;
+    ClipId                fClip;
+    Frame                 fAt;
+    Frame                 fOldLen = 0;
+    std::vector<MidiNote> fOldNotes;             // for undo
+    ClipId                fRightId = kInvalidClipId;
+};
+
 // Move a track up (-1) or down (+1) in the track list. Clamped; a no-op move
 // (already at the edge) reports failure so it doesn't hit the undo stack.
 class MoveTrackCommand : public Command {

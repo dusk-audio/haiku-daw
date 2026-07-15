@@ -604,7 +604,7 @@ void TimelineView::MouseDown(BPoint where) {
         if (rightClick) {
             if (hit >= 0) {
                 const MidiClip& c = t.midiClips[(size_t)hit];
-                const int pick = ContextMenu(where);
+                const int pick = ContextMenu(where, /*withSplit=*/true);
                 if (pick == 0) {          // Copy
                     fClipMidi = c; fHasClipMidi = true;
                     fHasClipClip = false; fHasClipNote = false;
@@ -612,6 +612,10 @@ void TimelineView::MouseDown(BPoint where) {
                 } else if (pick == 1) {   // Delete
                     fStack->Execute(std::make_unique<RemoveMidiClipCommand>(
                         t.id, c.id), *fProject);
+                } else if (pick == 2) {   // Split here
+                    Frame sat = Snapped(XToFrame(where.x));
+                    fStack->Execute(std::make_unique<SplitMidiClipCommand>(
+                        t.id, c.id, sat), *fProject);
                 }
             } else if (fHasClipMidi) {     // empty lane: offer paste
                 if (PastePopup(where))
