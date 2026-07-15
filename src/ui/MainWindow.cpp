@@ -26,6 +26,7 @@
 
 #include <Alert.h>
 #include <Application.h>
+#include <OS.h>   // system_time() for MIDI event timestamping
 #include <Button.h>
 #include <File.h>
 #include <FindDirectory.h>
@@ -767,6 +768,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     // Count-in over: begin capture once we reach the record point.
                     if (fCapturePending && ph >= fRecPoint)
                         StartCapture();
+                    // Drain live MIDI into the take (stamped by kit timestamp,
+                    // independent of this ~60 Hz poll's granularity).
+                    if (fMidiIn && !fCapturePending) {
+                        MidiEvent ev[64];
+                        std::size_t n;
+                        while ((n = fMidiIn->ReadEvents(ev, 64)) > 0)
+                            for (std::size_t i = 0; i < n; i++) {
+                                Frame mf = fRecStart
+                                    + (Frame)((double)(ev[i].timeUs - fMidiT0)
+                                              * 1e-6 * fProject->sampleRate);
+                                if (mf < fRecStart) mf = fRecStart;
+                                fMidiRec.OnEvent(ev[i], mf);
+                            }
+                    }
                     // Loop-record: at the loop end, rewind the engine to the
                     // loop start (the recorder keeps capturing across the seam).
                     if (fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
@@ -921,28 +936,91 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
 }
 
 void MainWindow::StartCapture() {
-    // Write takes into the project's directory (a self-contained bundle) when
-    // the project has been saved; otherwise the working directory.
-    char name[64];
-    std::snprintf(name, sizeof(name), "take-%d.wav", ++fTakeCounter);
-    fTakePath = fTakeDir.empty() ? std::string(name)
-                                 : fTakeDir + "/" + name;
-    fRecorder.reset(new Recorder());
-    if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
-        std::fprintf(stderr, "MainWindow: recording failed to start\n");
-        fRecorder.reset();
-        --fTakeCounter;
-        return;
-    }
-    // Wire input monitoring: the engine mixes the recorder's live input (only
-    // if the input rate matches the output rate).
-    fRecorder->SetMonitor(fMonitorInput);
-    if (fEngine) {
-        fEngine->SetMonitorSource(fRecorder.get());
-        fEngine->SetInputMonitor(fMonitorInput);
-    }
     fRecStart = fRecPoint;      // clip origin = record point
     fCapturePending = false;
+
+    // Audio capture: only when an audio track is armed (a MIDI-only take opens
+    // no input device and writes no WAV).
+    if (!fRecTracks.empty()) {
+        // Write takes into the project's directory (a self-contained bundle)
+        // when the project has been saved; otherwise the working directory.
+        char name[64];
+        std::snprintf(name, sizeof(name), "take-%d.wav", ++fTakeCounter);
+        fTakePath = fTakeDir.empty() ? std::string(name)
+                                     : fTakeDir + "/" + name;
+        fRecorder.reset(new Recorder());
+        if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
+            std::fprintf(stderr, "MainWindow: recording failed to start\n");
+            fRecorder.reset();
+            --fTakeCounter;
+        } else {
+            // Wire input monitoring: the engine mixes the recorder's live input
+            // (only if the input rate matches the output rate).
+            fRecorder->SetMonitor(fMonitorInput);
+            if (fEngine) {
+                fEngine->SetMonitorSource(fRecorder.get());
+                fEngine->SetInputMonitor(fMonitorInput);
+            }
+        }
+    }
+
+    StartMidiCapture();
+}
+
+// Open a MIDI consumer, connect every armed MIDI track's input endpoint (by
+// name) to it, and begin the note-pairing recorder at the record point.
+void MainWindow::StartMidiCapture() {
+    if (fMidiRecTracks.empty()) return;
+    fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
+    if (fMidiIn->Register() != B_OK) {
+        std::fprintf(stderr, "MainWindow: MIDI input register failed\n");
+        fMidiIn.reset();
+        fMidiRecTracks.clear();
+        return;
+    }
+    const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
+    for (TrackId id : fMidiRecTracks) {
+        const Track* t = fProject->FindTrack(id);
+        if (!t || t->input.kind != InputSource::kMidi) continue;
+        for (const MidiEndpointInfo& e : eps)
+            if (e.isProducer && e.name == t->input.name) {
+                fMidiIn->ConnectFrom(e.id);
+                break;
+            }
+    }
+    // Discard events queued before this take, then start the take clock.
+    MidiEvent tmp[64];
+    while (fMidiIn->ReadEvents(tmp, 64) > 0) {}
+    fMidiRec.Begin(fRecStart);
+    fMidiT0 = system_time();
+}
+
+// End the MIDI take at `endFrame` and drop the resulting region onto each armed
+// MIDI track (one fresh clip id per track). Tears down the input consumer.
+void MainWindow::StopMidiCapture(Frame endFrame) {
+    if (!fMidiIn) return;
+    // Drain any events still queued, stamping each by wall-clock frame.
+    MidiEvent ev[64];
+    std::size_t n;
+    while ((n = fMidiIn->ReadEvents(ev, 64)) > 0)
+        for (std::size_t i = 0; i < n; i++) {
+            Frame mf = fRecStart + (Frame)((double)(ev[i].timeUs - fMidiT0)
+                                           * 1e-6 * fProject->sampleRate);
+            if (mf < fRecStart) mf = fRecStart;
+            fMidiRec.OnEvent(ev[i], mf);
+        }
+    const MidiClip take = fMidiRec.End(endFrame);
+    fMidiIn.reset();   // disconnect + unregister the consumer
+
+    std::vector<TrackId> targets;
+    targets.swap(fMidiRecTracks);
+    if (take.notes.empty()) return;   // nothing played: no clip
+    for (TrackId target : targets) {
+        MidiClip c = take;             // AddMidiClipCommand assigns a fresh id
+        c.id = kInvalidClipId;
+        fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
+    }
+    fTimeline->Invalidate();
 }
 
 void MainWindow::StartRecording() {
@@ -950,13 +1028,20 @@ void MainWindow::StartRecording() {
         return;
     if (fPlaying) StopPlayback();
 
-    // Record onto every armed audio track (one input take, dropped on each).
+    // Record onto every armed audio track (one input take, dropped on each),
+    // and capture live MIDI onto every armed MIDI track that has a MIDI input.
     fRecTracks.clear();
-    for (const Track& t : fProject->Tracks())
-        if (t.type == TrackType::Audio && t.armed)
+    fMidiRecTracks.clear();
+    for (const Track& t : fProject->Tracks()) {
+        if (!t.armed) continue;
+        if (t.type == TrackType::Audio)
             fRecTracks.push_back(t.id);
-    if (fRecTracks.empty()) {
-        std::fprintf(stderr, "MainWindow: arm a track (R) before recording\n");
+        else if (t.type == TrackType::Midi && t.input.kind == InputSource::kMidi)
+            fMidiRecTracks.push_back(t.id);
+    }
+    if (fRecTracks.empty() && fMidiRecTracks.empty()) {
+        std::fprintf(stderr, "MainWindow: arm a track (R) before recording "
+                             "(MIDI tracks also need an input: right-click Arm)\n");
         return;
     }
 
@@ -989,6 +1074,9 @@ void MainWindow::StopRecording() {
     if (!fRecMode)
         return;
 
+    // Take end = the playhead now, before the engine stops (MIDI needs it to
+    // close held notes at the take boundary).
+    const Frame endPh = fEngine ? fEngine->Playhead() : fRecStart;
     const bool captured = fRecorder && fRecorder->IsRecording();
     int64_t frames = 0;
     double  recRate = fProject->sampleRate;
@@ -1016,8 +1104,13 @@ void MainWindow::StopRecording() {
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
 
+    // Finalize the MIDI take independently of the audio take (a MIDI-only
+    // record has no audio recorder / targets, so this must run before the
+    // audio empty-take early-out below).
+    StopMidiCapture(endPh);
+
     if (!captured || frames <= 0 || targets.empty()) {
-        std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
+        if (fRecorder) std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
         fRecorder.reset();
         return;
     }

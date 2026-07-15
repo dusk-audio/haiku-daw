@@ -14,6 +14,8 @@
 #include "../model/Command.h"
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
+#include "../midi/MidiPort.h"
+#include "../midi/MidiRecorder.h"
 
 #include <Messenger.h>
 #include <Window.h>
@@ -58,6 +60,8 @@ private:
     void StartRecording();
     void StopRecording();
     void StartCapture();             // open the Recorder (after any count-in)
+    void StartMidiCapture();         // connect armed MIDI inputs, begin the take
+    void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
     bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
@@ -105,6 +109,12 @@ private:
     // the RT thread is stopped before the recorder it may read is freed.
     std::unique_ptr<Recorder> fRecorder;  // active while recording
     std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
+    // MIDI capture: a consumer connected to the armed MIDI tracks' input
+    // endpoints, feeding a note-pairing recorder. Independent of the audio path.
+    std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
+    MidiRecorder              fMidiRec;
+    std::vector<TrackId>      fMidiRecTracks; // armed MIDI targets for the take
+    bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)

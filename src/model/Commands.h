@@ -138,6 +138,23 @@ private:
     bool    fOldSoloed = false;
 };
 
+// Set a track's record input source (MIDI endpoint / audio input). Discrete
+// choice from the header input picker; stores the old source for Undo().
+class SetTrackInputCommand : public Command {
+public:
+    SetTrackInputCommand(TrackId track, InputSource input)
+        : fTrack(track), fNew(std::move(input)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Input"; }
+
+private:
+    TrackId     fTrack;
+    InputSource fNew;
+    InputSource fOld;
+};
+
 // Add a MIDI region (clip) to a track. Allocates a clip id in Do() if unset;
 // Undo() removes it. CreatedId() gives the id after Do() (for the UI).
 class AddMidiClipCommand : public Command {

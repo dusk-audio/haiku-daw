@@ -6,6 +6,8 @@
 //       src/model/Project.cpp -o /tmp/midi && /tmp/midi
 #include "../src/midi/MidiEventRing.h"
 #include "../src/midi/MidiRecorder.h"
+#include "../src/model/Commands.h"
+#include "../src/model/ProjectIO.h"
 
 #include <cstdio>
 
@@ -115,6 +117,54 @@ int main() {
         rec.OnEvent(MidiEvent::NoteOff(0, 67, 0), 1500);
         MidiClip clip = rec.End(1500);
         CHECK(clip.notes.size() == 2);
+    }
+
+    // --- SetTrackInputCommand: assign / undo a track's record input ----------
+    {
+        Project p;
+        Track t; t.id = p.NextTrackId(); t.type = TrackType::Midi; t.name = "Keys";
+        p.AddTrack(t);
+        const TrackId id = t.id;
+
+        InputSource src; src.kind = InputSource::kMidi; src.name = "/dev/midi/usb/0-0";
+        SetTrackInputCommand cmd(id, src);
+        CHECK(cmd.Do(p));
+        CHECK(p.FindTrack(id)->input.kind == InputSource::kMidi);
+        CHECK(p.FindTrack(id)->input.name == "/dev/midi/usb/0-0");
+        cmd.Undo(p);
+        CHECK(p.FindTrack(id)->input.kind == InputSource::kNone);
+        CHECK(p.FindTrack(id)->input.name.empty());
+    }
+
+    // --- ProjectIO round-trips the input source ------------------------------
+    {
+        Project p;
+        Track t; t.id = p.NextTrackId(); t.type = TrackType::Midi; t.name = "Keys";
+        t.input.kind = InputSource::kMidi;
+        t.input.name = "/dev/midi/usb/0-0";
+        t.input.channel = 2;
+        p.AddTrack(t);
+
+        const char* path = "midi_input_roundtrip.dawproj";
+        CHECK(ProjectIO::Save(p, path));
+        Project q;
+        CHECK(ProjectIO::Load(q, path));
+        std::remove(path);
+        CHECK(q.Tracks().size() == 1);
+        const InputSource& in = q.Tracks()[0].input;
+        CHECK(in.kind == InputSource::kMidi);
+        CHECK(in.name == "/dev/midi/usb/0-0");
+        CHECK(in.channel == 2);
+
+        // A track with no input assigned writes no `input` line and loads kNone.
+        Project p2;
+        Track t2; t2.id = p2.NextTrackId(); t2.type = TrackType::Audio; t2.name = "Aud";
+        p2.AddTrack(t2);
+        CHECK(ProjectIO::Save(p2, path));
+        Project q2;
+        CHECK(ProjectIO::Load(q2, path));
+        std::remove(path);
+        CHECK(q2.Tracks()[0].input.kind == InputSource::kNone);
     }
 
     std::printf("midi_tests: %d checks, %d failures\n", g_checks, g_fails);

@@ -60,6 +60,18 @@ struct MidiClip {
     Frame                 fadeOutFrames = 0;
 };
 
+// The input a track records from. A MIDI track records from a MIDI endpoint,
+// matched by *name* (e.g. "/dev/midi/usb/0-0") so the assignment survives the
+// endpoint-id reassignment that happens across sessions/reboots. An audio track
+// records from an input device + channel (channel selection is for multichannel
+// interfaces; v1 audio uses the system default). kNone = armed to nothing.
+struct InputSource {
+    enum Kind { kNone = 0, kAudioDefault = 1, kMidi = 2 };
+    int         kind    = kNone;
+    std::string name;          // MIDI endpoint name; "" for the default input
+    int         channel = 0;   // audio channel / MIDI channel filter (0 = all)
+};
+
 // An aux send: taps a track's signal and adds `level` * signal into `dest`
 // (an aux Bus). Post-fader (the default) taps after the track's fader+fx;
 // pre-fader taps the raw pre-fader signal. `dest == kInvalidTrackId` is unused.
@@ -97,6 +109,7 @@ struct Track {
     AutomationLane          panAuto;  // pan envelope (absolute pan; empty = static)
     std::vector<FxAutoLane> fxAuto;   // effect-parameter automation lanes
     Instrument              instrument; // synth voice (MIDI tracks)
+    InputSource             input;    // record input (MIDI endpoint / audio in)
 
     // Freeze (render-to-audio): when frozen, the track plays a single rendered
     // clip with its fx/fader baked in, and its pre-freeze content is stashed

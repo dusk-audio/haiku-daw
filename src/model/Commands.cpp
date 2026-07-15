@@ -609,6 +609,19 @@ void SetFxCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->fx = fOld;
 }
 
+// --- SetTrackInputCommand ---------------------------------------------
+
+bool SetTrackInputCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->input;
+    t->input = fNew;
+    return true;
+}
+void SetTrackInputCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->input = fOld;
+}
+
 // --- SetInstrumentCommand ---------------------------------------------
 
 bool SetInstrumentCommand::Do(Project& p) {

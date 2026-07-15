@@ -151,6 +151,10 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << in.decay << " " << in.sustain << " " << in.release << "\n";
         }
 
+        if (t.input.kind != InputSource::kNone)
+            f << "input " << t.input.kind << " " << t.input.channel
+              << " \"" << t.input.name << "\"\n";
+
         f << "endtrack\n";
     }
     return f.good();
@@ -359,6 +363,13 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
                 >> in.release;
             if (in.waveform < 0 || in.waveform > 3) in.waveform = 0;
             cur.instrument = in;
+        }
+        else if (kw == "input" && haveTrack) {
+            InputSource in;
+            iss >> in.kind >> in.channel;
+            if (in.kind < 0 || in.kind > InputSource::kMidi) in.kind = InputSource::kNone;
+            in.name = Unquote(line);   // "" if the line has no quotes
+            cur.input = in;
         }
         else if (kw == "send" && haveTrack) {
             Send s;
