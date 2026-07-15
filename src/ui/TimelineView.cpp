@@ -182,6 +182,9 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         case '+': case '=': ZoomBy(0.5); break;   // zoom in
         case '-': case '_': ZoomBy(2.0); break;   // zoom out
         case 'f': case 'F': ZoomToFit(); break;   // fit project to view width
+        case B_SPACE:   // toggle transport (play/stop)
+            if (BWindow* w = Window()) w->PostMessage(kMsgTransportToggle);
+            break;
         case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - kRulerHeight) * 0.8f); break;
         case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - kRulerHeight) * 0.8f); break;
         case B_DELETE: case B_BACKSPACE:
@@ -430,6 +433,22 @@ void TimelineView::DrawDragGhost() {
 void TimelineView::SetPlayhead(Frame f) {
     if (f == fPlayhead)
         return;
+    // Follow (chase): page the scroll when the playhead nears the right edge or
+    // falls before the visible window, so a long take stays on screen.
+    if (fFollow) {
+        const float contentW = Bounds().Width() - kHeaderWidth;
+        if (contentW > 1.0f) {
+            const Frame viewFrames = (Frame)(contentW * fFramesPerPixel);
+            if (f < fScrollFrame
+                || f > fScrollFrame + (Frame)(viewFrames * 0.9)) {
+                fScrollFrame = f - (Frame)(viewFrames * 0.1);
+                if (fScrollFrame < 0) fScrollFrame = 0;
+                fPlayhead = f;
+                Invalidate();
+                return;
+            }
+        }
+    }
     const float xOld = FrameToX(fPlayhead);
     const float xNew = FrameToX(f);
     fPlayhead = f;

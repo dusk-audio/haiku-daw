@@ -555,6 +555,10 @@ void Engine::FillBuffer(float* out, size_t frames) {
         fMonFrame += (Frame)frames;
         UpdateLiveVoices(bs);
         const size_t nfloats = frames * 2;
+        for (size_t i = 0; i < fBuses.size(); i++) {        // reset track meters
+            fNodePeakL[i].store(0.0f, std::memory_order_relaxed);
+            fNodePeakR[i].store(0.0f, std::memory_order_relaxed);
+        }
         float pl = 0.0f, pr = 0.0f;
         for (size_t idx = 0; idx < fBuses.size(); idx++) {
             Bus& b = fBuses[idx];
@@ -568,6 +572,15 @@ void Engine::FillBuffer(float* out, size_t frames) {
             }
             for (auto& fx : b.fx)
                 if (fx) fx->Process(nb, static_cast<int>(frames));
+            float npl = 0.0f, npr = 0.0f;                   // per-track meter
+            for (size_t i = 0; i < frames; i++) {
+                const float l = std::fabs(nb[i * 2 + 0]);
+                const float r = std::fabs(nb[i * 2 + 1]);
+                if (l > npl) npl = l;
+                if (r > npr) npr = r;
+            }
+            fNodePeakL[idx].store(npl, std::memory_order_relaxed);
+            fNodePeakR[idx].store(npr, std::memory_order_relaxed);
             for (size_t i = 0; i < nfloats; i++) out[i] += nb[i];
         }
         const float mg = fMasterGain.load(std::memory_order_relaxed);

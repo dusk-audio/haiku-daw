@@ -90,6 +90,7 @@ enum {
     MSG_IMPORT_MIDI_REF = 'imdr',
     MSG_EXPORT_MIDI     = 'emid',
     MSG_EXPORT_MIDI_REF = 'emdr',
+    MSG_FOLLOW    = 'folw',   // toggle: chase the playhead
 };
 
 // Defined below; used by MessageReceived above its definition.
@@ -148,6 +149,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(fMonoItem);
     viewMenu->AddSeparatorItem();
     viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
+    fFollowItem = new BMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
+    fFollowItem->SetMarked(true);   // chase on by default
+    viewMenu->AddItem(fFollowItem);
     viewMenu->AddItem(new BMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SHORTCUTS)));
     viewMenu->AddItem(new BMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
@@ -339,6 +343,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fMetronome = !fMetronome;
             if (fMetItem) fMetItem->SetMarked(fMetronome);
             if (fEngine) fEngine->SetMetronome(fMetronome);
+            break;
+        case MSG_FOLLOW: {
+            const bool on = !(fFollowItem && fFollowItem->IsMarked());
+            if (fFollowItem) fFollowItem->SetMarked(on);
+            fTimeline->SetFollow(on);
+            break;
+        }
+        case kMsgTransportToggle:   // spacebar
+            if (fPlaying || fRecMode) { StopPlayback(); StopRecording(); }
+            else                        StartPlayback();
             break;
         case MSG_EXPORT:
             if (!fExportPanel) {
@@ -763,6 +777,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            if (fEngine && fMonitoring && !fPlaying && !fRecMode) {
+                // Idle live-monitoring: drive the meters from the monitor engine
+                // (no playhead / transport — nothing is playing back).
+                fMeter->SetLevels(fEngine->PeakL(), fEngine->PeakR());
+                PushTrackPeaks();
+                break;
+            }
             if (fEngine && (fPlaying || fRecMode)) {
                 fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
                 const Frame ph = fEngine->Playhead();
@@ -841,7 +862,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
 }
 
 void MainWindow::UpdatePulse() {
-    const bool need = fPlaying || fRecMode
+    const bool need = fPlaying || fRecMode || fMonitoring
                    || (fRecorder && fRecorder->IsRecording());
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -1050,6 +1071,7 @@ void MainWindow::StopMidiMonitor() {
     }
     fMidiIn.reset();
     fMonitoring = false;
+    UpdatePulse();
 }
 
 // Reconcile idle live-monitoring with the current arming. When idle (not
@@ -1096,6 +1118,7 @@ void MainWindow::UpdateMidiMonitor() {
     fEngine->SetLiveMidi(fMidiIn->MonitorInput());
     fEngine->Start();
     fMonitoring = true;
+    UpdatePulse();   // poll the meters while monitoring
 }
 
 void MainWindow::StartRecording() {

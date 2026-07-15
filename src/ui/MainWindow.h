@@ -146,6 +146,7 @@ private:
     int                       fCountInBars = 0;      // metronome bars before capture
     BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
     BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
+    BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
     int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
     Frame                     fRecStart = 0; // frame the capture (clip) begins at

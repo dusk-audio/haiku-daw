@@ -85,6 +85,7 @@ public:
     // Move the playhead. Invalidates only the old + new columns, so the 60 Hz
     // poll doesn't repaint the whole view each tick.
     void SetPlayhead(Frame f);
+    void SetFollow(bool on) { fFollow = on; }   // chase the playhead in view
 
     // Per-track output peaks (from the engine) for the header meters. Cleared
     // when playback stops. Keyed by TrackId -> (peakL, peakR) in [0, 1+].
@@ -242,6 +243,7 @@ private:
 
     // Live recording region (no clips yet); drawn on every armed track.
     bool           fRecording = false;
+    bool           fFollow    = true;   // auto-scroll to keep the playhead in view
     Frame          fRecStart  = 0;
     Frame          fRecLen    = 0;
     // Live take content while recording (see SetLiveMidiNotes / SetLiveAudio).

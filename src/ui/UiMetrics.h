@@ -23,6 +23,9 @@ constexpr uint32 kMsgSeek = 'seek';
 // idle MIDI monitoring (start/stop the monitor engine).
 constexpr uint32 kMsgMonitorRefresh = 'mon?';
 
+// TimelineView -> MainWindow: spacebar pressed; toggle play/stop.
+constexpr uint32 kMsgTransportToggle = 'xptg';
+
 inline rgb_color Rgb(uint8 r, uint8 g, uint8 b) {
     return rgb_color{r, g, b, 255};
 }
