@@ -637,15 +637,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Apply the edit to the running engine so it takes effect live.
             // Param tweaks sync in place; a structural change (add/remove/
             // reorder/replace) rebuilds the engine at the playhead.
-            // Make the edit take effect on the running engine. Param tweaks sync
-            // in place (no seam); if the chain STRUCTURE changed, or we're
-            // playing/monitoring, rebuild so an added/removed effect is
-            // guaranteed to be in the graph.
-            if (fEngine) {
-                const bool synced = fEngine->SyncFx(*fProject);
-                if (!synced || fPlaying || fMonitoring)
-                    ReloadActiveEngine();
-            }
+            // Param tweaks sync into the live effects in place (no seam); only a
+            // STRUCTURAL change (add/remove/reorder/replace) needs a rebuild.
+            if (fEngine && !fEngine->SyncFx(*fProject))
+                ReloadActiveEngine();
             fTimeline->Invalidate();
             break;
         }

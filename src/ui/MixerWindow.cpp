@@ -38,7 +38,9 @@ static StripLayout LayoutStrip(float x0, float h) {
     y += 4;
     s.pan = BRect(cx - 21, y, cx + 21, y + 42); y += 46;
     s.val = BRect(L, y, R, y + 14); y += 16;
-    const float botTop = h - 76;   // reserve room for I/R, M/S, name
+    // Reserve room for I/R, M/S, name; never let the fader invert / zero-out
+    // (guards a div-by-zero in the fader drag on a very short window).
+    const float botTop = std::max(h - 76.0f, y + 20.0f);
     s.fader = BRect(cx - 30, y, cx - 4, botTop);
     s.meter = BRect(cx + 6,  y, cx + 26, botTop);
     float by = h - 72;
@@ -231,7 +233,8 @@ void MixerStripsView::MouseMoved(BPoint where, uint32, const BMessage*) {
     const StripLayout L = LayoutStrip(x0, h);
 
     if (fDrag == Drag::Fader) {
-        float t = (L.fader.bottom - where.y) / L.fader.Height();
+        const float fh = L.fader.Height();
+        float t = fh > 0 ? (L.fader.bottom - where.y) / fh : 0;
         if (t < 0) t = 0; if (t > 1) t = 1;
         const float gain = t * kMaxGain;
         if (master) fMasterGain = gain;
@@ -257,6 +260,7 @@ MixerWindow::MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
     : BWindow(frame, "Mixer", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fApply(apply) {
+    SetSizeLimits(160, 100000, 320, 100000);   // keep the strip tall enough
     fView = new MixerStripsView(Bounds(), std::move(strips), masterGain, apply);
     AddChild(fView);
 }

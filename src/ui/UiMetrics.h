@@ -35,6 +35,8 @@ constexpr uint32 kMsgTransportToggle = 'xptg';
 // window's DispatchMessage; returns true if it consumed the event.
 inline bool ForwardSpaceToTransport(BMessage* msg, const BMessenger& main) {
     if (!msg || msg->what != B_KEY_DOWN) return false;
+    int32 repeat = 0;   // ignore auto-repeat so holding space doesn't spam toggle
+    if (msg->FindInt32("be:key_repeat", &repeat) == B_OK && repeat > 1) return false;
     const char* bytes = nullptr;
     ssize_t len = 0;
     if (msg->FindData("bytes", B_STRING_TYPE, (const void**)&bytes, &len) == B_OK

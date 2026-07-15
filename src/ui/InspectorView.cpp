@@ -294,12 +294,15 @@ void InspectorView::MouseUp(BPoint) {
     fDrag = Drag::None;
     if (!t) return;
     // Restore the pre-drag value, then push ONE command (clean single undo).
+    // Only when the value actually changed, so a bare click isn't a no-op undo.
     if (mode == Drag::Fader) {
         const float g = t->gain; t->gain = fDragOrig;
-        fStack->Execute(std::make_unique<SetTrackGainCommand>(t->id, g), *fProject);
+        if (g != fDragOrig)
+            fStack->Execute(std::make_unique<SetTrackGainCommand>(t->id, g), *fProject);
     } else if (mode == Drag::Pan) {
         const float p = t->pan; t->pan = fDragOrig;
-        fStack->Execute(std::make_unique<SetTrackPanCommand>(t->id, p), *fProject);
+        if (p != fDragOrig)
+            fStack->Execute(std::make_unique<SetTrackPanCommand>(t->id, p), *fProject);
     }
     Refresh();
 }

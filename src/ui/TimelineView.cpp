@@ -1336,9 +1336,13 @@ void TimelineView::MouseUp(BPoint where) {
         }
         if (cmd) {
             fStack->Execute(std::move(cmd), *fProject);
-            // A clip/region edit (move/resize/fade/gain) only reaches the engine
-            // at Load; rebuild it so the change takes effect during playback.
-            if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+            // A clip/region edit (move/resize/fade/clip-gain) is baked into the
+            // stream at Load, so rebuild the engine to hear it live. Track
+            // gain/pan are NOT — UpdateMix applies them every pulse — so skip the
+            // rebuild for those (it would add a needless playback dropout).
+            const bool liveMix = (fDrag == Drag::Gain || fDrag == Drag::Pan);
+            if (!liveMix)
+                if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
         }
     }
     const bool wasFader = (fDrag == Drag::Gain || fDrag == Drag::Pan);
