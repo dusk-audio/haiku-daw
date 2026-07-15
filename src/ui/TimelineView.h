@@ -185,6 +185,8 @@ private:
     std::map<TrackId, std::pair<float, float>> fTrackPeaks;   // header meters
 
     std::set<ClipId> fSelClips;
+    // Captured start of each selected MIDI region at drag-start, for group move.
+    std::map<ClipId, Frame> fMidiMoveOrig;
     bool  ClipSelected(ClipId id) const { return fSelClips.count(id) != 0; }
     void  DeleteSelection();       // MacroCommand remove of all selected clips
     void  DuplicateSelection();    // MacroCommand add of offset copies

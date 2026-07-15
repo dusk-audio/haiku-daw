@@ -714,6 +714,15 @@ void TimelineView::MouseDown(BPoint where) {
             } else {
                 fDrag = Drag::Clip;
                 fDragGrabOffset = XToFrame(where.x) - c.startFrame;
+                // Group move: snapshot every selected MIDI region's start so a
+                // drag shifts them all by one delta (same-track).
+                fMultiMove = fSelClips.size() > 1;
+                fMidiMoveOrig.clear();
+                if (fMultiMove)
+                    for (ClipId id : fSelClips)
+                        if (Track* tr = TrackOfClip(id))
+                            if (MidiClip* mc = tr->FindMidiClip(id))
+                                fMidiMoveOrig[id] = mc->startFrame;
             }
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
@@ -979,12 +988,24 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
     } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
-        // MIDI region move: preview live (same track), commit on drop.
-        MidiClip* c = t->FindMidiClip(fDragClip);
+        // MIDI region move: preview live (same track), commit on drop. When
+        // multiple are selected, shift them all by the grabbed clip's delta
+        // from each captured origin.
         Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
         if (start < 0) start = 0;
         fDragCurStart = start;
-        if (c) c->startFrame = start;
+        if (fMultiMove) {
+            const Frame delta = start - fDragClipOrig;
+            for (const auto& kv : fMidiMoveOrig)
+                if (Track* tr = TrackOfClip(kv.first))
+                    if (MidiClip* mc = tr->FindMidiClip(kv.first)) {
+                        Frame ns = kv.second + delta;
+                        mc->startFrame = ns < 0 ? 0 : ns;
+                    }
+            Invalidate();
+        } else if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+            c->startFrame = start;
+        }
     } else if (fDrag == Drag::Clip) {
         // Ghost preview: track the position + target lane; don't touch the
         // model until drop.
@@ -1171,6 +1192,23 @@ void TimelineView::MouseUp(BPoint where) {
             t->pan = fDragOrig;
             if (v != fDragOrig)
                 cmd = std::make_unique<SetTrackPanCommand>(fDragTrack, v);
+        } else if (fDrag == Drag::Clip && fDragIsMidiClip && fMultiMove) {
+            // MIDI group move: restore every selected region to its captured
+            // origin, then commit one macro shifting all by the grabbed delta.
+            const Frame delta = fDragCurStart - fDragClipOrig;
+            if (delta != 0) {
+                auto macro = std::make_unique<MacroCommand>("Move MIDI Clips");
+                for (const auto& kv : fMidiMoveOrig)
+                    if (Track* tr = TrackOfClip(kv.first))
+                        if (MidiClip* mc = tr->FindMidiClip(kv.first)) {
+                            mc->startFrame = kv.second;   // restore origin
+                            Frame ns = kv.second + delta;
+                            if (ns < 0) ns = 0;
+                            macro->Add(std::make_unique<MoveMidiClipCommand>(
+                                tr->id, kv.first, ns));
+                        }
+                if (!macro->Empty()) cmd = std::move(macro);
+            }
         } else if (fDrag == Drag::Clip && fMultiMove) {
             // Group move: shift every selected clip by the same frame delta
             // (same track each), as one undoable step.
@@ -1187,7 +1225,7 @@ void TimelineView::MouseUp(BPoint where) {
                 if (!macro->Empty()) cmd = std::move(macro);
             }
         } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
-            // MIDI region: restore the previewed start, then commit one move.
+            // MIDI region (single): restore the previewed start, commit one move.
             if (MidiClip* c = t->FindMidiClip(fDragClip)) {
                 const Frame v = fDragCurStart;
                 c->startFrame = fDragClipOrig;
