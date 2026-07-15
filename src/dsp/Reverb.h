@@ -23,16 +23,12 @@
 #include <memory>
 #include <vector>
 
-// The DuskVerb plate engine (verbatim port, global namespace); forward-declared
-// so Reverb.h stays light (the heavy engine headers are pulled only in the .cpp).
-class DattorroPlateVintage;
-
 namespace daw {
 
 // Reverb algorithm selector (param slot 2). 0 keeps the original Freeverb-style
 // reverb (back-compatible with old projects, whose params stop at [size, mix]);
 // higher values select a ported DuskVerb engine.
-enum class ReverbAlgo { Freeverb = 0, DuskPlate = 1 };
+enum class ReverbAlgo { Freeverb = 0, DuskPlate = 1, DuskHall = 2, DuskFDN = 3 };
 
 class Reverb : public IEffect {
 public:
@@ -65,7 +61,8 @@ private:
 
     void BuildLines();
 
-    void BuildPlate();   // (re)create + configure the DuskVerb plate engine
+    void BuildEngine();  // (re)create + configure the selected DuskVerb engine
+    void ApplyEngineParams();
 
     double fRoomSize;
     double fMix;
@@ -80,8 +77,11 @@ private:
     float fCombLP[2][kNumCombs] = {};   // Freeverb damping filter state
     Line  fAllpass[2][kNumAllpass];
 
-    // DuskVerb plate engine + de-interleave scratch (processed in chunks).
-    std::unique_ptr<DattorroPlateVintage> fPlate;
+    // DuskVerb engines (owned behind a pImpl so the heavy/templated engine
+    // headers stay in the .cpp) + de-interleave scratch (processed in chunks).
+    struct Engines;
+    std::unique_ptr<Engines> fEng;
+    bool HasEngine() const;   // true if a DuskVerb engine is selected + built
     static constexpr int kPlateChunk = 1024;
     std::vector<float> fInL, fInR, fOutL, fOutR;
 };

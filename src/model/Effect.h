@@ -59,9 +59,15 @@ inline EffectDesc DelayDesc(float sec = 0.25f, float fb = 0.35f, float mix = 0.3
 inline EffectDesc ReverbDesc(float roomSize = 0.5f, float mix = 0.3f) {
     return EffectDesc{EffectType::Reverb, {roomSize, mix}};
 }
-// DuskVerb plate engine preset: params [size, mix, algorithm=1, decay s, tone].
+// DuskVerb engine presets: params [size, mix, algorithm, decay s, tone].
 inline EffectDesc DuskPlateDesc() {
     return EffectDesc{EffectType::Reverb, {0.7f, 0.35f, 1.0f, 2.6f, 0.5f}};
+}
+inline EffectDesc DuskHallDesc() {
+    return EffectDesc{EffectType::Reverb, {0.7f, 0.35f, 2.0f, 3.4f, 0.5f}};
+}
+inline EffectDesc DuskFdnDesc() {
+    return EffectDesc{EffectType::Reverb, {0.7f, 0.35f, 3.0f, 2.8f, 0.5f}};
 }
 inline EffectDesc CompressorDesc(float thrDb = -20.0f, float ratio = 4.0f,
                                  float attackMs = 10.0f, float releaseMs = 100.0f,
@@ -104,7 +110,7 @@ inline void FxParamRange(EffectType t, int slot, float* mn, float* mx) {
     };
     switch (t) {
         case EffectType::Delay:      pick({{0.01f,1},{0,0.95f},{0,1}}); break;
-        case EffectType::Reverb:     pick({{0,1},{0,1},{0,1},{0.2f,12},{0,1}}); break;
+        case EffectType::Reverb:     pick({{0,1},{0,1},{0,3},{0.2f,12},{0,1}}); break;
         case EffectType::Compressor: pick({{-60,0},{1,20},{0.1f,100},{5,1000},{0,24}}); break;
         case EffectType::Saturator:  pick({{0,1},{0,1},{-24,24}}); break;
         case EffectType::Gate:       pick({{-80,0},{1,20},{0.1f,100},{5,1000},{0,80}}); break;

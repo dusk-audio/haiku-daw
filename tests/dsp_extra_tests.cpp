@@ -43,6 +43,25 @@ int main() {
         CHECK(finite);
     }
 
+    // 1c. DuskVerb hall + FDN engines: impulse -> finite decaying tail.
+    for (float algo : { 2.0f, 3.0f }) {   // 2 = DuskHall, 3 = DuskFDN
+        Reverb rv(0.7, 1.0);
+        rv.SetParam(2, algo);
+        rv.SetParam(3, 3.0f);
+        rv.Prepare(SR);
+        const int N = 48000;
+        std::vector<float> buf(N * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        rv.Process(buf.data(), N);
+        float lateEnergy = 0.0f; bool finite = true;
+        for (int i = 0; i < N * 2; i++) {
+            if (!std::isfinite(buf[i])) finite = false;
+            if (i >= 24000) lateEnergy += std::fabs(buf[i]);
+        }
+        CHECK(finite);
+        CHECK(lateEnergy > 1e-3f);
+    }
+
     // 1. Reverb: impulse then silence yields a decaying, non-silent tail.
     {
         Reverb rv(0.7, 1.0);   // large room, fully wet so the tail is visible

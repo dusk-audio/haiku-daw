@@ -1,11 +1,57 @@
 #include "Reverb.h"
 
-#include "duskverb/DattorroPlateVintage.h"   // verbatim DuskVerb plate engine
+#include "duskverb/DattorroPlateVintage.h"   // verbatim DuskVerb engines
+#include "duskverb/DenseHallReverb.h"
+#include "duskverb/FDNReverb.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace daw {
+
+// Owns the concrete DuskVerb engines. Only the selected one is instantiated.
+// All three share the same process/prepare/clear/setDecayTime/setSize/
+// setTrebleMultiply API, so dispatch is a simple branch.
+struct Reverb::Engines {
+    std::unique_ptr<DattorroPlateVintage> plate;
+    std::unique_ptr<DenseHallReverb>      hall;
+    std::unique_ptr<FDNReverb>            fdn;
+
+    bool Any() const { return plate || hall || fdn; }
+    void Clear() { plate.reset(); hall.reset(); fdn.reset(); }
+
+    void Prepare(double sr) {
+        if (plate) plate->prepare(sr, Reverb::kPlateChunk);
+        if (hall)  hall->prepare(sr, Reverb::kPlateChunk);
+        if (fdn)   fdn->prepare(sr, Reverb::kPlateChunk);
+    }
+    void ClearBuffers() {
+        if (plate) plate->clearBuffers();
+        if (hall)  hall->clear();
+        if (fdn)   fdn->clearBuffers();
+    }
+    void Process(const float* inL, const float* inR,
+                 float* outL, float* outR, int n) {
+        if (plate) plate->process(inL, inR, outL, outR, n);
+        else if (hall) hall->process(inL, inR, outL, outR, n);
+        else if (fdn)  fdn->process(inL, inR, outL, outR, n);
+    }
+    void SetDecay(float s) {
+        if (plate) plate->setDecayTime(s);
+        if (hall)  hall->setDecayTime(s);
+        if (fdn)   fdn->setDecayTime(s);
+    }
+    void SetSize(float s) {
+        if (plate) plate->setSize(s);
+        if (hall)  hall->setSize(s);
+        if (fdn)   fdn->setSize(s);
+    }
+    void SetTreble(float m) {
+        if (plate) plate->setTrebleMultiply(m);
+        if (hall)  hall->setTrebleMultiply(m);
+        if (fdn)   fdn->setTrebleMultiply(m);
+    }
+};
 
 namespace {
 // Base delay lengths at the 44.1 kHz calibration rate (DuskVerb's
@@ -29,11 +75,13 @@ constexpr float kDenormal = 1.0e-15f;
 } // namespace
 
 Reverb::Reverb(double roomSize, double mix)
-    : fRoomSize(roomSize), fMix(mix) {
+    : fRoomSize(roomSize), fMix(mix), fEng(new Engines()) {
     BuildLines();   // self-safe if Process runs before Prepare
 }
 
-Reverb::~Reverb() = default;   // out-of-line: plate type complete here
+Reverb::~Reverb() = default;   // out-of-line: engine types complete here
+
+bool Reverb::HasEngine() const { return fEng && fEng->Any(); }
 
 void Reverb::SetParams(double roomSize, double mix) {
     fRoomSize = roomSize;
@@ -45,22 +93,32 @@ void Reverb::Prepare(double sampleRate) {
     if (sampleRate > 0)
         fSampleRate = sampleRate;
     BuildLines();
-    if (fAlgo == (int)ReverbAlgo::DuskPlate) BuildPlate();
+    if (fAlgo != (int)ReverbAlgo::Freeverb) BuildEngine();
+    else if (fEng) fEng->Clear();
 }
 
-// (Re)create the DuskVerb plate engine (allocates — call off the RT thread).
-// The engine's post-prepare defaults are the calibrated Vintage Vocal Plate;
-// the DAW's Size / Decay / Tone params ride on top.
-void Reverb::BuildPlate() {
-    fPlate.reset(new DattorroPlateVintage());
-    fPlate->prepare(fSampleRate, kPlateChunk);
+// (Re)create the selected DuskVerb engine (allocates — call off the RT thread).
+// Each engine's post-prepare state is its calibrated default; the DAW's
+// Size / Decay / Tone params ride on top.
+void Reverb::BuildEngine() {
+    fEng->Clear();
+    switch ((ReverbAlgo)fAlgo) {
+        case ReverbAlgo::DuskPlate: fEng->plate.reset(new DattorroPlateVintage()); break;
+        case ReverbAlgo::DuskHall:  fEng->hall.reset(new DenseHallReverb()); break;
+        case ReverbAlgo::DuskFDN:   fEng->fdn.reset(new FDNReverb()); break;
+        default: return;
+    }
+    fEng->Prepare(fSampleRate);
     fInL.assign(kPlateChunk, 0.0f);  fInR.assign(kPlateChunk, 0.0f);
     fOutL.assign(kPlateChunk, 0.0f); fOutR.assign(kPlateChunk, 0.0f);
-    const double sz = std::clamp(fRoomSize, 0.0, 1.0);
-    const double tn = std::clamp(fTone, 0.0, 1.0);
-    fPlate->setDecayTime((float)std::max(0.1, fDecay));
-    fPlate->setSize((float)sz);
-    fPlate->setTrebleMultiply((float)(0.5 + tn));   // 0.5..1.5
+    ApplyEngineParams();
+}
+
+void Reverb::ApplyEngineParams() {
+    if (!HasEngine()) return;
+    fEng->SetDecay((float)std::max(0.1, fDecay));
+    fEng->SetSize((float)std::clamp(fRoomSize, 0.0, 1.0));
+    fEng->SetTreble((float)(0.5 + std::clamp(fTone, 0.0, 1.0)));   // 0.5..1.5
 }
 
 void Reverb::BuildLines() {
@@ -81,13 +139,13 @@ void Reverb::Reset() {
         for (int i = 0; i < kNumCombs; i++)   { fComb[c][i].Clear(); fCombLP[c][i] = 0.0f; }
         for (int i = 0; i < kNumAllpass; i++) fAllpass[c][i].Clear();
     }
-    if (fPlate) fPlate->clearBuffers();
+    if (fEng) fEng->ClearBuffers();
 }
 
 void Reverb::Process(float* stereo, int frames) {
-    // DuskVerb plate: de-interleave in chunks, run the engine (100% wet), then
+    // DuskVerb engine: de-interleave in chunks, run the engine (100% wet), then
     // mix wet/dry back. The engine tail is always live; `mix` blends it in.
-    if (fAlgo == (int)ReverbAlgo::DuskPlate && fPlate) {
+    if (HasEngine()) {
         const float wet = (float)std::max(0.0, std::min(1.0, fMix));
         const float dry = 1.0f - wet;
         int off = 0;
@@ -97,8 +155,8 @@ void Reverb::Process(float* stereo, int frames) {
                 fInL[i] = stereo[(off + i) * 2 + 0];
                 fInR[i] = stereo[(off + i) * 2 + 1];
             }
-            fPlate->process(fInL.data(), fInR.data(),
-                            fOutL.data(), fOutR.data(), n);
+            fEng->Process(fInL.data(), fInR.data(),
+                          fOutL.data(), fOutR.data(), n);
             for (int i = 0; i < n; i++) {
                 stereo[(off + i) * 2 + 0] = fInL[i] * dry + fOutL[i] * wet;
                 stereo[(off + i) * 2 + 1] = fInR[i] * dry + fOutR[i] * wet;
@@ -153,17 +211,17 @@ void Reverb::SetParam(int slot, float v) {
     switch (slot) {
         case 0:
             fRoomSize = v;
-            if (fPlate) fPlate->setSize((float)std::clamp((double)v, 0.0, 1.0));
+            if (HasEngine()) fEng->SetSize((float)std::clamp((double)v, 0.0, 1.0));
             break;
         case 1: fMix = v; break;
         case 2: fAlgo = (int)(v + 0.5f); break;   // rebuilt on next Prepare
         case 3:
             fDecay = v;
-            if (fPlate) fPlate->setDecayTime((float)std::max(0.1f, v));
+            if (HasEngine()) fEng->SetDecay((float)std::max(0.1f, v));
             break;
         case 4:
             fTone = v;
-            if (fPlate) fPlate->setTrebleMultiply(
+            if (HasEngine()) fEng->SetTreble(
                 (float)(0.5 + std::clamp((double)v, 0.0, 1.0)));
             break;
     }

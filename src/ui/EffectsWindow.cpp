@@ -112,8 +112,8 @@ float EffectsView::PanelTop(size_t i) const {
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    // 7 built-in + Dusk Plate add buttons + one per loaded plugin.
-    const int addRows = 8 + (int)PluginHost::Instance().Plugins().size();
+    // 7 built-in + 3 DuskVerb add buttons + one per loaded plugin.
+    const int addRows = 10 + (int)PluginHost::Instance().Plugins().size();
     y += addRows * 26 + 12;
     return y;
 }
@@ -328,8 +328,12 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColText());
         const char* title = EffName(d.type);
         if (d.type == EffectType::Plugin) title = d.pluginName.c_str();
-        else if (d.type == EffectType::Reverb && d.p(2) >= 0.5f)
-            title = "Reverb — Dusk Plate";
+        else if (d.type == EffectType::Reverb) {
+            const int algo = (int)(d.p(2) + 0.5f);
+            title = algo == 1 ? "Reverb — Dusk Plate"
+                  : algo == 2 ? "Reverb — Dusk Hall"
+                  : algo == 3 ? "Reverb — Dusk FDN" : "Reverb";
+        }
         DrawString(title, BPoint(panel.left + 8, panel.top + 15));
 
         // Up / Down / Remove buttons in the title bar.
@@ -397,14 +401,16 @@ void EffectsView::Draw(BRect) {
         fHits.push_back({ (int)at[k], 4, 0, b, 0, 0 });
         ay += 26;
     }
-    // DuskVerb plate preset (a Reverb with the plate engine selected).
-    {
+    // DuskVerb engine presets (a Reverb with a DuskVerb engine selected).
+    // slot carries the algorithm (1 plate, 2 hall, 3 FDN).
+    const char* duskLbls[3] = { "Add Dusk Plate", "Add Dusk Hall", "Add Dusk FDN" };
+    for (int k = 0; k < 3; k++) {
         BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
         SetHighColor(ColHeaderHi()); FillRect(b);
         SetHighColor(ColGrid());     StrokeRect(b);
-        SetHighColor(ColAccent());   DrawString("Add Dusk Plate",
+        SetHighColor(ColAccent());   DrawString(duskLbls[k],
                                                 BPoint(b.left + 10, b.bottom - 6));
-        fHits.push_back({ (int)EffectType::Reverb, 4, 1, b, 0, 0 });  // slot 1 = plate
+        fHits.push_back({ (int)EffectType::Reverb, 4, k + 1, b, 0, 0 });
         ay += 26;
     }
 
@@ -507,8 +513,9 @@ void EffectsView::MouseDown(BPoint where) {
                     fChain.push_back(d);
                     Apply(); Invalidate();
                 }
-            } else if ((EffectType)h.effect == EffectType::Reverb && h.slot == 1) {
-                fChain.push_back(DuskPlateDesc());   // Dusk Plate preset
+            } else if ((EffectType)h.effect == EffectType::Reverb && h.slot >= 1) {
+                fChain.push_back(h.slot == 1 ? DuskPlateDesc()
+                                 : h.slot == 2 ? DuskHallDesc() : DuskFdnDesc());
                 Apply(); Invalidate();
             } else {
                 fChain.push_back(MakeDefault((EffectType)h.effect));

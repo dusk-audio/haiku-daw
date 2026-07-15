@@ -29,6 +29,7 @@ add_library(daw_model
     src/dsp/duskverb/DattorroPlateVintage.cpp   # DuskVerb plate (verbatim port)
     src/dsp/duskverb/DattorroTank.cpp           # DuskVerb Dattorro tank (verbatim)
     src/dsp/duskverb/OctaveGEQDesign.cpp        # DuskVerb octave GEQ design (verbatim)
+    src/dsp/duskverb/FDNReverb.cpp              # DuskVerb FDN / AccurateHall (verbatim)
     src/dsp/Compressor.cpp      # kit-free dynamics compressor
     src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
     src/dsp/Loudness.cpp        # kit-free BS.1770 LUFS + true-peak meter
