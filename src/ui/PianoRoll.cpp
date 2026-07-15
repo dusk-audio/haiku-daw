@@ -31,11 +31,11 @@ static const char* NoteName(int pitch, char* buf, size_t n) {
     return buf;
 }
 
-PianoRollView::PianoRollView(BRect frame, TrackId track,
+PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
                              std::vector<MidiNote> notes, TempoMap tempo,
                              double sampleRate, BMessenger apply)
     : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
-      fNotes(std::move(notes)), fTrack(track), fTempo(tempo),
+      fNotes(std::move(notes)), fTrack(track), fClip(clip), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
     SetViewColor(ColBackground());
     fTempo.sampleRate = sampleRate;
@@ -164,6 +164,7 @@ int PianoRollView::NoteAt(BPoint where) const {
 void PianoRollView::Apply() {
     BMessage m(kMsgApplyNotes);
     m.AddInt64("track", (int64)fTrack);
+    m.AddInt64("clip", (int64)fClip);
     for (const MidiNote& n : fNotes) {
         m.AddInt32("np", n.pitch);
         m.AddInt32("nv", n.velocity);
@@ -367,11 +368,12 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
 
 // --- window ---------------------------------------------------------------
 
-PianoRoll::PianoRoll(BRect frame, TrackId track, std::vector<MidiNote> notes,
+PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
+                     std::vector<MidiNote> notes,
                      TempoMap tempo, double sampleRate, BMessenger apply)
     : BWindow(frame, "Piano Roll", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
-    fView = new PianoRollView(Bounds(), track, std::move(notes), tempo,
+    fView = new PianoRollView(Bounds(), track, clip, std::move(notes), tempo,
                               sampleRate, apply);
     AddChild(fView);
     fView->MakeFocus(true);

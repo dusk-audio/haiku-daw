@@ -103,9 +103,14 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << c.gain << " " << c.takeGroup << " " << (c.takeActive ? 1 : 0)
               << "\n";
 
-        for (const MidiNote& n : t.notes)
-            f << "note " << n.pitch << " " << n.velocity << " "
-              << (long long)n.startFrame << " " << (long long)n.lengthFrames << "\n";
+        for (const MidiClip& mc : t.midiClips) {
+            f << "midiclip " << mc.id << " " << (long long)mc.startFrame << " "
+              << (long long)mc.lengthFrames << " " << mc.colorIndex << "\n";
+            for (const MidiNote& n : mc.notes)   // frames are clip-relative
+                f << "note " << n.pitch << " " << n.velocity << " "
+                  << (long long)n.startFrame << " "
+                  << (long long)n.lengthFrames << "\n";
+        }
 
         for (const EffectDesc& e : t.fx) {
             f << "fx " << (int)e.type << " " << e.params.size();
@@ -170,6 +175,8 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     bool     haveTrack = false;
     TrackId  maxTrack = 0;
     ClipId   maxClip  = 0;
+    int      curMidiIdx    = -1;      // index into cur.midiClips for `note` lines
+    bool     curMidiLegacy = false;   // current clip was synthesized from old notes
 
     // Tempo/meter changes are collected and applied after the whole file is
     // read (frame-0 seed depends on `tempo`/`timesig`, which may appear anywhere).
@@ -242,6 +249,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         else if (kw == "track") {
             commit();
             cur = Track{};
+            curMidiIdx = -1; curMidiLegacy = false;
             std::string type;
             int mute, solo, arm;
             iss >> cur.id >> type >> cur.gain >> cur.pan >> mute >> solo >> arm;
@@ -282,12 +290,38 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);
         }
+        else if (kw == "midiclip" && haveTrack) {
+            MidiClip mc;
+            long long id = 0, st = 0, ln = 0; int col = 0;
+            iss >> id >> st >> ln >> col;
+            mc.id = (ClipId)id; mc.startFrame = (Frame)st;
+            mc.lengthFrames = (Frame)ln; mc.colorIndex = col;
+            if (mc.id > maxClip) maxClip = mc.id;
+            cur.midiClips.push_back(mc);
+            curMidiIdx = (int)cur.midiClips.size() - 1;
+            curMidiLegacy = false;
+        }
         else if (kw == "note" && haveTrack) {
             MidiNote n;
             long long start, len;
             iss >> n.pitch >> n.velocity >> start >> len;
             n.startFrame = start; n.lengthFrames = len;
-            cur.notes.push_back(n);
+            // Legacy files stored track-absolute notes with no enclosing clip;
+            // migrate them into one implicit region at frame 0 whose window
+            // grows to cover them (notes stay absolute == relative-to-0).
+            if (curMidiIdx < 0) {
+                MidiClip mc; mc.id = kInvalidClipId;   // id assigned post-load
+                mc.startFrame = 0; mc.lengthFrames = 1;
+                cur.midiClips.push_back(mc);
+                curMidiIdx = (int)cur.midiClips.size() - 1;
+                curMidiLegacy = true;
+            }
+            cur.midiClips[(size_t)curMidiIdx].notes.push_back(n);
+            if (curMidiLegacy) {
+                const Frame end = n.startFrame + n.lengthFrames;
+                MidiClip& mc = cur.midiClips[(size_t)curMidiIdx];
+                if (end > mc.lengthFrames) mc.lengthFrames = end;
+            }
         }
         else if (kw == "fx" && haveTrack) {
             EffectDesc e;
@@ -354,6 +388,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     for (const MeterChange& mc : meterChanges) p.tempoMap.SetMeterAt(mc.frame, mc.num, mc.denom);
 
     p.ReserveIds(maxTrack, maxClip);
+    // Give migrated (legacy) MIDI regions real ids now that maxClip is known.
+    for (Track& t : p.Tracks())
+        for (MidiClip& mc : t.midiClips)
+            if (mc.id == kInvalidClipId) mc.id = p.NextClipId();
     return true;
 }
 

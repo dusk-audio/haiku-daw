@@ -204,13 +204,22 @@ static void test_undo_unification() {
     stack.Undo(p);
     CHECK(p.masterFx.empty());
 
-    // SetNotesCommand.
+    // AddMidiClipCommand + SetMidiClipNotesCommand.
+    MidiClip mc; mc.startFrame = 0; mc.lengthFrames = 1000;
+    auto addMc = std::make_unique<AddMidiClipCommand>(tid, mc);
+    AddMidiClipCommand* addMcPtr = addMc.get();
+    stack.Execute(std::move(addMc), p);
+    const ClipId mcId = addMcPtr->CreatedId();
+    CHECK(p.FindTrack(tid)->midiClips.size() == 1);
     MidiNote n; n.pitch = 60; n.startFrame = 0; n.lengthFrames = 100;
-    stack.Execute(std::make_unique<SetNotesCommand>(
-        tid, std::vector<MidiNote>{ n }), p);
-    CHECK(p.FindTrack(tid)->notes.size() == 1);
+    stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+        tid, mcId, std::vector<MidiNote>{ n }), p);
+    CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->notes.size() == 1);
+    CHECK(p.FindTrack(tid)->CollectNotes().size() == 1);
     stack.Undo(p);
-    CHECK(p.FindTrack(tid)->notes.empty());
+    CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->notes.empty());
+    stack.Undo(p);   // undo the clip add
+    CHECK(p.FindTrack(tid)->midiClips.empty());
 
     // Coalescing: two consecutive SetInstrumentCommand -> ONE undo step that
     // restores the original instrument (before the first).
@@ -375,19 +384,31 @@ static void test_resize_clip_and_edit_note() {
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "M"), p);
     TrackId tm = p.Tracks().back().id;
-    MidiNote n; n.pitch = 60; n.startFrame = 0; n.lengthFrames = 100;
-    stack.Execute(std::make_unique<AddNoteCommand>(tm, n), p);
-    MidiNote e; e.pitch = 67; e.velocity = 40; e.startFrame = 480; e.lengthFrames = 240;
-    stack.Execute(std::make_unique<NoteEditCommand>(tm, 0, e), p);
-    CHECK(p.FindTrack(tm)->notes[0].pitch == 67);
-    CHECK(p.FindTrack(tm)->notes[0].velocity == 40);
-    CHECK(p.FindTrack(tm)->notes[0].startFrame == 480);
-    CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 240);
+    MidiClip mc; mc.startFrame = 1000; mc.lengthFrames = 2000;
+    MidiNote n; n.pitch = 60; n.startFrame = 100; n.lengthFrames = 100;  // clip-rel
+    mc.notes.push_back(n);
+    auto addm = std::make_unique<AddMidiClipCommand>(tm, mc);
+    AddMidiClipCommand* addmPtr = addm.get();
+    stack.Execute(std::move(addm), p);
+    const ClipId mcId = addmPtr->CreatedId();
+    // CollectNotes offsets the relative note by the clip start (1000+100).
+    CHECK(p.FindTrack(tm)->CollectNotes().size() == 1);
+    CHECK(p.FindTrack(tm)->CollectNotes()[0].startFrame == 1100);
+
+    // Move the region: notes follow (relative frames unchanged).
+    stack.Execute(std::make_unique<MoveMidiClipCommand>(tm, mcId, 5000), p);
+    CHECK(p.FindTrack(tm)->FindMidiClip(mcId)->startFrame == 5000);
+    CHECK(p.FindTrack(tm)->CollectNotes()[0].startFrame == 5100);
     stack.Undo(p);
-    CHECK(p.FindTrack(tm)->notes[0].pitch == 60);
-    CHECK(p.FindTrack(tm)->notes[0].velocity == 100);
-    CHECK(p.FindTrack(tm)->notes[0].startFrame == 0);
-    CHECK(p.FindTrack(tm)->notes[0].lengthFrames == 100);
+    CHECK(p.FindTrack(tm)->FindMidiClip(mcId)->startFrame == 1000);
+
+    // Resize the window smaller than the note's start -> note kept but silent.
+    stack.Execute(std::make_unique<ResizeMidiClipCommand>(tm, mcId, 50), p);
+    CHECK(p.FindTrack(tm)->FindMidiClip(mcId)->lengthFrames == 50);
+    CHECK(p.FindTrack(tm)->FindMidiClip(mcId)->notes.size() == 1);  // not deleted
+    CHECK(p.FindTrack(tm)->CollectNotes().empty());                 // out of window
+    stack.Undo(p);
+    CHECK(p.FindTrack(tm)->CollectNotes().size() == 1);             // back in window
 }
 
 static void test_track_manage_and_fade() {
@@ -475,18 +496,19 @@ static void test_remove_clip_and_note() {
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "M"), p);
     TrackId tm = p.Tracks().back().id;
-    MidiNote n1; n1.pitch = 60; n1.startFrame = 0;
-    MidiNote n2; n2.pitch = 64; n2.startFrame = 480;
-    stack.Execute(std::make_unique<AddNoteCommand>(tm, n1), p);
-    stack.Execute(std::make_unique<AddNoteCommand>(tm, n2), p);
-    CHECK(p.FindTrack(tm)->notes.size() == 2);
+    MidiClip mc1; mc1.startFrame = 0;    mc1.lengthFrames = 1000;
+    MidiClip mc2; mc2.startFrame = 2000; mc2.lengthFrames = 1000;
+    auto a1 = std::make_unique<AddMidiClipCommand>(tm, mc1);
+    auto* a1p = a1.get(); stack.Execute(std::move(a1), p);
+    stack.Execute(std::make_unique<AddMidiClipCommand>(tm, mc2), p);
+    CHECK(p.FindTrack(tm)->midiClips.size() == 2);
 
-    stack.Execute(std::make_unique<RemoveNoteCommand>(tm, 0), p);   // remove n1
-    CHECK(p.FindTrack(tm)->notes.size() == 1);
-    CHECK(p.FindTrack(tm)->notes[0].pitch == 64);
-    stack.Undo(p);   // n1 restored at index 0
-    CHECK(p.FindTrack(tm)->notes.size() == 2);
-    CHECK(p.FindTrack(tm)->notes[0].pitch == 60);
+    stack.Execute(std::make_unique<RemoveMidiClipCommand>(tm, a1p->CreatedId()), p);
+    CHECK(p.FindTrack(tm)->midiClips.size() == 1);
+    CHECK(p.FindTrack(tm)->midiClips[0].startFrame == 2000);
+    stack.Undo(p);   // clip comes back, re-sorted by start
+    CHECK(p.FindTrack(tm)->midiClips.size() == 2);
+    CHECK(p.FindTrack(tm)->midiClips[0].startFrame == 0);
 }
 
 static void test_effect_commands() {
@@ -521,18 +543,25 @@ static void test_note_commands() {
     CommandStack stack;
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), p);
     TrackId id = p.Tracks().front().id;
-    CHECK(p.FindTrack(id)->notes.empty());
+    CHECK(p.FindTrack(id)->midiClips.empty());
+
+    MidiClip mc; mc.startFrame = 0; mc.lengthFrames = 4000;
+    auto add = std::make_unique<AddMidiClipCommand>(id, mc);
+    auto* addPtr = add.get();
+    stack.Execute(std::move(add), p);
+    const ClipId cid = addPtr->CreatedId();
 
     MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 1000; n.lengthFrames = 500;
-    stack.Execute(std::make_unique<AddNoteCommand>(id, n), p);
-    CHECK(p.FindTrack(id)->notes.size() == 1);
-    CHECK(p.FindTrack(id)->notes[0].pitch == 64);
-    CHECK(p.FindTrack(id)->notes[0].startFrame == 1000);
+    stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+        id, cid, std::vector<MidiNote>{ n }), p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 1);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].pitch == 64);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].startFrame == 1000);
 
     stack.Undo(p);
-    CHECK(p.FindTrack(id)->notes.empty());
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.empty());
     stack.Redo(p);
-    CHECK(p.FindTrack(id)->notes.size() == 1);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 1);
 }
 
 static void test_frame_seconds_roundtrip() {

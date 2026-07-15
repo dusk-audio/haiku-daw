@@ -87,8 +87,8 @@ void TimelineView::PanBy(Frame deltaFrames) {
     for (const Track& t : fProject->Tracks()) {
         for (const Clip& c : t.clips)
             if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
-        for (const MidiNote& n : t.notes)
-            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+        for (const MidiClip& mc : t.midiClips)
+            if (mc.startFrame + mc.lengthFrames > end) end = mc.startFrame + mc.lengthFrames;
     }
     if (fScrollFrame > end) fScrollFrame = end;
     Invalidate();
@@ -108,8 +108,8 @@ void TimelineView::ZoomToFit() {
     for (const Track& t : fProject->Tracks()) {
         for (const Clip& c : t.clips)
             if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
-        for (const MidiNote& n : t.notes)
-            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+        for (const MidiClip& mc : t.midiClips)
+            if (mc.startFrame + mc.lengthFrames > end) end = mc.startFrame + mc.lengthFrames;
     }
     const float contentW = Bounds().Width() - kHeaderWidth;
     if (end <= 0 || contentW < 1.0f) return;
@@ -213,12 +213,26 @@ void TimelineView::PasteToTrack(TrackId track, Frame at, TrackType type) {
         c.startFrame = at;
         fStack->Execute(std::make_unique<AddClipCommand>(track, c), *fProject);
         Invalidate();
-    } else if (type == TrackType::Midi && fHasClipNote) {
-        MidiNote n = fClipNote;
-        n.startFrame = at;
-        fStack->Execute(std::make_unique<AddNoteCommand>(track, n), *fProject);
+    } else if (type == TrackType::Midi && fHasClipMidi) {
+        MidiClip c = fClipMidi;
+        c.id = kInvalidClipId;      // AddMidiClipCommand assigns a fresh id
+        c.startFrame = at;
+        fStack->Execute(std::make_unique<AddMidiClipCommand>(track, c), *fProject);
         Invalidate();
     }
+}
+
+// Open the piano-roll editor for one MIDI region. Notes are edited clip-relative
+// and posted back scoped to `clip` (see PianoRollView::Apply / kMsgApplyNotes).
+void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    const MidiClip* c = t->FindMidiClip(clip);
+    if (!c) return;
+    BPoint sp = ConvertToScreen(BPoint(kHeaderWidth + 40, kRulerHeight + 40));
+    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
+    (new PianoRoll(wr, track, clip, c->notes, fProject->tempoMap,
+                   fProject->sampleRate, BMessenger(Window())))->Show();
 }
 
 void TimelineView::PasteAtPlayhead() {
@@ -235,14 +249,15 @@ void TimelineView::PasteAtPlayhead() {
             fStack->Execute(std::make_unique<AddClipCommand>(target, c), *fProject);
             Invalidate();
         }
-    } else if (fHasClipNote) {
+    } else if (fHasClipMidi) {
         TrackId target = kInvalidTrackId;
         for (const Track& t : fProject->Tracks())
             if (t.type == TrackType::Midi) { target = t.id; break; }
         if (target != kInvalidTrackId) {
-            MidiNote n = fClipNote;
-            n.startFrame = at;
-            fStack->Execute(std::make_unique<AddNoteCommand>(target, n), *fProject);
+            MidiClip c = fClipMidi;
+            c.id = kInvalidClipId;
+            c.startFrame = at;
+            fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
             Invalidate();
         }
     }
@@ -375,25 +390,6 @@ int TimelineView::PitchAt(BRect lane, float y) const {
     if (pitch < 0) pitch = 0;
     if (pitch > 127) pitch = 127;
     return pitch;
-}
-
-int TimelineView::NoteIndexAt(const Track& t, BRect lane, BPoint where) const {
-    const float h = lane.Height();
-    for (size_t i = 0; i < t.notes.size(); i++) {
-        const MidiNote& n = t.notes[i];
-        float x0 = FrameToX(n.startFrame);
-        float x1 = FrameToX(n.startFrame + n.lengthFrames);
-        int p = n.pitch - kMidiLow;
-        if (p < 0) p = 0;
-        if (p >= kMidiRange) p = kMidiRange - 1;
-        const float ny = lane.bottom - (float)p / kMidiRange * h;
-        const float nh = h / kMidiRange + 1.0f;
-        BRect r(x0, ny - nh, x1, ny);
-        r.InsetBy(-2, -2);   // a little slop for easy clicking
-        if (r.Contains(where))
-            return (int)i;
-    }
-    return -1;
 }
 
 Frame TimelineView::BarStartFrameAt(Frame f) const {
@@ -566,18 +562,11 @@ void TimelineView::MouseDown(BPoint where) {
             int32 clicks = 1;
             if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
                 m->FindInt32("clicks", &clicks);
-            if (clicks >= 2) {
+            if (clicks >= 2) {   // double-click a track name: rename it
                 BPoint sp = ConvertToScreen(where);
-                if (t.type == TrackType::Midi) {   // MIDI name: open piano roll
-                    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
-                    (new PianoRoll(wr, t.id, t.notes, fProject->tempoMap,
-                                   fProject->sampleRate,
-                                   BMessenger(Window())))->Show();
-                } else {                            // audio name: rename
-                    BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
-                    (new RenameWindow(wr, t.id, t.name.c_str(),
-                                      BMessenger(Window())))->Show();
-                }
+                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                (new RenameWindow(wr, t.id, t.name.c_str(),
+                                  BMessenger(Window())))->Show();
                 return;
             }
         }
@@ -595,59 +584,95 @@ void TimelineView::MouseDown(BPoint where) {
         }
     }
 
-    // MIDI track content: right-click deletes; on a note, drag to move or
-    // (near its right edge) resize; on empty space, add a note.
+    // MIDI track content: regions behave like audio clips. Double-click opens
+    // the piano roll (creating a region first on empty space); drag moves or
+    // (right edge) resizes; right-click = Copy/Delete/Paste. Notes are edited
+    // in the piano roll, not here.
     if (t.type == TrackType::Midi) {
-        const int hit = NoteIndexAt(t, lane, where);
+        const Frame at = XToFrame(where.x);
+        int hit = -1;
+        for (size_t i = 0; i < t.midiClips.size(); i++) {
+            const MidiClip& c = t.midiClips[i];
+            if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
+                hit = (int)i; break;
+            }
+        }
+        int32 clicks = 1;
+        if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+            m->FindInt32("clicks", &clicks);
+
         if (rightClick) {
             if (hit >= 0) {
+                const MidiClip& c = t.midiClips[(size_t)hit];
                 const int pick = ContextMenu(where);
                 if (pick == 0) {          // Copy
-                    fClipNote = t.notes[(size_t)hit];
-                    fHasClipNote = true; fHasClipClip = false;
+                    fClipMidi = c; fHasClipMidi = true;
+                    fHasClipClip = false; fHasClipNote = false;
                     fClipType = TrackType::Midi;
                 } else if (pick == 1) {   // Delete
-                    fStack->Execute(std::make_unique<RemoveNoteCommand>(
-                        t.id, (size_t)hit), *fProject);
+                    fStack->Execute(std::make_unique<RemoveMidiClipCommand>(
+                        t.id, c.id), *fProject);
                 }
-            } else if (fHasClipNote) {     // empty lane: offer paste
+            } else if (fHasClipMidi) {     // empty lane: offer paste
                 if (PastePopup(where))
                     PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Midi);
             }
             Invalidate(lane);
             return;
         }
-        if (hit >= 0) {
-            const MidiNote& n = t.notes[(size_t)hit];
-            const float xStart = FrameToX(n.startFrame);
-            const float xEnd   = FrameToX(n.startFrame + n.lengthFrames);
+
+        if (clicks >= 2) {   // open the piano roll (create a region on empty)
+            ClipId cid = kInvalidClipId;
+            if (hit >= 0) {
+                cid = t.midiClips[(size_t)hit].id;
+            } else {
+                Frame st = Snapped(XToFrame(where.x));
+                if (st < 0) st = 0;
+                MidiClip nc;
+                nc.startFrame = st;
+                nc.lengthFrames = fProject->tempoMap.FrameAt(
+                                      fProject->tempoMap.BeatAt(st) + 4) - st;  // ~1 bar
+                if (nc.lengthFrames < 1)
+                    nc.lengthFrames = (Frame)(fProject->tempoMap.FramesPerBeatAt(st) * 4);
+                auto add = std::make_unique<AddMidiClipCommand>(t.id, nc);
+                AddMidiClipCommand* ap = add.get();
+                fStack->Execute(std::move(add), *fProject);
+                cid = ap->CreatedId();
+                Invalidate(lane);
+            }
+            if (cid != kInvalidClipId) OpenPianoRollForClip(t.id, cid);
+            return;
+        }
+
+        if (hit >= 0) {   // select + begin move/resize
+            const MidiClip& c = t.midiClips[(size_t)hit];
+            if (modifiers() & B_SHIFT_KEY) {
+                if (ClipSelected(c.id)) fSelClips.erase(c.id);
+                else                    fSelClips.insert(c.id);
+                Invalidate(lane);
+                return;
+            }
+            if (!ClipSelected(c.id)) { fSelClips.clear(); fSelClips.insert(c.id); }
+            fDragTrack       = t.id;
+            fDragLane        = idx;
+            fDragClip        = c.id;
+            fDragClipOrig    = c.startFrame;
+            fDragClipOrigLen = c.lengthFrames;
+            fDragIsMidiClip  = true;
+            const float xStart = FrameToX(c.startFrame);
+            const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
             const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
-            fDragTrack     = t.id;
-            fDragLane      = idx;
-            fDragNote      = hit;
-            fDragNoteOrig  = n;
-            if (modifiers() & B_CONTROL_KEY)
-                fDrag = Drag::NoteVelocity;   // Ctrl-drag = set velocity
-            else if (wide && where.x >= xEnd - kEdgeGrab)
-                fDrag = Drag::NoteResize;
-            else {
-                fDrag = Drag::Note;
-                fDragGrabOffset  = XToFrame(where.x) - n.startFrame;
-                fDragPitchOffset = n.pitch - PitchAt(lane, where.y);
+            if (wide && where.x >= xEnd - kEdgeGrab) {
+                fDrag = Drag::ClipResize;
+            } else {
+                fDrag = Drag::Clip;
+                fDragGrabOffset = XToFrame(where.x) - c.startFrame;
             }
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
-        Frame time = Snapped(XToFrame(where.x));
-        if (time < 0) time = 0;
-        MidiNote n;
-        n.pitch = PitchAt(lane, where.y);
-        n.velocity = 100;
-        n.startFrame = time;
-        // Default length = one beat at the note's tempo, so it lands on grid.
-        n.lengthFrames = (Frame)fProject->tempoMap.FramesPerBeatAt(time);
-        fStack->Execute(std::make_unique<AddNoteCommand>(t.id, n), *fProject);
-        Invalidate(lane);
+        // Empty single click: clear the selection.
+        if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(lane); }
         return;
     }
 
@@ -903,6 +928,13 @@ void TimelineView::PreviewDrag(BPoint where) {
         float v = ((where.x - pr.left) / pr.Width()) * 2.0f - 1.0f;
         if (v < -1) v = -1; if (v > 1) v = 1;
         t->pan = v;
+    } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
+        // MIDI region move: preview live (same track), commit on drop.
+        MidiClip* c = t->FindMidiClip(fDragClip);
+        Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
+        if (start < 0) start = 0;
+        fDragCurStart = start;
+        if (c) c->startFrame = start;
     } else if (fDrag == Drag::Clip) {
         // Ghost preview: track the position + target lane; don't touch the
         // model until drop.
@@ -916,6 +948,13 @@ void TimelineView::PreviewDrag(BPoint where) {
             fDragCurLane = dstIdx;   // cross-track move only for a single clip
         Invalidate();
         return;   // ghost is drawn in Draw(); no per-lane model change
+    } else if (fDrag == Drag::ClipResize && fDragIsMidiClip) {
+        MidiClip* c = t->FindMidiClip(fDragClip);
+        if (c) {
+            Frame len = Snapped(XToFrame(where.x)) - c->startFrame;
+            if (len < 1) len = 1;
+            c->lengthFrames = len;
+        }
     } else if (fDrag == Drag::ClipResize) {
         Clip* c = t->FindClip(fDragClip);
         if (c) {
@@ -947,30 +986,6 @@ void TimelineView::PreviewDrag(BPoint where) {
             float v = f * kMaxGain;
             if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
             c->gain = v;
-        }
-    } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
-               || fDrag == Drag::NoteVelocity) {
-        if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
-            MidiNote& n = t->notes[(size_t)fDragNote];
-            if (fDrag == Drag::Note) {
-                Frame start = Snapped(XToFrame(where.x) - fDragGrabOffset);
-                if (start < 0) start = 0;
-                n.startFrame = start;
-                int pitch = PitchAt(lane, where.y) + fDragPitchOffset;
-                if (pitch < 0) pitch = 0;
-                if (pitch > 127) pitch = 127;
-                n.pitch = pitch;
-            } else if (fDrag == Drag::NoteResize) {
-                Frame len = Snapped(XToFrame(where.x)) - n.startFrame;
-                if (len < 1) len = 1;
-                n.lengthFrames = len;
-            } else {   // NoteVelocity: vertical position sets velocity
-                float f = (lane.bottom - where.y) / lane.Height();
-                int vel = (int)(f * 127.0f + 0.5f);
-                if (vel < 1) vel = 1;
-                if (vel > 127) vel = 127;
-                n.velocity = vel;
-            }
         }
     }
     Invalidate(lane);
@@ -1107,6 +1122,15 @@ void TimelineView::MouseUp(BPoint where) {
                         }
                 if (!macro->Empty()) cmd = std::move(macro);
             }
+        } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
+            // MIDI region: restore the previewed start, then commit one move.
+            if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                const Frame v = fDragCurStart;
+                c->startFrame = fDragClipOrig;
+                if (v != fDragClipOrig)
+                    cmd = std::make_unique<MoveMidiClipCommand>(
+                            fDragTrack, fDragClip, v);
+            }
         } else if (fDrag == Drag::Clip) {
             // Model was never mutated during the drag (ghost preview). Apply
             // the drop: same lane -> reposition; different lane -> move track.
@@ -1121,6 +1145,14 @@ void TimelineView::MouseUp(BPoint where) {
                     fDragTrack, fDragClip, dstId, v);
             else if (v != fDragClipOrig)
                 cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
+        } else if (fDrag == Drag::ClipResize && fDragIsMidiClip) {
+            if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                const Frame v = c->lengthFrames;
+                c->lengthFrames = fDragClipOrigLen;
+                if (v != fDragClipOrigLen)
+                    cmd = std::make_unique<ResizeMidiClipCommand>(
+                            fDragTrack, fDragClip, v);
+            }
         } else if (fDrag == Drag::ClipResize) {
             if (Clip* c = t->FindClip(fDragClip)) {
                 const Frame v = c->lengthFrames;
@@ -1145,25 +1177,13 @@ void TimelineView::MouseUp(BPoint where) {
                     cmd = std::make_unique<SetClipFadeCommand>(fDragTrack,
                             fDragClip, fin, fout);
             }
-        } else if (fDrag == Drag::Note || fDrag == Drag::NoteResize
-                   || fDrag == Drag::NoteVelocity) {
-            if (fDragNote >= 0 && (size_t)fDragNote < t->notes.size()) {
-                MidiNote& n = t->notes[(size_t)fDragNote];
-                const MidiNote final = n;
-                n = fDragNoteOrig;   // restore for a clean single undo step
-                if (final.pitch != fDragNoteOrig.pitch
-                    || final.startFrame != fDragNoteOrig.startFrame
-                    || final.lengthFrames != fDragNoteOrig.lengthFrames
-                    || final.velocity != fDragNoteOrig.velocity)
-                    cmd = std::make_unique<NoteEditCommand>(fDragTrack,
-                            (size_t)fDragNote, final);
-            }
         }
         if (cmd)
             fStack->Execute(std::move(cmd), *fProject);
     }
     fDrag = Drag::None;
     fDragNote = -1;
+    fDragIsMidiClip = false;
     fDragCurLane = -1;
     fMultiMove = false;
     Invalidate();   // a clip may have moved to another lane
@@ -1714,24 +1734,53 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
     DrawString(name.c_str(), BPoint(block.left + 4, block.top + 14));
 }
 
-// Draw a Midi track's notes as a simple piano roll: time across, pitch up.
+// Draw a Midi track's regions: each MidiClip is a block (like an audio clip)
+// with a mini piano-roll preview of its in-window notes. Notes are edited in
+// the piano roll (double-click a region); the timeline moves/resizes regions.
 void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
-    const float h = lane.Height();
-    for (const MidiNote& n : t.notes) {
-        float x0 = FrameToX(n.startFrame);
-        float x1 = FrameToX(n.startFrame + n.lengthFrames);
+    for (const MidiClip& mc : t.midiClips) {
+        float x0 = FrameToX(mc.startFrame);
+        float x1 = FrameToX(mc.startFrame + mc.lengthFrames);
         if (x1 < kHeaderWidth || x0 > lane.right)
             continue;
-        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
-        int p = n.pitch - kMidiLow;
-        if (p < 0) p = 0;
-        if (p >= kMidiRange) p = kMidiRange - 1;
-        const float ny = lane.bottom - (float)p / kMidiRange * h;
-        const float nh = h / kMidiRange + 1.0f;
-        // Brightness tracks velocity (Ctrl-drag a note to change it).
-        const float s = 0.4f + 0.6f * (n.velocity / 127.0f);
-        SetHighColor(Rgb((uint8)(120 * s), (uint8)(200 * s), (uint8)(140 * s)));
-        FillRect(BRect(x0, ny - nh, x1, ny));
+        BRect block(std::max(x0, (float)kHeaderWidth), lane.top + 2,
+                    std::min(x1, lane.right),         lane.bottom - 2);
+
+        rgb_color base = TrackColor(mc.colorIndex ? mc.colorIndex : t.colorIndex);
+        SetHighColor(Rgb((uint8)(base.red * 0.45f),
+                         (uint8)(base.green * 0.45f + 24),
+                         (uint8)(base.blue * 0.45f)));
+        FillRect(block);
+
+        // In-window notes: relative -> absolute frame -> x, pitch -> y.
+        for (const MidiNote& n : mc.notes) {
+            if (n.startFrame < 0 || n.startFrame >= mc.lengthFrames)
+                continue;
+            const Frame a = mc.startFrame + n.startFrame;
+            float nx0 = FrameToX(a);
+            float nx1 = FrameToX(a + n.lengthFrames);
+            if (nx1 < block.left || nx0 > block.right)
+                continue;
+            if (nx0 < block.left)  nx0 = block.left;
+            if (nx1 > block.right) nx1 = block.right;
+            int p = n.pitch - kMidiLow;
+            if (p < 0) p = 0;
+            if (p >= kMidiRange) p = kMidiRange - 1;
+            const float ny = block.bottom - (float)p / kMidiRange * block.Height();
+            const float nh = block.Height() / kMidiRange + 1.0f;
+            const float s = 0.4f + 0.6f * (n.velocity / 127.0f);
+            SetHighColor(Rgb((uint8)(150 * s), (uint8)(220 * s), (uint8)(160 * s)));
+            FillRect(BRect(nx0, ny - nh, nx1, ny));
+        }
+
+        if (ClipSelected(mc.id)) {           // selection highlight (shared)
+            SetHighColor(Rgb(255, 255, 255));
+            StrokeRect(block);
+            StrokeRect(block.InsetByCopy(1, 1));
+        } else {
+            SetHighColor(ColClipBorder());
+            StrokeRect(block);
+        }
     }
 }
 

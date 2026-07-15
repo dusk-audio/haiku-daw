@@ -56,8 +56,11 @@ int main() {
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), a);
     TrackId t2 = a.Tracks().back().id;
-    MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500; n.lengthFrames = 480;
-    stack.Execute(std::make_unique<AddNoteCommand>(t2, n), a);
+    MidiClip mc; mc.startFrame = 2000; mc.lengthFrames = 4000;
+    { MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500;   // clip-rel
+      n.lengthFrames = 480; mc.notes.push_back(n); }
+    { auto add = std::make_unique<AddMidiClipCommand>(t2, mc);
+      stack.Execute(std::move(add), a); }
     { Instrument in; in.waveform = 2; in.attack = 0.01f; in.decay = 0.2f;
       in.sustain = 0.5f; in.release = 0.3f; a.FindTrack(t2)->instrument = in; }
 
@@ -136,9 +139,13 @@ int main() {
     const Track& bt2 = b.Tracks()[1];
     CHECK(bt2.type == TrackType::Midi);
     CHECK(bt2.name == "Synth");
-    CHECK(bt2.notes.size() == 1);
-    CHECK(bt2.notes[0].pitch == 64);
-    CHECK(bt2.notes[0].startFrame == 500);
+    CHECK(bt2.midiClips.size() == 1);
+    CHECK(bt2.midiClips[0].startFrame == 2000);
+    CHECK(bt2.midiClips[0].lengthFrames == 4000);
+    CHECK(bt2.midiClips[0].notes.size() == 1);
+    CHECK(bt2.midiClips[0].notes[0].pitch == 64);
+    CHECK(bt2.midiClips[0].notes[0].startFrame == 500);   // clip-relative
+    CHECK(bt2.CollectNotes()[0].startFrame == 2500);       // absolute = 2000+500
     CHECK(bt2.instrument.waveform == 2);
     CHECK(std::abs(bt2.instrument.decay - 0.2f) < 1e-4f);
     CHECK(std::abs(bt2.instrument.sustain - 0.5f) < 1e-4f);

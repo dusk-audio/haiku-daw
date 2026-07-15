@@ -33,14 +33,26 @@ struct Clip {
     bool        takeActive    = true;
 };
 
-// A single MIDI note placed on a track's timeline. Positions are in project
-// (timeline) frames, same unit as audio clips, so audio and MIDI share the
-// one transport clock. Pitch is a MIDI note number (60 = middle C).
+// A single MIDI note. Its position is in frames RELATIVE to the containing
+// MidiClip's start (see MidiClip). Pitch is a MIDI note number (60 = middle C).
 struct MidiNote {
     int   pitch        = 60;    // 0..127
     int   velocity     = 100;   // 1..127
-    Frame startFrame   = 0;
+    Frame startFrame   = 0;     // relative to the clip start
     Frame lengthFrames = 0;
+};
+
+// A MIDI region on a MIDI track: a movable/copyable container of notes, the
+// MIDI analogue of an audio Clip. Notes are stored clip-relative so the whole
+// region moves as a unit. The region is a non-destructive playback window:
+// only notes whose start lies within [0, lengthFrames) sound; notes outside
+// are kept (e.g. after trimming) but silent. See Track::CollectNotes.
+struct MidiClip {
+    ClipId                id           = kInvalidClipId;
+    Frame                 startFrame   = 0;   // position on the track timeline
+    Frame                 lengthFrames = 0;   // region length (the window)
+    std::vector<MidiNote> notes;              // clip-relative
+    int                   colorIndex   = 0;   // UI tint (0 = inherit track)
 };
 
 // An aux send: taps a track's signal and adds `level` * signal into `dest`
@@ -72,8 +84,8 @@ struct Track {
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     int               colorIndex = 0;   // index into the UI track-color palette
     int               height     = 72;  // lane height in pixels (UI)
-    std::vector<Clip>       clips;    // audio clips, kept sorted by startFrame
-    std::vector<MidiNote>   notes;    // MIDI notes (Midi tracks)
+    std::vector<Clip>       clips;      // audio clips, kept sorted by startFrame
+    std::vector<MidiClip>   midiClips;  // MIDI regions (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
     std::vector<Send>       sends;    // aux sends into buses
     AutomationLane          gainAuto; // volume envelope (absolute gain; empty = static)
@@ -83,6 +95,21 @@ struct Track {
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;
+    MidiClip*       FindMidiClip(ClipId id);
+    const MidiClip* FindMidiClip(ClipId id) const;
+
+    // Flatten all MIDI regions into absolute-timeline notes for playback:
+    // each clip's in-window notes offset by the clip start. Off the RT thread
+    // (the engine snapshots the result when building its graph).
+    std::vector<MidiNote> CollectNotes() const {
+        std::vector<MidiNote> out;
+        for (const MidiClip& c : midiClips)
+            for (const MidiNote& n : c.notes)
+                if (n.startFrame >= 0 && n.startFrame < c.lengthFrames)
+                    out.push_back({ n.pitch, n.velocity,
+                                    c.startFrame + n.startFrame, n.lengthFrames });
+        return out;
+    }
 };
 
 class Project {
@@ -129,6 +156,8 @@ public:
     bool MoveTrack(size_t from, size_t to);           // reorder within the list
     bool AddClip(TrackId track, const Clip& c);
     bool RemoveClip(TrackId track, ClipId clip);
+    bool AddMidiClip(TrackId track, const MidiClip& c);
+    bool RemoveMidiClip(TrackId track, ClipId clip);
 
 private:
     std::vector<Track> fTracks;

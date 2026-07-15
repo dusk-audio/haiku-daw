@@ -125,7 +125,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
         for (const Clip& c : t.clips)
             if (c.startFrame + c.lengthFrames > projEnd)
                 projEnd = c.startFrame + c.lengthFrames;
-        for (const MidiNote& n : t.notes)
+        for (const MidiNote& n : t.CollectNotes())   // absolute-timeline notes
             if (n.startFrame + n.lengthFrames > projEnd)
                 projEnd = n.startFrame + n.lengthFrames;
     }
@@ -228,7 +228,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
                           nodeBuf[it->second], fades[ci].fadeIn, fades[ci].fadeOut);
             }
         } else if (t.type == TrackType::Midi) {
-            std::vector<MidiNote> notes = t.notes;
+            std::vector<MidiNote> notes = t.CollectNotes();
             if (scale != 1.0)
                 for (MidiNote& n : notes) {
                     n.startFrame   = ToOut(n.startFrame, scale);

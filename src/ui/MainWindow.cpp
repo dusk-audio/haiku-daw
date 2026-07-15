@@ -375,11 +375,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMaster) fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
             break;
         case kMsgApplyNotes: {
-            // A PianoRoll posts the edited note list. Undoable via SetNotesCommand
-            // (one step per gesture — the roll posts on mouse-up / add / delete).
-            int64 tid = 0;
+            // A PianoRoll posts one region's edited note list (clip-relative).
+            // Undoable via SetMidiClipNotesCommand (one step per gesture).
+            int64 tid = 0, cid = 0;
             msg->FindInt64("track", &tid);
-            if (fProject->FindTrack((TrackId)tid)) {
+            msg->FindInt64("clip", &cid);
+            Track* tr = fProject->FindTrack((TrackId)tid);
+            if (tr && tr->FindMidiClip((ClipId)cid)) {
                 std::vector<MidiNote> notes;
                 int32 pitch = 0;
                 for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
@@ -392,8 +394,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
                     notes.push_back(n);
                 }
-                fStack->Execute(std::make_unique<SetNotesCommand>(
-                    (TrackId)tid, std::move(notes)), *fProject);
+                fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
+                    (TrackId)tid, (ClipId)cid, std::move(notes)), *fProject);
                 fTimeline->Invalidate();
             }
             break;
@@ -728,8 +730,8 @@ static Frame ProjectEndFrame(const Project& p) {
     for (const Track& t : p.Tracks()) {
         for (const Clip& c : t.clips)
             if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
-        for (const MidiNote& n : t.notes)
-            if (n.startFrame + n.lengthFrames > end) end = n.startFrame + n.lengthFrames;
+        for (const MidiClip& mc : t.midiClips)
+            if (mc.startFrame + mc.lengthFrames > end) end = mc.startFrame + mc.lengthFrames;
     }
     return end;
 }

@@ -18,6 +18,18 @@ const Clip* Track::FindClip(ClipId id) const {
     return nullptr;
 }
 
+MidiClip* Track::FindMidiClip(ClipId id) {
+    for (auto& c : midiClips)
+        if (c.id == id) return &c;
+    return nullptr;
+}
+
+const MidiClip* Track::FindMidiClip(ClipId id) const {
+    for (const auto& c : midiClips)
+        if (c.id == id) return &c;
+    return nullptr;
+}
+
 // --- Project ----------------------------------------------------------
 
 Track* Project::FindTrack(TrackId id) {
@@ -91,6 +103,28 @@ bool Project::RemoveClip(TrackId track, ClipId clip) {
                            [&](const Clip& c) { return c.id == clip; });
     if (it == t->clips.end()) return false;
     t->clips.erase(it);
+    return true;
+}
+
+bool Project::AddMidiClip(TrackId track, const MidiClip& c) {
+    Track* t = FindTrack(track);
+    if (t == nullptr || c.id == kInvalidClipId || t->FindMidiClip(c.id))
+        return false;
+    auto it = std::lower_bound(t->midiClips.begin(), t->midiClips.end(), c,
+        [](const MidiClip& a, const MidiClip& b) {
+            return a.startFrame < b.startFrame;
+        });
+    t->midiClips.insert(it, c);
+    return true;
+}
+
+bool Project::RemoveMidiClip(TrackId track, ClipId clip) {
+    Track* t = FindTrack(track);
+    if (t == nullptr) return false;
+    auto it = std::find_if(t->midiClips.begin(), t->midiClips.end(),
+                           [&](const MidiClip& c) { return c.id == clip; });
+    if (it == t->midiClips.end()) return false;
+    t->midiClips.erase(it);
     return true;
 }
 

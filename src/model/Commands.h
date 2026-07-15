@@ -138,19 +138,21 @@ private:
     bool    fOldSoloed = false;
 };
 
-// Add a MIDI note to a track. Undo removes the note it appended.
-class AddNoteCommand : public Command {
+// Add a MIDI region (clip) to a track. Allocates a clip id in Do() if unset;
+// Undo() removes it. CreatedId() gives the id after Do() (for the UI).
+class AddMidiClipCommand : public Command {
 public:
-    AddNoteCommand(TrackId track, MidiNote note)
-        : fTrack(track), fNote(note) {}
+    AddMidiClipCommand(TrackId track, MidiClip clip)
+        : fTrack(track), fClip(std::move(clip)) {}
 
     bool Do(Project& p) override;
     void Undo(Project& p) override;
-    std::string Name() const override { return "Add Note"; }
+    std::string Name() const override { return "Add MIDI Clip"; }
+    ClipId CreatedId() const { return fClip.id; }
 
 private:
     TrackId  fTrack;
-    MidiNote fNote;
+    MidiClip fClip;
 };
 
 // Add a clip to a track. Allocates a clip id in Do(); Undo() removes it.
@@ -237,20 +239,20 @@ private:
     Frame   fOldFadeOut  = 0;                 // left clip's original fade-out
 };
 
-// Remove the note at `index` on a track. Stores it + its index for Undo().
-class RemoveNoteCommand : public Command {
+// Remove a MIDI region from a track. Stores it for Undo().
+class RemoveMidiClipCommand : public Command {
 public:
-    RemoveNoteCommand(TrackId track, size_t index)
-        : fTrack(track), fIndex(index) {}
+    RemoveMidiClipCommand(TrackId track, ClipId clip)
+        : fTrack(track), fClip(clip) {}
 
     bool Do(Project& p) override;
     void Undo(Project& p) override;
-    std::string Name() const override { return "Remove Note"; }
+    std::string Name() const override { return "Remove MIDI Clip"; }
 
 private:
     TrackId  fTrack;
-    size_t   fIndex;
-    MidiNote fRemoved;
+    ClipId   fClip;
+    MidiClip fRemoved;
 };
 
 // Move a clip to a new start position. Stores the old position for Undo().
@@ -356,21 +358,55 @@ private:
     float   fOld = 1.0f;
 };
 
-// Replace a note (move, resize, or velocity edit). Stores old for Undo().
-class NoteEditCommand : public Command {
+// Move a MIDI region to a new start position (and optionally another track).
+// Stores the old track+position for Undo(). Coalesces during a drag.
+class MoveMidiClipCommand : public Command {
 public:
-    NoteEditCommand(TrackId track, size_t index, MidiNote note)
-        : fTrack(track), fIndex(index), fNote(note) {}
+    MoveMidiClipCommand(TrackId track, ClipId clip, Frame newStart,
+                        TrackId newTrack = kInvalidTrackId)
+        : fTrack(track), fClip(clip), fNewStart(newStart),
+          fNewTrack(newTrack == kInvalidTrackId ? track : newTrack) {}
 
     bool Do(Project& p) override;
     void Undo(Project& p) override;
-    std::string Name() const override { return "Edit Note"; }
+    std::string Name() const override { return "Move MIDI Clip"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<MoveMidiClipCommand*>(prev);
+        if (!p || p->fClip != fClip) return false;
+        p->fNewStart = fNewStart; p->fNewTrack = fNewTrack;
+        return true;
+    }
 
 private:
-    TrackId  fTrack;
-    size_t   fIndex;
-    MidiNote fNote;   // the new value (clamped in Do)
-    MidiNote fOld;    // saved in Do()
+    TrackId fTrack, fNewTrack;
+    ClipId  fClip;
+    Frame   fNewStart;
+    TrackId fOldTrack = kInvalidTrackId;
+    Frame   fOldStart = 0;
+};
+
+// Resize a MIDI region's window length (non-destructive: notes outside are kept
+// but silent). Stores the old length for Undo(). Coalesces during a drag.
+class ResizeMidiClipCommand : public Command {
+public:
+    ResizeMidiClipCommand(TrackId track, ClipId clip, Frame newLength)
+        : fTrack(track), fClip(clip), fNewLen(newLength) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Resize MIDI Clip"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<ResizeMidiClipCommand*>(prev);
+        if (!p || p->fClip != fClip) return false;
+        p->fNewLen = fNewLen;
+        return true;
+    }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewLen;
+    Frame   fOldLen = 0;
 };
 
 // Move a track up (-1) or down (+1) in the track list. Clamped; a no-op move
@@ -449,17 +485,19 @@ private:
     Instrument fNew, fOld;
 };
 
-// Replace a MIDI track's whole note list (piano-roll edits). One step per
-// gesture (the piano roll posts on mouse-up / add / delete).
-class SetNotesCommand : public Command {
+// Replace one MIDI region's note list (piano-roll edits). One step per gesture
+// (the piano roll posts on mouse-up / add / delete). Notes are clip-relative.
+class SetMidiClipNotesCommand : public Command {
 public:
-    SetNotesCommand(TrackId track, std::vector<MidiNote> notes)
-        : fTrack(track), fNew(std::move(notes)) {}
+    SetMidiClipNotesCommand(TrackId track, ClipId clip,
+                            std::vector<MidiNote> notes)
+        : fTrack(track), fClip(clip), fNew(std::move(notes)) {}
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Edit Notes"; }
 private:
     TrackId               fTrack;
+    ClipId                fClip;
     std::vector<MidiNote> fNew, fOld;
 };
 

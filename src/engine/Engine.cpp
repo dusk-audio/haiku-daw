@@ -264,20 +264,23 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     // Add a bus per audible MIDI track: snapshot its notes for the synth to
     // render (rebuild-on-play, so MIDI edits apply on the next Start).
     for (const Track& t : project.Tracks()) {
-        if (t.type != TrackType::Midi || t.notes.empty())
+        if (t.type != TrackType::Midi)
+            continue;
+        std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
+        if (notes.empty())
             continue;
         const bool audible = !t.muted && (!anySolo || t.soloed);
         if (!audible)
             continue;
         Bus b;
         b.id    = t.id;
-        b.notes = t.notes;
+        for (const MidiNote& n : notes)
+            if (n.startFrame + n.lengthFrames > fEndFrame)
+                fEndFrame = n.startFrame + n.lengthFrames;
+        b.notes = std::move(notes);
         b.instrument = t.instrument;
         EqualPowerGains(t.gain, t.pan, &b.midiGainL, &b.midiGainR);
         fBuses.push_back(std::move(b));
-        for (const MidiNote& n : t.notes)
-            if (n.startFrame + n.lengthFrames > fEndFrame)
-                fEndFrame = n.startFrame + n.lengthFrames;
     }
 
     // Add a node per bus track (always, even muted, so it stays a valid

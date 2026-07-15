@@ -129,19 +129,16 @@ void SetTrackSoloCommand::Undo(Project& p) {
         t->soloed = fOldSoloed;
 }
 
-// --- AddNoteCommand ---------------------------------------------------
+// --- AddMidiClipCommand -----------------------------------------------
 
-bool AddNoteCommand::Do(Project& p) {
-    Track* t = p.FindTrack(fTrack);
-    if (!t) return false;
-    t->notes.push_back(fNote);
-    return true;
+bool AddMidiClipCommand::Do(Project& p) {
+    if (fClip.id == kInvalidClipId)
+        fClip.id = p.NextClipId();
+    return p.AddMidiClip(fTrack, fClip);
 }
 
-void AddNoteCommand::Undo(Project& p) {
-    if (Track* t = p.FindTrack(fTrack))
-        if (!t->notes.empty())
-            t->notes.pop_back();
+void AddMidiClipCommand::Undo(Project& p) {
+    p.RemoveMidiClip(fTrack, fClip.id);
 }
 
 // --- AddClipCommand ---------------------------------------------------
@@ -241,21 +238,83 @@ void SplitClipCommand::Undo(Project& p) {
     }
 }
 
-// --- RemoveNoteCommand ------------------------------------------------
+// --- RemoveMidiClipCommand --------------------------------------------
 
-bool RemoveNoteCommand::Do(Project& p) {
+bool RemoveMidiClipCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
-    if (!t || fIndex >= t->notes.size()) return false;
-    fRemoved = t->notes[fIndex];
-    t->notes.erase(t->notes.begin() + fIndex);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fRemoved = *c;                    // save for Undo
+    return p.RemoveMidiClip(fTrack, fClip);
+}
+
+void RemoveMidiClipCommand::Undo(Project& p) {
+    p.AddMidiClip(fTrack, fRemoved);  // re-inserted sorted by start
+}
+
+// --- MoveMidiClipCommand ----------------------------------------------
+
+bool MoveMidiClipCommand::Do(Project& p) {
+    Track* src = p.FindTrack(fTrack);
+    if (!src) return false;
+    MidiClip* c = src->FindMidiClip(fClip);
+    if (!c) return false;
+    fOldTrack = fTrack;
+    fOldStart = c->startFrame;
+    if (fNewTrack == fTrack) {
+        c->startFrame = fNewStart < 0 ? 0 : fNewStart;
+        std::sort(src->midiClips.begin(), src->midiClips.end(),
+                  [](const MidiClip& a, const MidiClip& b) {
+                      return a.startFrame < b.startFrame; });
+        return true;
+    }
+    // Cross-track move: pull from src, re-home in the destination.
+    MidiClip moved = *c;
+    moved.startFrame = fNewStart < 0 ? 0 : fNewStart;
+    if (!p.FindTrack(fNewTrack)) return false;
+    p.RemoveMidiClip(fTrack, fClip);
+    return p.AddMidiClip(fNewTrack, moved);
+}
+
+void MoveMidiClipCommand::Undo(Project& p) {
+    // Find wherever the clip currently lives and move it back.
+    if (fNewTrack != fOldTrack) {
+        if (MidiClip* c = p.FindTrack(fNewTrack)
+                ? p.FindTrack(fNewTrack)->FindMidiClip(fClip) : nullptr) {
+            MidiClip moved = *c;
+            moved.startFrame = fOldStart;
+            p.RemoveMidiClip(fNewTrack, fClip);
+            p.AddMidiClip(fOldTrack, moved);
+            return;
+        }
+    }
+    if (Track* t = p.FindTrack(fOldTrack)) {
+        if (MidiClip* c = t->FindMidiClip(fClip)) {
+            c->startFrame = fOldStart;
+            std::sort(t->midiClips.begin(), t->midiClips.end(),
+                      [](const MidiClip& a, const MidiClip& b) {
+                          return a.startFrame < b.startFrame; });
+        }
+    }
+}
+
+// --- ResizeMidiClipCommand --------------------------------------------
+
+bool ResizeMidiClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fOldLen = c->lengthFrames;
+    c->lengthFrames = fNewLen < 1 ? 1 : fNewLen;
     return true;
 }
 
-void RemoveNoteCommand::Undo(Project& p) {
-    Track* t = p.FindTrack(fTrack);
-    if (!t) return;
-    size_t i = fIndex <= t->notes.size() ? fIndex : t->notes.size();
-    t->notes.insert(t->notes.begin() + i, fRemoved);
+void ResizeMidiClipCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (MidiClip* c = t->FindMidiClip(fClip))
+            c->lengthFrames = fOldLen;
 }
 
 // --- MoveClipCommand --------------------------------------------------
@@ -393,27 +452,6 @@ void SetClipGainCommand::Undo(Project& p) {
             c->gain = fOld;
 }
 
-// --- NoteEditCommand --------------------------------------------------
-
-bool NoteEditCommand::Do(Project& p) {
-    Track* t = p.FindTrack(fTrack);
-    if (!t || fIndex >= t->notes.size()) return false;
-    fOld = t->notes[fIndex];
-    MidiNote n = fNote;
-    if (n.pitch < 0) n.pitch = 0; if (n.pitch > 127) n.pitch = 127;
-    if (n.velocity < 1) n.velocity = 1; if (n.velocity > 127) n.velocity = 127;
-    if (n.startFrame < 0) n.startFrame = 0;
-    if (n.lengthFrames < 1) n.lengthFrames = 1;
-    t->notes[fIndex] = n;
-    return true;
-}
-
-void NoteEditCommand::Undo(Project& p) {
-    Track* t = p.FindTrack(fTrack);
-    if (t && fIndex < t->notes.size())
-        t->notes[fIndex] = fOld;
-}
-
 // --- SetSendsCommand --------------------------------------------------
 
 bool SetSendsCommand::Do(Project& p) {
@@ -514,17 +552,21 @@ void SetInstrumentCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->instrument = fOld;
 }
 
-// --- SetNotesCommand --------------------------------------------------
+// --- SetMidiClipNotesCommand ------------------------------------------
 
-bool SetNotesCommand::Do(Project& p) {
+bool SetMidiClipNotesCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
-    fOld = t->notes;
-    t->notes = fNew;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fOld = c->notes;
+    c->notes = fNew;
     return true;
 }
-void SetNotesCommand::Undo(Project& p) {
-    if (Track* t = p.FindTrack(fTrack)) t->notes = fOld;
+void SetMidiClipNotesCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (MidiClip* c = t->FindMidiClip(fClip))
+            c->notes = fOld;
 }
 
 // --- SetTrackColor / SetTrackHeight -----------------------------------

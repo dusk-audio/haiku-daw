@@ -21,6 +21,17 @@ static int g_checks = 0, g_fails = 0;
 
 using namespace daw;
 
+// Put an absolute-frame note onto a MIDI track via a single region at frame 0
+// (relative == absolute), growing the region window to cover it.
+static void PutNote(Track& t, const MidiNote& n) {
+    if (t.midiClips.empty()) { MidiClip c; c.id = 1; c.startFrame = 0;
+                               c.lengthFrames = 1; t.midiClips.push_back(c); }
+    MidiClip& c = t.midiClips.front();
+    c.notes.push_back(n);
+    const Frame end = n.startFrame + n.lengthFrames;
+    if (end > c.lengthFrames) c.lengthFrames = end;
+}
+
 int main() {
     const double SR = 48000.0;
 
@@ -41,7 +52,7 @@ int main() {
     note.velocity     = 110;
     note.startFrame   = 0;
     note.lengthFrames = static_cast<Frame>(SR / 2);   // 0.5 s
-    t.notes.push_back(note);
+    PutNote(t, note);
 
     CHECK(project.AddTrack(t));
 
@@ -82,7 +93,7 @@ int main() {
         Track m;
         m.id = pr.NextTrackId(); m.type = TrackType::Midi;
         m.gain = 1.0f; m.pan = 0.0f;
-        m.notes.push_back(note);
+        PutNote(m, note);
         Track b;
         b.id = pr.NextTrackId(); b.type = TrackType::Bus;
         b.gain = busGain; b.pan = 0.0f;
@@ -122,7 +133,7 @@ int main() {
         Track m;
         m.id = pr.NextTrackId(); m.type = TrackType::Midi;
         m.gain = 1.0f; m.pan = 0.0f;
-        m.notes.push_back(note);
+        PutNote(m, note);
         m.output = kInvalidTrackId;          // direct to master
         if (level > 0.0f) m.sends.push_back(Send{b.id, level, false});
         pr.AddTrack(b);
@@ -154,7 +165,7 @@ int main() {
         pr.sampleRate = SR;
         Track m;
         m.id = pr.NextTrackId(); m.type = TrackType::Midi;
-        m.gain = 1.0f; m.pan = 0.0f; m.notes.push_back(note);
+        m.gain = 1.0f; m.pan = 0.0f; PutNote(m, note);
         m.sends.push_back(Send{ m.id, 1.0f, false });   // self-send
         pr.AddTrack(m);
         const std::string p = "/tmp/haiku_daw_export_selfsend.wav";
@@ -179,7 +190,7 @@ int main() {
         m.gain = 1.0f; m.pan = 0.0f;
         MidiNote n2 = note;
         n2.startFrame = 0; n2.lengthFrames = (Frame)SR;   // 1 s sustained
-        m.notes.push_back(n2);
+        PutNote(m, n2);
         m.gainAuto.AddPoint(0, 1.0f);
         m.gainAuto.AddPoint((Frame)SR, 0.0f);             // ramp to silence
         pr.AddTrack(m);

@@ -102,7 +102,6 @@ private:
     // Lane geometry + header hit-testing.
     BRect LaneRect(int index) const;
     int   TrackIndexAt(BPoint where) const;             // -1 if none
-    int   NoteIndexAt(const Track& t, BRect lane, BPoint where) const;  // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
     void  HandleRulerMenu(BPoint where);        // tempo/meter change menu
     Frame BarStartFrameAt(Frame f) const;       // nearest bar boundary frame
@@ -122,6 +121,7 @@ private:
 
     // Clip drag state.
     ClipId  fDragClip        = kInvalidClipId;
+    bool    fDragIsMidiClip  = false;  // dragging a MIDI region (vs audio clip)
     Frame   fDragClipOrig    = 0;      // clip startFrame at drag start
     Frame   fDragClipOrigLen = 0;      // clip lengthFrames at drag start
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
@@ -149,8 +149,13 @@ private:
     bool     fHasClipClip = false;
     Clip     fClipClip;                // copied audio clip
     bool     fHasClipNote = false;
-    MidiNote fClipNote;                // copied MIDI note
+    MidiNote fClipNote;                // (legacy; unused)
+    bool     fHasClipMidi = false;
+    MidiClip fClipMidi;                // copied MIDI region
     TrackType fClipType = TrackType::Audio;  // source track type (paste target)
+
+    // Open the piano roll for one MIDI region (notes edited clip-relative).
+    void OpenPianoRollForClip(TrackId track, ClipId clip);
 
     // Automation editing. fAutoMode[track] = 0 off / 1 gain / 2 pan /
     // 3+ = fx-parameter lane (fxAuto[mode-3]); cycled by the header "Auto" box.
