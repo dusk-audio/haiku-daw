@@ -1129,7 +1129,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
         c.id = kInvalidClipId;
         fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
     }
-    fTimeline->Invalidate();
+    fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
 void MainWindow::ReloadActiveEngine() {
@@ -1346,7 +1346,7 @@ void MainWindow::StopRecording() {
             fStack->Execute(std::move(macro), *fProject);
         }
         fRecorder.reset();
-        fTimeline->Invalidate();
+        fTimeline->ZoomToFit();   // show the whole take after recording
         return;
     }
 
@@ -1375,7 +1375,7 @@ void MainWindow::StopRecording() {
     }
 
     fRecorder.reset();
-    fTimeline->Invalidate();
+    fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
 // The directory portion of a path (empty if none), for bundling takes.
