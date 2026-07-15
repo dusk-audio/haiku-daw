@@ -23,6 +23,26 @@ using namespace daw;
 int main() {
     const double SR = 48000.0;
 
+    // 1b. DuskVerb plate engine: impulse -> a decaying, non-silent tail.
+    {
+        Reverb rv(0.7, 1.0);
+        rv.SetParam(2, 1.0f);   // algorithm = DuskPlate
+        rv.SetParam(3, 2.5f);   // decay 2.5 s
+        rv.Prepare(SR);         // builds the plate engine
+        const int N = 48000;    // 1 s
+        std::vector<float> buf(N * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        rv.Process(buf.data(), N);
+        float lateEnergy = 0.0f;
+        for (int i = 12000; i < N; i++)
+            lateEnergy += std::fabs(buf[i * 2]) + std::fabs(buf[i * 2 + 1]);
+        CHECK(lateEnergy > 1e-3f);   // plate tail exists well after the impulse
+        // Not NaN/Inf.
+        bool finite = true;
+        for (int i = 0; i < N * 2; i++) if (!std::isfinite(buf[i])) finite = false;
+        CHECK(finite);
+    }
+
     // 1. Reverb: impulse then silence yields a decaying, non-silent tail.
     {
         Reverb rv(0.7, 1.0);   // large room, fully wet so the tail is visible

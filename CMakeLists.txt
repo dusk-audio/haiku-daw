@@ -25,7 +25,10 @@ add_library(daw_model
     src/engine/Metronome.cpp    # kit-free click generator, host-testable
     src/dsp/Biquad.cpp          # kit-free biquad filter effect
     src/dsp/Delay.cpp           # kit-free feedback delay effect
-    src/dsp/Reverb.cpp          # kit-free Schroeder reverb
+    src/dsp/Reverb.cpp          # kit-free Schroeder reverb + DuskVerb engines
+    src/dsp/duskverb/DattorroPlateVintage.cpp   # DuskVerb plate (verbatim port)
+    src/dsp/duskverb/DattorroTank.cpp           # DuskVerb Dattorro tank (verbatim)
+    src/dsp/duskverb/OctaveGEQDesign.cpp        # DuskVerb octave GEQ design (verbatim)
     src/dsp/Compressor.cpp      # kit-free dynamics compressor
     src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
     src/dsp/Loudness.cpp        # kit-free BS.1770 LUFS + true-peak meter

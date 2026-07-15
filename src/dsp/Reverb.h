@@ -20,18 +20,30 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <memory>
 #include <vector>
 
+// The DuskVerb plate engine (verbatim port, global namespace); forward-declared
+// so Reverb.h stays light (the heavy engine headers are pulled only in the .cpp).
+class DattorroPlateVintage;
+
 namespace daw {
+
+// Reverb algorithm selector (param slot 2). 0 keeps the original Freeverb-style
+// reverb (back-compatible with old projects, whose params stop at [size, mix]);
+// higher values select a ported DuskVerb engine.
+enum class ReverbAlgo { Freeverb = 0, DuskPlate = 1 };
 
 class Reverb : public IEffect {
 public:
     static constexpr int kNumCombs   = 4;
     static constexpr int kNumAllpass = 2;
 
-    // roomSize = comb feedback / tail length [0,1], mix = wet amount [0,1]
-    // (0 = dry only, 1 = wet only).
+    // Param layout: [size, mix, algorithm, decaySec, tone]. size = comb
+    // feedback / tail length [0,1]; mix = wet amount [0,1]; algorithm per
+    // ReverbAlgo; decaySec = reverb time (engine algos); tone [0,1] brightness.
     Reverb(double roomSize = 0.5, double mix = 0.3);
+    ~Reverb() override;   // out-of-line for the forward-declared plate
 
     void SetParams(double roomSize, double mix);
 
@@ -53,15 +65,25 @@ private:
 
     void BuildLines();
 
+    void BuildPlate();   // (re)create + configure the DuskVerb plate engine
+
     double fRoomSize;
     double fMix;
     double fSampleRate = 48000.0;
+    int    fAlgo  = 0;      // ReverbAlgo
+    double fDecay = 2.0;    // reverb time (s) for engine algorithms
+    double fTone  = 0.5;    // brightness [0,1]
 
     // Per-channel comb bank (each with its own damping one-pole state) and
-    // series allpass bank.
+    // series allpass bank (Freeverb algorithm).
     Line  fComb[2][kNumCombs];
     float fCombLP[2][kNumCombs] = {};   // Freeverb damping filter state
     Line  fAllpass[2][kNumAllpass];
+
+    // DuskVerb plate engine + de-interleave scratch (processed in chunks).
+    std::unique_ptr<DattorroPlateVintage> fPlate;
+    static constexpr int kPlateChunk = 1024;
+    std::vector<float> fInL, fInR, fOutL, fOutR;
 };
 
 } // namespace daw

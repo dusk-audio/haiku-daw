@@ -33,8 +33,14 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
         }
         case EffectType::Delay:
             return std::unique_ptr<IEffect>(new Delay(d.p(0), d.p(1), d.p(2)));
-        case EffectType::Reverb:
-            return std::unique_ptr<IEffect>(new Reverb(d.p(0), d.p(1)));
+        case EffectType::Reverb: {
+            auto rv = std::unique_ptr<Reverb>(new Reverb(d.p(0), d.p(1)));
+            // Apply all params (algorithm/decay/tone) before Prepare builds the
+            // selected engine.
+            for (size_t i = 0; i < d.params.size(); i++)
+                rv->SetParam((int)i, d.params[i]);
+            return rv;
+        }
         case EffectType::Compressor:
             return std::unique_ptr<IEffect>(
                 new Compressor(d.p(0), d.p(1), d.p(2), d.p(3), d.p(4)));
