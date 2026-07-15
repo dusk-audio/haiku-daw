@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 static int g_checks = 0, g_fails = 0;
@@ -80,6 +81,57 @@ int main() {
         d.Process(buf.data(), 16);
         CHECK(std::fabs(buf[2 * 4] - 1.0f) < 1e-4f);   // first echo
         CHECK(std::fabs(buf[2 * 8] - 0.5f) < 1e-4f);   // second echo * feedback
+    }
+
+    // 5b. Delay tempo-sync: 1/4 note at 120 BPM = 0.5 s echo (24000 frames).
+    {
+        Delay d(0.25, 0.0, 1.0, /*sync*/ true, /*division 1/4*/ 0);
+        d.Prepare(SR);
+        d.SetTempo(120.0);
+        std::vector<float> buf(30000 * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        d.Process(buf.data(), 30000);
+        CHECK(std::fabs(buf[2 * 24000] - 1.0f) < 1e-4f);   // echo at 0.5 s
+        CHECK(std::fabs(buf[2 * 12000]) < 1e-4f);          // nothing at 0.25 s
+    }
+
+    // 5c. Tempo change moves the synced echo: 1/4 at 60 BPM = 1.0 s (48000).
+    {
+        Delay d(0.25, 0.0, 1.0, true, 0);
+        d.Prepare(SR);
+        d.SetTempo(60.0);
+        std::vector<float> buf(50000 * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        d.Process(buf.data(), 50000);
+        CHECK(std::fabs(buf[2 * 48000] - 1.0f) < 1e-4f);
+    }
+
+    // 5d. Eighth-note division: 1/8 at 120 BPM = 0.25 s (12000 frames).
+    {
+        Delay d(0.25, 0.0, 1.0, true, 3);   // division index 3 = "1/8"
+        d.Prepare(SR);
+        d.SetTempo(120.0);
+        std::vector<float> buf(16000 * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        d.Process(buf.data(), 16000);
+        CHECK(std::fabs(buf[2 * 12000] - 1.0f) < 1e-4f);
+    }
+
+    // 5e. Live time change via SetParam(0) (movable tap, no reallocation).
+    {
+        Delay d(0.1, 0.0, 1.0);            // free mode, 0.1 s
+        d.Prepare(SR);
+        d.SetParam(0, 8.0f / (float)SR);   // retune to an 8-frame delay live
+        std::vector<float> buf(16 * 2, 0.0f);
+        buf[0] = 1.0f; buf[1] = 1.0f;
+        d.Process(buf.data(), 16);
+        CHECK(std::fabs(buf[2 * 8] - 1.0f) < 1e-4f);
+    }
+
+    // 5f. Division labels.
+    {
+        CHECK(std::strcmp(Delay::DivisionName(0), "1/4") == 0);
+        CHECK(std::strcmp(Delay::DivisionName(3), "1/8") == 0);
     }
 
     // 6. Factory builds the right effects from descriptors and they run.

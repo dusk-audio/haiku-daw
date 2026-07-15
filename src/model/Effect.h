@@ -29,7 +29,7 @@ struct EffectDesc {
     std::string        pluginName;   // set when type == Plugin (add-on id)
     // Per-type param layout:
     //   Biquad:     [mode(0 LP,1 HP,2 Peak), freq Hz, Q, gain dB]
-    //   Delay:      [time s, feedback [0,1), mix [0,1]]
+    //   Delay:      [time s, feedback [0,1), mix [0,1], sync 0/1, division idx]
     //   Reverb:     [roomSize [0,1], mix [0,1]]
     //   Compressor: [threshold dB, ratio, attack ms, release ms, makeup dB]
     //   Eq:         5 bands of [freq Hz, gain dB, Q] (band 0 = low shelf,
@@ -53,8 +53,9 @@ inline EffectDesc LowPassDesc(float freq = 800.0f, float q = 0.707f) {
 inline EffectDesc HighPassDesc(float freq = 200.0f, float q = 0.707f) {
     return BiquadDesc(1.0f, freq, q);
 }
-inline EffectDesc DelayDesc(float sec = 0.25f, float fb = 0.35f, float mix = 0.3f) {
-    return EffectDesc{EffectType::Delay, {sec, fb, mix}};
+inline EffectDesc DelayDesc(float sec = 0.25f, float fb = 0.35f, float mix = 0.3f,
+                            float sync = 0.0f, float division = 0.0f) {
+    return EffectDesc{EffectType::Delay, {sec, fb, mix, sync, division}};
 }
 inline EffectDesc ReverbDesc(float roomSize = 0.5f, float mix = 0.3f) {
     return EffectDesc{EffectType::Reverb, {roomSize, mix}};
@@ -109,7 +110,7 @@ inline void FxParamRange(EffectType t, int slot, float* mn, float* mx) {
         for (auto& p : r) { if (i == slot) { lo = p.first; hi = p.second; } i++; }
     };
     switch (t) {
-        case EffectType::Delay:      pick({{0.01f,1},{0,0.95f},{0,1}}); break;
+        case EffectType::Delay:      pick({{0.01f,1},{0,0.95f},{0,1},{0,1},{0,6}}); break;
         case EffectType::Reverb:     pick({{0,1},{0,1},{0,3},{0.2f,12},{0,1}}); break;
         case EffectType::Compressor: pick({{-60,0},{1,20},{0.1f,100},{5,1000},{0,24}}); break;
         case EffectType::Saturator:  pick({{0,1},{0,1},{-24,24}}); break;

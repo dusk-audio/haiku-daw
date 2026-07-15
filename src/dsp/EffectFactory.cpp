@@ -32,7 +32,8 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
                 new Biquad(mode, d.p(1), d.p(2), d.p(3)));
         }
         case EffectType::Delay:
-            return std::unique_ptr<IEffect>(new Delay(d.p(0), d.p(1), d.p(2)));
+            return std::unique_ptr<IEffect>(
+                new Delay(d.p(0), d.p(1), d.p(2), d.p(3) >= 0.5f, (int)(d.p(4) + 0.5f)));
         case EffectType::Reverb: {
             auto rv = std::unique_ptr<Reverb>(new Reverb(d.p(0), d.p(1)));
             // Apply all params (algorithm/decay/tone) before Prepare builds the

@@ -37,6 +37,11 @@ public:
     // no-op (an effect opts in by overriding).
     virtual void SetParam(int /*slot*/, float /*value*/) {}
 
+    // Inform the effect of the current tempo (BPM), for tempo-synced params
+    // (e.g. a delay locked to note divisions). Called off the RT thread at Load
+    // and whenever the tempo changes. Default: no-op.
+    virtual void SetTempo(double /*bpm*/) {}
+
     // Live metering for the effect editor (read off the RT thread; effects
     // update these in Process). Default: no meter.
     //   MeterDb  — a single scalar (e.g. a compressor's gain reduction, <= 0).

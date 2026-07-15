@@ -2,6 +2,7 @@
 
 #include "UiMetrics.h"
 #include "../dsp/Eq.h"
+#include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../plugin/PluginHost.h"
 
 #include <MenuItem.h>
@@ -110,8 +111,8 @@ float EffectsView::PanelHeight(const EffectDesc& d) const {
     float h = kTitleH + 6;
     if (d.type == EffectType::Eq || d.type == EffectType::Compressor)
         h += kGraphH;
-    if (d.type == EffectType::Reverb)
-        h += kSelH;   // reverb type selector row
+    if (d.type == EffectType::Reverb || d.type == EffectType::Delay)
+        h += kSelH;   // type / sync selector row
     h += kKnobH;   // one knob row (all effects have <= 5 knobs)
     return h + 8;
 }
@@ -403,6 +404,22 @@ void EffectsView::Draw(BRect) {
             DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));   // dropdown arrow
             fHits.push_back({ (int)i, 7, 0, sel, 0, 0 });   // kind 7 = reverb type
             knobTop += kSelH;
+        } else if (d.type == EffectType::Delay) {
+            // Sync selector: "Free" (manual Time knob) or a tempo note-division.
+            const bool sync = d.p(3) >= 0.5f;
+            const char* nm = sync ? Delay::DivisionName((int)(d.p(4) + 0.5f))
+                                  : "Free";
+            BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
+            SetHighColor(ColHeaderHi()); FillRect(sel);
+            SetHighColor(ColGrid());     StrokeRect(sel);
+            SetHighColor(ColTextDim());
+            DrawString("Sync:", BPoint(sel.left + 8, sel.bottom - 6));
+            SetHighColor(ColAccent());
+            DrawString(nm, BPoint(sel.left + 52, sel.bottom - 6));
+            SetHighColor(ColText());
+            DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));
+            fHits.push_back({ (int)i, 8, 0, sel, 0, 0 });   // kind 8 = delay sync
+            knobTop += kSelH;
         }
 
         // Knob row.
@@ -529,6 +546,31 @@ void EffectsView::MouseDown(BPoint where) {
                 if (d.params.size() < 5) d.params.resize(5, 0.0f);
                 if (d.params[3] <= 0.0f) d.params[3] = 2.6f;  // decay default
                 d.params[2] = (float)a;
+                Apply(); Invalidate();
+            }
+            delete menu;
+            break;
+        }
+        case 8: {   // delay sync / division dropdown
+            if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
+            EffectDesc& d = fChain[h.effect];
+            if (d.params.size() < 5) d.params.resize(5, 0.0f);
+            const bool sync = d.p(3) >= 0.5f;
+            const int  curDiv = (int)(d.p(4) + 0.5f);
+            BPopUpMenu* menu = new BPopUpMenu("sync", false, false);
+            BMenuItem* free = new BMenuItem("Free", nullptr);
+            if (!sync) free->SetMarked(true);
+            menu->AddItem(free);
+            for (int a = 0; a < Delay::kDivisionCount; a++) {
+                BMenuItem* it = new BMenuItem(Delay::DivisionName(a), nullptr);
+                if (sync && a == curDiv) it->SetMarked(true);
+                menu->AddItem(it);
+            }
+            BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+            if (sel) {
+                const int idx = menu->IndexOf(sel);
+                if (idx == 0) { d.params[3] = 0.0f; }             // Free
+                else { d.params[3] = 1.0f; d.params[4] = (float)(idx - 1); }
                 Apply(); Invalidate();
             }
             delete menu;

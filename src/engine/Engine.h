@@ -126,6 +126,17 @@ public:
     // playing (writes atomics the RT callback reads).
     void UpdateMix(const Project& project);
 
+    // Push effect-parameter edits into the running graph without a rebuild, so
+    // knob tweaks take effect during playback. Only chains whose structure still
+    // matches (same effect types, same count) are updated via SetParam (RT-safe);
+    // add/remove/reorder still needs the next Load. Also refreshes tempo-synced
+    // params. Safe to call from the UI thread while playing.
+    void SyncFx(const Project& project);
+
+    // Tell every effect the current tempo (for tempo-synced params, e.g. a
+    // delay locked to note divisions). Off-RT; call at Load + on tempo change.
+    void SetFxTempo(double bpm);
+
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
 
@@ -273,6 +284,7 @@ private:
         bool                                  audible = true;
         bool                                  liveMonitor = false;  // armed MIDI: synth live input
         std::vector<std::unique_ptr<IEffect>> fx;
+        std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
         // Aux sends: (destination node index into fBuses, linear level). Taps
         // this node's post-FX output. Dest node indices are resolved at Load,
         // so the RT callback does no id lookups. The topo order (built over
@@ -298,6 +310,7 @@ private:
     std::unique_ptr<std::atomic<float>[]>     fNodePeakL; // per-node output peak
     std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
+    std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input

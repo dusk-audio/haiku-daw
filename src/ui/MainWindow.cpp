@@ -544,6 +544,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             fStack->Execute(std::make_unique<SetFxCommand>(
                 (TrackId)tid, master, std::move(chain)), *fProject);
+            // Apply the edit to the running engine so it takes effect live
+            // (knob tweaks; structural changes still wait for the next Play).
+            if (fEngine) fEngine->SyncFx(*fProject);
             fTimeline->Invalidate();
             break;
         }
@@ -723,7 +726,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);
             fTimeline->Invalidate();   // grid + ruler follow tempo
-            // Metronome/engine pick up the new tempo on the next Play (rebuild).
+            // Update tempo-synced effects (e.g. a delay) in the running engine.
+            if (fEngine) fEngine->SetFxTempo(bpm);
+            // Metronome/engine otherwise picks up the new tempo on the next Play.
             break;
         }
         case MSG_SAVE:

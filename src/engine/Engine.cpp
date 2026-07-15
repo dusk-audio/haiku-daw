@@ -333,8 +333,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
         for (const EffectDesc& d : t->fx) {
             auto fx = MakeEffect(d);
-            if (fx) fx->Prepare(fOutputRate);
+            if (fx) { fx->Prepare(fOutputRate); fx->SetTempo(project.tempoBPM); }
             b.fx.push_back(std::move(fx));
+            b.fxTypes.push_back(d.type);
         }
         // Automation snapshot (RT-owned copy of the lanes).
         b.statGain = t->gain;
@@ -392,11 +393,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
 
     // Master bus effect chain (applied to the summed output).
     fMasterFx.clear();
+    fMasterFxTypes.clear();
     for (const EffectDesc& d : project.masterFx) {
         auto fx = MakeEffect(d);
         if (!fx) continue;
         fx->Prepare(fOutputRate);
+        fx->SetTempo(project.tempoBPM);
         fMasterFx.push_back(std::move(fx));
+        fMasterFxTypes.push_back(d.type);
     }
 
     // Master loudness meter. Integrated accumulation is disabled: it allocates
@@ -456,6 +460,35 @@ void Engine::UpdateMix(const Project& project) {
                 else           s->SetMix(t.gain, t.pan, audible);
             }
     }
+}
+
+void Engine::SyncFx(const Project& project) {
+    // Push each effect's params from the model into the live objects. SetParam
+    // is RT-safe (the RT thread may run concurrently). Only structurally-matched
+    // chains are synced; a changed shape waits for the next Load.
+    auto sync = [](std::vector<std::unique_ptr<IEffect>>& fx,
+                   const std::vector<EffectType>& types,
+                   const std::vector<EffectDesc>& descs) {
+        if (fx.size() != descs.size()) return;   // add/remove/reorder -> rebuild
+        for (size_t i = 0; i < fx.size(); i++) {
+            if (!fx[i] || i >= types.size() || types[i] != descs[i].type) continue;
+            for (size_t s = 0; s < descs[i].params.size(); s++)
+                fx[i]->SetParam((int)s, descs[i].params[s]);
+        }
+    };
+    for (Bus& b : fBuses) {
+        const Track* t = project.FindTrack(b.id);
+        if (t) sync(b.fx, b.fxTypes, t->fx);
+    }
+    sync(fMasterFx, fMasterFxTypes, project.masterFx);
+}
+
+void Engine::SetFxTempo(double bpm) {
+    for (Bus& b : fBuses)
+        for (auto& fx : b.fx)
+            if (fx) fx->SetTempo(bpm);
+    for (auto& fx : fMasterFx)
+        if (fx) fx->SetTempo(bpm);
 }
 
 void Engine::Start() {
