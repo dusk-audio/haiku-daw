@@ -173,6 +173,25 @@ static void test_split_clip() {
     CHECK(tmt->midiClips.size() == 1);
     CHECK(tmt->midiClips[0].notes.size() == 2);
     CHECK(tmt->midiClips[0].lengthFrames == 4000);
+
+    // MIDI velocity fades: fade-in scales an early note's velocity by position.
+    {
+        Project fp;
+        fp.AddTrack(Track{});
+        Track ft; ft.id = fp.NextTrackId(); ft.type = TrackType::Midi;
+        MidiClip fc; fc.id = fp.NextClipId(); fc.startFrame = 0;
+        fc.lengthFrames = 1000; fc.fadeInFrames = 200; fc.fadeOutFrames = 200;
+        { MidiNote n; n.pitch=60; n.velocity=100; n.startFrame=100; fc.notes.push_back(n); } // mid fade-in -> *0.5
+        { MidiNote n; n.pitch=62; n.velocity=100; n.startFrame=500; fc.notes.push_back(n); } // no fade -> full
+        { MidiNote n; n.pitch=64; n.velocity=100; n.startFrame=900; fc.notes.push_back(n); } // mid fade-out -> *0.5
+        ft.midiClips.push_back(fc);
+        fp.AddTrack(ft);
+        auto cn = fp.FindTrack(ft.id)->CollectNotes();
+        CHECK(cn.size() == 3);
+        CHECK(cn[0].velocity == 50);    // 100 * 100/200
+        CHECK(cn[1].velocity == 100);   // full
+        CHECK(cn[2].velocity == 50);    // 100 * (1000-900)/200
+    }
 }
 
 static void test_active_take() {

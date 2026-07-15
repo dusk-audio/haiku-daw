@@ -317,6 +317,28 @@ void ResizeMidiClipCommand::Undo(Project& p) {
             c->lengthFrames = fOldLen;
 }
 
+// --- SetMidiClipFadeCommand -------------------------------------------
+
+bool SetMidiClipFadeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fOldIn = c->fadeInFrames; fOldOut = c->fadeOutFrames;
+    Frame in = fIn < 0 ? 0 : fIn, out = fOut < 0 ? 0 : fOut;
+    if (in > c->lengthFrames)  in = c->lengthFrames;
+    if (out > c->lengthFrames) out = c->lengthFrames;
+    c->fadeInFrames = in; c->fadeOutFrames = out;
+    return true;
+}
+
+void SetMidiClipFadeCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (MidiClip* c = t->FindMidiClip(fClip)) {
+            c->fadeInFrames = fOldIn; c->fadeOutFrames = fOldOut;
+        }
+}
+
 // --- SplitMidiClipCommand ---------------------------------------------
 
 bool SplitMidiClipCommand::Do(Project& p) {

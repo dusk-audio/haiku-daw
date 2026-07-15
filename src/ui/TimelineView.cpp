@@ -662,11 +662,18 @@ void TimelineView::MouseDown(BPoint where) {
             fDragClip        = c.id;
             fDragClipOrig    = c.startFrame;
             fDragClipOrigLen = c.lengthFrames;
+            fDragFadeInOrig  = c.fadeInFrames;
+            fDragFadeOutOrig = c.fadeOutFrames;
             fDragIsMidiClip  = true;
             const float xStart = FrameToX(c.startFrame);
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
             const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
-            if (wide && where.x >= xEnd - kEdgeGrab) {
+            const bool  topBand = where.y <= lane.top + 16;
+            if (topBand && where.x <= xStart + 12) {
+                fDrag = Drag::ClipFadeIn;    // top-left grip = fade in
+            } else if (topBand && where.x >= xEnd - 12) {
+                fDrag = Drag::ClipFadeOut;   // top-right grip = fade out
+            } else if (wide && where.x >= xEnd - kEdgeGrab) {
                 fDrag = Drag::ClipResize;
             } else {
                 fDrag = Drag::Clip;
@@ -966,6 +973,20 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (len < 1) len = 1;
             c->lengthFrames = len;
         }
+    } else if (fDrag == Drag::ClipFadeIn && fDragIsMidiClip) {
+        MidiClip* c = t->FindMidiClip(fDragClip);
+        if (c) {
+            Frame f = XToFrame(where.x) - c->startFrame;
+            if (f < 0) f = 0; if (f > c->lengthFrames) f = c->lengthFrames;
+            c->fadeInFrames = f;
+        }
+    } else if (fDrag == Drag::ClipFadeOut && fDragIsMidiClip) {
+        MidiClip* c = t->FindMidiClip(fDragClip);
+        if (c) {
+            Frame f = (c->startFrame + c->lengthFrames) - XToFrame(where.x);
+            if (f < 0) f = 0; if (f > c->lengthFrames) f = c->lengthFrames;
+            c->fadeOutFrames = f;
+        }
     } else if (fDrag == Drag::ClipFadeIn) {
         Clip* c = t->FindClip(fDragClip);
         if (c) {
@@ -1171,6 +1192,16 @@ void TimelineView::MouseUp(BPoint where) {
                 if (v != fDragOrig)
                     cmd = std::make_unique<SetClipGainCommand>(fDragTrack,
                             fDragClip, v);
+            }
+        } else if ((fDrag == Drag::ClipFadeIn || fDrag == Drag::ClipFadeOut)
+                   && fDragIsMidiClip) {
+            if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                const Frame fin = c->fadeInFrames, fout = c->fadeOutFrames;
+                c->fadeInFrames = fDragFadeInOrig;
+                c->fadeOutFrames = fDragFadeOutOrig;
+                if (fin != fDragFadeInOrig || fout != fDragFadeOutOrig)
+                    cmd = std::make_unique<SetMidiClipFadeCommand>(fDragTrack,
+                            fDragClip, fin, fout);
             }
         } else if (fDrag == Drag::ClipFadeIn || fDrag == Drag::ClipFadeOut) {
             if (Clip* c = t->FindClip(fDragClip)) {
@@ -1811,6 +1842,31 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             const float s = 0.55f + 0.45f * (n.velocity / 127.0f);
             SetHighColor(Rgb((uint8)(235 * s), (uint8)(240 * s), (uint8)(245 * s)));
             FillRect(BRect(nx0, ny - nh, nx1, ny));
+        }
+
+        // Velocity-fade ramps + top-corner grips (drag to set MIDI fades).
+        SetHighColor(Rgb(235, 240, 248));
+        if (mc.fadeInFrames > 0) {
+            float fx = FrameToX(mc.startFrame + mc.fadeInFrames);
+            if (fx > block.left)
+                StrokeLine(BPoint(block.left, block.bottom),
+                           BPoint(std::min(fx, block.right), block.top));
+        }
+        if (mc.fadeOutFrames > 0) {
+            float fx = FrameToX(mc.startFrame + mc.lengthFrames - mc.fadeOutFrames);
+            if (fx < block.right)
+                StrokeLine(BPoint(std::max(fx, block.left), block.top),
+                           BPoint(block.right, block.bottom));
+        }
+        if (block.Width() > 30) {
+            BPoint li[3] = { BPoint(block.left + 1, block.top + 1),
+                             BPoint(block.left + 8, block.top + 1),
+                             BPoint(block.left + 1, block.top + 8) };
+            FillPolygon(li, 3);
+            BPoint ri[3] = { BPoint(block.right - 1, block.top + 1),
+                             BPoint(block.right - 8, block.top + 1),
+                             BPoint(block.right - 1, block.top + 8) };
+            FillPolygon(ri, 3);
         }
 
         if (ClipSelected(mc.id)) {           // selection highlight (shared)

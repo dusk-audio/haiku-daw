@@ -57,6 +57,7 @@ int main() {
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), a);
     TrackId t2 = a.Tracks().back().id;
     MidiClip mc; mc.startFrame = 2000; mc.lengthFrames = 4000;
+    mc.fadeInFrames = 300; mc.fadeOutFrames = 450;
     { MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500;   // clip-rel
       n.lengthFrames = 480; mc.notes.push_back(n); }
     { auto add = std::make_unique<AddMidiClipCommand>(t2, mc);
@@ -142,6 +143,8 @@ int main() {
     CHECK(bt2.midiClips.size() == 1);
     CHECK(bt2.midiClips[0].startFrame == 2000);
     CHECK(bt2.midiClips[0].lengthFrames == 4000);
+    CHECK(bt2.midiClips[0].fadeInFrames == 300);    // MIDI fades round-trip
+    CHECK(bt2.midiClips[0].fadeOutFrames == 450);
     CHECK(bt2.midiClips[0].notes.size() == 1);
     CHECK(bt2.midiClips[0].notes[0].pitch == 64);
     CHECK(bt2.midiClips[0].notes[0].startFrame == 500);   // clip-relative

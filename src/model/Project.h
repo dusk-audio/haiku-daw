@@ -53,6 +53,11 @@ struct MidiClip {
     Frame                 lengthFrames = 0;   // region length (the window)
     std::vector<MidiNote> notes;              // clip-relative
     int                   colorIndex   = 0;   // UI tint (0 = inherit track)
+    // Velocity fades (in clip-relative frames): notes starting inside the
+    // fade-in ramp up from silence; notes inside the fade-out ramp down. A MIDI
+    // region "fade" scales note velocity by start position (Logic-style).
+    Frame                 fadeInFrames  = 0;
+    Frame                 fadeOutFrames = 0;
 };
 
 // An aux send: taps a track's signal and adds `level` * signal into `dest`
@@ -104,10 +109,24 @@ struct Track {
     std::vector<MidiNote> CollectNotes() const {
         std::vector<MidiNote> out;
         for (const MidiClip& c : midiClips)
-            for (const MidiNote& n : c.notes)
-                if (n.startFrame >= 0 && n.startFrame < c.lengthFrames)
-                    out.push_back({ n.pitch, n.velocity,
-                                    c.startFrame + n.startFrame, n.lengthFrames });
+            for (const MidiNote& n : c.notes) {
+                if (n.startFrame < 0 || n.startFrame >= c.lengthFrames)
+                    continue;
+                // Velocity fade by the note's start position within the region.
+                float f = 1.0f;
+                if (c.fadeInFrames > 0 && n.startFrame < c.fadeInFrames)
+                    f = (float)n.startFrame / (float)c.fadeInFrames;
+                if (c.fadeOutFrames > 0) {
+                    const Frame fo = c.lengthFrames - c.fadeOutFrames;
+                    if (n.startFrame > fo)
+                        f *= (float)(c.lengthFrames - n.startFrame)
+                             / (float)c.fadeOutFrames;
+                }
+                int vel = (int)(n.velocity * f + 0.5f);
+                if (vel < 1) vel = 1; if (vel > 127) vel = 127;
+                out.push_back({ n.pitch, vel,
+                                c.startFrame + n.startFrame, n.lengthFrames });
+            }
         return out;
     }
 };

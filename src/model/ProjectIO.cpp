@@ -105,7 +105,9 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 
         for (const MidiClip& mc : t.midiClips) {
             f << "midiclip " << mc.id << " " << (long long)mc.startFrame << " "
-              << (long long)mc.lengthFrames << " " << mc.colorIndex << "\n";
+              << (long long)mc.lengthFrames << " " << mc.colorIndex << " "
+              << (long long)mc.fadeInFrames << " "
+              << (long long)mc.fadeOutFrames << "\n";
             for (const MidiNote& n : mc.notes)   // frames are clip-relative
                 f << "note " << n.pitch << " " << n.velocity << " "
                   << (long long)n.startFrame << " "
@@ -293,9 +295,12 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         else if (kw == "midiclip" && haveTrack) {
             MidiClip mc;
             long long id = 0, st = 0, ln = 0; int col = 0;
+            long long fi = 0, fo = 0;
             iss >> id >> st >> ln >> col;
+            iss >> fi >> fo;   // optional fades (absent in older files -> 0)
             mc.id = (ClipId)id; mc.startFrame = (Frame)st;
             mc.lengthFrames = (Frame)ln; mc.colorIndex = col;
+            mc.fadeInFrames = (Frame)fi; mc.fadeOutFrames = (Frame)fo;
             if (mc.id > maxClip) maxClip = mc.id;
             cur.midiClips.push_back(mc);
             curMidiIdx = (int)cur.midiClips.size() - 1;

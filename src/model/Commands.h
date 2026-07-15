@@ -409,6 +409,28 @@ private:
     Frame   fOldLen = 0;
 };
 
+// Set a MIDI region's velocity fade-in / fade-out (clip-relative frames).
+// Coalesces during a drag; stores the old fades for Undo.
+class SetMidiClipFadeCommand : public Command {
+public:
+    SetMidiClipFadeCommand(TrackId track, ClipId clip, Frame fadeIn, Frame fadeOut)
+        : fTrack(track), fClip(clip), fIn(fadeIn), fOut(fadeOut) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set MIDI Fade"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetMidiClipFadeCommand*>(prev);
+        if (!p || p->fClip != fClip) return false;
+        p->fIn = fIn; p->fOut = fOut;
+        return true;
+    }
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fIn, fOut;
+    Frame   fOldIn = 0, fOldOut = 0;
+};
+
 // Split a MIDI region at absolute frame `at` into two regions: the left half
 // keeps notes starting before the cut, the right half (new id) gets the rest,
 // re-based to its own start. Undo restores the original region (length + notes)
