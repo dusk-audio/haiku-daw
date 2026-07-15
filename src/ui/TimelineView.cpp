@@ -620,8 +620,7 @@ void TimelineView::MouseDown(BPoint where) {
                 const std::string pick = sel ? std::string(sel->Label())
                                              : std::string();
                 delete mm;
-                // Color/height are view properties (serialized): mutate directly,
-                // like the arm toggle, rather than through the undo stack.
+                // Color/height/reorder route through the command stack (undoable).
                 if (pick == "Move Up")
                     fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, -1),
                                     *fProject);

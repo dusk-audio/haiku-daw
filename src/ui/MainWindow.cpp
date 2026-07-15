@@ -839,7 +839,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     // loop start (the recorder keeps capturing across the seam).
                     if (fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
                         fProject->transport.playhead = tr.loopStart;
-                        StartRecordEngine(tr.loopStart);
+                        if (!StartRecordEngine(tr.loopStart)) {
+                            std::fprintf(stderr, "MainWindow: loop-record engine "
+                                                 "restart failed; stopping\n");
+                            StopRecording();
+                        }
                         break;
                     }
                     const bool capturing = fRecorder && fRecorder->IsRecording();
@@ -959,7 +963,7 @@ void MainWindow::StartPlayback() {
     UpdatePulse();
 }
 
-void MainWindow::StopPlayback() {
+void MainWindow::StopPlayback(bool resumeMonitor) {
     if (fEngine)
         fEngine->Stop();
     fPlaying = false;
@@ -970,7 +974,8 @@ void MainWindow::StopPlayback() {
     UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
                           Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
-    UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
+    if (resumeMonitor)
+        UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
 }
 
 // Start the playback engine from `engineStart` for overdub monitoring during a
@@ -1043,18 +1048,21 @@ void MainWindow::StartMidiCapture() {
         return;
     }
     const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
+    std::set<int32> connected;   // dedupe: two armed tracks may share an endpoint
     for (TrackId id : fMidiRecTracks) {
         const Track* t = fProject->FindTrack(id);
         if (!t || t->input.kind != InputSource::kMidi) continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t->input.name) {
-                fMidiIn->ConnectFrom(e.id);
+                if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
                 break;
             }
     }
-    // Discard events queued before this take, then start the take clock.
+    // Discard events queued before this take (both the record and monitor
+    // rings) so stale pre-connect notes don't record or sound, then start.
     MidiEvent tmp[64];
     while (fMidiIn->ReadEvents(tmp, 64) > 0) {}
+    while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
     fMidiRec.Begin(fRecStart);
     fMidiT0 = system_time();
     // Route live events to the engine so armed MIDI tracks sound as you play.
@@ -1095,6 +1103,9 @@ void MainWindow::ReloadActiveEngine() {
     // that can't be applied in place (adding/removing an effect, a tempo edit)
     // takes effect without a manual stop/play. A brief seam is expected.
     if (fPlaying) {
+        // If the engine has already reached the end, let it stop naturally
+        // rather than restart from 0 (StartPlayback rewinds a past-end playhead).
+        if (fEngine && fEngine->IsFinished()) return;
         if (fEngine) fProject->transport.playhead = fEngine->Playhead();
         StartPlayback();          // rebuilds at the playhead and keeps playing
     } else if (fMonitoring) {
@@ -1134,12 +1145,13 @@ void MainWindow::UpdateMidiMonitor() {
     fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
     if (fMidiIn->Register() != B_OK) { fMidiIn.reset(); return; }
     const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
+    std::set<int32> connected;   // dedupe: two armed tracks may share an endpoint
     for (TrackId id : armed) {
         const Track* t = fProject->FindTrack(id);
         if (!t) continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t->input.name) {
-                fMidiIn->ConnectFrom(e.id);
+                if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
                 break;
             }
     }
@@ -1156,6 +1168,8 @@ void MainWindow::UpdateMidiMonitor() {
         fMidiIn.reset();
         return;
     }
+    MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
+    while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
     fEngine->SetLiveMidi(fMidiIn->MonitorInput());
     fEngine->Start();
     fMonitoring = true;
@@ -1165,7 +1179,7 @@ void MainWindow::UpdateMidiMonitor() {
 void MainWindow::StartRecording() {
     if (fRecMode || (fRecorder && fRecorder->IsRecording()))
         return;
-    if (fPlaying) StopPlayback();
+    if (fPlaying) StopPlayback(false);   // don't spin up a monitor we replace
     StopMidiMonitor();   // the record engine takes over monitoring
 
     // Record onto every armed audio track (one input take, dropped on each),

@@ -580,7 +580,12 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
     const Frame kTail = (Frame)(4.0f * fOutputRate);      // release lingers <= 4 s
     for (LiveVoice& v : fVoices) {
         if (!v.active) continue;
-        if (v.releasing && blockStart - v.off > kTail) { v.active = false; continue; }
+        // Reap a released voice once its tail has passed. `blockStart < v.off`
+        // means the playhead jumped backward (loop) — reap it too so it can't
+        // linger forever.
+        if (v.releasing && (blockStart < v.off || blockStart - v.off > kTail)) {
+            v.active = false; continue;
+        }
         Frame len = v.releasing ? (v.off - v.start) : kHeld;
         if (len < 1) len = 1;
         fLiveNotes.push_back(MidiNote{ (int)v.pitch, (int)v.vel, v.start, len });

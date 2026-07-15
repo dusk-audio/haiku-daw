@@ -57,7 +57,7 @@ public:
 
 private:
     void StartPlayback();
-    void StopPlayback();
+    void StopPlayback(bool resumeMonitor = true);  // false when about to record
     void StartRecording();
     void StopRecording();
     void StartCapture();             // open the Recorder (after any count-in)

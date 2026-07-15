@@ -267,10 +267,11 @@ void InspectorView::MouseMoved(BPoint where, uint32, const BMessage*) {
     Track* t = CurrentTrackMut();
     if (!t) return;
     if (fDrag == Drag::Fader) {
+        if (fFaderR.Height() <= 0) return;   // avoid div-by-zero -> NaN gain
         float frac = (fFaderR.bottom - where.y) / fFaderR.Height();
         t->gain = FracToGain(frac);
     } else if (fDrag == Drag::Pan) {
-        // Vertical drag over ~120 px spans full L..R.
+        // Horizontal drag across the knob spans full L..R.
         float pan = (where.x - (fPanR.left + fPanR.right) * 0.5f) / 60.0f;
         if (pan < -1) pan = -1; if (pan > 1) pan = 1;
         t->pan = pan;

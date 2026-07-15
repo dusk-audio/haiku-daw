@@ -15,8 +15,8 @@ namespace daw {
 // A rotary pan knob in `r`, pointer angle from pan [-1 (L) .. +1 (R)] (0 = 12
 // o'clock). Draws a dial with a tick and an L/C/R hint below.
 inline void DrawPanKnob(BView* v, BRect r, float pan) {
-    if (pan < -1.0f) pan = -1.0f;
-    if (pan >  1.0f) pan =  1.0f;
+    if (!(pan >= -1.0f)) pan = -1.0f;   // also catches NaN
+    if (pan >  1.0f)     pan =  1.0f;
     const float cx = (r.left + r.right) * 0.5f;
     const float cy = (r.top + r.bottom) * 0.5f;
     const float rad = std::min(r.Width(), r.Height()) * 0.5f - 1.0f;
@@ -39,7 +39,7 @@ inline void DrawPanKnob(BView* v, BRect r, float pan) {
 // A vertical fader in `r` filled from the bottom to `frac` [0,1]. Draws a unity
 // tick at `unityFrac`. Returns nothing; the caller labels it.
 inline void DrawVFader(BView* v, BRect r, float frac, float unityFrac) {
-    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    if (!(frac > 0)) frac = 0; if (frac > 1) frac = 1;   // NaN -> 0
     v->SetHighColor(ColLcd());
     v->FillRect(r);
     BRect fill = r;
@@ -75,10 +75,12 @@ constexpr float kUnityFrac = 1.0f / kMaxGainW;   // where 1.0 gain sits
 
 inline float GainToFrac(float gain) {
     float f = gain / kMaxGainW;
-    return f < 0 ? 0 : (f > 1 ? 1 : f);
+    if (!(f > 0)) return 0;   // NaN / negative -> 0
+    return f > 1 ? 1 : f;
 }
 inline float FracToGain(float frac) {
-    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    if (!(frac > 0)) frac = 0;   // NaN / negative -> 0
+    if (frac > 1) frac = 1;
     return frac * kMaxGainW;
 }
 inline float GainToDb(float gain) {
