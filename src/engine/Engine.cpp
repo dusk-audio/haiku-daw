@@ -222,7 +222,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Audio || monitorOnly)
             continue;   // monitor-only: no clip streams (no disk I/O)
-        const bool audible = !t.muted && (!anySolo || t.soloed);
+        const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
         for (size_t ci = 0; ci < t.clips.size(); ci++) {
             const Clip& c = t.clips[ci];
@@ -278,7 +278,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             continue;
         std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
         const bool monitor = t.armed || t.inputMonitor;   // live input synth
-        const bool audible = !t.muted && (!anySolo || t.soloed);
+        const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if ((notes.empty() && !monitor) || (!audible && !monitor))
             continue;
         Bus b;
@@ -327,7 +327,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         // Audio leaves are gated live by their streams (so live mute/unmute
         // works); a bus node is gated here (rebuild-on-play) and skips routing
         // its sum when muted / solo'd out.
-        b.audible = b.isBus ? (!t->muted && (!anySolo || t->soloed)) : true;
+        b.audible = b.isBus ? (!t->muted && (!anySolo || t->soloed || t->soloSafe)) : true;
         // Keep b.fx index-aligned with t->fx (nullptr placeholder for any
         // effect that fails to build, e.g. a missing plugin add-on) so
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
@@ -452,7 +452,7 @@ void Engine::UpdateMix(const Project& project) {
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Audio)
             continue;
-        const bool audible = !t.muted && (!anySolo || t.soloed);
+        const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         // Automated tracks: automation owns gain/pan (driven per block in
         // FillBuffer); only refresh audibility here so live mute/solo still work.
         const bool automated = t.gainAuto.Count() > 0 || t.panAuto.Count() > 0;
@@ -468,7 +468,7 @@ void Engine::UpdateMix(const Project& project) {
     for (Bus& b : fBuses) {
         const Track* t = project.FindTrack(b.id);
         if (!t) continue;
-        const bool audible = !t->muted && (!anySolo || t->soloed);
+        const bool audible = !t->muted && (!anySolo || t->soloed || t->soloSafe);
         const bool automated = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
         if (t->type == TrackType::Midi) {
             b.audible = audible || b.liveMonitor;   // keep monitored input audible

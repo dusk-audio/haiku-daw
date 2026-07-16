@@ -95,7 +95,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
           << (t.muted ? 1 : 0) << " " << (t.soloed ? 1 : 0) << " "
           << (t.armed ? 1 : 0) << " " << t.output
           << " \"" << t.name << "\" "
-          << t.colorIndex << " " << t.height << "\n";
+          << t.colorIndex << " " << t.height << " "
+          << (t.soloSafe ? 1 : 0) << "\n";
 
         for (const Clip& c : t.clips)
             f << "clip " << c.id << " "
@@ -277,9 +278,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             // Optional color index + lane height after the closing quote.
             if (size_t q = line.rfind('"'); q != std::string::npos) {
                 std::istringstream tail(line.substr(q + 1));
-                int ci = 0, h = 0;
+                int ci = 0, h = 0, ss = 0;
                 if (tail >> ci) cur.colorIndex = ci;
                 if (tail >> h && h >= 24) cur.height = h;
+                if (tail >> ss) cur.soloSafe = (ss != 0);
             }
             if (cur.id > maxTrack) maxTrack = cur.id;
             haveTrack = true;

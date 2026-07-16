@@ -234,6 +234,35 @@ int main() {
         }
     }
 
+    // Solo-safe: a track stays audible even when another track is soloed.
+    {
+        auto energy = [](const Project& pr) -> double {
+            const char* f = "solosafe_tmp.wav";
+            if (!ExportWav(pr, f, 48000.0)) return -1.0;
+            WavSource s;
+            if (!s.Open(f)) { std::remove(f); return -1.0; }
+            double e = 0; const float* c = nullptr; size_t n = 0;
+            while (s.ReadChunk(&c, &n))
+                for (size_t i = 0; i < n * 2; i++) e += std::fabs(c[i]);
+            std::remove(f);
+            return e;
+        };
+        Project p; p.sampleRate = SR;
+        Track a; a.id = p.NextTrackId(); a.type = TrackType::Midi; a.soloed = true;
+        MidiNote na; na.pitch = 60; na.velocity = 110;
+        na.startFrame = 0; na.lengthFrames = (Frame)(SR / 2); PutNote(a, na);
+        Track b; b.id = p.NextTrackId(); b.type = TrackType::Midi;
+        MidiNote nb; nb.pitch = 67; nb.velocity = 110;
+        nb.startFrame = 0; nb.lengthFrames = (Frame)(SR / 2); PutNote(b, nb);
+        p.AddTrack(a); p.AddTrack(b);
+        const double eSolo = energy(p);            // A soloed -> only A
+        Project p2 = p;                            // B solo-safe -> A + B
+        for (Track& t : p2.Tracks()) if (!t.soloed) t.soloSafe = true;
+        const double eSafe = energy(p2);
+        CHECK(eSolo > 0.0);
+        CHECK(eSafe > eSolo * 1.2);                // B adds energy despite A's solo
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

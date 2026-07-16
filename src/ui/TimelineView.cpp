@@ -698,6 +698,9 @@ void TimelineView::MouseDown(BPoint where) {
                 mm->AddItem(new BMenuItem("Taller", NULL));
                 mm->AddItem(new BMenuItem("Shorter", NULL));
                 mm->AddSeparatorItem();
+                BMenuItem* ssItem = new BMenuItem("Solo Safe", NULL);
+                ssItem->SetMarked(t.soloSafe);
+                mm->AddItem(ssItem);
                 mm->AddItem(new BMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
                 mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
                 mm->AddItem(new BMenuItem("Delete", NULL));
@@ -727,6 +730,11 @@ void TimelineView::MouseDown(BPoint where) {
                         fStack->Execute(std::make_unique<SetTrackHeightCommand>(
                             t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
                             *fProject);
+                } else if (pick == "Solo Safe") {
+                    // Transient mix state (like arm); toggle directly + refresh.
+                    if (Track* tr = fProject->FindTrack(t.id))
+                        tr->soloSafe = !tr->soloSafe;
+                    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
                 } else if (pick == "Freeze" || pick == "Unfreeze") {
                     // Freeze needs an offline render (file I/O): hand off to the
                     // main window. Unfreeze is pure model but routed the same way
@@ -1799,6 +1807,11 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     DrawButton(this, SoloRect(lane), "S", t.soloed,       ColSolo());
     DrawButton(this, ArmRect(lane),  "R", t.armed,        ColRec());
     DrawButton(this, MonRect(lane),  "I", t.inputMonitor, ColMon());
+    if (t.soloSafe) {   // solo-safe: a small dot on the Solo button
+        BRect s = SoloRect(lane);
+        SetHighColor(ColSolo());
+        FillEllipse(BPoint(s.right - 3, s.top + 3), 2, 2);
+    }
 
     // Pan knob (value ring in the track-type accent).
     DrawKnob(this, PanKnobRect(lane), t.pan,

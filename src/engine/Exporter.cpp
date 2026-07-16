@@ -119,7 +119,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // frames, then converted to output frames.
     Frame projEnd = 0;
     for (const Track& t : project.Tracks()) {
-        const bool audible = !t.muted && (!anySolo || t.soloed);
+        const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if (!audible)
             continue;
         for (const Clip& c : t.clips)
@@ -209,7 +209,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
         auto it = idx.find(id);
         if (it == idx.end()) continue;
         const Track& t = tracks[it->second];
-        const bool audible = !t.muted && (!anySolo || t.soloed);
+        const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if (!audible)
             continue;   // muted/solo'd out: render + route nothing downstream
 
