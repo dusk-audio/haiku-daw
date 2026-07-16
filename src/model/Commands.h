@@ -155,6 +155,48 @@ private:
     InputSource fOld;
 };
 
+// --- Markers (named timeline positions) -------------------------------
+
+// Add a named marker (Project::markers stays sorted by frame). Undo removes it.
+class AddMarkerCommand : public Command {
+public:
+    AddMarkerCommand(Frame frame, std::string name)
+        : fFrame(frame), fName(std::move(name)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Add Marker"; }
+private:
+    Frame       fFrame;
+    std::string fName;
+    int         fIndex = -1;   // where it landed (for undo)
+};
+
+// Remove the marker at `frame`. Stores it for undo.
+class RemoveMarkerCommand : public Command {
+public:
+    explicit RemoveMarkerCommand(Frame frame) : fFrame(frame) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Remove Marker"; }
+private:
+    Frame  fFrame;
+    Marker fRemoved;
+    int    fIndex = -1;
+};
+
+// Rename the marker at `frame`. Stores the old name for undo.
+class RenameMarkerCommand : public Command {
+public:
+    RenameMarkerCommand(Frame frame, std::string name)
+        : fFrame(frame), fNew(std::move(name)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Rename Marker"; }
+private:
+    Frame       fFrame;
+    std::string fNew, fOld;
+};
+
 // Add a MIDI region (clip) to a track. Allocates a clip id in Do() if unset;
 // Undo() removes it. CreatedId() gives the id after Do() (for the UI).
 class AddMidiClipCommand : public Command {

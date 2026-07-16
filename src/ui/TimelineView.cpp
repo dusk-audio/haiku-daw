@@ -177,6 +177,15 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         case B_SPACE:   // toggle transport (play/stop)
             if (BWindow* w = Window()) w->PostMessage(kMsgTransportToggle);
             break;
+        case 'm': case 'M': {   // drop a marker at the playhead
+            Frame at = fProject->transport.playhead; if (at < 0) at = 0;
+            char nm[24];
+            std::snprintf(nm, sizeof(nm), "Marker %d",
+                          (int)fProject->markers.size() + 1);
+            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
+            Invalidate();
+            break;
+        }
         case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - kRulerHeight) * 0.8f); break;
         case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - kRulerHeight) * 0.8f); break;
         case B_DELETE: case B_BACKSPACE:
@@ -394,6 +403,32 @@ void TimelineView::Draw(BRect updateRect) {
         SetHighColor(Rgb(200, 220, 255));
         StrokeRect(b);
     }
+    // Loop / punch region overlays across the lanes (translucent), + marker
+    // lines, so the cycle range and markers are visible in the arrangement, not
+    // just on the ruler.
+    const Transport& tr = fProject->transport;
+    const float botY = Bounds().bottom;
+    SetDrawingMode(B_OP_ALPHA);
+    SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+    auto band = [&](Frame a, Frame b, uint8 r, uint8 g, uint8 bl, uint8 al) {
+        float x0 = FrameToX(a), x1 = FrameToX(b);
+        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+        if (x1 <= x0) return;
+        SetHighColor(r, g, bl, al);
+        FillRect(BRect(x0, kRulerHeight, x1, botY));
+    };
+    if (tr.loopEnabled && tr.loopEnd > tr.loopStart)
+        band(tr.loopStart, tr.loopEnd, 70, 120, 95, 40);      // green
+    if (tr.punchEnabled && tr.punchOut > tr.punchIn)
+        band(tr.punchIn, tr.punchOut, 160, 60, 60, 45);       // red
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        if (x < kHeaderWidth || x > Bounds().right) continue;
+        SetHighColor(52, 199, 89, 70);
+        StrokeLine(BPoint(x, kRulerHeight), BPoint(x, botY));
+    }
+    SetDrawingMode(B_OP_COPY);
+
     DrawPlayhead();          // over lanes, under the ruler
     DrawRuler(updateRect);   // ruler last so it sits above lane content
 }
@@ -543,6 +578,15 @@ void TimelineView::HandleRulerMenu(BPoint where) {
         menu->AddItem(new BMenuItem("Remove change here", NULL));
     }
 
+    // Markers.
+    const Marker* nearMarker = MarkerAt(where);
+    menu->AddSeparatorItem();
+    menu->AddItem(new BMenuItem("Add Marker", NULL));
+    if (nearMarker) {
+        menu->AddItem(new BMenuItem("Rename Marker" B_UTF8_ELLIPSIS, NULL));
+        menu->AddItem(new BMenuItem("Delete Marker", NULL));
+    }
+
     BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
     if (sel) {
         BMenu* parent = sel->Menu();
@@ -559,6 +603,24 @@ void TimelineView::HandleRulerMenu(BPoint where) {
         } else if (label && std::strcmp(label, "Remove change here") == 0) {
             if (nearTempo >= 0) tm.RemoveTempoAt(nearTempo);
             else if (nearMeter >= 0) tm.RemoveMeterAt(nearMeter);
+        } else if (label && std::strcmp(label, "Add Marker") == 0) {
+            Frame at = Snapped(XToFrame(where.x)); if (at < 0) at = 0;
+            char nm[24];
+            std::snprintf(nm, sizeof(nm), "Marker %d",
+                          (int)fProject->markers.size() + 1);
+            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
+        } else if (nearMarker && label
+                   && std::strcmp(label, "Delete Marker") == 0) {
+            fStack->Execute(std::make_unique<RemoveMarkerCommand>(nearMarker->frame),
+                            *fProject);
+        } else if (nearMarker && label
+                   && std::strncmp(label, "Rename Marker", 13) == 0) {
+            // Reuse RenameWindow; the marker frame rides in the "track" id field.
+            BPoint sp = ConvertToScreen(where);
+            BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+            (new RenameWindow(wr, (TrackId)nearMarker->frame,
+                              nearMarker->name.c_str(), BMessenger(Window()),
+                              kMsgRenameMarker))->Show();
         }
         Invalidate();
     }
@@ -584,6 +646,14 @@ void TimelineView::MouseDown(BPoint where) {
     // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
     // range instead. On release we decide seek-vs-drag by how far it moved.
     if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
+        // Left-click a marker flag: jump the playhead there.
+        if (!rightClick) {
+            if (const Marker* mk = MarkerAt(where)) {
+                fProject->transport.playhead = mk->frame;
+                if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+                return;
+            }
+        }
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
         fDrag        = (modifiers() & B_CONTROL_KEY) ? Drag::RulerPunch
@@ -1505,6 +1575,28 @@ void TimelineView::DrawRuler(BRect update) {
         char s[16]; std::snprintf(s, sizeof(s), "%d/%d", m.num, m.denom);
         DrawString(s, BPoint(x + 2, 19));
     }
+
+    // Position markers: a small flag + name at the top of the ruler.
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        if (x < kHeaderWidth || x > r.right) continue;
+        SetHighColor(ColMidiAccent());   // green flag, distinct from tempo/meter
+        FillRect(BRect(x, 0, x + 8, 7));
+        StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
+        SetHighColor(ColText());
+        DrawString(mk.name.c_str(), BPoint(x + 10, 8));
+    }
+}
+
+// The marker whose flag is under `where` on the ruler, or nullptr.
+const Marker* TimelineView::MarkerAt(BPoint where) const {
+    if (!fProject || where.y >= kRulerHeight) return nullptr;
+    const Marker* best = nullptr; float bestd = 9.0f;
+    for (const Marker& mk : fProject->markers) {
+        const float d = std::fabs(FrameToX(mk.frame) - where.x);
+        if (d < bestd) { bestd = d; best = &mk; }
+    }
+    return best;
 }
 
 // Walk the visible bar/beat gridlines once, invoking fn for each. Shared by

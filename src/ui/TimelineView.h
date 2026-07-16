@@ -136,7 +136,8 @@ private:
     BRect LaneRect(int index) const;
     int   TrackIndexAt(BPoint where) const;             // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
-    void  HandleRulerMenu(BPoint where);        // tempo/meter change menu
+    void  HandleRulerMenu(BPoint where);        // tempo/meter/marker menu
+    const Marker* MarkerAt(BPoint where) const; // ruler marker under the cursor
     Frame BarStartFrameAt(Frame f) const;       // nearest bar boundary frame
 
     // Live fader/pan drag. During a drag we preview by writing the model

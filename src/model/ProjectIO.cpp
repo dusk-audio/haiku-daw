@@ -84,6 +84,9 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "meterchange " << (long long)mc.frame << " "
               << mc.num << " " << mc.denom << "\n";
 
+    for (const Marker& mk : p.markers)
+        f << "marker " << (long long)mk.frame << " \"" << mk.name << "\"\n";
+
     for (const Track& t : p.Tracks()) {
         const char* ty = t.type == TrackType::Midi ? "midi"
                        : t.type == TrackType::Bus  ? "bus" : "audio";
@@ -236,6 +239,11 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             long long fr = 0; int n = 4, d = 4;
             iss >> fr >> n >> d;
             if (fr > 0) meterChanges.push_back({(Frame)fr, n, d});
+        }
+        else if (kw == "marker") {
+            long long fr = 0; iss >> fr;
+            Marker mk; mk.frame = (Frame)fr; mk.name = Unquote(line);
+            p.markers.push_back(mk);
         }
         else if (kw == "transport") {
             long long ph, ls, le; int loop;

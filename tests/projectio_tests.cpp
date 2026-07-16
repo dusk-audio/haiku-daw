@@ -206,6 +206,34 @@ int main() {
         std::remove(bogus);
     }
 
+    // Markers: add (kept sorted) / rename / remove commands, undo, IO round-trip.
+    {
+        Project p;
+        CommandStack s;
+        s.Execute(std::make_unique<AddMarkerCommand>(2000, "B"), p);
+        s.Execute(std::make_unique<AddMarkerCommand>(1000, "A"), p);   // earlier
+        CHECK(p.markers.size() == 2);
+        CHECK(p.markers[0].frame == 1000 && p.markers[0].name == "A"); // sorted
+        CHECK(p.markers[1].frame == 2000 && p.markers[1].name == "B");
+        s.Execute(std::make_unique<RenameMarkerCommand>(1000, "Intro"), p);
+        CHECK(p.markers[0].name == "Intro");
+        s.Undo(p);   // undo rename
+        CHECK(p.markers[0].name == "A");
+        s.Execute(std::make_unique<RemoveMarkerCommand>(1000), p);
+        CHECK(p.markers.size() == 1 && p.markers[0].frame == 2000);
+        s.Undo(p);   // undo remove -> back at index 0
+        CHECK(p.markers.size() == 2 && p.markers[0].frame == 1000);
+
+        const char* path = "markers_tmp.dawproj";
+        CHECK(ProjectIO::Save(p, path));
+        Project q;
+        CHECK(ProjectIO::Load(q, path));
+        std::remove(path);
+        CHECK(q.markers.size() == 2);
+        CHECK(q.markers[0].frame == 1000 && q.markers[0].name == "A");
+        CHECK(q.markers[1].frame == 2000 && q.markers[1].name == "B");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

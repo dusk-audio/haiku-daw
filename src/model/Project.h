@@ -158,6 +158,13 @@ struct Track {
     }
 };
 
+// A named position marker on the timeline (absolute frames). Kept sorted by
+// frame in Project::markers.
+struct Marker {
+    Frame       frame = 0;
+    std::string name;
+};
+
 class Project {
 public:
     double        sampleRate = 48000.0;
@@ -167,6 +174,7 @@ public:
     TimeSignature timeSig;
     TempoMap      tempoMap;            // variable tempo + meter (authoritative)
     Transport     transport;
+    std::vector<Marker> markers;      // named position markers (sorted by frame)
 
     const std::vector<Track>& Tracks() const { return fTracks; }
     std::vector<Track>&       Tracks()       { return fTracks; }
@@ -192,6 +200,7 @@ public:
         timeSig    = TimeSignature{};
         tempoMap   = TempoMap{};
         transport  = Transport{};
+        markers.clear();
         fLastTrackId = kInvalidTrackId;
         fLastClipId  = kInvalidClipId;
     }

@@ -614,6 +614,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgRenameMarker: {
+            int64 fr = 0; const char* name = nullptr;   // "track" carries the frame
+            msg->FindInt64("track", &fr);
+            if (msg->FindString("name", &name) == B_OK && name) {
+                fStack->Execute(std::make_unique<RenameMarkerCommand>(
+                    (Frame)fr, name), *fProject);
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgApplyMix: {
             int64 tid = 0; float g = 1, p = 0; bool mu = false, so = false;
             msg->FindInt64("track", &tid);

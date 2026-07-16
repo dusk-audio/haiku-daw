@@ -609,6 +609,45 @@ void SetFxCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->fx = fOld;
 }
 
+// --- Markers ----------------------------------------------------------
+
+bool AddMarkerCommand::Do(Project& p) {
+    size_t i = 0;
+    while (i < p.markers.size() && p.markers[i].frame < fFrame) i++;
+    fIndex = (int)i;
+    p.markers.insert(p.markers.begin() + i, Marker{fFrame, fName});
+    return true;
+}
+void AddMarkerCommand::Undo(Project& p) {
+    if (fIndex >= 0 && fIndex < (int)p.markers.size())
+        p.markers.erase(p.markers.begin() + fIndex);
+}
+
+bool RemoveMarkerCommand::Do(Project& p) {
+    for (size_t i = 0; i < p.markers.size(); i++)
+        if (p.markers[i].frame == fFrame) {
+            fRemoved = p.markers[i];
+            fIndex   = (int)i;
+            p.markers.erase(p.markers.begin() + i);
+            return true;
+        }
+    return false;
+}
+void RemoveMarkerCommand::Undo(Project& p) {
+    if (fIndex >= 0 && fIndex <= (int)p.markers.size())
+        p.markers.insert(p.markers.begin() + fIndex, fRemoved);
+}
+
+bool RenameMarkerCommand::Do(Project& p) {
+    for (Marker& m : p.markers)
+        if (m.frame == fFrame) { fOld = m.name; m.name = fNew; return true; }
+    return false;
+}
+void RenameMarkerCommand::Undo(Project& p) {
+    for (Marker& m : p.markers)
+        if (m.frame == fFrame) { m.name = fOld; return; }
+}
+
 // --- SetTrackInputCommand ---------------------------------------------
 
 bool SetTrackInputCommand::Do(Project& p) {

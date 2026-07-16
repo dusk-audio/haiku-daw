@@ -11,10 +11,11 @@ namespace daw {
 enum { MSG_OK = 'rnok' };
 
 RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
-                           BMessenger apply)
-    : BWindow(frame, "Rename Track", B_TITLED_WINDOW,
+                           BMessenger apply, uint32 what)
+    : BWindow(frame, what == kMsgRenameMarker ? "Rename Marker" : "Rename Track",
+              B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
-      fTrack(track), fApply(apply) {
+      fTrack(track), fApply(apply), fWhat(what) {
     BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
     root->SetViewColor(ColHeader());
     AddChild(root);
@@ -33,7 +34,7 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
 
 void RenameWindow::MessageReceived(BMessage* msg) {
     if (msg->what == MSG_OK) {
-        BMessage m(kMsgRenameTrack);
+        BMessage m(fWhat);
         m.AddInt64("track", (int64)fTrack);
         m.AddString("name", fText->Text());
         fApply.SendMessage(&m);
