@@ -168,8 +168,15 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     // One page = the visible content width in frames.
     const Frame page = (Frame)((Bounds().right - kHeaderWidth) * fFramesPerPixel);
     switch (bytes[0]) {
-        case B_LEFT_ARROW:  PanBy(-page / 4); break;
-        case B_RIGHT_ARROW: PanBy(page / 4);  break;
+        case B_LEFT_ARROW:
+            if (modifiers() & B_COMMAND_KEY) JumpToMarker(-1);
+            else PanBy(-page / 4);
+            break;
+        case B_RIGHT_ARROW:
+            if (modifiers() & B_COMMAND_KEY) JumpToMarker(+1);
+            else PanBy(page / 4);
+            break;
+        case 'l': case 'L': LoopBetweenMarkers(); break;   // cycle marker-to-marker
         case B_HOME:        fScrollFrame = 0; Invalidate(); break;
         case '+': case '=': ZoomBy(0.5); break;   // zoom in
         case '-': case '_': ZoomBy(2.0); break;   // zoom out
@@ -1586,6 +1593,35 @@ void TimelineView::DrawRuler(BRect update) {
         SetHighColor(ColText());
         DrawString(mk.name.c_str(), BPoint(x + 10, 8));
     }
+}
+
+void TimelineView::JumpToMarker(int dir) {
+    const Frame ph = fProject->transport.playhead;
+    Frame target = -1;
+    if (dir > 0) {   // markers are sorted ascending: first after the playhead
+        for (const Marker& m : fProject->markers)
+            if (m.frame > ph) { target = m.frame; break; }
+    } else {         // last before the playhead
+        for (const Marker& m : fProject->markers)
+            if (m.frame < ph) target = m.frame; else break;
+    }
+    if (target >= 0) {
+        fProject->transport.playhead = target;
+        if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+    }
+}
+
+void TimelineView::LoopBetweenMarkers() {
+    const Frame ph = fProject->transport.playhead;
+    Frame lo = -1, hi = -1;
+    for (const Marker& m : fProject->markers) {
+        if (m.frame <= ph) lo = m.frame;
+        if (m.frame > ph)  { hi = m.frame; break; }
+    }
+    if (lo < 0 || hi < 0 || hi <= lo) return;   // need a bracketing pair
+    Transport& tr = fProject->transport;
+    tr.loopStart = lo; tr.loopEnd = hi; tr.loopEnabled = true;
+    Invalidate();
 }
 
 // The marker whose flag is under `where` on the ruler, or nullptr.

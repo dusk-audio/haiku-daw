@@ -138,6 +138,8 @@ private:
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
     void  HandleRulerMenu(BPoint where);        // tempo/meter/marker menu
     const Marker* MarkerAt(BPoint where) const; // ruler marker under the cursor
+    void  JumpToMarker(int dir);                // -1 = prev, +1 = next, from playhead
+    void  LoopBetweenMarkers();                 // cycle the markers bracketing the playhead
     Frame BarStartFrameAt(Frame f) const;       // nearest bar boundary frame
 
     // Live fader/pan drag. During a drag we preview by writing the model
