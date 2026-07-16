@@ -662,6 +662,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindBool("solo", &so);
             if (Track* t = fProject->FindTrack((TrackId)tid)) {
                 t->gain = g; t->pan = p; t->muted = mu; t->soloed = so;
+                // Mute-group: cascade the mute to every member of the group,
+                // then refresh the other strips/panes to show the change live.
+                if (t->muteGroup > 0) {
+                    const int grp = t->muteGroup;
+                    for (Track& o : fProject->Tracks())
+                        if (o.muteGroup == grp) o.muted = mu;
+                    PostMessage(kMsgUiRefresh);
+                }
                 fTimeline->Invalidate();
             }
             break;

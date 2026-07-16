@@ -104,14 +104,41 @@ void SetTrackPanCommand::Undo(Project& p) {
 bool SetTrackMuteCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
-    fOldMuted = t->muted;
-    t->muted  = fNewMuted;
+    fOld.clear();
+    const int group = t->muteGroup;
+    if (group > 0) {
+        // Mute-group: apply the new state to every member of the group.
+        for (Track& o : p.Tracks())
+            if (o.muteGroup == group) {
+                fOld.push_back({o.id, o.muted});
+                o.muted = fNewMuted;
+            }
+    } else {
+        fOld.push_back({t->id, t->muted});
+        t->muted = fNewMuted;
+    }
     return true;
 }
 
 void SetTrackMuteCommand::Undo(Project& p) {
+    for (const auto& pr : fOld)
+        if (Track* t = p.FindTrack(pr.first))
+            t->muted = pr.second;
+}
+
+// --- SetTrackMuteGroupCommand -----------------------------------------
+
+bool SetTrackMuteGroupCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldGroup = t->muteGroup;
+    t->muteGroup = fNewGroup < 0 ? 0 : fNewGroup;
+    return true;
+}
+
+void SetTrackMuteGroupCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack))
-        t->muted = fOldMuted;
+        t->muteGroup = fOldGroup;
 }
 
 // --- SetTrackSoloCommand ----------------------------------------------

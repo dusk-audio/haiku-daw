@@ -106,7 +106,9 @@ private:
     float   fOldPan = 0.0f;
 };
 
-// Toggle/set a track's mute. Stores previous for Undo().
+// Toggle/set a track's mute. If the track belongs to a mute group (muteGroup>0)
+// the new state is applied to every member of that group. Stores each affected
+// track's previous state for Undo().
 class SetTrackMuteCommand : public Command {
 public:
     SetTrackMuteCommand(TrackId track, bool muted)
@@ -119,7 +121,23 @@ public:
 private:
     TrackId fTrack;
     bool    fNewMuted;
-    bool    fOldMuted = false;
+    std::vector<std::pair<TrackId, bool>> fOld;   // affected tracks' prior mute
+};
+
+// Assign a track's mute group (0 = none). Stores the old group for Undo().
+class SetTrackMuteGroupCommand : public Command {
+public:
+    SetTrackMuteGroupCommand(TrackId track, int group)
+        : fTrack(track), fNewGroup(group) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Mute Group"; }
+
+private:
+    TrackId fTrack;
+    int     fNewGroup;
+    int     fOldGroup = 0;
 };
 
 // Set a track's solo flag. Stores previous for Undo().

@@ -158,6 +158,39 @@ int main() {
         CHECK(g.size() == 3 && g[1].empty());
     }
 
+    // --- Mute groups: muting any member mutes the whole group ----------------
+    {
+        Project p;
+        Track a; a.id = p.NextTrackId(); a.name = "A"; p.AddTrack(a);
+        Track b; b.id = p.NextTrackId(); b.name = "B"; p.AddTrack(b);
+        Track c; c.id = p.NextTrackId(); c.name = "C"; p.AddTrack(c);
+        // A and B in group 1; C ungrouped.
+        SetTrackMuteGroupCommand(a.id, 1).Do(p);
+        SetTrackMuteGroupCommand(b.id, 1).Do(p);
+
+        SetTrackMuteCommand mute(a.id, true);
+        CHECK(mute.Do(p));
+        CHECK(p.FindTrack(a.id)->muted && p.FindTrack(b.id)->muted);   // both
+        CHECK(!p.FindTrack(c.id)->muted);                              // not C
+        mute.Undo(p);
+        CHECK(!p.FindTrack(a.id)->muted && !p.FindTrack(b.id)->muted); // restored
+
+        // Ungrouped track mutes only itself.
+        SetTrackMuteCommand mc(c.id, true);
+        CHECK(mc.Do(p));
+        CHECK(p.FindTrack(c.id)->muted);
+        CHECK(!p.FindTrack(a.id)->muted && !p.FindTrack(b.id)->muted);
+
+        // Group assignment round-trips through ProjectIO.
+        const char* path = "mutegroup_roundtrip.dawproj";
+        CHECK(ProjectIO::Save(p, path));
+        Project q;
+        CHECK(ProjectIO::Load(q, path));
+        std::remove(path);
+        CHECK(q.Tracks()[0].muteGroup == 1 && q.Tracks()[1].muteGroup == 1);
+        CHECK(q.Tracks()[2].muteGroup == 0);
+    }
+
     // --- SetTrackInputCommand: assign / undo a track's record input ----------
     {
         Project p;

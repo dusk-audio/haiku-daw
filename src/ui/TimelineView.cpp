@@ -701,6 +701,19 @@ void TimelineView::MouseDown(BPoint where) {
                 BMenuItem* ssItem = new BMenuItem("Solo Safe", NULL);
                 ssItem->SetMarked(t.soloSafe);
                 mm->AddItem(ssItem);
+                // Mute-group submenu: muting any member mutes the whole group.
+                BMenu* mg = new BMenu("Mute Group");
+                BMenuItem* mgNone = new BMenuItem("None", NULL);
+                mgNone->SetMarked(t.muteGroup == 0);
+                mg->AddItem(mgNone);
+                for (int g = 1; g <= 4; g++) {
+                    char lb[16];
+                    std::snprintf(lb, sizeof(lb), "Group %d", g);
+                    BMenuItem* gi = new BMenuItem(lb, NULL);
+                    gi->SetMarked(t.muteGroup == g);
+                    mg->AddItem(gi);
+                }
+                mm->AddItem(mg);
                 mm->AddItem(new BMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
                 mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
                 mm->AddItem(new BMenuItem("Delete", NULL));
@@ -734,6 +747,11 @@ void TimelineView::MouseDown(BPoint where) {
                     // Transient mix state (like arm); toggle directly + refresh.
                     if (Track* tr = fProject->FindTrack(t.id))
                         tr->soloSafe = !tr->soloSafe;
+                    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+                } else if (pick == "None" || pick.rfind("Group ", 0) == 0) {
+                    const int g = pick == "None" ? 0 : std::atoi(pick.c_str() + 6);
+                    fStack->Execute(std::make_unique<SetTrackMuteGroupCommand>(
+                        t.id, g), *fProject);
                     if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
                 } else if (pick == "Freeze" || pick == "Unfreeze") {
                     // Freeze needs an offline render (file I/O): hand off to the
