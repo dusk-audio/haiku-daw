@@ -133,6 +133,7 @@ private:
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
+    BFilePanel*               fStemsPanel = nullptr;
     BFilePanel*               fImportPanel = nullptr;
     BFilePanel*               fMidiImportPanel = nullptr;
     BFilePanel*               fMidiExportPanel = nullptr;

@@ -28,4 +28,10 @@ namespace daw {
 bool ExportWav(const Project& project, const std::string& outPath,
                double outRate = 0.0);
 
+// Bounce each non-bus track to its own WAV stem under `dir` (named
+// "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by
+// soloing it. Returns the number of stems written. Kit-free, host-testable.
+int ExportStems(const Project& project, const std::string& dir,
+                double outRate = 0.0);
+
 } // namespace daw

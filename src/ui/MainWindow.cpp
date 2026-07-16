@@ -32,6 +32,7 @@
 #include <File.h>
 #include <FindDirectory.h>
 #include <Entry.h>
+#include <Directory.h>   // create_directory (stems folder)
 #include <FilePanel.h>
 #include <Menu.h>
 #include <MenuBar.h>
@@ -67,6 +68,8 @@ enum {
     MSG_ZOOM_OUT = 'zmot',
     MSG_EXPORT   = 'expt',
     MSG_EXPORT_REF = 'exrf',
+    MSG_EXPORT_STEMS = 'stem',
+    MSG_EXPORT_STEMS_REF = 'stmr',
     MSG_NEW_AUDIO = 'naud',
     MSG_NEW_MIDI  = 'nmid',
     MSG_NEW_BUS   = 'nbus',
@@ -147,6 +150,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
     fileMenu->AddItem(new BMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
     fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
+    fileMenu->AddItem(new BMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
     fileMenu->AddItem(new BMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
     fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
@@ -312,6 +316,7 @@ MainWindow::~MainWindow() {
     delete fSavePanel;
     delete fOpenPanel;
     delete fExportPanel;
+    delete fStemsPanel;
     delete fImportPanel;
     delete fMidiImportPanel;
     delete fMidiExportPanel;
@@ -439,6 +444,30 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 if (!ExportWav(*fProject, path.Path(), fProject->sampleRate))
                     std::fprintf(stderr, "MainWindow: export failed: %s\n",
                                  path.Path());
+            }
+            break;
+        }
+        case MSG_EXPORT_STEMS:
+            if (!fStemsPanel) {
+                BMessenger to(this);
+                fStemsPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
+                                             new BMessage(MSG_EXPORT_STEMS_REF));
+                fStemsPanel->SetSaveText("stems");   // subfolder name
+            }
+            fStemsPanel->Show();
+            break;
+        case MSG_EXPORT_STEMS_REF: {
+            entry_ref dir; const char* name = nullptr;
+            if (msg->FindRef("directory", &dir) == B_OK
+                && msg->FindString("name", &name) == B_OK) {
+                BPath base(&dir);
+                BPath stemDir(base.Path(), name && name[0] ? name : "stems");
+                create_directory(stemDir.Path(), 0755);
+                StopPlayback();
+                const int n = ExportStems(*fProject, stemDir.Path(),
+                                          fProject->sampleRate);
+                std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
+                             n, stemDir.Path());
             }
             break;
         }

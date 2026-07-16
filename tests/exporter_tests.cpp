@@ -213,6 +213,27 @@ int main() {
         CHECK(pLate < pEarly * 0.65f);             // ramp made the tail quiet
     }
 
+    // Stems: two MIDI tracks -> two isolated WAV files, each with signal.
+    {
+        Project p; p.sampleRate = SR; p.masterGain = 1.0f;
+        for (int k = 0; k < 2; k++) {
+            Track tr; tr.id = p.NextTrackId(); tr.type = TrackType::Midi;
+            tr.name = k == 0 ? "Kick" : "Snare";
+            MidiNote n; n.pitch = 60 + k * 4; n.velocity = 110;
+            n.startFrame = 0; n.lengthFrames = (Frame)(SR / 2);
+            PutNote(tr, n);
+            p.AddTrack(tr);
+        }
+        const int wrote = ExportStems(p, ".", SR);
+        CHECK(wrote == 2);
+        for (const char* f : { "./01_Kick.wav", "./02_Snare.wav" }) {
+            WavSource s;
+            CHECK(s.Open(f));
+            if (s.IsValid()) CHECK(s.TotalFrames() > 0);
+            std::remove(f);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

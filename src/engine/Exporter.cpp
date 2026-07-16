@@ -314,4 +314,31 @@ bool ExportWav(const Project& project, const std::string& outPath,
     return writer.Close();
 }
 
+// Replace path-hostile characters so a track name is a safe filename.
+static std::string SanitizeName(const std::string& n) {
+    std::string s = n;
+    for (char& c : s)
+        if (c == '/' || c == '\\' || c == ':' || c == '"') c = '_';
+    if (s.empty()) s = "track";
+    return s;
+}
+
+int ExportStems(const Project& project, const std::string& dir, double outRate) {
+    int written = 0, idx = 0;
+    for (const Track& t : project.Tracks()) {
+        idx++;
+        if (t.type == TrackType::Bus) continue;   // stems are source tracks
+        // Solo this track so ExportWav renders only it (through its own fader /
+        // fx / bus / master). Solo overrides mute in the mix.
+        Project copy = project;
+        for (Track& ct : copy.Tracks()) ct.soloed = (ct.id == t.id);
+        if (Track* ct = copy.FindTrack(t.id)) ct->muted = false;
+        char pre[8];
+        std::snprintf(pre, sizeof(pre), "%02d_", idx);
+        const std::string path = dir + "/" + pre + SanitizeName(t.name) + ".wav";
+        if (ExportWav(copy, path, outRate)) written++;
+    }
+    return written;
+}
+
 } // namespace daw
