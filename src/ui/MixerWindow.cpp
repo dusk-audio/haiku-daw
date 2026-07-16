@@ -187,6 +187,13 @@ void MixerStripsView::ApplyStrip(int i) {
     fApply.SendMessage(&m);
 }
 
+void MixerStripsView::SetStrips(std::vector<MixerStripInfo> strips, float masterGain) {
+    if (fDrag != Drag::None) return;   // don't disrupt an in-progress gesture
+    fStrips = std::move(strips);
+    fMasterGain = masterGain;
+    Invalidate();
+}
+
 void MixerStripsView::Post(uint32 what, uint64 track) {
     BMessage m(what);
     m.AddInt64("track", (int64)track);
@@ -283,6 +290,35 @@ void MixerWindow::MessageReceived(BMessage* msg) {
         msg->FindFloat("mpl", &ml);
         msg->FindFloat("mpr", &mr);
         fView->SetPeaks(peaks, ml, mr);
+        return;
+    }
+    if (msg->what == kMsgMixStrips) {
+        std::vector<MixerStripInfo> strips;
+        int64 tid = 0;
+        for (int32 i = 0; msg->FindInt64("tid", i, &tid) == B_OK; i++) {
+            MixerStripInfo s{};
+            s.trackId = (uint64)tid;
+            const char* nm = nullptr; msg->FindString("nm", i, &nm);
+            s.name = nm ? nm : "";
+            msg->FindFloat("g", i, &s.gain);
+            msg->FindFloat("p", i, &s.pan);
+            bool b = false;
+            msg->FindBool("mu", i, &b); s.muted = b;
+            msg->FindBool("so", i, &b); s.soloed = b;
+            msg->FindBool("ar", i, &b); s.armed = b;
+            msg->FindBool("mo", i, &b); s.inputMonitor = b;
+            int32 v = 0;
+            msg->FindInt32("ci", i, &v); s.colorIndex = v;
+            msg->FindInt32("ty", i, &v); s.type = v;
+            msg->FindInt32("fx", i, &v); s.fxCount = v;
+            msg->FindInt32("sn", i, &v); s.sendCount = v;
+            msg->FindBool("hi", i, &b); s.hasInput = b;
+            const char* ol = nullptr; msg->FindString("ol", i, &ol);
+            s.outLabel = ol ? ol : "Mst";
+            strips.push_back(std::move(s));
+        }
+        float mg = 1.0f; msg->FindFloat("mg", &mg);
+        fView->SetStrips(std::move(strips), mg);
         return;
     }
     BWindow::MessageReceived(msg);

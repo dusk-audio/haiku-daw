@@ -43,6 +43,10 @@ constexpr uint32 kMsgApplyMaster = 'mmst';
 // Live peaks pushed from the main window. Per track: int64 "tid", float "pl",
 // "pr"; plus master float "mpl","mpr".
 constexpr uint32 kMsgMixPeaks    = 'mpks';
+// Refreshed strip STATE pushed from the main window when the model changes
+// elsewhere (mute/solo/arm/fx/routing). Per strip the same fields the mixer
+// snapshot uses; master gain in float "mg".
+constexpr uint32 kMsgMixStrips   = 'mstr';
 // Strip section buttons -> the main window (which owns the model + editors).
 // All carry int64 "track".
 constexpr uint32 kMsgMixArm      = 'mxar';   // toggle record-enable
@@ -64,6 +68,9 @@ public:
 
     void SetPeaks(const std::map<uint64, std::pair<float, float>>& peaks,
                   float masterL, float masterR);
+    // Replace the strip state from a refresh (ignored mid-drag so it doesn't
+    // disrupt a fader/pan gesture).
+    void SetStrips(std::vector<MixerStripInfo> strips, float masterGain);
 
 private:
     float StripX(int i) const;       // left x of strip i (i == count -> master)

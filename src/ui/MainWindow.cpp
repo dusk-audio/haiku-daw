@@ -100,6 +100,31 @@ static bool RecoveryPath(BPath& out);
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
 
+// Snapshot the mixer strip state from the model (used to open the mixer and to
+// refresh it live when the model changes elsewhere).
+static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
+    std::vector<MixerStripInfo> strips;
+    for (const Track& t : p.Tracks()) {
+        MixerStripInfo s{};
+        s.trackId = (uint64)t.id;
+        s.name = t.name;
+        s.gain = t.gain; s.pan = t.pan;
+        s.muted = t.muted; s.soloed = t.soloed;
+        s.armed = t.armed; s.inputMonitor = t.inputMonitor;
+        s.colorIndex = t.colorIndex;
+        s.type = t.type == TrackType::Midi ? 1 : t.type == TrackType::Bus ? 2 : 0;
+        s.fxCount = (int)t.fx.size();
+        s.sendCount = (int)t.sends.size();
+        s.hasInput = t.input.kind != InputSource::kNone;
+        if (t.output == kInvalidTrackId) s.outLabel = "Mst";
+        else if (const Track* bt = p.FindTrack(t.output))
+            s.outLabel = bt->name.substr(0, 6);
+        else s.outLabel = "Bus";
+        strips.push_back(std::move(s));
+    }
+    return strips;
+}
+
 static constexpr float kTransportH = 36.0f;
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
@@ -314,10 +339,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fInspector) fInspector->SetTrack((TrackId)tid);
             break;
         }
-        case kMsgUiRefresh:        // a track edit: keep both panes consistent
+        case kMsgUiRefresh: {      // a track edit: keep the panes + mixer consistent
             if (fInspector) fInspector->Invalidate();
             if (fTimeline)  fTimeline->Invalidate();
+            if (fMixerMsgr.IsValid()) {   // refresh an open mixer's strip state
+                BMessage m(kMsgMixStrips);
+                for (const MixerStripInfo& s : BuildMixerStrips(*fProject)) {
+                    m.AddInt64("tid", (int64)s.trackId);
+                    m.AddString("nm", s.name.c_str());
+                    m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
+                    m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
+                    m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
+                    m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
+                    m.AddInt32("fx", s.fxCount);    m.AddInt32("sn", s.sendCount);
+                    m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
+                }
+                m.AddFloat("mg", fProject->masterGain);
+                fMixerMsgr.SendMessage(&m);
+            }
             break;
+        }
         case kMsgCycleAuto:        // inspector Auto button -> cycle timeline mode
             if (fInspector && fTimeline)
                 fTimeline->CycleAuto(fInspector->SelectedTrack());
@@ -476,26 +517,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_MIXER: {
-            std::vector<MixerStripInfo> strips;
-            for (const Track& t : fProject->Tracks()) {
-                MixerStripInfo s{};
-                s.trackId = (uint64)t.id;
-                s.name = t.name;
-                s.gain = t.gain; s.pan = t.pan;
-                s.muted = t.muted; s.soloed = t.soloed;
-                s.armed = t.armed; s.inputMonitor = t.inputMonitor;
-                s.colorIndex = t.colorIndex;
-                s.type = t.type == TrackType::Midi ? 1
-                       : t.type == TrackType::Bus  ? 2 : 0;
-                s.fxCount = (int)t.fx.size();
-                s.sendCount = (int)t.sends.size();
-                s.hasInput = t.input.kind != InputSource::kNone;
-                if (t.output == kInvalidTrackId) s.outLabel = "Mst";
-                else if (const Track* bt = fProject->FindTrack(t.output))
-                    s.outLabel = bt->name.substr(0, 6);
-                else s.outLabel = "Bus";
-                strips.push_back(std::move(s));
-            }
+            std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject);
             const float ww = 24 + (strips.size() + 1) * (96 + 4);   // + master
             BRect wr(120, 90, 120 + ww, 90 + 560);   // tall enough for the strip
             MixerWindow* mx = new MixerWindow(wr, strips, fProject->masterGain,
