@@ -400,6 +400,23 @@ private:
     std::vector<std::pair<ClipId, bool>> fOld;   // group members' prior active
 };
 
+// Make one MIDI region the active take in its take group (others go inactive).
+// The MIDI analogue of SetActiveTakeCommand. No-op for an ordinary region.
+class SetActiveMidiTakeCommand : public Command {
+public:
+    SetActiveMidiTakeCommand(TrackId track, ClipId clip)
+        : fTrack(track), fClip(clip) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Select Take"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    std::vector<std::pair<ClipId, bool>> fOld;
+};
+
 // Set a clip's per-clip linear gain. Stores the old value for Undo().
 class SetClipGainCommand : public Command {
 public:

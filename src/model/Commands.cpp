@@ -503,6 +503,31 @@ void SetActiveTakeCommand::Undo(Project& p) {
             c->takeActive = pr.second;
 }
 
+// --- SetActiveMidiTakeCommand -----------------------------------------
+
+bool SetActiveMidiTakeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* target = t->FindMidiClip(fClip);
+    if (!target || target->takeGroup == 0) return false;
+    const int group = target->takeGroup;
+    fOld.clear();
+    for (MidiClip& c : t->midiClips) {
+        if (c.takeGroup != group) continue;
+        fOld.push_back({c.id, c.takeActive});
+        c.takeActive = (c.id == fClip);
+    }
+    return true;
+}
+
+void SetActiveMidiTakeCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    for (const auto& pr : fOld)
+        if (MidiClip* c = t->FindMidiClip(pr.first))
+            c->takeActive = pr.second;
+}
+
 // --- SetClipGainCommand -----------------------------------------------
 
 bool SetClipGainCommand::Do(Project& p) {

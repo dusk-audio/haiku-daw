@@ -138,6 +138,26 @@ int main() {
         CHECK(clip.notes[1].lengthFrames == 2500);   // 3000 - 500
     }
 
+    // --- SplitMidiLoopTakes: loop-recorded notes -> per-pass takes -----------
+    {
+        std::vector<MidiNote> rec;
+        rec.push_back(MidiNote{60, 100, 100,  200});   // pass 0
+        rec.push_back(MidiNote{64, 100, 1200, 200});   // pass 1 (loopLen 1000)
+        rec.push_back(MidiNote{67, 100, 2300, 200});   // pass 2
+        auto takes = SplitMidiLoopTakes(rec, 1000);
+        CHECK(takes.size() == 3);
+        CHECK(takes[0].size() == 1 && takes[0][0].startFrame == 100);   // re-based
+        CHECK(takes[1].size() == 1 && takes[1][0].startFrame == 200);
+        CHECK(takes[2].size() == 1 && takes[2][0].startFrame == 300);
+        CHECK(takes[0][0].pitch == 60 && takes[2][0].pitch == 67);
+        // A silent middle pass leaves an empty take slot.
+        std::vector<MidiNote> gap;
+        gap.push_back(MidiNote{60, 100, 50,   100});   // pass 0
+        gap.push_back(MidiNote{72, 100, 2050, 100});   // pass 2 (pass 1 empty)
+        auto g = SplitMidiLoopTakes(gap, 1000);
+        CHECK(g.size() == 3 && g[1].empty());
+    }
+
     // --- SetTrackInputCommand: assign / undo a track's record input ----------
     {
         Project p;

@@ -58,6 +58,10 @@ struct MidiClip {
     // region "fade" scales note velocity by start position (Logic-style).
     Frame                 fadeInFrames  = 0;
     Frame                 fadeOutFrames = 0;
+    // Loop-record take comping: regions sharing a takeGroup (>0) are stacked
+    // alternatives; only the one with takeActive sounds/draws. 0 = ordinary.
+    int                   takeGroup     = 0;
+    bool                  takeActive    = true;
 };
 
 // The input a track records from. A MIDI track records from a MIDI endpoint,
@@ -136,7 +140,9 @@ struct Track {
     // (the engine snapshots the result when building its graph).
     std::vector<MidiNote> CollectNotes() const {
         std::vector<MidiNote> out;
-        for (const MidiClip& c : midiClips)
+        for (const MidiClip& c : midiClips) {
+            if (c.takeGroup > 0 && !c.takeActive)
+                continue;   // inactive loop-record take: silent
             for (const MidiNote& n : c.notes) {
                 if (n.startFrame < 0 || n.startFrame >= c.lengthFrames)
                     continue;
@@ -155,6 +161,7 @@ struct Track {
                 out.push_back({ n.pitch, vel,
                                 c.startFrame + n.startFrame, n.lengthFrames });
             }
+        }
         return out;
     }
 };

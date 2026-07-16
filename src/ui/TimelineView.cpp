@@ -788,6 +788,8 @@ void TimelineView::MouseDown(BPoint where) {
         int hit = -1;
         for (size_t i = 0; i < t.midiClips.size(); i++) {
             const MidiClip& c = t.midiClips[i];
+            if (c.takeGroup > 0 && !c.takeActive)
+                continue;   // inactive takes are hidden; act on the visible one
             if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
                 hit = (int)i; break;
             }
@@ -799,7 +801,8 @@ void TimelineView::MouseDown(BPoint where) {
         if (rightClick) {
             if (hit >= 0) {
                 const MidiClip& c = t.midiClips[(size_t)hit];
-                const int pick = ContextMenu(where, /*withSplit=*/true);
+                const int pick = ContextMenu(where, /*withSplit=*/true,
+                                             /*withTake=*/c.takeGroup > 0);
                 if (pick == 0) {          // Copy
                     fClipMidi = c; fHasClipMidi = true;
                     fHasClipClip = false; fHasClipNote = false;
@@ -811,6 +814,26 @@ void TimelineView::MouseDown(BPoint where) {
                     Frame sat = Snapped(XToFrame(where.x));
                     fStack->Execute(std::make_unique<SplitMidiClipCommand>(
                         t.id, c.id, sat), *fProject);
+                } else if (pick == 3 && c.takeGroup > 0) {   // Next Take
+                    // Cycle to the next take in the group (by startFrame origin
+                    // they all share, so order by id), wrapping to the first.
+                    ClipId next = kInvalidClipId; ClipId bestAbove = 0;
+                    ClipId firstId = kInvalidClipId; ClipId firstKey = 0;
+                    bool haveFirst = false;
+                    for (const MidiClip& o : t.midiClips) {
+                        if (o.takeGroup != c.takeGroup) continue;
+                        if (!haveFirst || o.id < firstKey) {
+                            firstKey = o.id; firstId = o.id; haveFirst = true;
+                        }
+                        if (o.id > c.id
+                            && (next == kInvalidClipId || o.id < bestAbove)) {
+                            bestAbove = o.id; next = o.id;
+                        }
+                    }
+                    if (next == kInvalidClipId) next = firstId;   // wrap
+                    if (next != kInvalidClipId)
+                        fStack->Execute(std::make_unique<SetActiveMidiTakeCommand>(
+                            t.id, next), *fProject);
                 }
             } else if (fHasClipMidi) {     // empty lane: offer paste
                 if (PastePopup(where))
@@ -2061,6 +2084,8 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
 // the piano roll (double-click a region); the timeline moves/resizes regions.
 void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
     for (const MidiClip& mc : t.midiClips) {
+        if (mc.takeGroup > 0 && !mc.takeActive)
+            continue;   // only the active take of a group is drawn
         float x0 = FrameToX(mc.startFrame);
         float x1 = FrameToX(mc.startFrame + mc.lengthFrames);
         if (x1 < kHeaderWidth || x0 > lane.right)
@@ -2081,6 +2106,19 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             FillRect(strip);
             SetHighColor(Rgb(240, 242, 245));
             DrawString(t.name.c_str(), BPoint(strip.left + 4, strip.top + 11));
+        }
+        // "T k/N" take badge on the active region of a loop-record group.
+        if (mc.takeGroup > 0 && block.Width() > 26) {
+            int n = 0, k = 0;
+            for (const MidiClip& o : t.midiClips)
+                if (o.takeGroup == mc.takeGroup) {
+                    n++;
+                    if (o.id <= mc.id) k++;   // stacked in id (record) order
+                }
+            char tb[16];
+            std::snprintf(tb, sizeof(tb), "T%d/%d", k, n);
+            SetHighColor(Rgb(240, 220, 120));
+            DrawString(tb, BPoint(block.left + 4, block.bottom - 5));
         }
 
         // In-window notes as a light preview below the name strip.

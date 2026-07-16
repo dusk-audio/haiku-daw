@@ -1254,6 +1254,39 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
     std::vector<TrackId> targets;
     targets.swap(fMidiRecTracks);
     if (take.notes.empty()) return;   // nothing played: no clip
+
+    // Loop-record: split the linear take into one region per loop pass and stack
+    // them as a take group on each armed track (last non-empty pass active), the
+    // MIDI mirror of the audio LoopTakes path. fLoopRecord is still set here —
+    // StopRecording resets it only after this returns.
+    const Transport& tr = fProject->transport;
+    if (fLoopRecord && tr.loopEnabled && tr.loopEnd > tr.loopStart) {
+        const Frame loopLen = tr.loopEnd - tr.loopStart;
+        const std::vector<std::vector<MidiNote>> passes =
+            SplitMidiLoopTakes(take.notes, loopLen);
+        int last = -1;   // index of the last non-empty pass
+        for (size_t k = 0; k < passes.size(); k++)
+            if (!passes[k].empty()) last = (int)k;
+        if (last < 0) return;   // every pass silent
+        for (TrackId target : targets) {
+            const int group = ++fTakeGroup;
+            auto macro = std::make_unique<MacroCommand>("Loop MIDI Takes");
+            for (size_t k = 0; k < passes.size(); k++) {
+                if (passes[k].empty()) continue;   // no silent stacked take
+                MidiClip c;
+                c.startFrame   = tr.loopStart;
+                c.lengthFrames = loopLen;
+                c.notes        = passes[k];
+                c.takeGroup    = group;
+                c.takeActive   = ((int)k == last);
+                macro->Add(std::make_unique<AddMidiClipCommand>(target, c));
+            }
+            fStack->Execute(std::move(macro), *fProject);
+        }
+        fTimeline->ZoomToFit();
+        return;
+    }
+
     for (TrackId target : targets) {
         MidiClip c = take;             // AddMidiClipCommand assigns a fresh id
         c.id = kInvalidClipId;

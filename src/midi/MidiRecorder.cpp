@@ -38,6 +38,21 @@ void MidiRecorder::OnEvent(const MidiEvent& e, Frame frameNow) {
     fOpen[key] = Open{ e.data1, e.data2, rel };
 }
 
+std::vector<std::vector<MidiNote>> SplitMidiLoopTakes(
+        const std::vector<MidiNote>& notes, Frame loopLen) {
+    std::vector<std::vector<MidiNote>> takes;
+    if (loopLen <= 0) { takes.push_back(notes); return takes; }
+    for (const MidiNote& n : notes) {
+        Frame s = n.startFrame < 0 ? 0 : n.startFrame;
+        const int pass = (int)(s / loopLen);
+        if ((int)takes.size() <= pass) takes.resize((size_t)pass + 1);
+        MidiNote rn = n;
+        rn.startFrame = s - (Frame)pass * loopLen;   // re-base to the loop start
+        takes[(size_t)pass].push_back(rn);
+    }
+    return takes;
+}
+
 std::vector<MidiNote> MidiRecorder::SnapshotNotes(Frame nowFrame) const {
     std::vector<MidiNote> out = fNotes;   // closed notes (clip-relative)
     for (const auto& kv : fOpen) {

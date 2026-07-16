@@ -63,4 +63,11 @@ private:
     std::vector<MidiNote>        fNotes;    // closed notes, clip-relative
 };
 
+// Split loop-recorded notes (clip-relative to the loop start, spanning several
+// passes of length `loopLen`) into one note list per pass, each re-based to the
+// loop start. takes[k] holds pass k's notes (empty if that pass was silent).
+// Kit-free, host-testable.
+std::vector<std::vector<MidiNote>> SplitMidiLoopTakes(
+    const std::vector<MidiNote>& notes, Frame loopLen);
+
 } // namespace daw
