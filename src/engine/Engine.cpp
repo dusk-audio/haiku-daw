@@ -10,7 +10,22 @@
 #include <cstdio>
 #include <cstring>
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <pmmintrin.h>   // DAZ (denormals-are-zero)
+#include <xmmintrin.h>   // FTZ (flush-to-zero)
+#endif
+
 namespace daw {
+
+// Flush-to-zero + denormals-are-zero on the current (audio) thread. Denormal
+// float state in feedback lines (reverb/delay/EQ decay tails) otherwise traps
+// into microcode on x86 and spikes CPU -> xruns. Cheap to set every callback.
+static inline void EnableDenormalFlush() {
+#if defined(__x86_64__) || defined(__i386__)
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+}
 
 // Ring holds ~2 seconds of stereo audio at 48k: plenty of slack so the
 // disk thread stays ahead of the RT callback without hoarding memory.
@@ -150,9 +165,21 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         if (ph < fStart || ph >= clipEnd)
             continue;   // outside the clip -> contribute nothing
 
+        // Resync after an earlier underrun: the ring lags the timeline by the
+        // frames we couldn't read. Drop that many stale frames now that data is
+        // back, so late-arriving audio plays at the CURRENT position instead of
+        // offset forever.
+        while (fSkipDebt > 0) {
+            float junk[2];
+            if (fRing.Read(junk, 2) < 2) break;   // still starved
+            fSkipDebt--;
+        }
+
         float lr[2];
-        if (fRing.Read(lr, 2) < 2)
-            continue;   // underrun -> silence for this frame
+        if (fRing.Read(lr, 2) < 2) {
+            fSkipDebt++;   // underrun: owe a drop; output silence this frame
+            continue;
+        }
 
         // Always consume the ring above; only sum when audible so an unmute
         // resumes in sample-sync rather than replaying buffered audio.
@@ -289,8 +316,10 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         b.notes = std::move(notes);
         b.instrument = t.instrument;
         b.liveMonitor = monitor;             // synth live input into this bus
-        b.audible     = audible || monitor;  // monitoring overrides mute/solo
-        EqualPowerGains(t.gain, t.pan, &b.midiGainL, &b.midiGainR);
+        b.audible.store(audible || monitor, std::memory_order_relaxed);  // monitor overrides mute/solo
+        float mgl, mgr; EqualPowerGains(t.gain, t.pan, &mgl, &mgr);
+        b.midiGainL.store(mgl, std::memory_order_relaxed);
+        b.midiGainR.store(mgr, std::memory_order_relaxed);
         fBuses.push_back(std::move(b));
     }
 
@@ -302,7 +331,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         Bus b;
         b.id    = t.id;
         b.isBus = true;
-        EqualPowerGains(t.gain, t.pan, &b.busGainL, &b.busGainR);
+        float bgl, bgr; EqualPowerGains(t.gain, t.pan, &bgl, &bgr);
+        b.busGainL.store(bgl, std::memory_order_relaxed);
+        b.busGainR.store(bgr, std::memory_order_relaxed);
         fBuses.push_back(std::move(b));
     }
 
@@ -326,8 +357,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         b.output  = t->output;
         // Audio leaves are gated live by their streams (so live mute/unmute
         // works); a bus node is gated here (rebuild-on-play) and skips routing
-        // its sum when muted / solo'd out.
-        b.audible = b.isBus ? (!t->muted && (!anySolo || t->soloed || t->soloSafe)) : true;
+        // its sum when muted / solo'd out. Only recompute audibility for bus
+        // nodes — a non-bus node keeps the audibility set when it was created
+        // (a MIDI node's audible||monitor, an audio leaf's default true), so a
+        // muted MIDI node stays inaudible until the first UpdateMix() poll
+        // instead of being force-unmuted here.
+        if (b.isBus)
+            b.audible.store(!t->muted && (!anySolo || t->soloed || t->soloSafe),
+                            std::memory_order_relaxed);
         // Keep b.fx index-aligned with t->fx (nullptr placeholder for any
         // effect that fails to build, e.g. a missing plugin add-on) so
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
@@ -471,13 +508,19 @@ void Engine::UpdateMix(const Project& project) {
         const bool audible = !t->muted && (!anySolo || t->soloed || t->soloSafe);
         const bool automated = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
         if (t->type == TrackType::Midi) {
-            b.audible = audible || b.liveMonitor;   // keep monitored input audible
-            if (!automated)
-                EqualPowerGains(t->gain, t->pan, &b.midiGainL, &b.midiGainR);
+            b.audible.store(audible || b.liveMonitor, std::memory_order_relaxed);  // keep monitored input audible
+            if (!automated) {
+                float mgl, mgr; EqualPowerGains(t->gain, t->pan, &mgl, &mgr);
+                b.midiGainL.store(mgl, std::memory_order_relaxed);
+                b.midiGainR.store(mgr, std::memory_order_relaxed);
+            }
         } else if (b.isBus) {
-            b.audible = audible;
-            if (!automated)
-                EqualPowerGains(t->gain, t->pan, &b.busGainL, &b.busGainR);
+            b.audible.store(audible, std::memory_order_relaxed);
+            if (!automated) {
+                float bgl, bgr; EqualPowerGains(t->gain, t->pan, &bgl, &bgr);
+                b.busGainL.store(bgl, std::memory_order_relaxed);
+                b.busGainR.store(bgr, std::memory_order_relaxed);
+            }
         }
     }
 }
@@ -536,6 +579,7 @@ void Engine::Start() {
     fPlayhead.store(fStartFrame);
     fFinished.store(fStartFrame >= fEndFrame);
     fPlaying.store(true);
+    fPlayerRunning.store(true, std::memory_order_release);   // callbacks may run now
     fPlayer->SetHasData(true);
     fPlayer->Start();
 }
@@ -543,7 +587,16 @@ void Engine::Start() {
 void Engine::Stop() {
     fPlaying.store(false);
     if (fPlayer)
-        fPlayer->Stop();
+        fPlayer->Stop();   // blocks until the last callback returns: RT quiesced
+    // Only now — after fPlayer->Stop() has drained the last callback — is it
+    // true that no callback can be in flight. QuiesceMonitorInput() keys its
+    // fast path off this, NOT fPlaying (which was cleared above, before Stop).
+    fPlayerRunning.store(false, std::memory_order_release);
+    // MIDI panic: release every live monitor voice so a note held at stop can't
+    // sustain (up to kHeld ~1 h) or re-sound if the same engine restarts. Safe
+    // now that the player is stopped and no callback is running.
+    for (LiveVoice& v : fVoices) v.active = false;
+    fLiveNotes.clear();
 }
 
 void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
@@ -551,6 +604,32 @@ void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
     Engine* self = static_cast<Engine*>(cookie);
     const size_t frames = size / (sizeof(float) * format.channel_count);
     self->FillBuffer(static_cast<float*>(buffer), frames);
+    // Mark this callback complete. QuiesceMonitorInput() waits on this so a
+    // caller can safely destroy a monitor/live-MIDI source it just detached,
+    // once any in-flight dereference of the old pointer has finished.
+    self->fCallbackGen.fetch_add(1, std::memory_order_release);
+}
+
+bool Engine::QuiesceMonitorInput() {
+    // Fast path keys off fPlayerRunning, which is false only when the player is
+    // confirmed stopped (fPlayer->Stop() returned) or never started — a real
+    // proof that no callback is in flight. (fPlaying is cleared at the TOP of
+    // Stop(), before the player drains, so it is NOT such a proof.)
+    if (!fPlayer || !fPlayerRunning.load(std::memory_order_acquire))
+        return true;
+    // Wait for two full callback boundaries: guarantees the callback that may
+    // have loaded the now-detached pointer has run to completion. Bounded so a
+    // stalled/dead callback can't hang the UI thread (~1 s worst case) — but on
+    // timeout we could NOT prove quiescence, so report failure. The caller must
+    // then fall back to Stop() (which blocks until the RT thread truly quiesces)
+    // before destroying the source; never free it on a false return.
+    const uint64_t start = fCallbackGen.load(std::memory_order_acquire);
+    for (int spin = 0; spin < 2000; ++spin) {
+        if (fCallbackGen.load(std::memory_order_acquire) - start >= 2)
+            return true;
+        snooze(500);   // 0.5 ms; callbacks are ~ms, so a few iterations at most
+    }
+    return false;   // quiescence NOT confirmed — caller must Stop() before freeing
 }
 
 float Engine::TrackPeakL(TrackId id) const {
@@ -625,6 +704,7 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
 }
 
 void Engine::FillBuffer(float* out, size_t frames) {
+    EnableDenormalFlush();                             // RT-safe, per callback
     std::memset(out, 0, frames * 2 * sizeof(float));   // stereo silence
 
     // Monitor-only: render just the live keyboard voices through each armed
@@ -645,9 +725,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
             float* nb = fNodeBufs[idx].data();
             std::memset(nb, 0, nfloats * sizeof(float));
             fSynth.Render(fLiveNotes, b.instrument, nb, frames, bs, 1.0f);
+            const float mgl = b.midiGainL.load(std::memory_order_relaxed);
+            const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
-                nb[i * 2 + 0] *= b.midiGainL;
-                nb[i * 2 + 1] *= b.midiGainR;
+                nb[i * 2 + 0] *= mgl;
+                nb[i * 2 + 1] *= mgr;
             }
             for (auto& fx : b.fx)
                 if (fx) fx->Process(nb, static_cast<int>(frames));
@@ -665,6 +747,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
         const float mg = fMasterGain.load(std::memory_order_relaxed);
         for (size_t i = 0; i < nfloats; i++) {
             if (mg != 1.0f) out[i] *= mg;
+            if (!std::isfinite(out[i])) out[i] = 0.0f;   // never blast the DAC
             const float a = std::fabs(out[i]);
             if (i & 1) { if (a > pr) pr = a; } else { if (a > pl) pl = a; }
         }
@@ -705,7 +788,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
     for (size_t oi = 0; oi < fOrder.size(); oi++) {
         const size_t idx = fOrder[oi];
         Bus& b = fBuses[idx];
-        if (!b.audible)
+        if (!b.audible.load(std::memory_order_relaxed))
             continue;                       // muted / solo'd out: route nothing
         float* nb = fNodeBufs[idx].data();
 
@@ -715,10 +798,18 @@ void Engine::FillBuffer(float* out, size_t frames) {
         if (b.hasAuto) {
             const float g = b.gainAuto.ValueAt(blockStart, b.statGain);
             const float p = b.panAuto.ValueAt(blockStart, b.statPan);
-            if (b.isBus)
-                EqualPowerGains(g, p, &b.busGainL, &b.busGainR);
-            else if (!b.notes.empty())
-                EqualPowerGains(g, p, &b.midiGainL, &b.midiGainR);
+            if (b.isBus) {
+                float bgl, bgr; EqualPowerGains(g, p, &bgl, &bgr);
+                b.busGainL.store(bgl, std::memory_order_relaxed);
+                b.busGainR.store(bgr, std::memory_order_relaxed);
+            } else if (!b.notes.empty() || b.liveMonitor) {
+                // MIDI node with notes OR a live-monitor-only armed track: its
+                // midiGain feeds the synth render, so automated gain/pan must
+                // reach it even when the node carries no recorded notes.
+                float mgl, mgr; EqualPowerGains(g, p, &mgl, &mgr);
+                b.midiGainL.store(mgl, std::memory_order_relaxed);
+                b.midiGainR.store(mgr, std::memory_order_relaxed);
+            }
             for (TrackStream* s : b.streams)   // audio leaves
                 s->SetGainPan(g, p);
         }
@@ -731,15 +822,19 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, 1.0f);
             if (live)                        // live keyboard through this voice
                 fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);
+            const float mgl = b.midiGainL.load(std::memory_order_relaxed);
+            const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
-                nb[i * 2 + 0] *= b.midiGainL;
-                nb[i * 2 + 1] *= b.midiGainR;
+                nb[i * 2 + 0] *= mgl;
+                nb[i * 2 + 1] *= mgr;
             }
         }
         if (b.isBus) {                      // bus: fader on the summed upstream
+            const float bgl = b.busGainL.load(std::memory_order_relaxed);
+            const float bgr = b.busGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
-                nb[i * 2 + 0] *= b.busGainL;
-                nb[i * 2 + 1] *= b.busGainR;
+                nb[i * 2 + 0] *= bgl;
+                nb[i * 2 + 1] *= bgr;
             }
         }
         // Effect-parameter automation: set each automated param from its lane
@@ -842,6 +937,12 @@ void Engine::FillBuffer(float* out, size_t frames) {
             }
         }
     }
+
+    // Final safety pass: a single NaN/Inf from any effect or a torn gain write
+    // would otherwise blast the DAC at full scale and poison the meters/LUFS
+    // (max propagates NaN). Zero any non-finite sample before it leaves here.
+    for (size_t i = 0; i < nfloats; i++)
+        if (!std::isfinite(out[i])) out[i] = 0.0f;
 
     // Block peak per channel for the UI meters (arithmetic only, RT-safe).
     float pl = 0.0f, pr = 0.0f;

@@ -90,6 +90,7 @@ private:
     Frame       fFadeIn;        // fade-in length (timeline frames)
     Frame       fFadeOut;       // fade-out length (timeline frames)
     float       fClipGain = 1.0f;  // per-clip linear gain
+    int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
@@ -165,6 +166,16 @@ public:
     // come from MidiInputPort::MonitorInput() (a ring separate from the record
     // drain, so the RT thread is the sole consumer).
     void SetLiveMidi(IMidiInput* in) { fLiveMidi.store(in); }
+
+    // After detaching a monitor/live-MIDI source (SetMonitorSource(nullptr) or
+    // SetLiveMidi(nullptr)), call this before destroying that source object.
+    // Returns true once no in-flight RT callback can still dereference the old
+    // pointer (immediately so when the player isn't running). Returns false if
+    // quiescence could NOT be confirmed within a bounded wait — in that case the
+    // caller must NOT free the source; it must Stop() the engine first (Stop
+    // blocks until the RT thread truly quiesces) and only then destroy it.
+    // Closes the teardown-ordering use-after-free window on those raw pointers.
+    bool QuiesceMonitorInput();
 
     // Monitor-only: run the output for live MIDI monitoring WITHOUT playing the
     // project (no clips, no playhead advance) — used to hear an armed MIDI track
@@ -283,12 +294,16 @@ private:
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
         Instrument                            instrument;// synth voice (MIDI)
-        float                                 midiGainL = 1.0f;  // equal-power
-        float                                 midiGainR = 1.0f;
-        float                                 busGainL  = 1.0f;  // bus fader
-        float                                 busGainR  = 1.0f;
+        // Live mix params: written by the UI thread (UpdateMix) and read by the
+        // RT callback (FillBuffer). Atomic + relaxed so a concurrent fader move
+        // can't tear a float into a NaN/garbage gain. Independent scalars with no
+        // cross-field invariant, so relaxed ordering is sufficient.
+        std::atomic<float>                    midiGainL{1.0f};  // equal-power
+        std::atomic<float>                    midiGainR{1.0f};
+        std::atomic<float>                    busGainL{1.0f};   // bus fader
+        std::atomic<float>                    busGainR{1.0f};
         bool                                  isBus   = false;
-        bool                                  audible = true;
+        std::atomic<bool>                     audible{true};
         bool                                  liveMonitor = false;  // armed MIDI: synth live input
         std::vector<std::unique_ptr<IEffect>> fx;
         std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
@@ -307,6 +322,47 @@ private:
         float                                 statGain = 1.0f;  // ValueAt default
         float                                 statPan  = 0.0f;
         bool                                  hasAuto  = false;
+
+        // The atomic members make Bus non-copyable and suppress the implicit
+        // move, but fBuses is a std::vector<Bus> that moves on growth/erase.
+        // Hand-write a noexcept move that transfers the atomics by value (all
+        // moves happen at Load, single-threaded, before the RT thread starts).
+        Bus() = default;
+        Bus(Bus&& o) noexcept
+            : id(o.id), output(o.output),
+              streams(std::move(o.streams)), notes(std::move(o.notes)),
+              instrument(std::move(o.instrument)),
+              midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
+              midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
+              busGainL(o.busGainL.load(std::memory_order_relaxed)),
+              busGainR(o.busGainR.load(std::memory_order_relaxed)),
+              isBus(o.isBus),
+              audible(o.audible.load(std::memory_order_relaxed)),
+              liveMonitor(o.liveMonitor),
+              fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
+              sendTargets(std::move(o.sendTargets)),
+              gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
+              fxAuto(std::move(o.fxAuto)),
+              statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto) {}
+        Bus& operator=(Bus&& o) noexcept {
+            if (this == &o) return *this;
+            id = o.id; output = o.output;
+            streams = std::move(o.streams); notes = std::move(o.notes);
+            instrument = std::move(o.instrument);
+            midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            busGainL.store(o.busGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            busGainR.store(o.busGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            isBus = o.isBus;
+            audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            liveMonitor = o.liveMonitor;
+            fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
+            sendTargets = std::move(o.sendTargets);
+            gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
+            fxAuto = std::move(o.fxAuto);
+            statGain = o.statGain; statPan = o.statPan; hasAuto = o.hasAuto;
+            return *this;
+        }
     };
 
     std::unique_ptr<BSoundPlayer>             fPlayer;
@@ -334,6 +390,15 @@ private:
     std::atomic<bool>                         fMonitorMono{false};
     std::atomic<IMonitorSource*>              fMonSource{nullptr};
     std::atomic<bool>                         fInputMonitor{false};
+    // Bumped once per completed RT callback; QuiesceMonitorInput() waits on it
+    // to bound the monitor/live-MIDI source teardown UAF window.
+    std::atomic<uint64_t>                     fCallbackGen{0};
+    // True only while the BSoundPlayer is actually running: set BEFORE
+    // fPlayer->Start() and cleared AFTER fPlayer->Stop() returns (Stop blocks
+    // until the last callback exits). Unlike fPlaying — which Stop() clears
+    // before the player has drained — this is a sound "no callback in flight"
+    // signal for QuiesceMonitorInput()'s fast path.
+    std::atomic<bool>                         fPlayerRunning{false};
     std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
     // Resampled-monitor state (when the monitor rate != output rate): a linear
     // pull-resampler carried across blocks. RT-only.
