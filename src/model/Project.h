@@ -159,8 +159,14 @@ struct Track {
                 }
                 int vel = (int)(n.velocity * f + 0.5f);
                 if (vel < 1) vel = 1; if (vel > 127) vel = 127;
+                // Clamp the note to the region window: a note must not sound past
+                // its clip's end (a region trim / loop-take boundary bounds it).
+                Frame len = n.lengthFrames;
+                const Frame room = c.lengthFrames - n.startFrame;
+                if (len > room) len = room;
+                if (len < 1)    len = 1;
                 out.push_back({ n.pitch, vel,
-                                c.startFrame + n.startFrame, n.lengthFrames });
+                                c.startFrame + n.startFrame, len });
             }
         }
         return out;

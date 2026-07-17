@@ -189,30 +189,41 @@ private:
     int         fIndex = -1;   // where it landed (for undo)
 };
 
-// Remove the marker at `frame`. Stores it for undo.
+// Remove the marker at `frame`. Stores it for undo. Pass `name` to disambiguate
+// when two markers share a frame (else the first at that frame is removed).
 class RemoveMarkerCommand : public Command {
 public:
     explicit RemoveMarkerCommand(Frame frame) : fFrame(frame) {}
+    RemoveMarkerCommand(Frame frame, std::string name)
+        : fFrame(frame), fName(std::move(name)), fHasName(true) {}
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Remove Marker"; }
 private:
-    Frame  fFrame;
-    Marker fRemoved;
-    int    fIndex = -1;
+    Frame       fFrame;
+    std::string fName;
+    bool        fHasName = false;
+    Marker      fRemoved;
+    int         fIndex = -1;
 };
 
-// Rename the marker at `frame`. Stores the old name for undo.
+// Rename the marker at `frame`. Stores the old name for undo. Pass `oldName` to
+// disambiguate when two markers share a frame (else the first is renamed).
 class RenameMarkerCommand : public Command {
 public:
     RenameMarkerCommand(Frame frame, std::string name)
         : fFrame(frame), fNew(std::move(name)) {}
+    RenameMarkerCommand(Frame frame, std::string oldName, std::string newName)
+        : fFrame(frame), fNew(std::move(newName)),
+          fOldMatch(std::move(oldName)), fHasMatch(true) {}
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Rename Marker"; }
 private:
     Frame       fFrame;
-    std::string fNew, fOld;
+    std::string fNew, fOld, fOldMatch;
+    bool        fHasMatch = false;
+    int         fIndex = -1;
 };
 
 // Add a MIDI region (clip) to a track. Allocates a clip id in Do() if unset;

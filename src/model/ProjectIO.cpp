@@ -1,21 +1,52 @@
 #include "ProjectIO.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 namespace daw {
 
 namespace {
 
-// Extract the substring between the first and last double-quote on a line.
-// Returns "" if there aren't two quotes.
-std::string Unquote(const std::string& line) {
+// Decode the first quoted token on a line. When `escaped` (the new format,
+// flagged in the header), content runs from the first '"' to the first
+// UNescaped '"', decoding \" \\ \n \r. When !escaped (legacy files written by
+// the pre-escape writer), the backslash is a literal byte and the token ends at
+// the first '"' — so a legacy path like C:\dir isn't mangled by escape decoding.
+std::string Unquote(const std::string& line, bool escaped) {
     size_t a = line.find('"');
-    size_t b = line.rfind('"');
-    if (a == std::string::npos || b == std::string::npos || b <= a)
-        return std::string();
-    return line.substr(a + 1, b - a - 1);
+    if (a == std::string::npos) return std::string();
+    std::string o;
+    for (size_t i = a + 1; i < line.size(); i++) {
+        char c = line[i];
+        if (escaped && c == '\\' && i + 1 < line.size()) {
+            char e = line[++i];
+            if      (e == 'n') o += '\n';
+            else if (e == 'r') o += '\r';
+            else               o += e;    // \" \\ and anything else -> literal
+        } else if (c == '"') {
+            break;                        // closing quote
+        } else {
+            o += c;
+        }
+    }
+    return o;
+}
+
+// Emit s as a quoted, backslash-escaped token so an embedded quote or newline
+// can't shift/corrupt the line on read.
+std::string Quote(const std::string& s) {
+    std::string o = "\"";
+    for (char c : s) {
+        if      (c == '\\' || c == '"') { o += '\\'; o += c; }
+        else if (c == '\n')             o += "\\n";
+        else if (c == '\r')             o += "\\r";
+        else                            o += c;
+    }
+    o += '"';
+    return o;
 }
 
 // Directory portion of a path ("" if none), without the trailing slash.
@@ -43,14 +74,32 @@ std::string Resolve(const std::string& stored, const std::string& baseDir) {
     return baseDir + "/" + stored;
 }
 
+// Upper bound on any count-prefixed list read from a project line. Guards
+// against a corrupt file with a huge count (e.g. "auto gain 2000000000")
+// driving an unbounded allocation. Real chains/lanes are far smaller.
+constexpr int kMaxListCount = 100000;
+
 } // namespace
 
 bool ProjectIO::Save(const Project& p, const std::string& path) {
-    std::ofstream f(path, std::ios::trunc);
+    // Atomic-ish save: write a sibling temp file, flush + close, then rename()
+    // over the target (rename is atomic on POSIX). A failed/interrupted write
+    // (disk full, mid-write crash) leaves the previous good save untouched
+    // instead of a truncated file. (No fsync: a power loss between rename and
+    // the tmp data reaching disk could still yield a short file — acceptable for
+    // v1; add fsync-before-rename if that guarantee is ever required.)
+    const std::string tmp = path + ".tmp";
+    std::ofstream f(tmp, std::ios::trunc | std::ios::binary);
     if (!f) return false;
+    // 9 significant digits round-trips a 32-bit float exactly and is plenty for
+    // the doubles here (tempo/rate); the default 6 silently drifts gains/pans.
+    f << std::setprecision(9);
     const std::string baseDir = DirOf(path);
 
-    f << "DAW 1\n";
+    // Header: "DAW <major> <fmtFlags>". major=1 (this parser); fmtFlags bit 0 = 1
+    // means strings on this file use backslash escaping (Quote/Unquote). Legacy
+    // files wrote "DAW 1" with no flag -> read back as literal (unescaped).
+    f << "DAW 1 1\n";
     f << "sampleRate " << p.sampleRate << "\n";
     f << "tempo " << p.tempoBPM << " "
       << (p.tempoMap.Tempos().front().ramp ? 1 : 0) << "\n";
@@ -69,7 +118,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     for (const EffectDesc& e : p.masterFx) {
         f << "masterfx " << (int)e.type << " " << e.params.size();
         for (float v : e.params) f << " " << v;
-        if (e.type == EffectType::Plugin) f << " \"" << e.pluginName << "\"";
+        if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
         f << "\n";
     }
 
@@ -85,7 +134,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << mc.num << " " << mc.denom << "\n";
 
     for (const Marker& mk : p.markers)
-        f << "marker " << (long long)mk.frame << " \"" << mk.name << "\"\n";
+        f << "marker " << (long long)mk.frame << " " << Quote(mk.name) << "\n";
 
     for (const Track& t : p.Tracks()) {
         const char* ty = t.type == TrackType::Midi ? "midi"
@@ -94,16 +143,17 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
           << t.gain << " " << t.pan << " "
           << (t.muted ? 1 : 0) << " " << (t.soloed ? 1 : 0) << " "
           << (t.armed ? 1 : 0) << " " << t.output
-          << " \"" << t.name << "\" "
+          << " " << Quote(t.name) << " "
           << t.colorIndex << " " << t.height << " "
-          << (t.soloSafe ? 1 : 0) << " " << t.muteGroup << "\n";
+          << (t.soloSafe ? 1 : 0) << " " << t.muteGroup << " "
+          << (t.inputMonitor ? 1 : 0) << "\n";
 
         for (const Clip& c : t.clips)
             f << "clip " << c.id << " "
               << (long long)c.startFrame << " " << (long long)c.lengthFrames << " "
               << (long long)c.sourceOffset << " "
               << (long long)c.fadeInFrames << " " << (long long)c.fadeOutFrames
-              << " \"" << Relativize(c.sourcePath, baseDir) << "\" "
+              << " " << Quote(Relativize(c.sourcePath, baseDir)) << " "
               << c.gain << " " << c.takeGroup << " " << (c.takeActive ? 1 : 0)
               << "\n";
 
@@ -122,7 +172,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         for (const EffectDesc& e : t.fx) {
             f << "fx " << (int)e.type << " " << e.params.size();
             for (float v : e.params) f << " " << v;
-            if (e.type == EffectType::Plugin) f << " \"" << e.pluginName << "\"";
+            if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
             f << "\n";
         }
 
@@ -158,29 +208,69 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
 
         if (t.input.kind != InputSource::kNone)
             f << "input " << t.input.kind << " " << t.input.channel
-              << " \"" << t.input.name << "\"\n";
+              << " " << Quote(t.input.name) << "\n";
 
         f << "endtrack\n";
     }
-    return f.good();
+    f << "enddaw\n";      // completeness trailer (see Load: legacy files lack it)
+    f.flush();
+    const bool ok = f.good();
+    f.close();
+    if (!ok || !f.good()) { std::remove(tmp.c_str()); return false; }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
 }
 
-bool ProjectIO::Load(Project& p, const std::string& path) {
+bool ProjectIO::Load(Project& out, const std::string& path) {
     std::ifstream f(path);
     if (!f) return false;
 
     // Validate the "DAW" magic with a BOUNDED read before touching the project.
     // A bare getline on a binary file (e.g. a WAV opened by mistake) can slurp
     // a huge chunk into a string (memory thrash / apparent freeze); and we must
-    // not Clear() the current session for a file that turns out not to be ours.
+    // not disturb the current session for a file that turns out not to be ours.
     std::string header;
-    for (char c; header.size() < 64 && f.get(c) && c != '\n'; )
+    bool sawNewline = false;
+    for (char c; header.size() < 64 && f.get(c); ) {
+        if (c == '\n') { sawNewline = true; break; }
         header.push_back(c);
-    if (header.rfind("DAW", 0) != 0)   // not our format -> leave project intact
+    }
+    // A real header line is newline-terminated within 64 bytes. No newline means
+    // a truncated write or a binary file with no line breaks -> reject (a bare
+    // "DAW 1" with no trailing newline can't be distinguished from truncation).
+    if (!sawNewline)
         return false;
+    // Parse the header STRICTLY: exact "DAW" magic + an integer major version,
+    // then an OPTIONAL integer fmtFlags, and nothing else. Rejects "DAWSON"
+    // (magic is a separate token), "DAW garbage" / missing / malformed version,
+    // a malformed fmtFlags, and any extra trailing tokens.
+    std::istringstream hs(header);
+    std::string magic;
+    int major = 0;
+    if (!(hs >> magic >> major) || magic != "DAW")
+        return false;                 // not our format / no version -> intact
+    if (major < 1 || major > 1)       // version gate: only "DAW 1" is parseable
+        return false;
+    int fmtFlags = 0;
+    std::string flagTok;
+    if (hs >> flagTok) {              // a third token is present: it MUST be the
+        std::istringstream fs(flagTok);   // integer fmtFlags, fully consumed...
+        char leftover;
+        if (!(fs >> fmtFlags) || (fs >> leftover))
+            return false;            // "DAW 1 xyz" / "DAW 1 1x" -> malformed
+        std::string extra;
+        if (hs >> extra) return false;   // ...and nothing after it ("DAW 1 1 2")
+    }
+    const bool escaped = (fmtFlags & 1) != 0;   // strings use \-escaping?
 
     const std::string baseDir = DirOf(path);
-    p.Clear();
+    // Parse into a fresh temp project; commit to `out` only after a clean parse
+    // so a corrupt/truncated file never wipes the live session.
+    Project  p;
+    bool     sawTrailer = false;
 
     Track    cur;
     bool     haveTrack = false;
@@ -201,6 +291,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         // the engine/crossfade rely on (a hand-edited file may be out of order).
         std::sort(cur.clips.begin(), cur.clips.end(),
                   [](const Clip& a, const Clip& b) {
+                      return a.startFrame < b.startFrame;
+                  });
+        std::sort(cur.midiClips.begin(), cur.midiClips.end(),
+                  [](const MidiClip& a, const MidiClip& b) {
                       return a.startFrame < b.startFrame;
                   });
         p.AddTrack(cur);
@@ -226,8 +320,10 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             iss >> type >> count;
             if (type < 0 || type > 8) type = 0;
             e.type = (EffectType)type;
-            for (int i = 0; i < count; i++) { float v = 0.0f; iss >> v; e.params.push_back(v); }
-            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line);
+            for (int i = 0; i < count && i < kMaxListCount; i++) {
+                float v = 0.0f; if (!(iss >> v)) break; e.params.push_back(v);
+            }
+            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
             p.masterFx.push_back(e);
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
@@ -244,11 +340,11 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
         }
         else if (kw == "marker") {
             long long fr = 0; iss >> fr;
-            Marker mk; mk.frame = (Frame)fr; mk.name = Unquote(line);
+            Marker mk; mk.frame = (Frame)fr; mk.name = Unquote(line, escaped);
             p.markers.push_back(mk);
         }
         else if (kw == "transport") {
-            long long ph, ls, le; int loop;
+            long long ph = 0, ls = 0, le = 0; int loop = 0;
             iss >> ph >> loop >> ls >> le;
             p.transport.playhead = ph;
             p.transport.loopEnabled = (loop != 0);
@@ -256,7 +352,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             p.transport.loopEnd = le;
         }
         else if (kw == "punch") {
-            long long pi, po; int en;
+            long long pi = 0, po = 0; int en = 0;
             iss >> en >> pi >> po;
             p.transport.punchEnabled = (en != 0);
             p.transport.punchIn = pi;
@@ -267,23 +363,29 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             cur = Track{};
             curMidiIdx = -1; curMidiLegacy = false;
             std::string type;
-            int mute, solo, arm;
-            iss >> cur.id >> type >> cur.gain >> cur.pan >> mute >> solo >> arm;
+            int mute = 0, solo = 0, arm = 0;
+            // These seven are the REQUIRED track fields (present in every format
+            // version). A truncated record like "track 1 audio" must fail the
+            // load, not silently commit a track with default gain/pan/flags.
+            // (Fields after this — output, color, height... — stay optional.)
+            if (!(iss >> cur.id >> type >> cur.gain >> cur.pan >> mute >> solo >> arm))
+                return false;   // malformed required record; `out` left untouched
             cur.type   = (type == "midi") ? TrackType::Midi
                        : (type == "bus")  ? TrackType::Bus : TrackType::Audio;
             cur.muted  = (mute != 0);
             cur.soloed = (solo != 0);
             cur.armed  = (arm != 0);
             iss >> cur.output;   // routing target; absent in older files -> 0 (master)
-            cur.name   = Unquote(line);
+            cur.name   = Unquote(line, escaped);
             // Optional color index + lane height after the closing quote.
             if (size_t q = line.rfind('"'); q != std::string::npos) {
                 std::istringstream tail(line.substr(q + 1));
-                int ci = 0, h = 0, ss = 0, mg = 0;
+                int ci = 0, h = 0, ss = 0, mg = 0, im = 0;
                 if (tail >> ci) cur.colorIndex = ci;
                 if (tail >> h && h >= 24) cur.height = h;
                 if (tail >> ss) cur.soloSafe = (ss != 0);
                 if (tail >> mg) cur.muteGroup = mg;
+                if (tail >> im) cur.inputMonitor = (im != 0);
             }
             if (cur.id > maxTrack) maxTrack = cur.id;
             haveTrack = true;
@@ -294,7 +396,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             iss >> c.id >> start >> len >> off >> fi >> fo;
             c.startFrame = start; c.lengthFrames = len; c.sourceOffset = off;
             c.fadeInFrames = fi; c.fadeOutFrames = fo;
-            c.sourcePath = Resolve(Unquote(line), baseDir);
+            c.sourcePath = Resolve(Unquote(line, escaped), baseDir);
             // Optional per-clip gain after the closing quote (absent in older
             // files -> 1.0).
             if (size_t q = line.rfind('"'); q != std::string::npos) {
@@ -353,21 +455,21 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             iss >> type >> count;
             if (type < 0 || type > 8) type = 0;
             e.type = (EffectType)type;
-            for (int i = 0; i < count; i++) {
+            for (int i = 0; i < count && i < kMaxListCount; i++) {
                 float v = 0.0f;
-                iss >> v;
+                if (!(iss >> v)) break;
                 e.params.push_back(v);
             }
-            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line);
+            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
             cur.fx.push_back(e);
         }
         else if (kw == "fxauto" && haveTrack) {
             FxAutoLane fa;
             int count = 0;
             iss >> fa.fxIndex >> fa.slot >> count;
-            for (int i = 0; i < count; i++) {
+            for (int i = 0; i < count && i < kMaxListCount; i++) {
                 long long fr = 0; float v = 0.0f;
-                iss >> fr >> v;
+                if (!(iss >> fr >> v)) break;
                 fa.lane.AddPoint((Frame)fr, v);
             }
             if (fa.lane.Count() > 0) cur.fxAuto.push_back(fa);
@@ -383,7 +485,7 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             InputSource in;
             iss >> in.kind >> in.channel;
             if (in.kind < 0 || in.kind > InputSource::kMidi) in.kind = InputSource::kNone;
-            in.name = Unquote(line);   // "" if the line has no quotes
+            in.name = Unquote(line, escaped);   // "" if the line has no quotes
             cur.input = in;
         }
         else if (kw == "send" && haveTrack) {
@@ -398,16 +500,24 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
             int count = 0;
             iss >> which >> count;
             AutomationLane& lane = (which == "pan") ? cur.panAuto : cur.gainAuto;
-            for (int i = 0; i < count; i++) {
+            for (int i = 0; i < count && i < kMaxListCount; i++) {
                 long long fr = 0; float v = 0.0f;
-                iss >> fr >> v;
+                if (!(iss >> fr >> v)) break;
                 lane.AddPoint((Frame)fr, v);
             }
         }
+        else if (kw == "enddaw") { sawTrailer = true; break; }
         // "endtrack" and unknown keywords: ignored (commit happens on next
         // track / EOF).
     }
     commit();
+    // A missing `enddaw` can't be distinguished from a legacy pre-trailer file
+    // (both carry "DAW 1"), so a truncated file is still accepted here — the
+    // real corruption defenses are the temp-parse-then-swap (a bad file never
+    // wipes the live session) and the version gate. Bumping the magic to "DAW 2"
+    // would make trailer-absence a reliable truncation signal; deferred so
+    // existing v1 files keep loading.
+    (void)sawTrailer;
 
     // Build the tempo/meter map: seed frame 0 from tempo/timesig, sync sample
     // rate, then apply the collected changes.
@@ -423,6 +533,8 @@ bool ProjectIO::Load(Project& p, const std::string& path) {
     for (Track& t : p.Tracks())
         for (MidiClip& mc : t.midiClips)
             if (mc.id == kInvalidClipId) mc.id = p.NextClipId();
+
+    out = std::move(p);   // clean parse -> commit; live session was untouched
     return true;
 }
 

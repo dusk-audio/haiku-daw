@@ -39,6 +39,12 @@ public:
 
 class CommandStack {
 public:
+    // Cap on retained undo history. Without it a long session accumulates every
+    // edit forever (some commands capture large state, e.g. a removed Track's
+    // whole clip/note/fx payload). At the cap the oldest entries are dropped —
+    // they simply become no-longer-undoable, as in any DAW's bounded history.
+    static constexpr size_t kMaxUndoDepth = 256;
+
     // Execute and, on success, push onto the undo stack. Executing a new
     // command clears the redo stack (standard linear-history semantics).
     bool Execute(std::unique_ptr<Command> cmd, Project& p) {
@@ -51,6 +57,10 @@ public:
             return true;
         }
         fUndo.push_back(std::move(cmd));
+        // Trim the oldest history past the cap (usually a single entry).
+        if (fUndo.size() > kMaxUndoDepth)
+            fUndo.erase(fUndo.begin(),
+                        fUndo.begin() + (fUndo.size() - kMaxUndoDepth));
         fRedo.clear();
         return true;
     }

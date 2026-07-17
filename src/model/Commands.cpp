@@ -300,9 +300,19 @@ bool MoveMidiClipCommand::Do(Project& p) {
     // Cross-track move: pull from src, re-home in the destination.
     MidiClip moved = *c;
     moved.startFrame = fNewStart < 0 ? 0 : fNewStart;
-    if (!p.FindTrack(fNewTrack)) return false;
+    Track* dst = p.FindTrack(fNewTrack);
+    if (!dst) return false;
+    // Guard the id-collision case BEFORE mutating: if the dest already holds
+    // this clip id, AddMidiClip would fail after the source removal and the
+    // clip would be lost with no undo. Bail cleanly instead.
+    if (dst->FindMidiClip(fClip)) return false;
+    MidiClip original = *c;   // c dangles after the remove below
     p.RemoveMidiClip(fTrack, fClip);
-    return p.AddMidiClip(fNewTrack, moved);
+    if (!p.AddMidiClip(fNewTrack, moved)) {
+        p.AddMidiClip(fTrack, original);   // re-home in source: no data loss
+        return false;
+    }
+    return true;
 }
 
 void MoveMidiClipCommand::Undo(Project& p) {
@@ -454,8 +464,16 @@ bool MoveClipToTrackCommand::Do(Project& p) {
     fMoved = *c;                       // save original (incl. its start) for undo
     Clip moved = fMoved;
     moved.startFrame = fNewStart;
+    // Guard id collision BEFORE removing: AddClip keeps the same id, so if the
+    // dest already holds it the add fails after the source removal and the clip
+    // is lost with no undo. Bail cleanly instead.
+    if (dst->FindClip(fClip)) return false;
     if (!p.RemoveClip(fSrc, fClip)) return false;
-    return p.AddClip(fDst, moved);     // keeps the same clip id
+    if (!p.AddClip(fDst, moved)) {     // keeps the same clip id
+        p.AddClip(fSrc, fMoved);       // re-home in source: no data loss
+        return false;
+    }
+    return true;
 }
 
 void MoveClipToTrackCommand::Undo(Project& p) {
@@ -677,7 +695,8 @@ void AddMarkerCommand::Undo(Project& p) {
 
 bool RemoveMarkerCommand::Do(Project& p) {
     for (size_t i = 0; i < p.markers.size(); i++)
-        if (p.markers[i].frame == fFrame) {
+        if (p.markers[i].frame == fFrame
+            && (!fHasName || p.markers[i].name == fName)) {
             fRemoved = p.markers[i];
             fIndex   = (int)i;
             p.markers.erase(p.markers.begin() + i);
@@ -691,13 +710,20 @@ void RemoveMarkerCommand::Undo(Project& p) {
 }
 
 bool RenameMarkerCommand::Do(Project& p) {
-    for (Marker& m : p.markers)
-        if (m.frame == fFrame) { fOld = m.name; m.name = fNew; return true; }
+    for (size_t i = 0; i < p.markers.size(); i++)
+        if (p.markers[i].frame == fFrame
+            && (!fHasMatch || p.markers[i].name == fOldMatch)) {
+            fOld = p.markers[i].name;
+            fIndex = (int)i;
+            p.markers[i].name = fNew;
+            return true;
+        }
     return false;
 }
 void RenameMarkerCommand::Undo(Project& p) {
-    for (Marker& m : p.markers)
-        if (m.frame == fFrame) { m.name = fOld; return; }
+    // Rename never reorders (frame unchanged), so the index is stable.
+    if (fIndex >= 0 && fIndex < (int)p.markers.size())
+        p.markers[fIndex].name = fOld;
 }
 
 // --- SetTrackInputCommand ---------------------------------------------

@@ -15,7 +15,13 @@ struct Reader {
     const uint8_t* end;
     bool ok = true;
 
-    bool has(size_t n) const { return (size_t)(end - p) >= n; }
+    // Guard p <= end first: if a prior `p += len` overshot, `end - p` is
+    // negative and the size_t cast would wrap to huge, wrongly reporting data
+    // available -> OOB read.
+    bool has(size_t n) const { return p <= end && (size_t)(end - p) >= n; }
+    // Advance by n only if n bytes remain; otherwise clamp to end + flag error.
+    // Avoids `p += n` overshooting end (UB pointer arithmetic) on a bad length.
+    void skip(size_t n) { if (has(n)) p += n; else { p = end; ok = false; } }
     uint8_t  u8()  { if (!has(1)) { ok = false; return 0; } return *p++; }
     uint16_t u16() { uint16_t h = u8(); return (uint16_t)((h << 8) | u8()); }
     uint32_t u32() { uint32_t v = u16(); return (v << 16) | u16(); }
@@ -84,8 +90,12 @@ bool ReadSmf(const std::string& path, SmfData& out) {
         if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'r' || r.u8() != 'k')
             break;
         const uint32_t tlen = r.u32();
+        // Validate the declared length before pointer arithmetic: r.p + tlen
+        // would be UB (and could wrap) if tlen runs past the buffer. A declared
+        // length past EOF is a truncated file — fail rather than parse a
+        // clamped, partial track.
+        if (!r.has(tlen)) { r.ok = false; break; }
         const uint8_t* trackEnd = r.p + tlen;
-        if (trackEnd > r.end) trackEnd = r.end;
 
         SmfTrack track;
         // Notes still waiting for their note-off, keyed by (channel<<8)|key.
@@ -104,21 +114,29 @@ bool ReadSmf(const std::string& path, SmfData& out) {
             if (status == 0xFF) {                 // meta event
                 const uint8_t type = r.u8();
                 const uint32_t len = r.varlen();
+                // The payload must lie within THIS track, not just the file: a
+                // bad meta length would otherwise read into the next track.
+                if (r.p > trackEnd || len > (size_t)(trackEnd - r.p)) {
+                    r.ok = false; break;
+                }
                 const uint8_t* data = r.p;
-                if (type == 0x51 && len == 3 && r.has(3)) {   // set tempo
+                if (type == 0x51 && len == 3) {   // set tempo
                     const uint32_t usPerQn =
                         ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
                     if (!gotTempo && usPerQn > 0) {
                         out.tempoBpm = 60000000.0 / (double)usPerQn;
                         gotTempo = true;
                     }
-                } else if (type == 0x03 && len > 0 && r.has(len)) {   // track name
+                } else if (type == 0x03 && len > 0) {   // track name
                     track.name.assign((const char*)data, (size_t)len);
                 }
-                r.p += len;
+                r.skip(len);
             } else if (status == 0xF0 || status == 0xF7) {   // sysex: skip
                 const uint32_t len = r.varlen();
-                r.p += len;
+                if (r.p > trackEnd || len > (size_t)(trackEnd - r.p)) {
+                    r.ok = false; break;
+                }
+                r.skip(len);
             } else if (hi == 0x90 || hi == 0x80) {           // note on / off
                 const uint8_t key = r.u8();
                 const uint8_t vel = r.u8();
@@ -146,6 +164,10 @@ bool ReadSmf(const std::string& path, SmfData& out) {
                 break;   // unknown status: bail on this track
             }
         }
+        // A track that overran its bounds (bad meta/sysex length, EOF mid-event)
+        // is rejected, not emitted — so a successful return never includes a
+        // partially parsed track.
+        if (!r.ok) break;
         // Any notes without a matching off end at the last event.
         for (auto& kv : pending) {
             SmfNote nn;
