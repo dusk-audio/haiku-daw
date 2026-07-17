@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -261,6 +263,197 @@ int main() {
         const double eSafe = energy(p2);
         CHECK(eSolo > 0.0);
         CHECK(eSafe > eSolo * 1.2);                // B adds energy despite A's solo
+    }
+
+    // Leaf-scratch reuse (OOM fix): several source tracks all feeding ONE bus
+    // must each contribute — the shared leaf scratch buffer is reused per track
+    // and summed into the bus, so no track's signal is dropped or overwritten.
+    {
+        auto energyNTracksToBus = [&](int n) -> double {
+            Project pr; pr.sampleRate = SR; pr.masterGain = 1.0f;
+            Track b; b.id = pr.NextTrackId(); b.type = TrackType::Bus;
+            b.gain = 1.0f; b.pan = 0.0f;
+            const TrackId bid = b.id;
+            pr.AddTrack(b);
+            for (int k = 0; k < n; k++) {
+                Track m; m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+                m.gain = 1.0f; m.pan = 0.0f; m.output = bid;   // leaf -> bus
+                MidiNote nk; nk.pitch = 48 + k * 3; nk.velocity = 100;
+                nk.startFrame = 0; nk.lengthFrames = (Frame)(SR / 2);
+                PutNote(m, nk);
+                pr.AddTrack(m);
+            }
+            const char* p = "leafbus_tmp.wav";
+            std::remove(p);
+            if (!ExportWav(pr, p, SR)) return -1.0;
+            WavSource s; if (!s.Open(p)) { std::remove(p); return -1.0; }
+            double e = 0; const float* c = nullptr; size_t f = 0;
+            while (s.ReadChunk(&c, &f))
+                for (size_t i = 0; i < f * 2; i++) e += std::fabs(c[i]);
+            std::remove(p);
+            return e;
+        };
+        const double e1 = energyNTracksToBus(1);
+        const double e4 = energyNTracksToBus(4);
+        CHECK(e1 > 0.0);
+        CHECK(e4 > e1 * 1.5);   // 4 tracks land (a scratch clobber would give ~1x)
+    }
+
+    // Bus-routed stem must NOT be silent: a soloed source feeding a (non-soloed)
+    // bus must still pass through the bus to master. Regression for the stem-
+    // silence bug where a solo-excluded bus was skipped entirely.
+    {
+        Project p; p.sampleRate = SR; p.masterGain = 1.0f;
+        Track bus; bus.id = p.NextTrackId(); bus.type = TrackType::Bus;
+        bus.name = "Drums"; bus.gain = 1.0f; bus.pan = 0.0f;
+        Track src; src.id = p.NextTrackId(); src.type = TrackType::Midi;
+        src.name = "Kick"; src.gain = 1.0f; src.pan = 0.0f;
+        src.output = bus.id;                         // route source INTO the bus
+        MidiNote n; n.pitch = 48; n.velocity = 110;
+        n.startFrame = 0; n.lengthFrames = (Frame)(SR / 2); PutNote(src, n);
+        p.AddTrack(bus); p.AddTrack(src);
+
+        const int wrote = ExportStems(p, ".", SR);
+        CHECK(wrote == 1);                           // one source stem (bus skipped)
+        WavSource s; CHECK(s.Open("./02_Kick.wav"));
+        float pk = 0.0f; const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f * 2; i++) pk = std::max(pk, std::fabs(c[i]));
+        std::remove("./02_Kick.wav");
+        CHECK(pk > 0.01f);                           // bus-routed stem has signal
+    }
+
+    // Solo-safe must NOT bleed into a stem: ExportStems isolates one track even
+    // when another is soloSafe.
+    {
+        Project p; p.sampleRate = SR; p.masterGain = 1.0f;
+        Track a; a.id = p.NextTrackId(); a.type = TrackType::Midi; a.name = "A";
+        MidiNote na; na.pitch = 60; na.velocity = 110;
+        na.startFrame = 0; na.lengthFrames = (Frame)(SR / 2); PutNote(a, na);
+        Track b; b.id = p.NextTrackId(); b.type = TrackType::Midi; b.name = "B";
+        b.soloSafe = true;                           // would bleed if not cleared
+        MidiNote nb2; nb2.pitch = 67; nb2.velocity = 110;
+        nb2.startFrame = 0; nb2.lengthFrames = (Frame)(SR / 2); PutNote(b, nb2);
+        p.AddTrack(a); p.AddTrack(b);
+
+        ExportStems(p, ".", SR);
+        auto energy = [&](const char* f) -> double {
+            WavSource s; if (!s.Open(f)) return -1.0;
+            double e = 0; const float* c = nullptr; size_t n = 0;
+            while (s.ReadChunk(&c, &n))
+                for (size_t i = 0; i < n * 2; i++) e += std::fabs(c[i]);
+            std::remove(f);
+            return e;
+        };
+        const double ea = energy("./01_A.wav");
+        const double eb = energy("./02_B.wav");
+        // A's stem should be ~one track's worth, not A+B (no soloSafe bleed).
+        CHECK(ea > 0.0 && eb > 0.0);
+        CHECK(std::fabs(ea - eb) < eb * 0.5);        // comparable, neither doubled
+    }
+
+    // Bit-depth export: 24-bit PCM and 32-bit float bounces must be valid,
+    // readable by WavSource, carry the rendered signal, AND be encoded in the
+    // requested format (fmt chunk audioFormat + bitsPerSample match the depth).
+    {
+        // Read the fmt chunk's audioFormat (offset 20) and bitsPerSample (34)
+        // from a canonical 44-byte-header WAV as written by WavWriter.
+        auto fmtOf = [](const std::string& path, uint16_t* fmt, uint16_t* bits) {
+            std::ifstream f(path, std::ios::binary);
+            uint8_t h[36];
+            f.read((char*)h, 36);
+            if (f.gcount() != 36) { *fmt = 0; *bits = 0; return; }
+            *fmt  = (uint16_t)(h[20] | (h[21] << 8));
+            *bits = (uint16_t)(h[34] | (h[35] << 8));
+        };
+        Project p; p.sampleRate = SR; p.masterGain = 1.0f;
+        Track m; m.id = p.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f; PutNote(m, note);
+        p.AddTrack(m);
+        for (int depth : { 24, 32 }) {
+            const std::string path = "/tmp/haiku_daw_depth.wav";
+            std::remove(path.c_str());
+            CHECK(ExportWav(p, path, SR, depth));
+            uint16_t fmt = 0, bits = 0;
+            fmtOf(path, &fmt, &bits);
+            CHECK(bits == depth);                          // encoded at requested depth
+            CHECK(fmt == (depth == 32 ? 3 : 1));           // 32 = IEEE float, else PCM
+            WavSource s;
+            CHECK(s.Open(path));
+            CHECK(s.IsValid());
+            CHECK(s.TotalFrames() > 0);
+            float peak = 0.0f; const float* c = nullptr; size_t f = 0;
+            while (s.ReadChunk(&c, &f))
+                for (size_t i = 0; i < f * 2; i++) peak = std::max(peak, std::fabs(c[i]));
+            CHECK(peak > 0.01f);                    // signal survived quantization
+            std::remove(path.c_str());
+        }
+    }
+
+    // NaN-injection: a float-WAV source carrying NaN/Inf samples must NOT reach
+    // the exported master. The final finite sweep zeroes them (parity with the
+    // RT engine's pre-DAC guard); without it the whole bounce is poisoned.
+    {
+        // Write a 32-bit float stereo WAV whose samples include NaN/Inf.
+        const char* nanWav = "/tmp/haiku_daw_naninject.wav";
+        auto put_u32 = [](std::ofstream& f, uint32_t v) {
+            uint8_t b[4] = { uint8_t(v), uint8_t(v>>8), uint8_t(v>>16), uint8_t(v>>24) };
+            f.write((char*)b, 4);
+        };
+        auto put_u16 = [](std::ofstream& f, uint16_t v) {
+            uint8_t b[2] = { uint8_t(v), uint8_t(v>>8) }; f.write((char*)b, 2);
+        };
+        const int frames = 4800;                     // 0.1 s @ 48k
+        std::vector<float> s(frames * 2);
+        const float qnan = std::numeric_limits<float>::quiet_NaN();
+        const float inf  = std::numeric_limits<float>::infinity();
+        for (int i = 0; i < frames; i++) {
+            s[i * 2 + 0] = (i % 3 == 0) ? qnan : (i % 3 == 1 ? inf : 0.3f);
+            s[i * 2 + 1] = (i % 5 == 0) ? -inf : 0.2f;
+        }
+        {
+            std::ofstream f(nanWav, std::ios::binary);
+            const uint32_t dataBytes = (uint32_t)(s.size() * sizeof(float));
+            f.write("RIFF", 4); put_u32(f, 36 + dataBytes); f.write("WAVE", 4);
+            f.write("fmt ", 4); put_u32(f, 16);
+            put_u16(f, 3);              // IEEE float
+            put_u16(f, 2);             // stereo
+            put_u32(f, 48000);
+            put_u32(f, 48000 * 2 * 4); // byte rate
+            put_u16(f, 2 * 4);         // block align
+            put_u16(f, 32);            // bits
+            f.write("data", 4); put_u32(f, dataBytes);
+            f.write((const char*)s.data(), dataBytes);
+        }
+
+        Project p; p.sampleRate = SR; p.masterGain = 1.0f;
+        Track t; t.id = p.NextTrackId(); t.type = TrackType::Audio;
+        t.gain = 1.0f; t.pan = 0.0f;
+        Clip c; c.startFrame = 0; c.lengthFrames = frames;
+        c.sourceOffset = 0; c.sourcePath = nanWav; c.gain = 1.0f;
+        t.clips.push_back(c);
+        p.AddTrack(t);
+
+        const std::string out = "/tmp/haiku_daw_nanout.wav";
+        std::remove(out.c_str());
+        // Export 32-bit FLOAT: WriteFloat stores those verbatim (no quantizer to
+        // clamp NaN/Inf), so the only thing that can keep them out of the file is
+        // the Exporter's own finite sweep. A 16-bit bounce would mask it (the
+        // PCM quantizer sanitizes too), so this isolates the export guard.
+        CHECK(ExportWav(p, out, SR, 32));
+        WavSource s2; CHECK(s2.Open(out));
+        bool allFinite = true; float pk = 0.0f;
+        const float* c2 = nullptr; size_t f2 = 0;
+        while (s2.ReadChunk(&c2, &f2))
+            for (size_t i = 0; i < f2 * 2; i++) {
+                if (!std::isfinite(c2[i])) allFinite = false;
+                pk = std::max(pk, std::fabs(c2[i]));
+            }
+        CHECK(allFinite);              // guard zeroed every NaN/Inf
+        CHECK(std::isfinite(pk));
+        CHECK(pk <= 1.0f + 1e-3f);     // no full-scale Inf blast survived
+        std::remove(out.c_str());
+        std::remove(nanWav);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

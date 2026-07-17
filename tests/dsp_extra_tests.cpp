@@ -85,6 +85,17 @@ int main() {
         for (int i = 12000; i < 12500; i++)
             win += std::fabs(buf[i * 2]);
         CHECK(win > 1e-5f);
+
+        // Wet-overload guard (Freeverb fixed input gain): a sustained full-scale
+        // input at max room + full wet must NOT blow up (was ~50x without the
+        // fixed gain). Every output sample stays within a sane ceiling.
+        Reverb loud(1.0, 1.0);   // max room, fully wet
+        loud.Prepare(SR);
+        std::vector<float> s(N * 2, 1.0f);   // sustained full-scale DC-ish input
+        loud.Process(s.data(), N);
+        float peak = 0.0f;
+        for (float v : s) peak = std::max(peak, std::fabs(v));
+        CHECK(peak < 4.0f);      // bounded (pre-fix this reached tens of x)
     }
 
     // 2. Reverb Reset() clears the tail: a fresh impulse behaves the same.

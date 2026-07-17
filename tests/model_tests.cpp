@@ -433,6 +433,22 @@ static void test_move_clip_to_track() {
     CHECK(p.FindTrack(tb)->clips.empty());
     CHECK(p.FindTrack(ta)->clips.size() == 1);
     CHECK(p.FindTrack(ta)->clips[0].startFrame == 100);
+
+    // Data-loss guard: a cross-track move whose dest already holds the clip id
+    // (reachable via a corrupt/hand-edited file with duplicate ids) must fail
+    // WITHOUT losing the source clip. Force a collision via the direct mutators.
+    {
+        Clip dup; dup.id = cid; dup.startFrame = 0; dup.lengthFrames = 10;
+        dup.sourcePath = "y.wav";
+        p.AddClip(tb, dup);                                  // dest now holds cid
+        CommandStack s2;
+        bool ok = s2.Execute(
+            std::make_unique<MoveClipToTrackCommand>(ta, cid, tb, 400), p);
+        CHECK(!ok);                                          // move refused
+        CHECK(p.FindTrack(ta)->clips.size() == 1);           // source intact
+        CHECK(p.FindTrack(ta)->clips[0].id == cid);
+        CHECK(p.FindTrack(tb)->clips.size() == 1);           // dest unchanged
+    }
 }
 
 static void test_resize_clip_and_edit_note() {
@@ -482,6 +498,17 @@ static void test_resize_clip_and_edit_note() {
     CHECK(p.FindTrack(tm)->CollectNotes().empty());                 // out of window
     stack.Undo(p);
     CHECK(p.FindTrack(tm)->CollectNotes().size() == 1);             // back in window
+
+    // Note length clamps to the region window: shrink the clip so the note
+    // (start 100, len 100) overhangs the end; CollectNotes caps it at the clip.
+    stack.Execute(std::make_unique<ResizeMidiClipCommand>(tm, mcId, 150), p);
+    {
+        auto cn = p.FindTrack(tm)->CollectNotes();
+        CHECK(cn.size() == 1);
+        CHECK(cn[0].lengthFrames == 50);                           // 150 - 100
+    }
+    stack.Undo(p);
+    CHECK(p.FindTrack(tm)->CollectNotes()[0].lengthFrames == 100); // full again
 }
 
 static void test_track_manage_and_fade() {
@@ -699,7 +726,27 @@ static void test_freeze_track() {
     CHECK(!s.Execute(std::make_unique<FreezeTrackCommand>(id, false), p));
 }
 
+// The undo stack is capped: pushing past kMaxUndoDepth drops the oldest
+// entries, so history stays bounded and only the last N edits stay undoable.
+static void test_undo_history_cap() {
+    daw::Project p;
+    daw::CommandStack s;
+    const size_t cap = daw::CommandStack::kMaxUndoDepth;
+    const size_t extra = 50;
+    for (size_t i = 0; i < cap + extra; i++)
+        s.Execute(std::make_unique<daw::AddMarkerCommand>(
+                      (daw::Frame)(i * 1000), "m"), p);
+    CHECK(p.markers.size() == cap + extra);   // all edits applied to the model
+    // Only the most recent `cap` are undoable; the oldest `extra` were trimmed.
+    size_t undone = 0;
+    while (s.CanUndo()) { s.Undo(p); undone++; }
+    CHECK(undone == cap);
+    // Trimmed edits are gone from history, so their markers remain in the model.
+    CHECK(p.markers.size() == extra);
+}
+
 int main() {
+    test_undo_history_cap();
     test_add_and_undo_track();
     test_gain_undo_redo();
     test_clip_sorted_insert_and_move();

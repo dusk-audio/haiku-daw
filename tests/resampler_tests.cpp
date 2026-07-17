@@ -79,6 +79,29 @@ int main() {
         CHECK(ok);
     }
 
+    // 5. Mono (1 channel): a mono buffer must resample as 1 float/frame with no
+    //    read past each frame (stereo indexing would OOB / misinterpret).
+    {
+        Resampler r(24000, 48000, /*channels=*/1);
+        CHECK(r.Channels() == 1);
+        // Exactly-sized mono buffer: 100 frames == 100 floats. A stereo-indexed
+        // reader would touch in[199] here (OOB) — this must stay in bounds.
+        std::vector<float> in(100, 0.42f);
+        std::vector<float> out;
+        r.Process(in.data(), 100, out);
+        const size_t frames = out.size();          // 1 float per frame (mono)
+        CHECK(std::llabs((long long)frames - 200) <= 2);   // 2x upsample
+        bool ok = true;
+        for (float s : out) if (std::fabs(s - 0.42f) > 1e-4f) ok = false;
+        CHECK(ok);
+    }
+
+    // 6. Channel count clamps to [1, kMaxChannels] (bad input never over-indexes).
+    {
+        Resampler lo(48000, 48000, 0);   CHECK(lo.Channels() == 1);
+        Resampler hi(48000, 48000, 9);   CHECK(hi.Channels() == 2);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

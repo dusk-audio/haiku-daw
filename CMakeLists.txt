@@ -8,6 +8,15 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
+# Optional AddressSanitizer/UBSan for the fuzz corpora (and everything else).
+# Off by default so the normal ctest loop stays fast; the fuzz tests still catch
+# hangs/aborts without it, but ASan is what catches silent OOB reads.
+option(DAW_SANITIZE "Build with -fsanitize=address,undefined" OFF)
+if(DAW_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
 # The model layer is kit-free (STL only) so it builds on any host. Keep it
 # in its own library target; engine/ui targets (which link Haiku kits) will
 # depend on this but never the reverse.
@@ -145,6 +154,22 @@ add_test(NAME smfio_tests COMMAND smfio_tests)
 add_executable(midi_tests tests/midi_tests.cpp)
 target_link_libraries(midi_tests PRIVATE daw_model)
 add_test(NAME midi_tests COMMAND midi_tests)
+
+# Adversarial fuzz corpora: malformed WAV / project input must fail cleanly,
+# never crash / hang / OOM. Run under ASan for teeth: cmake -DDAW_SANITIZE=ON.
+add_executable(wavsource_fuzz_tests tests/wavsource_fuzz_tests.cpp)
+target_link_libraries(wavsource_fuzz_tests PRIVATE daw_model)
+add_test(NAME wavsource_fuzz_tests COMMAND wavsource_fuzz_tests)
+
+add_executable(projectio_fuzz_tests tests/projectio_fuzz_tests.cpp)
+target_link_libraries(projectio_fuzz_tests PRIVATE daw_model)
+add_test(NAME projectio_fuzz_tests COMMAND projectio_fuzz_tests)
+
+# Fuzz corpora must terminate quickly; a short CTest timeout turns any accidental
+# non-terminating loop (a regression in the parsers' bounds) into a test failure
+# instead of a hung CI. Generous vs the ~1 s they actually take.
+set_tests_properties(wavsource_fuzz_tests projectio_fuzz_tests
+                     PROPERTIES TIMEOUT 60)
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are

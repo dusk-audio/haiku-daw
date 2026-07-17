@@ -224,6 +224,39 @@ int main() {
         s.Undo(p);   // undo remove -> back at index 0
         CHECK(p.markers.size() == 2 && p.markers[0].frame == 1000);
 
+        // Two markers sharing a frame: remove/rename must hit the one named,
+        // not just the first at that frame (marker identity = frame + name).
+        {
+            Project pc;
+            CommandStack sc;
+            sc.Execute(std::make_unique<AddMarkerCommand>(5000, "Verse"), pc);
+            sc.Execute(std::make_unique<AddMarkerCommand>(5000, "Chorus"), pc);
+            CHECK(pc.markers.size() == 2);
+            // Rename the second-at-frame ("Chorus") specifically.
+            sc.Execute(std::make_unique<RenameMarkerCommand>(
+                (Frame)5000, std::string("Chorus"), std::string("Bridge")), pc);
+            bool haveVerse = false, haveBridge = false, haveChorus = false;
+            for (const Marker& m : pc.markers) {
+                if (m.name == "Verse")  haveVerse  = true;
+                if (m.name == "Bridge") haveBridge = true;
+                if (m.name == "Chorus") haveChorus = true;
+            }
+            CHECK(haveVerse && haveBridge && !haveChorus);   // only Chorus renamed
+            sc.Undo(pc);                                      // restores "Chorus"
+            haveBridge = haveChorus = false;
+            for (const Marker& m : pc.markers) {
+                if (m.name == "Bridge") haveBridge = true;
+                if (m.name == "Chorus") haveChorus = true;
+            }
+            CHECK(haveChorus && !haveBridge);
+            // Remove "Verse" by name; "Chorus" must survive.
+            sc.Execute(std::make_unique<RemoveMarkerCommand>(
+                (Frame)5000, std::string("Verse")), pc);
+            CHECK(pc.markers.size() == 1 && pc.markers[0].name == "Chorus");
+            sc.Undo(pc);                                      // Verse back
+            CHECK(pc.markers.size() == 2);
+        }
+
         const char* path = "markers_tmp.dawproj";
         CHECK(ProjectIO::Save(p, path));
         Project q;
@@ -232,6 +265,90 @@ int main() {
         CHECK(q.markers.size() == 2);
         CHECK(q.markers[0].frame == 1000 && q.markers[0].name == "A");
         CHECK(q.markers[1].frame == 2000 && q.markers[1].name == "B");
+    }
+
+    // Version gate: a future major version must be rejected, project untouched,
+    // rather than silently misread by the v1 parser.
+    {
+        const char* vpath = "future_ver_tmp.dawproj";
+        std::ofstream vf(vpath);
+        vf << "DAW 2\nsampleRate 96000\nenddaw\n";
+        vf.close();
+        Project keep;
+        CommandStack ks;
+        ks.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Keep"), keep);
+        CHECK(!ProjectIO::Load(keep, vpath));       // rejected
+        CHECK(keep.Tracks().size() == 1);           // untouched
+        CHECK(keep.sampleRate == 48000.0);          // not overwritten with 96000
+        std::remove(vpath);
+    }
+
+    // Corrupt-file DoS: a huge count must not drive an unbounded allocation or
+    // hang; the loader caps/streams and completes.
+    {
+        const char* dpath = "huge_count_tmp.dawproj";
+        std::ofstream df(dpath);
+        df << "DAW 1\n"
+           << "track 1 audio 1.0 0.0 0 0 0\n"
+           << "auto gain 2000000000\n"       // no data tokens follow
+           << "endtrack\nenddaw\n";
+        df.close();
+        Project d;
+        CHECK(ProjectIO::Load(d, dpath));               // completes, no OOM/hang
+        CHECK(d.Tracks().size() == 1);
+        CHECK(d.Tracks()[0].gainAuto.Count() == 0);     // nothing bogus added
+        std::remove(dpath);
+    }
+
+    // String escaping + inputMonitor: a track name and clip path containing a
+    // double-quote and a newline must round-trip without corrupting the line,
+    // and inputMonitor must persist.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gt\"r\nL"), a);
+        TrackId t = a.Tracks().front().id;
+        a.FindTrack(t)->inputMonitor = true;
+        Clip c; c.startFrame = 0; c.lengthFrames = 10;
+        c.sourcePath = "takes/od\"d name.wav";       // embedded quote in path
+        s.Execute(std::make_unique<AddClipCommand>(t, c), a);
+
+        const char* path = "escape_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+        std::remove(path);
+        CHECK(b.Tracks().size() == 1);               // line not split by the \n
+        CHECK(b.Tracks()[0].name == "Gt\"r\nL");     // exact name survives
+        CHECK(b.Tracks()[0].inputMonitor == true);   // persisted
+        CHECK(b.Tracks()[0].clips.size() == 1);
+        CHECK(b.Tracks()[0].clips[0].sourcePath == "takes/od\"d name.wav");
+    }
+
+    // Save precision: a gain that the default 6-digit stream would round must
+    // round-trip within float epsilon.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "P"), a);
+        TrackId t = a.Tracks().front().id;
+        s.Execute(std::make_unique<SetTrackGainCommand>(t, 0.123456789f), a);
+        const char* path = "prec_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b; CHECK(ProjectIO::Load(b, path));
+        std::remove(path);
+        CHECK(std::abs(b.Tracks()[0].gain - 0.123456789f) < 1e-6f);
+    }
+
+    // Atomic save leaves no ".tmp" sidecar once it succeeds.
+    {
+        const char* apath = "atomic_tmp.dawproj";
+        Project p;
+        CHECK(ProjectIO::Save(p, apath));
+        const std::string sidecar = std::string(apath) + ".tmp";
+        std::ifstream leftover(sidecar);
+        CHECK(!leftover.good());                        // renamed away
+        std::remove(apath);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

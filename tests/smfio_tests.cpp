@@ -98,6 +98,38 @@ int main() {
         CHECK(!ReadSmf("/tmp/does_not_exist_9182.mid", r));
     }
 
+    // Malformed input must not crash/OOB and must not emit a partial track.
+    auto writeRaw = [](const std::vector<uint8_t>& b) {
+        std::ofstream f(kPath, std::ios::binary | std::ios::trunc);
+        f.write((const char*)b.data(), (std::streamsize)b.size());
+    };
+    // A declared MTrk length that runs past EOF is a truncated file: rejected.
+    {
+        std::vector<uint8_t> b = {
+            'M','T','h','d', 0,0,0,6, 0,0, 0,1, 0,96,
+            'M','T','r','k', 0,0,0x03,0xE8,   // tlen = 1000, but only 4 body bytes
+            0x00, 0xFF, 0x2F, 0x00
+        };
+        writeRaw(b);
+        SmfData r;
+        CHECK(!ReadSmf(kPath, r));         // truncated track -> no output
+        CHECK(r.tracks.empty());
+    }
+    // A meta event whose length overruns the track bound is rejected (would
+    // otherwise read into the next track / past the track).
+    {
+        // tlen = 6; body: delta0, FF 03 (text) len=5, but only 2 bytes remain.
+        std::vector<uint8_t> b = {
+            'M','T','h','d', 0,0,0,6, 0,0, 0,1, 0,96,
+            'M','T','r','k', 0,0,0,6,
+            0x00, 0xFF, 0x03, 0x05, 'A', 'B'
+        };
+        writeRaw(b);
+        SmfData r;
+        CHECK(!ReadSmf(kPath, r));         // overrunning meta -> track rejected
+        CHECK(r.tracks.empty());
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

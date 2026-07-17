@@ -58,6 +58,27 @@ int main() {
     CHECK(near(got[7], -1.0f));
 
     std::remove(path);
+
+    // 4 GB guard: a write that would push the data chunk past the 32-bit RIFF
+    // size limit is refused (returns false) without writing, so the file on disk
+    // stays a valid WAV. The huge count is checked before the buffer is touched,
+    // so a tiny buffer is safe to pass.
+    {
+        const char* gpath = "wavwriter_4gb_tmp.wav";
+        WavWriter g;
+        CHECK(g.Open(gpath, 48000, 2));
+        int16_t tiny[2] = { 0, 0 };
+        CHECK(g.WriteInt16(tiny, 2));                       // small write ok
+        CHECK(!g.WriteInt16(tiny, (size_t)3000000000ull));  // would overflow -> refused
+        CHECK(g.Close());
+        // File is still valid + reads back just the 2 samples actually written.
+        WavSource gs;
+        CHECK(gs.Open(gpath));
+        CHECK(gs.IsValid());
+        CHECK(gs.TotalFrames() == 1);                       // 2 samples = 1 stereo frame
+        std::remove(gpath);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
