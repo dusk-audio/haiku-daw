@@ -44,7 +44,8 @@ bool WavSource::Open(const std::string& path) {
         (void)id;
 
         if (std::memcmp(ch, "fmt ", 4) == 0) {
-            if (size < 16) break;   // malformed: base PCM fmt is 16 bytes
+            if (size < 16 || size > 4096) break;   // 16 = base PCM; cap guards
+                                                   // a corrupt huge fmt size
             std::vector<uint8_t> f(size);
             fFile.read(reinterpret_cast<char*>(f.data()), size);
             if (fFile.gcount() != (std::streamsize)size) break;
@@ -82,6 +83,27 @@ bool WavSource::Open(const std::string& path) {
     if (fAudioFormat != 1 && fAudioFormat != 3) {
         std::fprintf(stderr, "WavSource: unsupported format tag %u "
                      "(only PCM and float)\n", fAudioFormat);
+        return false;
+    }
+    // Float (tag 3) samples are read as 4-byte IEEE floats in SampleToFloat;
+    // a file declaring float with bits != 32 would make SampleToFloat memcpy
+    // 4 bytes out of a 2-byte sample slot -> heap OOB read. Reject it.
+    if (fAudioFormat == 3 && fBitsPerSample != 32) {
+        std::fprintf(stderr, "WavSource: float format must be 32-bit "
+                     "(got %d)\n", fBitsPerSample);
+        return false;
+    }
+    // PCM must be one of the widths SampleToFloat handles.
+    if (fAudioFormat == 1 && fBitsPerSample != 8  && fBitsPerSample != 16 &&
+        fBitsPerSample != 24 && fBitsPerSample != 32) {
+        std::fprintf(stderr, "WavSource: unsupported PCM depth %d\n",
+                     fBitsPerSample);
+        return false;
+    }
+    // A zero (or negative) sample rate is invalid and would divide-by-zero in
+    // the resampler / any frames<->seconds conversion downstream. Reject it.
+    if (fSampleRate <= 0.0f) {
+        std::fprintf(stderr, "WavSource: invalid sample rate %g\n", fSampleRate);
         return false;
     }
 
