@@ -100,6 +100,10 @@ add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
 
+add_executable(exporter_pdc_tests tests/exporter_pdc_tests.cpp)
+target_link_libraries(exporter_pdc_tests PRIVATE daw_model)
+add_test(NAME exporter_pdc_tests COMMAND exporter_pdc_tests)
+
 add_executable(metronome_tests tests/metronome_tests.cpp)
 target_link_libraries(metronome_tests PRIVATE daw_model)
 add_test(NAME metronome_tests COMMAND metronome_tests)
@@ -111,6 +115,18 @@ add_test(NAME automation_tests COMMAND automation_tests)
 add_executable(routing_tests tests/routing_tests.cpp)
 target_link_libraries(routing_tests PRIVATE daw_model)
 add_test(NAME routing_tests COMMAND routing_tests)
+
+add_executable(pdc_tests tests/pdc_tests.cpp)
+target_link_libraries(pdc_tests PRIVATE daw_model)
+add_test(NAME pdc_tests COMMAND pdc_tests)
+
+add_executable(framedelay_tests tests/framedelay_tests.cpp)
+target_link_libraries(framedelay_tests PRIVATE daw_model)
+add_test(NAME framedelay_tests COMMAND framedelay_tests)
+
+add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
+target_link_libraries(midicontrol_tests PRIVATE daw_model)
+add_test(NAME midicontrol_tests COMMAND midicontrol_tests)
 
 add_executable(crossfade_tests tests/crossfade_tests.cpp)
 target_link_libraries(crossfade_tests PRIVATE daw_model)

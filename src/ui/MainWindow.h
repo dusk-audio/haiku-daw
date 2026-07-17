@@ -159,6 +159,11 @@ private:
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
     Frame                     fRecStart = 0; // frame the capture (clip) begins at
     Frame                     fRecPoint = 0; // record start (== fRecStart)
+    // Record round-trip latency (output + input path), in project-rate frames.
+    // A captured take is this many frames late vs the timeline; the take is slid
+    // earlier by it (RecordPlan::CompensateRoundTrip). 0 = no compensation until
+    // the device latency is queried (Media Kit, on the target) into this field.
+    Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take

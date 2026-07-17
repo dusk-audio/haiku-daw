@@ -42,16 +42,33 @@ struct MidiNote {
     Frame lengthFrames = 0;
 };
 
-// A MIDI region on a MIDI track: a movable/copyable container of notes, the
-// MIDI analogue of an audio Clip. Notes are stored clip-relative so the whole
-// region moves as a unit. The region is a non-destructive playback window:
-// only notes whose start lies within [0, lengthFrames) sound; notes outside
-// are kept (e.g. after trimming) but silent. See Track::CollectNotes.
+// A non-note MIDI channel event stored on a MIDI region: control change, pitch
+// bend, program change, or channel aftertouch. Clip-relative like MidiNote; the
+// track's channel is implicit (per-track synth), matching MidiNote. These feed
+// CC lanes and are applied by the synth alongside notes. (Distinct from the
+// live-transport daw::MidiEvent in midi/MidiEvent.h, which carries channel +
+// arrival time; this is the placed, timeline model form.)
+struct MidiClipEvent {
+    enum Type { CC = 0, PitchBend = 1, Program = 2, ChannelPressure = 3 };
+    int   type       = CC;
+    Frame startFrame = 0;   // clip-relative
+    int   data       = 0;   // CC: controller number (0..127); else unused
+    int   value      = 0;   // CC / Program / ChannelPressure: 0..127;
+                            // PitchBend: 0..16383 (8192 = center)
+};
+
+// A MIDI region on a MIDI track: a movable/copyable container of notes (and
+// non-note events), the MIDI analogue of an audio Clip. Content is stored
+// clip-relative so the whole region moves as a unit. The region is a
+// non-destructive playback window: only content whose start lies within
+// [0, lengthFrames) sounds; content outside is kept (e.g. after trimming) but
+// silent. See Track::CollectNotes / CollectEvents.
 struct MidiClip {
     ClipId                id           = kInvalidClipId;
     Frame                 startFrame   = 0;   // position on the track timeline
     Frame                 lengthFrames = 0;   // region length (the window)
     std::vector<MidiNote> notes;              // clip-relative
+    std::vector<MidiClipEvent> events;        // CC/PB/PC/pressure, clip-relative
     int                   colorIndex   = 0;   // UI tint (0 = inherit track)
     // Velocity fades (in clip-relative frames): notes starting inside the
     // fade-in ramp up from silence; notes inside the fade-out ramp down. A MIDI
@@ -167,6 +184,25 @@ struct Track {
                 if (len < 1)    len = 1;
                 out.push_back({ n.pitch, vel,
                                 c.startFrame + n.startFrame, len });
+            }
+        }
+        return out;
+    }
+
+    // Flatten all MIDI regions' non-note events into absolute-timeline events,
+    // the CC/PB/PC/pressure analogue of CollectNotes: each in-window event of an
+    // active take, offset by its clip start. Off the RT thread (snapshotted).
+    std::vector<MidiClipEvent> CollectEvents() const {
+        std::vector<MidiClipEvent> out;
+        for (const MidiClip& c : midiClips) {
+            if (c.takeGroup > 0 && !c.takeActive)
+                continue;   // inactive loop-record take: silent
+            for (const MidiClipEvent& e : c.events) {
+                if (e.startFrame < 0 || e.startFrame >= c.lengthFrames)
+                    continue;   // outside the region window
+                MidiClipEvent ev = e;
+                ev.startFrame = c.startFrame + e.startFrame;
+                out.push_back(ev);
             }
         }
         return out;

@@ -120,14 +120,49 @@ checks still need Marc at the VM** (see "What's next" item 1).
    target; decide MP3/LAME licensing with Marc). (Loudness-normalize + true-peak
    ceiling + look-ahead true-peak limiter: done.)
 
-3. **Phase Y — latency compensation**: record round-trip offset (`Recorder`/
-   StartCapture; query device latency) + plugin delay compensation
-   (`IEffect::LatencySamples()`, delay-align sibling buses in `Engine` + `Exporter`).
+3. **Phase Y — latency compensation** ◐ *infrastructure landed (host-tested);
+   VM audio-runtime + the device-latency query pending.*
+   - Done: `IEffect::LatencySamples()`; kit-free PDC solver `model/Pdc.h`
+     (`pdc_tests`); **offline exporter PDC** — delay-aligns every edge, renders
+     padded, trims the leading latency so a bounce stays timeline-aligned; a
+     latent plugin is made transparent, not shifted (`exporter_pdc_tests`, proven
+     end-to-end with a synthetic-latency plugin: impulse transparency + dry-
+     sibling alignment). `pad == 0` ⇒ byte-identical to before. **RT engine PDC**
+     — `engine/FrameDelay.h` per-edge stereo delay line (`framedelay_tests`),
+     sized from the PDC solve at Load; all built-ins report 0 latency so every
+     line is length 0 (plain accumulate) and playback is bit-identical today
+     (cross-compiles clean, **VM audio-runtime unverified**). **Record round-trip
+     math** `RecordPlan::CompensateRoundTrip` (`recordplan_tests`), plumbed via
+     `MainWindow::fRoundTripFrames` (0 = off).
+   - Next: a live `IEffect` that reports real latency (e.g. a look-ahead limiter)
+     to exercise PDC on target; the Media-Kit device-latency query into
+     `fRoundTripFrames`; punch/loop-record round-trip compensation; offset the
+     playhead/BBT readout by the master latency during playback.
 
-4. **Phase Z — MIDI depth**: `MidiClip` stores events not just notes (CC/PB/PC/
-   sysex — hook the remaining `BMidiLocalConsumer` overrides in `MidiPort.cpp`,
-   extend `MidiRecorder`); per-track MIDI input demux (`MainWindow.cpp:1201` uses
-   one merged consumer for all armed tracks); CC lanes; MIDI clock/MTC.
+4. **Phase Z — MIDI depth** ◐ *event model + IO landed (host-tested); synth
+   apply + CC-lane UI next.*
+   - Done (kit-free, host-tested): `MidiClipEvent` (CC / pitch-bend / program /
+     channel-pressure), stored clip-relative on `MidiClip.events`;
+     `Track::CollectEvents()` (absolute-timeline, take/window-aware, mirrors
+     CollectNotes). `SmfIO` now captures + writes these (`SmfEvent`; 1-/2-data-
+     byte events; poly-aftertouch still skipped) — round-trip tested. `ProjectIO`
+     serializes them (`mev` lines) — round-trip tested. `MainWindow` SMF
+     import/export carries them through (controller-only tracks no longer
+     dropped; region window grows to cover events). `SetMidiClipNotesCommand`
+     only replaces `notes`, so piano-roll note edits preserve events.
+   - Audible CC (partial): kit-free `MidiControl.h` (`CcValueAt`, `PitchBendAt`,
+     `MidiChannelGain` = CC7 volume × CC11 expression) — host-tested. The
+     Exporter (host-tested end-to-end: CC7 mutes / halves / passes) and the Engine
+     render each MIDI node's notes through this per-block channel gain, so a
+     `.mid`'s volume/expression now plays back. Engine change cross-compiles;
+     **VM audio-runtime unverified**.
+   - Next: CC10 pan; pitch-bend + CC1 mod-wheel (both modulate frequency, so the
+     stateless `Synth` needs phase integration — deferred); smoothing the stepped
+     per-block CC; **CC lanes in the piano roll** (like the velocity lane, VM-
+     gated GUI); live-MIDI CC recording (hook the remaining `BMidiLocalConsumer`
+     overrides in `MidiPort.cpp`, extend `MidiRecorder`); per-track MIDI input
+     demux (`MainWindow.cpp` uses one merged consumer for all armed tracks);
+     MIDI clock/MTC; sysex.
 
 5. **Phase I+ — LV2 hosting** on top of the existing native-`.so` `PluginHost`.
 

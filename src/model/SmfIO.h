@@ -25,9 +25,22 @@ struct SmfNote {
     uint32_t lengthTick = 0;
 };
 
+// One non-note channel event (control change, pitch bend, program change,
+// channel aftertouch), in SMF ticks relative to the start of its track. The
+// channel is dropped (per-track model).
+struct SmfEvent {
+    enum Type { CC = 0, PitchBend = 1, Program = 2, ChannelPressure = 3 };
+    int      type  = CC;
+    uint32_t tick  = 0;
+    int      data  = 0;   // CC: controller number; else unused
+    int      value = 0;   // CC/Program/ChannelPressure: 0..127;
+                          // PitchBend: 0..16383 (8192 = center)
+};
+
 struct SmfTrack {
-    std::string          name;
-    std::vector<SmfNote> notes;
+    std::string           name;
+    std::vector<SmfNote>  notes;
+    std::vector<SmfEvent> events;   // CC / pitch-bend / program / aftertouch
 };
 
 struct SmfData {

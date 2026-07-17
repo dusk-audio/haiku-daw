@@ -9,6 +9,8 @@
 #include "../dsp/Loudness.h"
 #include "../dsp/Limiter.h"
 #include "../model/RoutingGraph.h"
+#include "../model/Pdc.h"
+#include "../model/MidiControl.h"
 #include "../model/Crossfade.h"
 
 #include <algorithm>
@@ -162,8 +164,6 @@ bool ExportWav(const Project& project, const std::string& outPath,
     if (totalOut <= 0)
         return false;   // nothing to render
 
-    const size_t nfloats = static_cast<size_t>(totalOut) * 2;
-    std::vector<float> master(nfloats, 0.0f);
     Synth synth(outRate);
 
     const auto& tracks = project.Tracks();
@@ -171,6 +171,58 @@ bool ExportWav(const Project& project, const std::string& outPath,
     std::unordered_map<TrackId, size_t> idx;
     for (size_t i = 0; i < tracks.size(); i++)
         idx[tracks[i].id] = i;
+
+    // Processing order: a node before every node it feeds — its output AND
+    // every aux-send destination. Sends add extra edges, so use the general
+    // edge topo (single-output ResolveRoutingOrder can't express them). The same
+    // edge set drives the PDC latency solve below.
+    std::vector<TrackId> nodeIds;
+    std::vector<std::pair<TrackId, TrackId>> edges;
+    for (const Track& t : tracks) {
+        nodeIds.push_back(t.id);
+        edges.push_back({t.id, t.output});
+        for (const Send& s : t.sends)
+            if (s.dest != kInvalidTrackId && s.dest != t.id)
+                edges.push_back({t.id, s.dest});   // skip self-send edge
+    }
+    std::vector<TrackId> order;
+    const bool routingOk = ResolveOrderWithEdges(nodeIds, edges, order);
+    if (!routingOk)    // cycle / bad graph: fall back to flat (all to master)
+        order = nodeIds;
+
+    // Plugin delay compensation. Measure each node's own fx-chain latency (sum
+    // of IEffect::LatencySamples after Prepare) and solve the graph so sibling
+    // paths meeting at a common node/bus/master are delay-aligned. `pad` is the
+    // total leading latency the render lags by (node graph + master fx): the mix
+    // is rendered into buffers padded by it, per-edge delays realign siblings,
+    // then the leading `pad` frames are trimmed so the bounce stays timeline-
+    // aligned (a latent plugin is made transparent, not shifted). With no latent
+    // effect anywhere pad == 0, every EdgeDelay is 0, and every path below is
+    // byte-identical to an uncompensated render.
+    auto chainLatency = [&](const std::vector<EffectDesc>& fxDescs) -> int {
+        int lat = 0;
+        for (const EffectDesc& d : fxDescs) {
+            auto e = MakeEffect(d);
+            if (e) { e->Prepare(outRate); lat += e->LatencySamples(); }
+        }
+        return lat;
+    };
+    std::vector<PdcNode> pnodes;
+    pnodes.reserve(tracks.size());
+    for (const Track& t : tracks)
+        pnodes.push_back({t.id, chainLatency(t.fx)});
+    PdcGraph pdc;
+    const bool pdcOk = routingOk && ComputePdc(pnodes, edges, pdc);
+    const int masterFxLat = chainLatency(project.masterFx);
+    const int64_t pad = pdcOk ? (int64_t)pdc.totalLatency + masterFxLat : 0;
+    const int64_t totalOutPadded = totalOut + pad;
+
+    // `nfloats` / `totalOut` are the LOGICAL output length (natural content and
+    // the trimmed file); `*Padded` sizes the render buffers so delayed tails
+    // fit. Edge sums shift a source's contribution later by EdgeDelay frames.
+    const size_t nfloats       = static_cast<size_t>(totalOut) * 2;
+    const size_t nfloatsPadded = static_cast<size_t>(totalOutPadded) * 2;
+    std::vector<float> master(nfloatsPadded, 0.0f);
 
     // A node needs its own persistent full-length buffer only if it RECEIVES
     // signal from other nodes (it is some node's output target or a send
@@ -196,33 +248,34 @@ bool ExportWav(const Project& project, const std::string& outPath,
     for (size_t i = 0; i < tracks.size(); i++)
         if (isDest[i]) {
             bufSlot[i] = (int)persist.size();
-            persist.emplace_back(nfloats, 0.0f);
+            persist.emplace_back(nfloatsPadded, 0.0f);
         }
-    std::vector<float> scratch(nfloats, 0.0f);
+    std::vector<float> scratch(nfloatsPadded, 0.0f);
     // The mix buffer (a std::vector&) for node index i: its persistent buffer if
     // it's a destination, else the shared leaf scratch.
     auto nodeVec = [&](size_t i) -> std::vector<float>& {
         return bufSlot[i] >= 0 ? persist[bufSlot[i]] : scratch;
     };
 
-    // Processing order: a node before every node it feeds — its output AND
-    // every aux-send destination. Sends add extra edges, so use the general
-    // edge topo (single-output ResolveRoutingOrder can't express them).
-    std::vector<TrackId> nodeIds;
-    std::vector<std::pair<TrackId, TrackId>> edges;
-    for (const Track& t : tracks) {
-        nodeIds.push_back(t.id);
-        edges.push_back({t.id, t.output});
-        for (const Send& s : t.sends)
-            if (s.dest != kInvalidTrackId && s.dest != t.id)
-                edges.push_back({t.id, s.dest});   // skip self-send edge
-    }
-    std::vector<TrackId> order;
-    const bool routingOk = ResolveOrderWithEdges(nodeIds, edges, order);
-    if (!routingOk)    // cycle / bad graph: fall back to flat (all to master)
-        order = nodeIds;
+    // Sum `src`'s content into `dst`, shifted `delay` frames later (PDC). Both
+    // buffers are nfloatsPadded long; content always fits (pad bounds the max
+    // shift). delay == 0 is the plain accumulate; a negative delay is clamped to
+    // 0 (belt-and-suspenders against an out-of-bounds write).
+    auto sumDelayed = [&](float* dst, const float* src, float level,
+                          int64_t delay) {
+        if (delay < 0) delay = 0;
+        const int64_t off = delay * 2;
+        const int64_t lim = (int64_t)nfloatsPadded - off;
+        for (int64_t i = 0; i < lim; ++i)
+            dst[i + off] += src[i] * level;
+    };
 
-    // Add a node's aux sends (for the given fader phase) into their dest buses.
+    // Add a node's aux sends (for the given fader phase) into their dest buses,
+    // delay-aligned to the destination (PDC). A POST-fader send taps the node's
+    // post-fx output (latency = node.outLat, i.e. EdgeDelay). A PRE-fader send
+    // taps BEFORE the fader/fx (latency = node.inLat), so it must be delayed by
+    // dest.inLat - node.inLat instead — otherwise a pre-fader send from a latent
+    // node lands node.fxLatency samples early.
     auto addSends = [&](const Track& t, bool pre, const float* nb) {
         for (const Send& s : t.sends) {
             if (s.preFader != pre || s.dest == kInvalidTrackId
@@ -230,13 +283,20 @@ bool ExportWav(const Project& project, const std::string& outPath,
             auto d = idx.find(s.dest);
             if (d == idx.end()) continue;
             float* db = nodeVec(d->second).data();   // dest is always persistent
-            for (size_t i = 0; i < nfloats; ++i) db[i] += nb[i] * s.level;
+            const int64_t delay = pre
+                ? (int64_t)pdc.InLat(s.dest) - pdc.InLat(t.id)   // pre-fader tap
+                : (int64_t)pdc.EdgeDelay(t.id, s.dest);          // post-fader tap
+            sumDelayed(db, nb, s.level, delay);
         }
     };
 
     // Instantiate + run an effect chain over a whole node buffer, in blocks.
+    // `inLat` is the node's PDC input latency: its content sits at buffer offset
+    // inLat, so the chain runs over the full padded buffer (priming the leading
+    // inLat frames + flushing the plugin's own latency tail) and fx-param
+    // automation maps buffer offset -> timeline frame as (off - inLat)/scale.
     auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf,
-                       const std::vector<FxAutoLane>& fxAuto) {
+                       const std::vector<FxAutoLane>& fxAuto, int64_t inLat) {
         // Chain kept index-aligned with fxDescs (nullptr for any skipped) so
         // effect-parameter automation can address chain[fxIndex].
         std::vector<std::unique_ptr<IEffect>> chain;
@@ -248,10 +308,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
         }
         if (!any) return;
         const int64_t kBlock = 8192;
-        for (int64_t off = 0; off < totalOut; off += kBlock) {
-            int64_t n = totalOut - off;
+        for (int64_t off = 0; off < totalOutPadded; off += kBlock) {
+            int64_t n = totalOutPadded - off;
             if (n > kBlock) n = kBlock;
-            const Frame pf = (Frame)(off / scale);   // block start, project frame
+            const Frame pf = off >= inLat ? (Frame)((off - inLat) / scale) : 0;
             for (const FxAutoLane& fa : fxAuto) {
                 if (fa.fxIndex < 0 || fa.fxIndex >= (int)chain.size()) continue;
                 if (!chain[fa.fxIndex] || fa.lane.Count() == 0) continue;
@@ -307,25 +367,46 @@ bool ExportWav(const Project& project, const std::string& outPath,
                     n.startFrame   = ToOut(n.startFrame, scale);
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
-            synth.Render(notes, t.instrument, nb, static_cast<size_t>(totalOut),
-                         0, 1.0f);
+            // Render in blocks so the CC7 (volume) x CC11 (expression) channel
+            // gain is re-evaluated as it steps. Events stay in project frames;
+            // the block start (output frames) maps back via 1/scale. A small
+            // block (~10 ms) keeps CC resolution close to the live engine's
+            // per-buffer granularity, so a bounce steps like playback.
+            const std::vector<MidiClipEvent> events = t.CollectEvents();
+            const int64_t kBlk = 512;
+            for (int64_t off = 0; off < totalOut; off += kBlk) {
+                const int64_t nn = std::min<int64_t>(kBlk, totalOut - off);
+                const Frame pf = (Frame)(off / scale);   // project frame @ block
+                const float cg = MidiChannelGain(events, pf);
+                synth.Render(notes, t.instrument, nb + off * 2, (size_t)nn,
+                             off, cg);
+            }
         }   // Bus: nb already holds the summed upstream (dry).
+
+        // PDC: this node's own material (sources) is at buffer offset 0, but a
+        // dest/bus's accumulated inputs already sit at its input latency, so the
+        // fader/fx run in buffer-position space offset by inLat. Sources are
+        // leaves with inLat == 0, so they are unaffected.
+        const int64_t nodeIn = pdcOk ? pdc.InLat(t.id) : 0;
 
         addSends(t, /*pre=*/true, nb);          // pre-fader taps (dry)
 
         // Fader = gain * equal-power pan. Automated per sample when a lane has
-        // points; otherwise a single constant multiply (fast path).
+        // points; otherwise a single constant multiply (fast path). A constant
+        // gain is position-independent, so it spans the whole padded buffer; an
+        // automation lane maps buffer offset i -> timeline (i - inLat)/scale.
         const bool automated = t.gainAuto.Count() > 0 || t.panAuto.Count() > 0;
         if (!automated) {
             float gLR[2];
             EqualPowerGains(t.gain, t.pan, &gLR[0], &gLR[1]);
-            for (int64_t i = 0; i < totalOut; ++i) {
+            for (int64_t i = 0; i < totalOutPadded; ++i) {
                 nb[i * 2 + 0] *= gLR[0];
                 nb[i * 2 + 1] *= gLR[1];
             }
         } else {
-            for (int64_t i = 0; i < totalOut; ++i) {
-                const Frame pf = static_cast<Frame>(i / scale);   // project frame
+            for (int64_t i = 0; i < totalOutPadded; ++i) {
+                const Frame pf = i >= nodeIn
+                    ? static_cast<Frame>((i - nodeIn) / scale) : 0;
                 const float g = t.gainAuto.ValueAt(pf, t.gain);
                 const float p = t.panAuto.ValueAt(pf, t.pan);
                 float gLR[2];
@@ -335,17 +416,19 @@ bool ExportWav(const Project& project, const std::string& outPath,
             }
         }
 
-        applyFx(t.fx, nb, t.fxAuto);
+        applyFx(t.fx, nb, t.fxAuto, nodeIn);
         addSends(t, /*pre=*/false, nb);         // post-fader taps
 
-        // Route this node into its output (a bus) or the master mix.
+        // Route this node into its output (a bus) or the master mix, delay-
+        // aligned to that destination (PDC). EdgeDelay is 0 when nothing is
+        // latent, so this is the plain accumulate in the common case.
         float* dst = master.data();
+        TrackId destId = kRoutingMaster;
         if (routingOk && t.output != kRoutingMaster) {
             auto d = idx.find(t.output);
-            if (d != idx.end()) dst = nodeVec(d->second).data();
+            if (d != idx.end()) { dst = nodeVec(d->second).data(); destId = t.output; }
         }
-        for (size_t i = 0; i < nfloats; ++i)
-            dst[i] += nb[i];
+        sumDelayed(dst, nb, 1.0f, pdc.EdgeDelay(t.id, destId));
     }
 
     // Master bus FX chain (applied to the summed mix before master gain).
@@ -359,8 +442,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
         }
         if (!masterFx.empty()) {
             const int64_t kBlock = 8192;
-            for (int64_t off = 0; off < totalOut; off += kBlock) {
-                int64_t n = totalOut - off;
+            for (int64_t off = 0; off < totalOutPadded; off += kBlock) {
+                int64_t n = totalOutPadded - off;
                 if (n > kBlock) n = kBlock;
                 float* pm = master.data() + off * 2;
                 for (auto& fx : masterFx)
@@ -369,18 +452,24 @@ bool ExportWav(const Project& project, const std::string& outPath,
         }
     }
 
+    // PDC trim: the whole mix lags the timeline by `pad` frames (node graph +
+    // master fx). Drop that leading latency so the bounce is timeline-aligned —
+    // a latent plugin becomes transparent, not a shift. `outp` is the logical
+    // (trimmed) master; everything below writes/measures exactly `nfloats`.
+    float* outp = master.data() + static_cast<size_t>(pad) * 2;
+
     // Apply master gain, then hand the float mix to the writer, which quantizes
     // to the chosen depth (TPDF-dithered for 16-bit; 24/32 have ample headroom).
     const float mg = project.masterGain;
     if (mg != 1.0f)
-        for (size_t i = 0; i < nfloats; ++i) master[i] *= mg;
+        for (size_t i = 0; i < nfloats; ++i) outp[i] *= mg;
 
     // Final safety sweep: never write a non-finite sample. A NaN/Inf from an
     // unstable effect or a NaN-bearing float source would otherwise poison the
     // exported master (and anything downstream reads/meters from it). Parity
     // with the RT engine's pre-DAC guard (P0 #1); the offline path lacked it.
     for (size_t i = 0; i < nfloats; ++i)
-        if (!std::isfinite(master[i])) master[i] = 0.0f;
+        if (!std::isfinite(outp[i])) outp[i] = 0.0f;
 
     // Loudness normalization (offline): measure the finished master's integrated
     // loudness + true peak, then apply one gain that brings it to the target
@@ -394,7 +483,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
         const int64_t kBlk = 8192;
         for (int64_t off = 0; off < totalOut; off += kBlk) {
             const int64_t n = std::min(kBlk, totalOut - off);
-            meter.Process(master.data() + off * 2, static_cast<int>(n));
+            meter.Process(outp + off * 2, static_cast<int>(n));
         }
         const float lufs = meter.IntegratedLufs();
         const float tp   = meter.TruePeakDb();
@@ -405,7 +494,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 gainDb = norm.truePeakCeil - tp;   // gain-backoff true-peak safety
             const float g = std::pow(10.0f, gainDb / 20.0f);
             if (std::isfinite(g) && g > 0.0f)
-                for (size_t i = 0; i < nfloats; ++i) master[i] *= g;
+                for (size_t i = 0; i < nfloats; ++i) outp[i] *= g;
         }
     }
 
@@ -414,7 +503,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // normalization gain, so its guarantee is on the final master.
     if (norm.limiter) {
         Limiter lim(norm.truePeakCeil, /*attackMs=*/2.0f, /*releaseMs=*/60.0f);
-        lim.Process(master.data(), static_cast<size_t>(totalOut), outRate);
+        lim.Process(outp, static_cast<size_t>(totalOut), outRate);
     }
 
     WavWriter writer;
@@ -422,7 +511,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     if (!writer.OpenFormat(outPath, static_cast<int>(outRate + 0.5), 2,
                            bitDepth, floatOut))
         return false;
-    if (!writer.WriteFloat(master.data(), nfloats, /*dither=*/bitDepth == 16))
+    if (!writer.WriteFloat(outp, nfloats, /*dither=*/bitDepth == 16))
         return false;
     return writer.Close();
 }

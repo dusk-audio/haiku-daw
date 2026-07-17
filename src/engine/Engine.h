@@ -17,8 +17,10 @@
 #include "RingBuffer.h"
 #include "WavSource.h"
 #include "Resampler.h"
+#include "FrameDelay.h"
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
+#include "../model/Pdc.h"
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
 #include "../synth/Synth.h"
@@ -293,6 +295,7 @@ private:
         TrackId                               output = kInvalidTrackId;  // 0 = master
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
+        std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
         Instrument                            instrument;// synth voice (MIDI)
         // Live mix params: written by the UI thread (UpdateMix) and read by the
         // RT callback (FillBuffer). Atomic + relaxed so a concurrent fader move
@@ -307,11 +310,21 @@ private:
         bool                                  liveMonitor = false;  // armed MIDI: synth live input
         std::vector<std::unique_ptr<IEffect>> fx;
         std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
-        // Aux sends: (destination node index into fBuses, linear level). Taps
-        // this node's post-FX output. Dest node indices are resolved at Load,
-        // so the RT callback does no id lookups. The topo order (built over
-        // output + send edges) guarantees each dest is processed after us.
-        std::vector<std::pair<size_t, float>> sendTargets;
+        // Aux sends: destination node index into fBuses, linear level, and a PDC
+        // delay line aligning this send to the dest's input latency. Taps this
+        // node's post-FX output. Dest node indices are resolved at Load, so the
+        // RT callback does no id lookups. The topo order (built over output +
+        // send edges) guarantees each dest is processed after us.
+        struct SendTarget {
+            size_t     dest;
+            float      level;
+            FrameDelay delay;   // PDC: aligns this send to dest.inputLatency
+        };
+        std::vector<SendTarget>               sendTargets;
+        // PDC delay line on this node's OUTPUT edge (into `output` or the master
+        // sink), aligning it to that destination's input latency. Zero-length
+        // (a plain accumulate) when nothing on the path is latent.
+        FrameDelay                            outDelay;
         // Gain/pan automation (RT-owned snapshot, copied from the Track at
         // Load). When a lane has points, the engine drives this node's gain/pan
         // per block from the lane (absolute, overriding the static fader);
@@ -331,6 +344,7 @@ private:
         Bus(Bus&& o) noexcept
             : id(o.id), output(o.output),
               streams(std::move(o.streams)), notes(std::move(o.notes)),
+              events(std::move(o.events)),
               instrument(std::move(o.instrument)),
               midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
               midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
@@ -341,6 +355,7 @@ private:
               liveMonitor(o.liveMonitor),
               fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
               sendTargets(std::move(o.sendTargets)),
+              outDelay(std::move(o.outDelay)),
               gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
               fxAuto(std::move(o.fxAuto)),
               statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto) {}
@@ -348,6 +363,7 @@ private:
             if (this == &o) return *this;
             id = o.id; output = o.output;
             streams = std::move(o.streams); notes = std::move(o.notes);
+            events = std::move(o.events);
             instrument = std::move(o.instrument);
             midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
             midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -358,6 +374,7 @@ private:
             liveMonitor = o.liveMonitor;
             fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
             sendTargets = std::move(o.sendTargets);
+            outDelay = std::move(o.outDelay);
             gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
             fxAuto = std::move(o.fxAuto);
             statGain = o.statGain; statPan = o.statPan; hasAuto = o.hasAuto;

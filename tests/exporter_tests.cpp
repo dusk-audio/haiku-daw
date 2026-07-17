@@ -216,6 +216,32 @@ int main() {
         CHECK(pLate < pEarly * 0.65f);             // ramp made the tail quiet
     }
 
+    // --- CC7 (channel volume) scales the synth: 0 mutes, 64 ~= half, 127 full.
+    auto peakWithCC7 = [&](int vol) -> float {
+        Project pr; pr.sampleRate = SR; pr.masterGain = 1.0f;
+        Track m; m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        MidiNote n2 = note; n2.startFrame = 0; n2.lengthFrames = (Frame)(SR / 2);
+        PutNote(m, n2);
+        m.midiClips.front().events.push_back({ MidiClipEvent::CC, 0, 7, vol });
+        pr.AddTrack(m);
+        const std::string p = "/tmp/haiku_daw_export_cc7.wav";
+        std::remove(p.c_str());
+        if (!ExportWav(pr, p, SR, 32)) return -1.0f;   // 32-bit float: exact
+        WavSource s; if (!s.Open(p)) return -1.0f;
+        float pk = 0.0f; const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f * 2; ++i) pk = std::max(pk, std::fabs(c[i]));
+        std::remove(p.c_str());
+        return pk;
+    };
+    const float pcFull = peakWithCC7(127);
+    const float pcMute = peakWithCC7(0);
+    const float pcHalf = peakWithCC7(64);
+    CHECK(pcFull > 0.05f);
+    CHECK(pcMute < pcFull * 0.02f);                              // CC7=0 mutes
+    CHECK(std::fabs(pcHalf - pcFull * (64.0f / 127.0f)) < pcFull * 0.1f); // ~half
+
     // Stems: two MIDI tracks -> two isolated WAV files, each with signal.
     {
         Project p; p.sampleRate = SR; p.masterGain = 1.0f;

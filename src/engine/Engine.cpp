@@ -2,6 +2,7 @@
 
 #include "../dsp/EffectFactory.h"
 #include "../model/Crossfade.h"
+#include "../model/MidiControl.h"
 
 #include <MediaDefs.h>
 
@@ -314,6 +315,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             if (n.startFrame + n.lengthFrames > fEndFrame)
                 fEndFrame = n.startFrame + n.lengthFrames;
         b.notes = std::move(notes);
+        b.events = t.CollectEvents();         // channel CC/PB (absolute frames)
         b.instrument = t.instrument;
         b.liveMonitor = monitor;             // synth live input into this bus
         b.audible.store(audible || monitor, std::memory_order_relaxed);  // monitor overrides mute/solo
@@ -397,7 +399,12 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         for (const Send& s : t->sends) {
             if (s.dest == kInvalidTrackId || s.dest == b.id) continue;
             const long di = nodeIndexOf(s.dest);
-            if (di >= 0) b.sendTargets.push_back({(size_t)di, s.level});
+            if (di >= 0) {
+                Bus::SendTarget st;
+                st.dest = (size_t)di;
+                st.level = s.level;
+                b.sendTargets.push_back(std::move(st));
+            }
         }
     }
 
@@ -425,6 +432,44 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                     if (fBuses[i].id == id) { fOrder.push_back(i); break; }
         } else {   // cycle / bad graph: flat order, all to master
             for (size_t i = 0; i < fBuses.size(); i++) fOrder.push_back(i);
+        }
+    }
+
+    // Plugin delay compensation: size each edge's delay line so sibling paths
+    // meeting at a bus or the master are time-aligned. A node's own latency is
+    // the sum of its fx chain's IEffect::LatencySamples() — 0 for every built-in
+    // effect today, so every delay line below is length 0 (a plain accumulate)
+    // and playback is bit-identical to an uncompensated mix until a latent
+    // effect appears. Off the RT thread: Prepare allocates the rings; the RT
+    // callback only runs them.
+    {
+        std::vector<PdcNode> pnodes;
+        std::vector<std::pair<TrackId, TrackId>> edges;
+        pnodes.reserve(fBuses.size());
+        for (const Bus& b : fBuses) {
+            int lat = 0;
+            for (const auto& fx : b.fx)
+                if (fx) lat += fx->LatencySamples();
+            pnodes.push_back({b.id, lat});
+            edges.push_back({b.id, b.output});
+            const Track* t = project.FindTrack(b.id);
+            if (t)
+                for (const Send& s : t->sends)
+                    if (s.dest != kInvalidTrackId && s.dest != b.id)
+                        edges.push_back({b.id, s.dest});
+        }
+        PdcGraph pdc;
+        const bool ok = ComputePdc(pnodes, edges, pdc);
+        for (Bus& b : fBuses) {
+            // A dangling output (routed to a deleted node) feeds the master sink
+            // in both the topo and the mix, so align it to the master target.
+            TrackId outId = b.output;
+            if (outId != kRoutingMaster && nodeIndexOf(outId) < 0)
+                outId = kRoutingMaster;
+            b.outDelay.Prepare(ok ? (size_t)pdc.EdgeDelay(b.id, outId) : 0);
+            for (Bus::SendTarget& st : b.sendTargets)
+                st.delay.Prepare(
+                    ok ? (size_t)pdc.EdgeDelay(b.id, fBuses[st.dest].id) : 0);
         }
     }
 
@@ -818,8 +863,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
             s->Mix(nb, frames, blockStart);
         const bool live = b.liveMonitor && !fLiveNotes.empty();
         if (!b.notes.empty() || live) {     // MIDI: render dry then fader
-            if (!b.notes.empty())
-                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, 1.0f);
+            if (!b.notes.empty()) {
+                // CC7 (volume) x CC11 (expression) channel gain, per block.
+                const float cg = MidiChannelGain(b.events, blockStart);
+                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, cg);
+            }
             if (live)                        // live keyboard through this voice
                 fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
@@ -865,23 +913,20 @@ void Engine::FillBuffer(float* out, size_t frames) {
             fNodePeakR[idx].store(pr, std::memory_order_relaxed);
         }
 
-        // Aux sends: add this node's post-FX signal into each dest node buffer.
-        // Topo order guarantees the dest is processed later, so it sees this.
-        for (const auto& st : b.sendTargets) {
-            float* db = fNodeBufs[st.first].data();
-            const float lvl = st.second;
-            for (size_t i = 0; i < nfloats; i++)
-                db[i] += nb[i] * lvl;
-        }
+        // Aux sends: add this node's post-FX signal into each dest node buffer,
+        // PDC-delayed to the dest's input latency. Topo order guarantees the
+        // dest is processed later, so it sees this.
+        for (auto& st : b.sendTargets)
+            st.delay.ProcessAdd(nb, fNodeBufs[st.dest].data(), frames, st.level);
 
-        // Route into the output bus, or the master (out).
+        // Route into the output bus, or the master (out), PDC-delayed to that
+        // destination's input latency (a plain accumulate when nothing is latent).
         float* dst = out;
         if (b.output != kInvalidTrackId) {
             for (size_t j = 0; j < fBuses.size(); j++)
                 if (fBuses[j].id == b.output) { dst = fNodeBufs[j].data(); break; }
         }
-        for (size_t i = 0; i < nfloats; i++)
-            dst[i] += nb[i];
+        b.outDelay.ProcessAdd(nb, dst, frames, 1.0f);
     }
 
     // Master bus FX on the summed output (before gain/metering).

@@ -1533,18 +1533,22 @@ void MainWindow::StopRecording() {
     }
 
     // Punch: trim the take to the punch range (non-destructive — the clip just
-    // references a sub-span of the captured file).
+    // references a sub-span of the captured file). The plain take is round-trip-
+    // compensated (slid earlier by the record latency); punch trimming is applied
+    // as before (its compensation is a follow-up alongside loop-record).
     TakeRegion region;
-    region.startFrame = fRecStart;
-    region.sourceOffset = 0;
-    region.lengthFrames = captureLen;
     if (tr.punchEnabled) {
+        region.startFrame = fRecStart;
+        region.sourceOffset = 0;
+        region.lengthFrames = captureLen;
         if (!PunchedTake(fRecStart, captureLen, tr.punchIn, tr.punchOut,
                          &region)) {
             std::fprintf(stderr, "MainWindow: take outside punch range, discarded\n");
             fRecorder.reset();
             return;
         }
+    } else {
+        region = CompensateRoundTrip(fRecStart, captureLen, fRoundTripFrames);
     }
 
     for (TrackId target : targets) {
@@ -1656,7 +1660,8 @@ void MainWindow::ImportMidi(const char* path) {
 
     int added = 0;
     for (const SmfTrack& st : d.tracks) {
-        if (st.notes.empty()) continue;             // skip conductor/empty tracks
+        if (st.notes.empty() && st.events.empty())
+            continue;                               // skip conductor/empty tracks
         MidiClip clip;
         clip.startFrame = 0;
         Frame maxEnd = 0;
@@ -1670,6 +1675,16 @@ void MainWindow::ImportMidi(const char* path) {
             clip.notes.push_back(mn);
             if (mn.startFrame + mn.lengthFrames > maxEnd)
                 maxEnd = mn.startFrame + mn.lengthFrames;
+        }
+        for (const SmfEvent& se : st.events) {      // CC/PB/PC/pressure
+            MidiClipEvent me;
+            me.type       = se.type;
+            me.startFrame = (Frame)llround(se.tick * perTick);
+            me.data       = se.data;
+            me.value      = se.value;
+            clip.events.push_back(me);
+            if (me.startFrame + 1 > maxEnd)         // keep events in the window
+                maxEnd = me.startFrame + 1;
         }
         clip.lengthFrames = maxEnd;
 
@@ -1707,6 +1722,14 @@ void MainWindow::ExportMidi(const char* path) {
             sn.lengthTick = (uint32_t)llround((n.lengthFrames / fpb) * division);
             if (sn.lengthTick < 1) sn.lengthTick = 1;
             st.notes.push_back(sn);
+        }
+        for (const MidiClipEvent& e : t.CollectEvents()) {   // CC/PB/PC/pressure
+            SmfEvent se;
+            se.type  = e.type;
+            se.tick  = (uint32_t)llround((e.startFrame / fpb) * division);
+            se.data  = e.data;
+            se.value = e.value;
+            st.events.push_back(se);
         }
         d.tracks.push_back(std::move(st));
     }

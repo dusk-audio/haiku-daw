@@ -55,6 +55,30 @@ inline bool PunchedTake(Frame captureStart, Frame captureLen,
     return true;
 }
 
+// Compensate a captured take for record round-trip latency. The signal a
+// musician plays against the backing track is captured `rtFrames` late — the
+// output path delays what they hear, and the input path delays when their play
+// is timestamped — so the raw capture lags the timeline by that round trip
+// (output latency + input latency, in TIMELINE frames). Slide the take that
+// many frames EARLIER so it lines up with what was heard. If that would place
+// it before frame 0, the lead is dropped from the source instead (the take
+// starts at 0 with a matching source offset), so a take never lands at a
+// negative timeline position. `rtFrames <= 0` returns the take unchanged.
+inline TakeRegion CompensateRoundTrip(Frame recStart, Frame captureLen,
+                                      Frame rtFrames) {
+    TakeRegion r;
+    if (rtFrames < 0) rtFrames = 0;
+    Frame start  = recStart - rtFrames;
+    Frame srcOff = 0;
+    if (start < 0) { srcOff = -start; start = 0; }   // clamp at the timeline start
+    Frame len = captureLen - srcOff;
+    if (len < 0) len = 0;
+    r.startFrame   = start;
+    r.sourceOffset = srcOff;
+    r.lengthFrames = len;
+    return r;
+}
+
 // Split a linear loop-record capture into one take per loop pass. The capture
 // began at `loopStart` and ran `captureLen` frames while playback looped over
 // [loopStart, loopEnd). Each pass i is a clip at loopStart with source offset

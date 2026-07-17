@@ -206,10 +206,52 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   export with progress/cancel; FLAC/Ogg/MP3 encoders (bundled/own libs — no
   Media Kit decoders on target); export presets + ranges.
 
-## Phase Y — Latency compensation
+## Phase Y — Latency compensation  ◐ IN PROGRESS
 
-Record round-trip offset (query device latency) + plugin delay compensation
-(`IEffect::LatencySamples()`, delay-align sibling buses in the engine + Exporter).
+- ✅ Infrastructure: `IEffect::LatencySamples()` (default 0); kit-free PDC latency
+  solver `model/Pdc.h` (per-node in/out latency + per-edge compensating delay
+  over the routing DAG, reusing the routing edge model). Host-tested
+  (`pdc_tests`).
+- ✅ Offline exporter PDC: measures each node's fx-chain latency, delay-aligns
+  every edge (output + sends + master), renders into padded buffers, then trims
+  the leading latency so a bounce stays timeline-aligned (a latent plugin is made
+  transparent, not shifted). Host-tested end-to-end with a synthetic-latency
+  plugin (`exporter_pdc_tests`: impulse transparency + dry-sibling alignment).
+  With no latent effect, `pad == 0` and the render is byte-identical to before.
+- ✅ RT engine PDC: kit-free `engine/FrameDelay.h` stereo delay line
+  (host-tested), one per routing edge (output + each send), sized from the PDC
+  solve at Load. Every built-in effect reports 0 latency, so all delay lines are
+  length 0 (a plain accumulate) and playback is bit-identical until a latent
+  effect appears. Cross-compiles clean; **VM audio-runtime verification pending.**
+- ✅ Record round-trip offset math: `RecordPlan::CompensateRoundTrip` slides a
+  take earlier by the record round-trip latency (host-tested), plumbed into the
+  take-placement path via `MainWindow::fRoundTripFrames` (0 until the device
+  latency is queried — Media Kit, VM-gated).
+- *Remaining:* a live latent effect that actually reports latency (e.g. a
+  look-ahead limiter as an `IEffect`); the Media-Kit device-latency query feeding
+  `fRoundTripFrames`; round-trip compensation for the punch/loop-record paths;
+  BBT/playhead report offset by the master latency during playback.
+
+## Phase Z — MIDI depth  ◐ IN PROGRESS
+
+- ✅ Event model (kit-free, host-tested): `MidiClipEvent` (CC / pitch-bend /
+  program / channel-pressure) stored clip-relative on `MidiClip.events`;
+  `Track::CollectEvents()` mirrors `CollectNotes` (absolute-timeline,
+  take/window-aware). Distinct from the live-transport `daw::MidiEvent`.
+- ✅ IO: `SmfIO` captures + writes CC/PB/PC/pressure (`SmfEvent`, variable
+  data-byte count); `ProjectIO` `mev` lines; both round-trip tested. `MainWindow`
+  SMF import/export carries events through; note edits preserve them
+  (`SetMidiClipNotesCommand` touches only `notes`).
+- ✅ Audible channel volume/expression: kit-free `MidiControl.h`
+  (`CcValueAt` / `PitchBendAt` / `MidiChannelGain` = CC7 × CC11, host-tested).
+  The Exporter (host-tested: CC7 mutes/halves/passes) and the Engine render MIDI
+  notes through this per-block gain, so a `.mid`'s volume/expression plays back.
+  Engine wiring cross-compiles; VM audio-runtime pending.
+- *Remaining:* CC10 pan + pitch-bend + mod-wheel (pitch/mod need synth phase
+  integration — the synth is stateless); per-block CC smoothing (stepped today);
+  **CC lanes** in the piano roll (velocity-lane-style, VM-gated); live-MIDI CC
+  recording (`MidiPort`/`MidiRecorder`); per-track MIDI input demux;
+  MIDI clock/MTC; sysex.
 
 ## Phase I — Plugins (long-term)
 

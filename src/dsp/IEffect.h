@@ -42,6 +42,21 @@ public:
     // and whenever the tempo changes. Default: no-op.
     virtual void SetTempo(double /*bpm*/) {}
 
+    // Processing latency this effect adds, in FRAMES (per-channel samples, NOT
+    // interleaved floats) at the Prepare() rate: the number of frames by which
+    // its output lags its input (a look-ahead limiter, a linear-phase FIR, an
+    // FFT-block processor). This is the universal audio convention (LV2/VST
+    // report latency in frames); the whole PDC path — Pdc::EdgeDelay,
+    // FrameDelay::Prepare, the Exporter's pad/trim — is in frames end to end, so
+    // no per-channel doubling is ever applied. Plugin-delay
+    // compensation (Phase Y) reads this after Prepare() to delay-align sibling
+    // signal paths so a latent effect on one track doesn't smear against a dry
+    // sibling. Must be constant across a Prepare()/Process() lifetime (the graph
+    // sizes its delay lines from it once). Default 0 = zero-latency (all the
+    // built-in effects: their feedback/IIR state adds no reported delay). An
+    // effect that reports N delays its output by exactly N frames.
+    virtual int LatencySamples() const { return 0; }
+
     // Live metering for the effect editor (read off the RT thread; effects
     // update these in Process). Default: no meter.
     //   MeterDb  — a single scalar (e.g. a compressor's gain reduction, <= 0).

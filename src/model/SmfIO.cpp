@@ -54,11 +54,14 @@ void PutVarlen(std::vector<uint8_t>& b, uint32_t v) {
     while (n) b.push_back(stack[--n]);
 }
 
-// A raw timed event, used to sort a track's note on/offs before delta-encoding.
+// A raw timed event, used to sort a track's note on/offs + channel events
+// before delta-encoding. `ndata` = number of data bytes after the status (1 for
+// program-change / channel-pressure, 2 for notes / CC / pitch-bend).
 struct Ev {
     uint32_t tick;
-    int      order;   // tie-break: offs (0) before ons (1) at the same tick
+    int      order;   // tie-break: offs (0) before ons/events (1) at same tick
     uint8_t  status, d1, d2;
+    uint8_t  ndata;
 };
 
 } // namespace
@@ -156,10 +159,23 @@ bool ReadSmf(const std::string& path, SmfData& out) {
                         pending.erase(it);
                     }
                 }
-            } else if (hi == 0xC0 || hi == 0xD0) {           // 1 data byte
-                r.u8();
-            } else if (hi == 0xA0 || hi == 0xB0 || hi == 0xE0) {   // 2 data bytes
-                r.u8(); r.u8();
+            } else if (hi == 0xC0) {                         // program change
+                const uint8_t prog = r.u8();
+                track.events.push_back({ SmfEvent::Program, now, 0, prog });
+            } else if (hi == 0xD0) {                         // channel pressure
+                const uint8_t val = r.u8();
+                track.events.push_back({ SmfEvent::ChannelPressure, now, 0, val });
+            } else if (hi == 0xB0) {                         // control change
+                const uint8_t ctrl = r.u8();
+                const uint8_t val  = r.u8();
+                track.events.push_back({ SmfEvent::CC, now, ctrl, val });
+            } else if (hi == 0xE0) {                         // pitch bend (14-bit)
+                const uint8_t lsb = r.u8();
+                const uint8_t msb = r.u8();
+                track.events.push_back({ SmfEvent::PitchBend, now, 0,
+                                         (int)lsb | ((int)msb << 7) });
+            } else if (hi == 0xA0) {                         // poly aftertouch: skip
+                r.u8(); r.u8();                              // (per-note; not modeled)
             } else {
                 break;   // unknown status: bail on this track
             }
@@ -181,6 +197,10 @@ bool ReadSmf(const std::string& path, SmfData& out) {
                   [](const SmfNote& a, const SmfNote& b) {
                       return a.startTick < b.startTick;
                   });
+        std::stable_sort(track.events.begin(), track.events.end(),
+                         [](const SmfEvent& a, const SmfEvent& b) {
+                             return a.tick < b.tick;
+                         });
         r.p = trackEnd;                 // resync to the declared track end
         out.tracks.push_back(std::move(track));
     }
@@ -205,9 +225,29 @@ bool WriteSmf(const std::string& path, const SmfData& in) {
         for (const SmfNote& n : tr.notes) {
             int v = n.velocity; if (v < 1) v = 1; if (v > 127) v = 127;
             evs.push_back({ n.startTick, 1, 0x90, (uint8_t)(n.pitch & 0x7F),
-                            (uint8_t)v });
+                            (uint8_t)v, 2 });
             evs.push_back({ n.startTick + n.lengthTick, 0, 0x80,
-                            (uint8_t)(n.pitch & 0x7F), 0x40 });
+                            (uint8_t)(n.pitch & 0x7F), 0x40, 2 });
+        }
+        for (const SmfEvent& e : tr.events) {   // channel is implicit 0
+            switch (e.type) {
+                case SmfEvent::CC:
+                    evs.push_back({ e.tick, 1, 0xB0, (uint8_t)(e.data & 0x7F),
+                                    (uint8_t)(e.value & 0x7F), 2 });
+                    break;
+                case SmfEvent::PitchBend:
+                    evs.push_back({ e.tick, 1, 0xE0, (uint8_t)(e.value & 0x7F),
+                                    (uint8_t)((e.value >> 7) & 0x7F), 2 });
+                    break;
+                case SmfEvent::Program:
+                    evs.push_back({ e.tick, 1, 0xC0, (uint8_t)(e.value & 0x7F),
+                                    0, 1 });
+                    break;
+                case SmfEvent::ChannelPressure:
+                    evs.push_back({ e.tick, 1, 0xD0, (uint8_t)(e.value & 0x7F),
+                                    0, 1 });
+                    break;
+            }
         }
         std::stable_sort(evs.begin(), evs.end(), [](const Ev& a, const Ev& b) {
             return a.tick != b.tick ? a.tick < b.tick : a.order < b.order;
@@ -237,7 +277,8 @@ bool WriteSmf(const std::string& path, const SmfData& in) {
         for (const Ev& e : evs) {
             PutVarlen(body, e.tick - prev);
             prev = e.tick;
-            body.push_back(e.status); body.push_back(e.d1); body.push_back(e.d2);
+            body.push_back(e.status); body.push_back(e.d1);
+            if (e.ndata == 2) body.push_back(e.d2);   // 1-data events omit d2
         }
         // End of track.
         PutVarlen(body, 0);

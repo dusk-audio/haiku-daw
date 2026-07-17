@@ -60,6 +60,8 @@ int main() {
     mc.fadeInFrames = 300; mc.fadeOutFrames = 450;
     { MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 500;   // clip-rel
       n.lengthFrames = 480; mc.notes.push_back(n); }
+    mc.events.push_back({ MidiClipEvent::CC,        100, 11, 88 });     // clip-rel
+    mc.events.push_back({ MidiClipEvent::PitchBend, 700,  0, 12000 });
     { auto add = std::make_unique<AddMidiClipCommand>(t2, mc);
       stack.Execute(std::move(add), a); }
     { Instrument in; in.waveform = 2; in.attack = 0.01f; in.decay = 0.2f;
@@ -149,6 +151,18 @@ int main() {
     CHECK(bt2.midiClips[0].notes[0].pitch == 64);
     CHECK(bt2.midiClips[0].notes[0].startFrame == 500);   // clip-relative
     CHECK(bt2.CollectNotes()[0].startFrame == 2500);       // absolute = 2000+500
+    // MIDI clip events (CC + pitch bend) round-trip, clip-relative.
+    CHECK(bt2.midiClips[0].events.size() == 2);
+    CHECK(bt2.midiClips[0].events[0].type == MidiClipEvent::CC);
+    CHECK(bt2.midiClips[0].events[0].data == 11);
+    CHECK(bt2.midiClips[0].events[0].value == 88);
+    CHECK(bt2.midiClips[0].events[0].startFrame == 100);
+    CHECK(bt2.midiClips[0].events[1].type == MidiClipEvent::PitchBend);
+    CHECK(bt2.midiClips[0].events[1].value == 12000);
+    { auto ev = bt2.CollectEvents();                        // absolute-timeline
+      CHECK(ev.size() == 2);
+      CHECK(ev[0].startFrame == 2100);                       // 2000 + 100
+      CHECK(ev[1].startFrame == 2700); }
     CHECK(bt2.instrument.waveform == 2);
     CHECK(std::abs(bt2.instrument.decay - 0.2f) < 1e-4f);
     CHECK(std::abs(bt2.instrument.sustain - 0.5f) < 1e-4f);

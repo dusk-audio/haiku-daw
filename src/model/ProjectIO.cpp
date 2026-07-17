@@ -167,6 +167,9 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
                 f << "note " << n.pitch << " " << n.velocity << " "
                   << (long long)n.startFrame << " "
                   << (long long)n.lengthFrames << "\n";
+            for (const MidiClipEvent& e : mc.events)   // CC/PB/PC/pressure, clip-rel
+                f << "mev " << e.type << " " << (long long)e.startFrame << " "
+                  << e.data << " " << e.value << "\n";
         }
 
         for (const EffectDesc& e : t.fx) {
@@ -448,6 +451,15 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
                 MidiClip& mc = cur.midiClips[(size_t)curMidiIdx];
                 if (end > mc.lengthFrames) mc.lengthFrames = end;
             }
+        }
+        else if (kw == "mev" && haveTrack && curMidiIdx >= 0) {
+            MidiClipEvent e;
+            long long st = 0;
+            iss >> e.type >> st >> e.data >> e.value;
+            e.startFrame = (Frame)st;
+            // Ignore an unknown/garbage event type rather than store it.
+            if (e.type >= MidiClipEvent::CC && e.type <= MidiClipEvent::ChannelPressure)
+                cur.midiClips[(size_t)curMidiIdx].events.push_back(e);
         }
         else if (kw == "fx" && haveTrack) {
             EffectDesc e;

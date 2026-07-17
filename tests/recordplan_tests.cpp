@@ -60,6 +60,29 @@ int main() {
         CHECK(LoopTakes(500, 500, 2000).empty());
     }
 
+    // Round-trip compensation: a take slides earlier by the round-trip latency.
+    {
+        // Normal case: recStart 10000, 5000 captured, 480-frame round trip.
+        TakeRegion r = CompensateRoundTrip(10000, 5000, 480);
+        CHECK(r.startFrame   == 10000 - 480);   // slid earlier
+        CHECK(r.sourceOffset == 0);             // whole capture kept
+        CHECK(r.lengthFrames == 5000);
+        // Zero / negative latency -> unchanged.
+        r = CompensateRoundTrip(10000, 5000, 0);
+        CHECK(r.startFrame == 10000 && r.sourceOffset == 0 && r.lengthFrames == 5000);
+        r = CompensateRoundTrip(10000, 5000, -100);
+        CHECK(r.startFrame == 10000 && r.sourceOffset == 0);
+        // Near the timeline start: shifting earlier would go negative, so the
+        // lead is dropped from the source and the start clamps to 0.
+        r = CompensateRoundTrip(300, 5000, 480);
+        CHECK(r.startFrame   == 0);
+        CHECK(r.sourceOffset == 180);           // 480 - 300 dropped from the head
+        CHECK(r.lengthFrames == 5000 - 180);
+        // Round trip longer than the whole capture -> empty (nothing survives).
+        r = CompensateRoundTrip(0, 100, 480);
+        CHECK(r.startFrame == 0 && r.sourceOffset == 480 && r.lengthFrames == 0);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

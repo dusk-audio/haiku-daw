@@ -54,6 +54,40 @@ int main() {
         CHECK(r.tracks[1].notes[0].lengthTick == 1920);
     }
 
+    // Channel-event round-trip: CC, pitch bend, program change, aftertouch on a
+    // track alongside notes, written and read back exactly.
+    {
+        SmfData d;
+        d.division = 480; d.tempoBpm = 120.0;
+        SmfTrack t; t.name = "Ctrl";
+        t.notes.push_back({ 60, 100, 0, 480 });
+        t.events.push_back({ SmfEvent::CC,              0,   1, 64 });  // mod
+        t.events.push_back({ SmfEvent::CC,            240,   7, 100 }); // volume
+        t.events.push_back({ SmfEvent::PitchBend,     120,   0, 10000 });
+        t.events.push_back({ SmfEvent::Program,         0,   0, 5 });
+        t.events.push_back({ SmfEvent::ChannelPressure, 360, 0, 77 });
+        d.tracks = { t };
+        CHECK(WriteSmf(kPath, d));
+
+        SmfData r;
+        CHECK(ReadSmf(kPath, r));
+        CHECK(r.tracks.size() == 1);
+        CHECK(r.tracks[0].notes.size() == 1);
+        CHECK(r.tracks[0].events.size() == 5);
+        // Sorted by tick: PC@0, CC1@0, PB@120, CC7@240, pressure@360.
+        auto& ev = r.tracks[0].events;
+        // Find each by (type,data) since same-tick order isn't guaranteed.
+        int nCC = 0, nPB = 0, nProg = 0, nPress = 0;
+        for (const SmfEvent& e : ev) {
+            if (e.type == SmfEvent::CC && e.data == 1)  { CHECK(e.value == 64);  CHECK(e.tick == 0);   nCC++; }
+            if (e.type == SmfEvent::CC && e.data == 7)  { CHECK(e.value == 100); CHECK(e.tick == 240); nCC++; }
+            if (e.type == SmfEvent::PitchBend)          { CHECK(e.value == 10000); CHECK(e.tick == 120); nPB++; }
+            if (e.type == SmfEvent::Program)            { CHECK(e.value == 5);   CHECK(e.tick == 0);   nProg++; }
+            if (e.type == SmfEvent::ChannelPressure)    { CHECK(e.value == 77);  CHECK(e.tick == 360); nPress++; }
+        }
+        CHECK(nCC == 2 && nPB == 1 && nProg == 1 && nPress == 1);
+    }
+
     // A hand-built track using running status + a note-on with velocity 0 as the
     // note-off. Header: MThd len6 fmt0 ntrks1 div96.
     {
