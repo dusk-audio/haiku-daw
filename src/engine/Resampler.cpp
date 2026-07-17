@@ -2,20 +2,25 @@
 
 namespace daw {
 
-Resampler::Resampler(double inRate, double outRate)
+Resampler::Resampler(double inRate, double outRate, int channels)
     : fRatio((inRate > 0 && outRate > 0) ? outRate / inRate : 1.0),
       fStep((inRate > 0 && outRate > 0) ? inRate / outRate : 1.0),
-      fPos(0.0), fPrevL(0.0f), fPrevR(0.0f), fHavePrev(false) {}
+      fPos(0.0),
+      fChannels((channels < 1) ? 1 : (channels > kMaxChannels ? kMaxChannels : channels)),
+      fHavePrev(false) {
+    for (int c = 0; c < kMaxChannels; c++) fPrev[c] = 0.0f;
+}
 
 void Resampler::Process(const float* in, size_t inFrames,
                         std::vector<float>& out) {
     if (inFrames == 0)
         return;
 
+    const int ch = fChannels;   // 1 or 2; index each frame as in[i*ch + c]
+
     // Seed the interpolation edge on the very first frame ever seen.
     if (!fHavePrev) {
-        fPrevL = in[0];
-        fPrevR = in[1];
+        for (int c = 0; c < ch; c++) fPrev[c] = in[c];
         fHavePrev = true;
         fPos = 0.0;
     }
@@ -24,17 +29,16 @@ void Resampler::Process(const float* in, size_t inFrames,
     while (i < inFrames) {
         if (fPos < 1.0) {
             // Interpolate between the previous frame and input frame i.
-            const float curL = in[i * 2 + 0];
-            const float curR = in[i * 2 + 1];
             const float frac = static_cast<float>(fPos);
-            out.push_back(fPrevL + (curL - fPrevL) * frac);
-            out.push_back(fPrevR + (curR - fPrevR) * frac);
+            for (int c = 0; c < ch; c++) {
+                const float cur = in[i * ch + c];
+                out.push_back(fPrev[c] + (cur - fPrev[c]) * frac);
+            }
             fPos += fStep;
         } else {
             // Advance the interpolation edge to the next input frame.
             fPos -= 1.0;
-            fPrevL = in[i * 2 + 0];
-            fPrevR = in[i * 2 + 1];
+            for (int c = 0; c < ch; c++) fPrev[c] = in[i * ch + c];
             i++;
         }
     }
