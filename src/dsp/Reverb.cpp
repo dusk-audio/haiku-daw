@@ -173,6 +173,10 @@ void Reverb::Process(float* stereo, int frames) {
     const float combFb = (float)(0.7 + 0.28 * rs);
     const float wet = (float)std::max(0.0, std::min(1.0, fMix));
     const float dry = 1.0f - wet;
+    // Freeverb fixed input gain: without it, a comb's steady-state gain is
+    // 1/(1-combFb) (~50x at high room size), so the wet path grossly overloads /
+    // clips. Scaling the input keeps the tail near unity.
+    const float kFixedGain = 0.015f;
 
     for (int i = 0; i < frames; i++) {
         for (int c = 0; c < 2; c++) {
@@ -185,7 +189,7 @@ void Reverb::Process(float* stereo, int frames) {
                 const float y = L.buf[L.pos];          // delayed output
                 // One-pole damping inside the feedback loop.
                 fCombLP[c][k] = y * (1.0f - kDamping) + fCombLP[c][k] * kDamping;
-                L.buf[L.pos] = in + fCombLP[c][k] * combFb + kDenormal;
+                L.buf[L.pos] = in * kFixedGain + fCombLP[c][k] * combFb + kDenormal;
                 if (++L.pos >= (size_t)L.size) L.pos = 0;
                 acc += y;
             }
