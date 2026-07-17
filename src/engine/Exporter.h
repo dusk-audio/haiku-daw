@@ -1,4 +1,5 @@
-// Exporter — offline "bounce" of a Project to a 16-bit stereo WAV file.
+// Exporter — offline "bounce" of a Project to a stereo WAV file (PCM 16/24-bit
+// or 32-bit IEEE float, selected per export).
 //
 // Renders the whole timeline to disk with no real-time constraints: no
 // BSoundPlayer, no ring buffers, no disk threads. It reuses the same kit-free
@@ -17,16 +18,20 @@
 
 namespace daw {
 
-// Render `project` to a 16-bit PCM stereo WAV at `outPath`, sampled at
-// `outRate` Hz. If `outRate <= 0` the project's own sample rate is used.
+// Render `project` to a stereo WAV at `outPath`, sampled at `outRate` Hz, in the
+// format chosen by `bitDepth` (see below). If `outRate <= 0` the project's own
+// sample rate is used.
 //
 // The timeline is laid out in *output* frames: a project-frame position p maps
 // to output frame round(p * outRate / project.sampleRate), so clip/note
 // placement and fade lengths stay correct at any target rate. Solo overrides
 // mute (any soloed non-muted track mutes the rest). Returns false if there is
 // nothing to render or the output file cannot be written.
+//
+// `bitDepth` selects the output sample format: 16 or 24 = PCM (16-bit is
+// TPDF-dithered), 32 = IEEE float. Any other value falls back to 16.
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate = 0.0);
+               double outRate = 0.0, int bitDepth = 16);
 
 // Bounce each non-bus track to its own WAV stem under `dir` (named
 // "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by

@@ -16,9 +16,25 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <pmmintrin.h>
+#include <xmmintrin.h>
+#endif
+
 namespace daw {
 
 namespace {
+
+// Flush-to-zero + denormals-are-zero for this render thread. Offline effect
+// feedback tails (reverb/delay/EQ decays) otherwise hit denormals and stall the
+// FPU into microcode — here it just slows the export, but keep parity with the
+// RT engine which sets the same flags per callback.
+inline void EnableDenormalFlush() {
+#if defined(__x86_64__) || defined(__i386__)
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+}
 
 // Equal-power pan, identical to Engine::EqualPowerGains: pan -1 = hard left,
 // 0 = center (-3 dB each channel), +1 = hard right. Folds the track gain into
@@ -36,9 +52,12 @@ inline int64_t ToOut(Frame projFrame, double scale) {
     return static_cast<int64_t>(static_cast<double>(projFrame) * scale + 0.5);
 }
 
-// Decode one audio clip's source in full, resampled to `outRate`, into an
-// interleaved-stereo buffer. Returns the resampled frame count (out.size()/2).
-size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out) {
+// Decode one audio clip's source resampled to `outRate` into an interleaved-
+// stereo buffer, stopping once `maxOutFrames` output frames are available (0 =
+// no limit). Bounding the decode keeps a 2 s clip cut from a 1 h file from
+// decoding — and buffering — the whole hour. Returns out.size()/2.
+size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
+                  int64_t maxOutFrames = 0) {
     out.clear();
     WavSource src;
     if (!src.Open(c.sourcePath))
@@ -49,8 +68,11 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out) {
     Resampler rs(src.FrameRate(), outRate);
     const float* chunk = nullptr;
     size_t frames = 0;
-    while (src.ReadChunk(&chunk, &frames))
+    while (src.ReadChunk(&chunk, &frames)) {
         rs.Process(chunk, frames, out);
+        if (maxOutFrames > 0 && (int64_t)(out.size() / 2) >= maxOutFrames)
+            break;   // enough decoded to cover the clip window
+    }
     return out.size() / 2;
 }
 
@@ -60,14 +82,16 @@ void PlaceClip(const Clip& c, double scale, double outRate,
                int64_t totalOut, const float* gainLR,
                std::vector<float>& trackBuf,
                Frame effFadeIn, Frame effFadeOut) {
-    std::vector<float> decoded;
-    const size_t decodedFrames = DecodeClip(c, outRate, decoded);
-    if (decodedFrames == 0)
-        return;
-
     const int64_t startOut  = ToOut(c.startFrame, scale);
     const int64_t lengthOut = ToOut(c.lengthFrames, scale);
     if (lengthOut <= 0)
+        return;
+
+    std::vector<float> decoded;
+    // Only decode enough source to cover the clip window (+ a small resampler
+    // slack) rather than the entire source file.
+    const size_t decodedFrames = DecodeClip(c, outRate, decoded, lengthOut + 64);
+    if (decodedFrames == 0)
         return;
 
     // How many frames actually play: bounded by clip length and decoded data.
@@ -102,7 +126,9 @@ void PlaceClip(const Clip& c, double scale, double outRate,
 } // namespace
 
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate) {
+               double outRate, int bitDepth) {
+    EnableDenormalFlush();
+    if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 16;
     const double projRate = project.sampleRate;
     if (outRate <= 0.0)
         outRate = projRate;
@@ -140,12 +166,42 @@ bool ExportWav(const Project& project, const std::string& outPath,
 
     const auto& tracks = project.Tracks();
 
-    // One mix buffer (node) per track; buses accumulate their inputs here.
-    std::vector<std::vector<float>> nodeBuf(tracks.size(),
-                                            std::vector<float>(nfloats, 0.0f));
     std::unordered_map<TrackId, size_t> idx;
     for (size_t i = 0; i < tracks.size(); i++)
         idx[tracks[i].id] = i;
+
+    // A node needs its own persistent full-length buffer only if it RECEIVES
+    // signal from other nodes (it is some node's output target or a send
+    // destination) — such a buffer must accumulate inputs across the topo
+    // order. Leaf source tracks that only feed master/a bus never accumulate,
+    // so they share ONE scratch buffer. This bounds memory to
+    // (#destination nodes + master + scratch) full-length buffers instead of
+    // one per track, which OOMs on large sessions.
+    std::vector<bool> isDest(tracks.size(), false);
+    for (const Track& t : tracks) {
+        if (t.output != kRoutingMaster) {
+            auto d = idx.find(t.output);
+            if (d != idx.end()) isDest[d->second] = true;
+        }
+        for (const Send& s : t.sends) {
+            if (s.dest == kInvalidTrackId || s.dest == t.id) continue;
+            auto d = idx.find(s.dest);
+            if (d != idx.end()) isDest[d->second] = true;
+        }
+    }
+    std::vector<int> bufSlot(tracks.size(), -1);
+    std::vector<std::vector<float>> persist;
+    for (size_t i = 0; i < tracks.size(); i++)
+        if (isDest[i]) {
+            bufSlot[i] = (int)persist.size();
+            persist.emplace_back(nfloats, 0.0f);
+        }
+    std::vector<float> scratch(nfloats, 0.0f);
+    // The mix buffer (a std::vector&) for node index i: its persistent buffer if
+    // it's a destination, else the shared leaf scratch.
+    auto nodeVec = [&](size_t i) -> std::vector<float>& {
+        return bufSlot[i] >= 0 ? persist[bufSlot[i]] : scratch;
+    };
 
     // Processing order: a node before every node it feeds — its output AND
     // every aux-send destination. Sends add extra edges, so use the general
@@ -171,7 +227,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 || s.dest == t.id) continue;   // ignore a self-send
             auto d = idx.find(s.dest);
             if (d == idx.end()) continue;
-            float* db = nodeBuf[d->second].data();
+            float* db = nodeVec(d->second).data();   // dest is always persistent
             for (size_t i = 0; i < nfloats; ++i) db[i] += nb[i] * s.level;
         }
     };
@@ -210,24 +266,39 @@ bool ExportWav(const Project& project, const std::string& outPath,
         if (it == idx.end()) continue;
         const Track& t = tracks[it->second];
         const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
-        if (!audible)
-            continue;   // muted/solo'd out: render + route nothing downstream
+        const bool isDestNode = bufSlot[it->second] >= 0;
+        // A MUTE silences a node and everything routed through it. But a bus /
+        // destination that is merely solo-EXCLUDED must still pass the upstream
+        // it already accumulated (which may include a soloed source) downstream
+        // — otherwise every stem of a bus-routed track renders silent. Only a
+        // solo-excluded LEAF (no accumulated inputs) contributes nothing.
+        if (t.muted)
+            continue;
+        if (!audible && !isDestNode)
+            continue;
 
-        float* nb = nodeBuf[it->second].data();
+        // Leaf nodes reuse the shared scratch, so clear it before building this
+        // node. A destination node keeps whatever upstream inputs already
+        // accumulated in its persistent buffer (do NOT clear it).
+        if (bufSlot[it->second] < 0)
+            std::fill(scratch.begin(), scratch.end(), 0.0f);
+        float* nb = nodeVec(it->second).data();
         const float kUnity[2] = { 1.0f, 1.0f };
 
+        // Build the node's OWN material only when audible; a solo-excluded dest
+        // still runs (below) to pass its accumulated upstream through its fader.
         // Build the node DRY (no pan / gain yet), so a pre-fader send taps the
         // raw signal and the gain+pan fader can be a time-varying envelope.
-        if (t.type == TrackType::Audio) {
+        if (audible && t.type == TrackType::Audio) {
             const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
             for (size_t ci = 0; ci < t.clips.size(); ci++) {
                 const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
                 if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
                 PlaceClip(c, scale, outRate, totalOut, kUnity,
-                          nodeBuf[it->second], fades[ci].fadeIn, fades[ci].fadeOut);
+                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
             }
-        } else if (t.type == TrackType::Midi) {
+        } else if (audible && t.type == TrackType::Midi) {
             std::vector<MidiNote> notes = t.CollectNotes();
             if (scale != 1.0)
                 for (MidiNote& n : notes) {
@@ -269,7 +340,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
         float* dst = master.data();
         if (routingOk && t.output != kRoutingMaster) {
             auto d = idx.find(t.output);
-            if (d != idx.end()) dst = nodeBuf[d->second].data();
+            if (d != idx.end()) dst = nodeVec(d->second).data();
         }
         for (size_t i = 0; i < nfloats; ++i)
             dst[i] += nb[i];
@@ -296,20 +367,25 @@ bool ExportWav(const Project& project, const std::string& outPath,
         }
     }
 
-    // Master gain, clamp to [-1,1], convert to interleaved int16.
+    // Apply master gain, then hand the float mix to the writer, which quantizes
+    // to the chosen depth (TPDF-dithered for 16-bit; 24/32 have ample headroom).
     const float mg = project.masterGain;
-    std::vector<int16_t> pcm(nfloats);
-    for (size_t i = 0; i < nfloats; ++i) {
-        float s = master[i] * mg;
-        if (s >  1.0f) s =  1.0f;
-        if (s < -1.0f) s = -1.0f;
-        pcm[i] = static_cast<int16_t>(std::lround(s * 32767.0f));
-    }
+    if (mg != 1.0f)
+        for (size_t i = 0; i < nfloats; ++i) master[i] *= mg;
+
+    // Final safety sweep: never write a non-finite sample. A NaN/Inf from an
+    // unstable effect or a NaN-bearing float source would otherwise poison the
+    // exported master (and anything downstream reads/meters from it). Parity
+    // with the RT engine's pre-DAC guard (P0 #1); the offline path lacked it.
+    for (size_t i = 0; i < nfloats; ++i)
+        if (!std::isfinite(master[i])) master[i] = 0.0f;
 
     WavWriter writer;
-    if (!writer.Open(outPath, static_cast<int>(outRate + 0.5), 2))
+    const bool floatOut = (bitDepth == 32);
+    if (!writer.OpenFormat(outPath, static_cast<int>(outRate + 0.5), 2,
+                           bitDepth, floatOut))
         return false;
-    if (!writer.WriteInt16(pcm.data(), pcm.size()))
+    if (!writer.WriteFloat(master.data(), nfloats, /*dither=*/bitDepth == 16))
         return false;
     return writer.Close();
 }
@@ -331,7 +407,12 @@ int ExportStems(const Project& project, const std::string& dir, double outRate) 
         // Solo this track so ExportWav renders only it (through its own fader /
         // fx / bus / master). Solo overrides mute in the mix.
         Project copy = project;
-        for (Track& ct : copy.Tracks()) ct.soloed = (ct.id == t.id);
+        // Isolate exactly this track: solo it, and clear soloSafe on everyone
+        // (a soloSafe track would otherwise bleed into every stem).
+        for (Track& ct : copy.Tracks()) {
+            ct.soloed   = (ct.id == t.id);
+            ct.soloSafe = false;
+        }
         if (Track* ct = copy.FindTrack(t.id)) ct->muted = false;
         char pre[8];
         std::snprintf(pre, sizeof(pre), "%02d_", idx);
