@@ -89,6 +89,7 @@ private:
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
     std::atomic<bool>  fXrun{false}; // ring overflowed (disk not keeping up)
+    std::atomic<int64_t> fDroppedFloats{0}; // xrun-dropped samples to pad w/ silence
 
     // Live waveform envelope (disk thread writes by index, UI reads < count).
     std::vector<float>  fEnvMin;

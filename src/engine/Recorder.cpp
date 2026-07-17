@@ -43,8 +43,15 @@ void Recorder::HandleBuffer(void* data, size_t size, const media_format& fmt) {
 
     const bool monitor = fMonitor.load(std::memory_order_relaxed);
     auto flush = [&](size_t n) {
-        if (fRing.Write(tmp, n) < n)
+        const size_t wrote = fRing.Write(tmp, n);
+        if (wrote < n) {
             fXrun.store(true, std::memory_order_relaxed);   // disk fell behind
+            // Record how many samples we dropped so the disk thread can pad the
+            // take with silence and keep its total length == real elapsed time
+            // (else everything after the xrun shifts earlier on the timeline).
+            fDroppedFloats.fetch_add((int64_t)(n - wrote),
+                                     std::memory_order_relaxed);
+        }
         if (monitor)
             fMonitorRing.Write(tmp, n);   // overflow silently dropped (tolerable)
     };
@@ -105,6 +112,29 @@ void Recorder::DiskLoop() {
     int   bFrames = 0, bChan = 0;
     // Drain until stopped AND the ring is empty (flush the tail).
     while (true) {
+        // Pad any xrun-dropped samples with silence so the take's length tracks
+        // real elapsed time (downstream timeline stays aligned past the glitch).
+        if (int64_t drop = fDroppedFloats.exchange(0, std::memory_order_relaxed)) {
+            const int64_t padFrames = ch ? drop / ch : 0;
+            std::memset(ibuf, 0, sizeof(ibuf));
+            while (drop > 0) {
+                const size_t chunk = drop > 4096 ? 4096 : (size_t)drop;
+                fWriter.WriteInt16(ibuf, chunk);
+                drop -= (int64_t)chunk;
+            }
+            // Advance the waveform envelope over the padded (silent) frames so
+            // the UI waveform stays aligned with the audio after the xrun.
+            bMin = 0.0f; bMax = 0.0f;
+            for (int64_t fr = 0; fr < padFrames; fr++)
+                if (++bFrames >= kEnvBucketFrames) {
+                    const size_t nn = fEnvCount.load(std::memory_order_relaxed);
+                    if (nn < envCap) {
+                        fEnvMin[nn] = 0.0f; fEnvMax[nn] = 0.0f;
+                        fEnvCount.store(nn + 1, std::memory_order_release);
+                    }
+                    bFrames = 0;
+                }
+        }
         const size_t got = fRing.Read(fbuf, 4096);
         if (got == 0) {
             if (!fRunning.load())
