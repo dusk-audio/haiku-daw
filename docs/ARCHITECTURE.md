@@ -161,11 +161,18 @@ audit of "what changed."
 ## 5. Storage & streaming
 
 ### 5.1 Files
-- Audio import/export via Media Kit's `BMediaFile` / `BMediaTrack` — these
-  decode/encode wav, aiff, and whatever translators are installed.
-- Project file: a directory (a "bundle") or a single serialized file.
-  Recommend a directory bundle: `project.daw/` containing `project.xml`
-  (or a simple binary/JSON) + a `media/` folder of recorded takes.
+- **Audio I/O is our own, not `BMediaFile`.** The target Haiku image ships no
+  Media Kit reader/decoder plugins, so `BMediaFile` returns "No handler" (see
+  "CRITICAL constraint" in `HANDOFF.md`). We therefore hand-write RIFF/WAVE
+  read (`WavSource`) and write (`WavWriter`): PCM 8/16/24/32 + IEEE-float in,
+  and export as 16-bit (TPDF-dithered) / 24-bit PCM / 32-bit float out, with
+  optional BS.1770 loudness normalization + a true-peak ceiling. Compressed
+  formats (FLAC/Ogg/MP3) will need a **bundled/own** decoder, never the Media
+  Kit. Do NOT reintroduce `BMediaFile`.
+- Project file: a single serialized text file (`ProjectIO`, `.dawproj`) with a
+  strict versioned header; media paths are stored relative to the project so a
+  project + co-located media are portable. Recorded takes are bundled next to
+  the project on save.
 
 ### 5.2 Use BFS attributes (a real Haiku superpower)
 Haiku's file system stores typed attributes and indexes them. Use it:
@@ -323,6 +330,14 @@ haiku-daw/
 Ship each milestone runnable. Milestone 0 is the gate: if BSoundPlayer
 latency in your VM is unusable, that decides "VM for dev, real hardware for
 audio testing" early.
+
+**Beyond M8 (current state):** the milestone ladder M0–M8 is complete, plus
+feature phases A–H (mixer routing, automation, editing depth, recording depth,
+tempo/meter map, MIDI instrument, sample browser, persistence) — see
+`ROADMAP.md`. A production-readiness pass has since fixed the P0 crash /
+data-loss / audio-safety blockers and the P1 correctness batch, and started
+Phase X export mastering (bit-depth + dither + loudness normalization) — see
+`PRODUCTION_HANDOFF.md`. `HANDOFF.md` carries the running per-feature detail.
 
 ---
 

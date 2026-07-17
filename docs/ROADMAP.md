@@ -171,10 +171,41 @@ with the local cross-compiler, runtime pending on the VM.
 - ✅ Autosave / crash recovery: a recovery `.dawproj` every 30 s; clean quit
   deletes it, so a leftover triggers a Recover/Discard prompt on next launch.
 
+## Production-readiness pass — P0/P1  ✅ DONE (audio-listening verify pending)
+
+Stability / durability / audio-safety hardening from a deep audit (details in
+`PRODUCTION_HANDOFF.md`). All committed on `master`, host + VM-on-target tested.
+- **P0 (10/10)** — pre-DAC NaN/denormal guard; atomic project save + parse-into-
+  temp load (a corrupt file never wipes the session); WavSource OOB + count-DoS
+  caps; block-wise/leaf-scratch export (OOM); cross-track move data-loss guard;
+  atomic `Bus` mix params (UpdateMix UI/RT race); monitor/live-MIDI teardown UAF.
+- **P1** — bus-stem silence; note-length clamp; save precision + string escaping
+  + strict versioned header; Freeverb input gain; SMF bounds; MIDI panic on stop;
+  underrun resync; xrun take-length pad; marker identity by frame+name; channel-
+  aware resampler; undo-history cap; WavWriter 4 GB guard + NaN sanitize; zero-
+  rate reject. Fuzz corpora + NaN-injection + malformed-SMF regression tests.
+- *Remaining P1 minors:* zipper-noise coeff smoothing; Eq FFT off the RT thread;
+  autosave-during-recording.
+
+## Phase X — Export & mastering  ◐ IN PROGRESS
+
+- ✅ Bit depth: 16-bit (TPDF-dithered) / 24-bit PCM / 32-bit float; `ExportWav`
+  `bitDepth` param; fmt-chunk asserted in tests.
+- ✅ Loudness normalization: BS.1770 integrated-LUFS target with a true-peak-safe
+  dBTP ceiling (gain-based, not a look-ahead limiter). Reuses `Loudness` offline.
+- *Remaining:* export bit-depth/rate/format **selection UI**; worker-thread
+  export with progress/cancel; a true look-ahead limiter; FLAC/Ogg/MP3 encoders
+  (bundled/own libs — no Media Kit decoders on target); export presets + ranges.
+
+## Phase Y — Latency compensation
+
+Record round-trip offset (query device latency) + plugin delay compensation
+(`IEffect::LatencySamples()`, delay-align sibling buses in the engine + Exporter).
+
 ## Phase I — Plugins (long-term)
 
-Internal effect add-on ABI, then LV2 hosting with native generic GUIs
-(ARCHITECTURE §8 stages 2–3). VST is a maybe.
+Internal effect add-on ABI (`PluginHost` + native `.so` exists), then LV2
+hosting with native generic GUIs (ARCHITECTURE §8 stages 2–3). VST is a maybe.
 
 ## Ardour-parity gap (what the phases above do NOT yet cover)
 
@@ -189,8 +220,9 @@ no video/notation/cloud). Beyond the phases, a pro DAW like Ardour also has:
 - **Advanced routing** — VCA master faders, a monitor/control-room section
   (dim/mono/AFL/PFL), an any-to-any routing matrix, external hardware inserts,
   full sidechain routing.
-- **Metering** — K-system, true-peak, LUFS/loudness, phase/correlation, a
-  meterbridge. (We have simple master peak only.)
+- **Metering** — K-system, phase/correlation, a meterbridge. (We have per-track
+  peak meters + a BS.1770 master LUFS / true-peak readout; K-system and
+  correlation are the gaps.)
 - **Audio editing** — time-stretch / pitch-shift (Rubber Band), transient
   detection, audio quantize, strip-silence, region normalize/reverse/gain,
   ripple + slip/slide edit, playlists per track.
@@ -202,8 +234,10 @@ no video/notation/cloud). Beyond the phases, a pro DAW like Ardour also has:
   change/sysex, MIDI clock. (We have an internal piano roll only.)
 - **Comping / cue** — take comping, a clip-launch (cue) page.
 - **Track ops** — freeze/bounce a track, track templates, folder tracks.
-- **Export** — stems, multi-format (FLAC/MP3/Ogg), dithering, loudness
-  normalization, export presets, ranges. (We have one 16-bit WAV bounce.)
+- **Export** — multi-format (FLAC/MP3/Ogg), export presets, ranges, a true
+  look-ahead limiter. (We have stems + per-track/per-bus bounce, 16/24/32-bit
+  with TPDF dither, and BS.1770 loudness normalization with a true-peak-safe
+  ceiling — Phase X; compressed formats + presets + ranges are the gaps.)
 - **Session** — snapshots, templates, archive/bundle, cleanup-unused, autosave,
   markers / ranges / locations.
 - **Other** — video timeline, Lua scripting, surround/VBAP panning, spectral

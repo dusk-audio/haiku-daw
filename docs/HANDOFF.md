@@ -125,11 +125,19 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   `IEffect::SetParam` + `Track.fxAuto` + engine/Exporter per-block drive + timeline
   Auto-box editing give full effect-parameter automation. `Eq::MagnitudeResponseDb`
   drives the EQ graph; custom effects editor (knobs/EQ graph/comp curve).
-- **NEXT** — Phase I (plugins, long-term) or clear the deferred list: external
-  Midi Kit 2 I/O (class-compliant USB; midi_probe.sh), MIDI-note multi-select,
-  tempo ramps, band-limited osc, resampled input monitor, drag-drop from the
-  sample browser, transport-widget theming. Runtime-verify the GUI interactively
-  in the VM (`sh scripts/vm.sh ssh`, then launch `~/haiku-daw/build/daw`).
+- **Production-readiness pass** ✅ (committed on `master`; audio-listening verify
+  pending) — a deep audit reframed the gap to shippable as stability/durability,
+  not features. P0 crash/data-loss/audio-safety blockers (all 10) + the P1
+  correctness batch are fixed with regression tests + fuzz corpora; export
+  mastering (Phase X: bit-depth + dither + loudness normalization) is under way.
+  Full detail + what's next in **`docs/PRODUCTION_HANDOFF.md`**; the phase/parity
+  roadmap in **`docs/ROADMAP.md`**.
+- **NEXT** — finish Phase X (export selection UI + worker thread), Phase Y latency
+  compensation, Phase Z MIDI depth (external Midi Kit 2 I/O), Phase I plugin
+  hosting; plus the deferred list (MIDI-note multi-select, tempo ramps, resampled
+  input monitor, drag-drop from the sample browser). Runtime-verify the GUI + the
+  committed engine changes in the VM (`sh scripts/vm.sh ssh`, launch
+  `~/haiku-daw/build/daw`).
 
 ## Architecture in one breath
 
@@ -276,25 +284,18 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — the full ladder (M0–M8 + resampler + DSP) is done
+## Next task — core ladder + feature phases A–H are done
 
-Editing (delete/move/resize/velocity/fades), the effects editor, portable
-relative media paths, offline export, the mixer, and track management are all
-**done** (see the status list above). Remaining work is reach, not core:
-
-**A. External Midi Kit 2 I/O.** `BMidiRoster` / `BMidiLocalProducer/Consumer`
-for hardware keyboards + ports and recording MIDI. Run `scripts/midi_probe.sh`
-on the VM first (mirrors `record_probe.sh`).
-
-**B. Automation.** Gain/pan/effect-param lanes over time.
-
-**C. BFS sample browser.** Tag audio with BPM/Key/Duration attributes; a live
-`BQuery` becomes an instant sample browser (ARCHITECTURE §5.2) — the native
-Haiku superpower.
-
-**D. Smaller items.** Copy/paste of clips + notes, and bundling recorded takes
-next to the `.dawproj`. (Effect reordering, a metronome click, and MIDI
-equal-power pan in both the live engine and export are done.)
+The full milestone ladder (M0–M8 + resampler + DSP) and feature phases A–H
+(mixer routing, automation, editing depth, recording depth, tempo/meter map,
+MIDI instrument, sample browser, persistence) are **done** — see the status
+list above and `docs/ROADMAP.md`. The project is now in a **production-readiness
+push**: the P0/P1 stability batch is fixed + committed, and export mastering
+(Phase X) is under way. The current worklist + priorities live in
+**`docs/PRODUCTION_HANDOFF.md`**; the phase/parity map in **`docs/ROADMAP.md`**.
+In short, remaining work is: finish Phase X (export UI + worker thread),
+Phase Y (latency compensation), Phase Z (external Midi Kit 2 I/O + MIDI depth),
+Phase I (LV2 plugin hosting), and the small deferred items.
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.

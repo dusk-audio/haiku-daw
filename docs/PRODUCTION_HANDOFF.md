@@ -9,23 +9,27 @@ in full below, so no external/unversioned plan file is needed to continue.
 ## Where we are
 
 A 5-agent audit of the DAW found the gap to a shippable commercial product is
-**stability/durability/depth, not features**. The previous session fixed the
-crash / data-loss / audio-safety blockers (P0) and most of the correctness batch
-(P1), plus started export mastering (Phase X). **All changes are uncommitted in
-the working tree** and were NOT committed (commit only when Marc asks; author
-`marc@duskaudio.com`, no AI trailer).
+**stability/durability/depth, not features**. The **P0 ship-blockers (all 10) and
+the P1 correctness batch are fixed and committed**, plus export mastering
+(Phase X) is under way (bit-depth + dither + loudness normalization done). Work
+is **committed on `master`** as of `c3eb04c` (author `marc@duskaudio.com`, no AI
+trailer, conventional subjects); the VM checkout tracks it via the `git bundle`
+sync. Future commits still land on `master` only when Marc asks.
 
-### Verification (all green as of handoff)
+### Verification (all green)
 ```
-cmake --build build && (cd build && ctest)     # 25/25 pass, ~730+ asserts
-sh scripts/haiku_syntax_check.sh               # 0 FAIL (engine/UI cross-compile)
+cmake --build build && (cd build && ctest)          # 27/27 pass
+cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # ASan/UBSan clean
+sh scripts/haiku_syntax_check.sh                    # 0 FAIL (engine/UI cross-compile)
+sh scripts/vm.sh test                               # VM on-target: 27/27 pass
 ```
-Host tests cover the kit-free changes; engine/UI changes are cross-compile-clean
-but **need VM runtime verification** (see below).
+Host + on-target tests cover the kit-free changes; the engine/UI changes are
+cross-compile-clean and build+test green on the VM, but the **audio-listening
+checks still need Marc at the VM** (see "What's next" item 1).
 
-## Landed this session (working tree, ~650 lines + tests)
+## Landed (committed on master, host + on-target tested)
 
-**P0 — ship blockers (8/10 done, host-tested + Haiku-cross-verified):**
+**P0 — ship blockers (10/10 done):**
 - `Engine.cpp` `FillBuffer`: FTZ/DAZ denormal flush + `isfinite`→0 sweep before
   the DAC (main + monitor paths) — kills NaN blast + denormal xruns.
 - `ProjectIO.cpp`: atomic save (tmp+rename+`enddaw` trailer); Load parses into a
@@ -68,11 +72,19 @@ but **need VM runtime verification** (see below).
   underrun `fSkipDebt` resync (drops stale ring frames instead of desyncing).
 - `Recorder.cpp`: xrun silence-pad preserves take length + advances the envelope.
 
-**Phase X (export mastering) — started:**
+**Phase X (export mastering) — in progress:**
 - `WavWriter`: `OpenFormat(bits/float)` + `WriteFloat` with TPDF dither (16-bit),
-  24-bit PCM, 32-bit float. `Exporter::ExportWav` gained `bitDepth` (16/24/32).
-  16-bit export now dithered (no longer bit-identical to the old truncation —
-  deterministic, an improvement; no test asserts exact samples).
+  24-bit PCM, 32-bit float; NaN/clamp sanitize; 4 GB guard. `Exporter::ExportWav`
+  gained `bitDepth` (16/24/32); 16-bit is dithered. Host test asserts the fmt
+  chunk's format+bits match the requested depth.
+- **Loudness normalization** ✅ — `ExportWav` takes an `ExportNormalize` option:
+  measure integrated LUFS + true peak (kit-free `Loudness`, BS.1770), apply one
+  gain to the target LUFS, backed off so the output never crosses the dBTP
+  ceiling (true-peak-*safe* normalization, not a look-ahead limiter). Host-tested
+  (hits target; ceiling wins on a loud target).
+- *Remaining:* export bit-depth/rate/format **selection UI** + worker-thread
+  export with progress/cancel (both GUI, need VM runtime); a true look-ahead
+  limiter; FLAC/Ogg/MP3 encoders (bundled libs — no Media Kit decoders on target).
 
 ## What's next (priority order)
 
@@ -89,11 +101,12 @@ but **need VM runtime verification** (see below).
    Phase X selection UI (item 2).
 
 2. **Finish Phase X** — bit-depth/rate/format **selection UI** in the export
-   flow (`MainWindow.cpp` export path currently hard-passes `sampleRate`, 16-bit);
-   move export **off the UI looper** onto a worker thread with progress/cancel
-   (`MainWindow.cpp:444,467`); loudness-normalize + true-peak limit on export
-   (reuse `Loudness`); **FLAC/Ogg/MP3 encoders** (need bundled libs — NO Media
-   Kit decoders on the target; decide MP3/LAME licensing with Marc).
+   flow (`MainWindow.cpp` export path currently hard-passes `sampleRate`, 16-bit,
+   no normalization); move export **off the UI looper** onto a worker thread with
+   progress/cancel (`MainWindow.cpp:444,467`); a true look-ahead limiter (the
+   current normalization is gain-based/true-peak-safe, done); **FLAC/Ogg/MP3
+   encoders** (need bundled libs — NO Media Kit decoders on the target; decide
+   MP3/LAME licensing with Marc). (Loudness-normalize + true-peak ceiling: done.)
 
 3. **Phase Y — latency compensation**: record round-trip offset (`Recorder`/
    StartCapture; query device latency) + plugin delay compensation
@@ -125,7 +138,12 @@ but **need VM runtime verification** (see below).
 - Commits: `marc@duskaudio.com`, conventional-commit subjects, **no AI trailer**,
   no GitHub remote (git-pull loop to the VM).
 
-## Adversarial tests worth adding (not yet done)
-Fuzz corpus for `WavSource` + `ProjectIO` (truncated/oversized/garbage → no
-crash/OOM, clean failure); NaN-injection effect proving the master guard zeroes
-it; large-project export staying memory-bounded.
+## Adversarial tests — DONE
+Fuzz corpora for `WavSource` + `ProjectIO` (truncated/oversized/garbage → no
+crash/OOM, clean failure — `tests/wavsource_fuzz_tests.cpp`,
+`tests/projectio_fuzz_tests.cpp`, ASan-clean, CTest `TIMEOUT`); a NaN-injection
+export test proving the master finite-sweep zeroes NaN/Inf (32-bit-float bounce
+so the guard, not the quantizer, is what's under test); a malformed-SMF test
+(bad track/meta length → rejected, no OOB); leaf-scratch / bus-stem export tests
+proving large sessions stay memory-bounded and bus-routed stems aren't silent.
+Build under ASan for teeth: `cmake -B b-asan -DDAW_SANITIZE=ON`.
