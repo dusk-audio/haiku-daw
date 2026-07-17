@@ -10,6 +10,8 @@
 #include <Messenger.h>
 #include <Window.h>
 
+#include <string>
+
 class BTextControl;
 
 namespace daw {
@@ -30,6 +32,7 @@ private:
     TrackId       fTrack;
     BMessenger    fApply;
     uint32        fWhat;
+    std::string   fOldName;   // the name before edit, echoed back as "oldname"
     BTextControl* fText;
 };
 

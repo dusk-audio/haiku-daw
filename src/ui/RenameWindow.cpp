@@ -15,7 +15,8 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
     : BWindow(frame, what == kMsgRenameMarker ? "Rename Marker" : "Rename Track",
               B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
-      fTrack(track), fApply(apply), fWhat(what) {
+      fTrack(track), fApply(apply), fWhat(what),
+      fOldName(current ? current : "") {
     BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
     root->SetViewColor(ColHeader());
     AddChild(root);
@@ -37,6 +38,7 @@ void RenameWindow::MessageReceived(BMessage* msg) {
         BMessage m(fWhat);
         m.AddInt64("track", (int64)fTrack);
         m.AddString("name", fText->Text());
+        m.AddString("oldname", fOldName.c_str());   // disambiguates same-frame markers
         fApply.SendMessage(&m);
         Quit();
         return;

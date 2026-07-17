@@ -618,8 +618,8 @@ void TimelineView::HandleRulerMenu(BPoint where) {
             fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
         } else if (nearMarker && label
                    && std::strcmp(label, "Delete Marker") == 0) {
-            fStack->Execute(std::make_unique<RemoveMarkerCommand>(nearMarker->frame),
-                            *fProject);
+            fStack->Execute(std::make_unique<RemoveMarkerCommand>(
+                                nearMarker->frame, nearMarker->name), *fProject);
         } else if (nearMarker && label
                    && std::strncmp(label, "Rename Marker", 13) == 0) {
             // Reuse RenameWindow; the marker frame rides in the "track" id field.

@@ -644,11 +644,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgRenameMarker: {
-            int64 fr = 0; const char* name = nullptr;   // "track" carries the frame
-            msg->FindInt64("track", &fr);
+            int64 fr = 0; const char* name = nullptr; const char* oldName = nullptr;
+            msg->FindInt64("track", &fr);               // "track" carries the frame
             if (msg->FindString("name", &name) == B_OK && name) {
-                fStack->Execute(std::make_unique<RenameMarkerCommand>(
-                    (Frame)fr, name), *fProject);
+                // Disambiguate by the pre-edit name when two markers share a frame.
+                if (msg->FindString("oldname", &oldName) == B_OK && oldName)
+                    fStack->Execute(std::make_unique<RenameMarkerCommand>(
+                        (Frame)fr, oldName, name), *fProject);
+                else
+                    fStack->Execute(std::make_unique<RenameMarkerCommand>(
+                        (Frame)fr, name), *fProject);
                 fTimeline->Invalidate();
             }
             break;
@@ -1256,8 +1261,14 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
             fMidiRec.OnEvent(ev[i], mf);
         }
     const MidiClip take = fMidiRec.End(endFrame);
-    if (fEngine) fEngine->SetLiveMidi(nullptr);   // stop monitoring this source
-    fMidiIn.reset();   // disconnect + unregister the consumer
+    if (fEngine) {
+        fEngine->SetLiveMidi(nullptr);            // stop monitoring this source
+        // Wait out any in-flight RT deref. If quiescence can't be confirmed,
+        // Stop() blocks until the RT thread truly quiesces — never free first.
+        if (!fEngine->QuiesceMonitorInput())
+            fEngine->Stop();
+    }
+    fMidiIn.reset();   // disconnect + unregister the consumer (now UAF-safe)
 
     std::vector<TrackId> targets;
     targets.swap(fMidiRecTracks);
