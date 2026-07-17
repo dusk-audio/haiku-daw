@@ -29,7 +29,8 @@ public:
     const char* Name() const override { return "Biquad"; }
 
 private:
-    void Recompute();
+    void Recompute();    // -> target coefficients
+    void SnapCoeffs();   // live = target (no glide), for Prepare/construct
 
     Type   fType;
     double fFreq;
@@ -37,8 +38,15 @@ private:
     double fGainDb;
     double fSampleRate = 48000.0;
 
-    // Normalized coefficients (a0 folded in).
+    // Live normalized coefficients (a0 folded in) used by Process, and the
+    // targets they glide toward. SetParam/automation moves the targets; Process
+    // one-pole-smooths the live coeffs to them per sample so a coefficient step
+    // at a block boundary can't inject a click (zipper noise). When converged
+    // (no automation) live == target, so the glide is a no-op and the static
+    // response is unchanged.
     double fB0 = 1, fB1 = 0, fB2 = 0, fA1 = 0, fA2 = 0;
+    double fTB0 = 1, fTB1 = 0, fTB2 = 0, fTA1 = 0, fTA2 = 0;
+    double fCoefSmooth = 0.0;   // per-sample glide factor (0 = snap), set in Prepare
 
     // Per-channel Direct Form I state: x[n-1], x[n-2], y[n-1], y[n-2].
     double fX1[2] = {0, 0}, fX2[2] = {0, 0};

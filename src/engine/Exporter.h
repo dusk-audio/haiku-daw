@@ -32,15 +32,23 @@ namespace daw {
 // TPDF-dithered), 32 = IEEE float. Any other value falls back to 16.
 //
 // `norm` optionally loudness-normalizes the finished master to a target
-// integrated loudness (ITU-R BS.1770 / EBU R128), backing the gain off so the
-// export never exceeds a true-peak ceiling (dBTP). This is gain-based
-// normalization with true-peak safety, not a look-ahead limiter: when the
-// target can't be reached without exceeding the ceiling, the ceiling wins and
-// the result lands below target rather than clipping.
+// integrated loudness (ITU-R BS.1770 / EBU R128) and/or true-peak-limits it to
+// a ceiling (dBTP):
+//   - `enabled` alone: gain-based normalization with true-peak safety — when
+//     the target can't be reached without exceeding the ceiling, the gain is
+//     backed off so the whole program lands below target rather than clipping.
+//   - `limiter`: run a look-ahead true-peak limiter (see dsp/Limiter) to hold
+//     the ceiling instead of backing the gain off. With normalization also on,
+//     the program is pushed all the way to `targetLufs` and the limiter — not a
+//     whole-mix attenuation — catches the peaks, so quiet material reaches
+//     target loudness. `limiter` may be used without `enabled` to limit peaks
+//     only. Either way the output true peak stays at/under `truePeakCeil`.
 struct ExportNormalize {
     bool  enabled      = false;
     float targetLufs   = -14.0f;   // integrated LUFS target (e.g. -14 streaming)
     float truePeakCeil = -1.0f;    // dBTP ceiling the output must not exceed
+    bool  limiter      = false;    // hold the ceiling with a look-ahead limiter
+                                   // instead of gain-backoff (lets it hit target)
 };
 
 bool ExportWav(const Project& project, const std::string& outPath,

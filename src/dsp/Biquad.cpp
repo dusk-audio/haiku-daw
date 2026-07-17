@@ -4,9 +4,14 @@
 
 namespace daw {
 
+// ~10 ms coefficient glide: long enough to defeat zipper noise on a stepped
+// parameter, short enough not to smear an automation move audibly.
+static constexpr double kCoefSmoothMs = 10.0;
+
 Biquad::Biquad(Type type, double freq, double q, double gainDb)
     : fType(type), fFreq(freq), fQ(q), fGainDb(gainDb) {
     Recompute();
+    SnapCoeffs();
 }
 
 void Biquad::SetParams(Type type, double freq, double q, double gainDb) {
@@ -15,12 +20,16 @@ void Biquad::SetParams(Type type, double freq, double q, double gainDb) {
     fQ      = q;
     fGainDb = gainDb;
     Recompute();
+    if (fCoefSmooth <= 0.0)   // not yet Prepared: apply immediately (no glide)
+        SnapCoeffs();
 }
 
 void Biquad::Prepare(double sampleRate) {
     if (sampleRate > 0)
         fSampleRate = sampleRate;
+    fCoefSmooth = 1.0 - std::exp(-1.0 / (kCoefSmoothMs * 0.001 * fSampleRate));
     Recompute();
+    SnapCoeffs();   // start on-target: no glide transient at playback start
     Reset();
 }
 
@@ -66,11 +75,15 @@ void Biquad::Recompute() {
             break;
     }
 
-    fB0 = b0 / a0;
-    fB1 = b1 / a0;
-    fB2 = b2 / a0;
-    fA1 = a1 / a0;
-    fA2 = a2 / a0;
+    fTB0 = b0 / a0;
+    fTB1 = b1 / a0;
+    fTB2 = b2 / a0;
+    fTA1 = a1 / a0;
+    fTA2 = a2 / a0;
+}
+
+void Biquad::SnapCoeffs() {
+    fB0 = fTB0; fB1 = fTB1; fB2 = fTB2; fA1 = fTA1; fA2 = fTA2;
 }
 
 void Biquad::Reset() {
@@ -98,6 +111,13 @@ void Biquad::SetParam(int slot, float value) {
 
 void Biquad::Process(float* stereo, int frames) {
     for (int i = 0; i < frames; i++) {
+        // Glide live coefficients toward their target (shared across channels)
+        // so a SetParam step ramps in over ~10 ms instead of clicking.
+        fB0 += (fTB0 - fB0) * fCoefSmooth;
+        fB1 += (fTB1 - fB1) * fCoefSmooth;
+        fB2 += (fTB2 - fB2) * fCoefSmooth;
+        fA1 += (fTA1 - fA1) * fCoefSmooth;
+        fA2 += (fTA2 - fA2) * fCoefSmooth;
         for (int c = 0; c < 2; c++) {
             const double x = stereo[i * 2 + c];
             const double y = fB0 * x + fB1 * fX1[c] + fB2 * fX2[c]

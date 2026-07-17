@@ -184,18 +184,27 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   underrun resync; xrun take-length pad; marker identity by frame+name; channel-
   aware resampler; undo-history cap; WavWriter 4 GB guard + NaN sanitize; zero-
   rate reject. Fuzz corpora + NaN-injection + malformed-SMF regression tests.
-- *Remaining P1 minors:* zipper-noise coeff smoothing; Eq FFT off the RT thread;
-  autosave-during-recording.
+- *Remaining P1 minors:* autosave-during-recording.
+  (DONE: zipper-noise smoothing — ~10 ms coefficient glide in Biquad/Eq and
+  makeup/range-floor glide in Compressor/Gate, so a stepped/automated parameter
+  ramps instead of clicking. Host-tested `smoothing_tests`, ASan-clean.)
+  (DONE: Eq FFT moved off the RT thread — RT captures + double-buffer-publishes
+  each analyzer frame, the FFT runs lazily UI-side in `Eq::Spectrum()`.)
 
 ## Phase X — Export & mastering  ◐ IN PROGRESS
 
 - ✅ Bit depth: 16-bit (TPDF-dithered) / 24-bit PCM / 32-bit float; `ExportWav`
   `bitDepth` param; fmt-chunk asserted in tests.
 - ✅ Loudness normalization: BS.1770 integrated-LUFS target with a true-peak-safe
-  dBTP ceiling (gain-based, not a look-ahead limiter). Reuses `Loudness` offline.
+  dBTP ceiling (gain-based). Reuses `Loudness` offline.
+- ✅ Look-ahead true-peak limiter (`dsp/Limiter`): offline, 4x-oversampled
+  detection, stereo-linked, anticipatory attack (zero added latency) + release;
+  guarantees the output dBTP ceiling by limiting peaks. Wired into `ExportWav`
+  (`ExportNormalize::limiter`) so normalization can hit the target LUFS and the
+  limiter — not a whole-program attenuation — holds the ceiling. Host-tested.
 - *Remaining:* export bit-depth/rate/format **selection UI**; worker-thread
-  export with progress/cancel; a true look-ahead limiter; FLAC/Ogg/MP3 encoders
-  (bundled/own libs — no Media Kit decoders on target); export presets + ranges.
+  export with progress/cancel; FLAC/Ogg/MP3 encoders (bundled/own libs — no
+  Media Kit decoders on target); export presets + ranges.
 
 ## Phase Y — Latency compensation
 
@@ -234,10 +243,10 @@ no video/notation/cloud). Beyond the phases, a pro DAW like Ardour also has:
   change/sysex, MIDI clock. (We have an internal piano roll only.)
 - **Comping / cue** — take comping, a clip-launch (cue) page.
 - **Track ops** — freeze/bounce a track, track templates, folder tracks.
-- **Export** — multi-format (FLAC/MP3/Ogg), export presets, ranges, a true
-  look-ahead limiter. (We have stems + per-track/per-bus bounce, 16/24/32-bit
-  with TPDF dither, and BS.1770 loudness normalization with a true-peak-safe
-  ceiling — Phase X; compressed formats + presets + ranges are the gaps.)
+- **Export** — multi-format (FLAC/MP3/Ogg), export presets, ranges. (We have
+  stems + per-track/per-bus bounce, 16/24/32-bit with TPDF dither, BS.1770
+  loudness normalization, and a look-ahead true-peak limiter — Phase X;
+  compressed formats + presets + ranges are the gaps.)
 - **Session** — snapshots, templates, archive/bundle, cleanup-unused, autosave,
   markers / ranges / locations.
 - **Other** — video timeline, Lua scripting, surround/VBAP panning, spectral

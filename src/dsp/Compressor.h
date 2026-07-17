@@ -55,7 +55,9 @@ private:
     // Smoothing coefficients (per-sample) and cached linear gains.
     double fAttackCoef  = 0.0;
     double fReleaseCoef = 0.0;
-    double fMakeupLin   = 1.0;
+    double fMakeupLin   = 1.0;   // target makeup gain (linear)
+    double fMakeupCur   = 1.0;   // live makeup gain, glided toward fMakeupLin
+    double fCoefSmooth  = 0.0;   // per-sample glide factor (0 = snap), set in Prepare
 
     // Stereo-linked smoothed GAIN envelope (linear, 1 = no reduction).
     double fEnv = 1.0;

@@ -7,6 +7,7 @@
 #include "../dsp/EffectFactory.h"
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
+#include "../dsp/Limiter.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Crossfade.h"
 
@@ -383,7 +384,9 @@ bool ExportWav(const Project& project, const std::string& outPath,
 
     // Loudness normalization (offline): measure the finished master's integrated
     // loudness + true peak, then apply one gain that brings it to the target
-    // LUFS — reduced if needed so the true peak never crosses the ceiling.
+    // LUFS. Without a limiter, the gain is backed off so the true peak never
+    // crosses the ceiling; with a limiter (below) the full target gain is
+    // applied and the limiter holds the ceiling instead.
     if (norm.enabled) {
         Loudness meter;
         meter.Prepare(outRate);
@@ -398,12 +401,20 @@ bool ExportWav(const Project& project, const std::string& outPath,
         // Only normalize measurable program (silence stays silent).
         if (lufs > Loudness::kSilenceLufs + 1.0f) {
             float gainDb = norm.targetLufs - lufs;
-            if (tp + gainDb > norm.truePeakCeil)   // true-peak safety wins
-                gainDb = norm.truePeakCeil - tp;
+            if (!norm.limiter && tp + gainDb > norm.truePeakCeil)
+                gainDb = norm.truePeakCeil - tp;   // gain-backoff true-peak safety
             const float g = std::pow(10.0f, gainDb / 20.0f);
             if (std::isfinite(g) && g > 0.0f)
                 for (size_t i = 0; i < nfloats; ++i) master[i] *= g;
         }
+    }
+
+    // Look-ahead true-peak limiter (offline): hold the dBTP ceiling by limiting
+    // peaks rather than attenuating the whole program. Runs last, after any
+    // normalization gain, so its guarantee is on the final master.
+    if (norm.limiter) {
+        Limiter lim(norm.truePeakCeil, /*attackMs=*/2.0f, /*releaseMs=*/60.0f);
+        lim.Process(master.data(), static_cast<size_t>(totalOut), outRate);
     }
 
     WavWriter writer;

@@ -18,10 +18,10 @@ sync. Future commits still land on `master` only when Marc asks.
 
 ### Verification (all green)
 ```
-cmake --build build && (cd build && ctest)          # 27/27 pass
+cmake --build build && (cd build && ctest)          # 29/29 pass
 cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # ASan/UBSan clean
 sh scripts/haiku_syntax_check.sh                    # 0 FAIL (engine/UI cross-compile)
-sh scripts/vm.sh test                               # VM on-target: 27/27 pass
+sh scripts/vm.sh test                               # VM on-target: 29/29 pass
 ```
 Host + on-target tests cover the kit-free changes; the engine/UI changes are
 cross-compile-clean and build+test green on the VM, but the **audio-listening
@@ -80,11 +80,22 @@ checks still need Marc at the VM** (see "What's next" item 1).
 - **Loudness normalization** ✅ — `ExportWav` takes an `ExportNormalize` option:
   measure integrated LUFS + true peak (kit-free `Loudness`, BS.1770), apply one
   gain to the target LUFS, backed off so the output never crosses the dBTP
-  ceiling (true-peak-*safe* normalization, not a look-ahead limiter). Host-tested
-  (hits target; ceiling wins on a loud target).
+  ceiling (true-peak-*safe* normalization). Host-tested (hits target; ceiling
+  wins on a loud target).
+- **Look-ahead true-peak limiter** ✅ — kit-free `dsp/Limiter`: offline,
+  4x-oversampled true-peak detection (same FIR as `Loudness`), stereo-linked
+  gain, look-ahead window-min + anticipatory backward-smoothed attack (zero
+  added latency, so no PDC needed on the master sink) + exponential release;
+  guarantees the output dBTP ceiling. Wired into `ExportWav` via
+  `ExportNormalize::limiter` — with normalization on, the program is pushed to
+  `targetLufs` and the limiter (not a whole-mix attenuation) holds the ceiling,
+  so quiet material reaches target loudness; may also be used without
+  normalization to peak-limit only. Host-tested (`tests/limiter_tests.cpp` +
+  exporter integration cases: reaches a loud target the gain-backoff path
+  couldn't, ceiling still held). ASan-clean.
 - *Remaining:* export bit-depth/rate/format **selection UI** + worker-thread
-  export with progress/cancel (both GUI, need VM runtime); a true look-ahead
-  limiter; FLAC/Ogg/MP3 encoders (bundled libs — no Media Kit decoders on target).
+  export with progress/cancel (both GUI, need VM runtime); FLAC/Ogg/MP3 encoders
+  (bundled libs — no Media Kit decoders on target).
 
 ## What's next (priority order)
 
@@ -102,11 +113,12 @@ checks still need Marc at the VM** (see "What's next" item 1).
 
 2. **Finish Phase X** — bit-depth/rate/format **selection UI** in the export
    flow (`MainWindow.cpp` export path currently hard-passes `sampleRate`, 16-bit,
-   no normalization); move export **off the UI looper** onto a worker thread with
-   progress/cancel (`MainWindow.cpp:444,467`); a true look-ahead limiter (the
-   current normalization is gain-based/true-peak-safe, done); **FLAC/Ogg/MP3
-   encoders** (need bundled libs — NO Media Kit decoders on the target; decide
-   MP3/LAME licensing with Marc). (Loudness-normalize + true-peak ceiling: done.)
+   no normalization/limiting — needs to surface `bitDepth` + `ExportNormalize`
+   {enabled, targetLufs, truePeakCeil, limiter}); move export **off the UI
+   looper** onto a worker thread with progress/cancel (`MainWindow.cpp:444,467`);
+   **FLAC/Ogg/MP3 encoders** (need bundled libs — NO Media Kit decoders on the
+   target; decide MP3/LAME licensing with Marc). (Loudness-normalize + true-peak
+   ceiling + look-ahead true-peak limiter: done.)
 
 3. **Phase Y — latency compensation**: record round-trip offset (`Recorder`/
    StartCapture; query device latency) + plugin delay compensation
@@ -119,10 +131,16 @@ checks still need Marc at the VM** (see "What's next" item 1).
 
 5. **Phase I+ — LV2 hosting** on top of the existing native-`.so` `PluginHost`.
 
-6. **P1 minors remaining**: zipper-noise coeff smoothing (Biquad/Eq/Comp/Gate);
-   Eq FFT off the RT thread (`Eq.cpp:217`); autosave-during-recording
-   (`MainWindow.cpp:1176`); denormal DC-bias belt-and-suspenders on the IIR state
-   (deferred — FTZ already covers it, DC bias needs audio verification).
+6. **P1 minors remaining**: autosave-during-recording (`MainWindow.cpp:1176`);
+   denormal DC-bias belt-and-suspenders on the IIR state (deferred — FTZ already
+   covers it, DC bias needs audio verification). (DONE: Eq FFT off the RT thread —
+   the audio thread now only captures + double-buffer-publishes each 512-sample
+   analyzer frame; the FFT runs lazily on the UI thread in `Eq::Spectrum()` (the
+   meter poll), so the transform is off the RT path. Host-tested, ASan-clean.)
+   (DONE: zipper-noise smoothing — ~10 ms coefficient glide in Biquad/Eq +
+   makeup/range-floor glide in Compressor/Gate; a stepped/automated param ramps
+   instead of clicking. RT-safe (arithmetic on preallocated members). Host-tested
+   `tests/smoothing_tests.cpp`, ASan-clean.)
    (DONE: marker identity by frame+name; Resampler mono/channel-aware; undo
    history cap; WavWriter >4 GB guard; WavWriter NaN/clamp sanitize; WavSource
    zero-rate reject; SmfIO checked skip; ProjectIO strict header + escaped-format

@@ -516,6 +516,39 @@ int main() {
             CHECK(tp <= -1.0f + 0.3f);                  // ceiling respected
             std::remove(path.c_str());
         }
+
+        // (c) Same loud target (-3 LUFS) WITH the look-ahead limiter: instead of
+        // backing the whole program off, the limiter holds the ceiling — so the
+        // output gets much closer to the target loudness than (b) did, while the
+        // true peak still stays at/under the ceiling.
+        {
+            Project p = build();
+            ExportNormalize nz; nz.enabled = true; nz.limiter = true;
+            nz.targetLufs = -3.0f; nz.truePeakCeil = -1.0f;
+            std::remove(path.c_str());
+            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            float lufs = 0, tp = 0;
+            CHECK(measure(path, &lufs, &tp));
+            CHECK(tp <= -1.0f + 0.3f);                  // ceiling still respected
+            CHECK(lufs > -8.0f);                        // reached loud (backoff couldn't)
+            std::remove(path.c_str());
+        }
+
+        // (d) Limiter without normalization: a hot master (source gain 1.0 into
+        // a full-velocity note) is peak-limited to the ceiling with no loudness
+        // change requested.
+        {
+            Project p = build();
+            for (Track& t : p.Tracks()) t.gain = 1.0f;   // hotter than build()'s 0.5
+            ExportNormalize nz; nz.enabled = false; nz.limiter = true;
+            nz.truePeakCeil = -1.0f;
+            std::remove(path.c_str());
+            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            float lufs = 0, tp = 0;
+            CHECK(measure(path, &lufs, &tp));
+            CHECK(tp <= -1.0f + 0.3f);                  // limiter held the ceiling
+            std::remove(path.c_str());
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

@@ -90,6 +90,10 @@ Co HighShelfCo(double fc, double sr, double gainDB, double Q) {
 
 } // namespace
 
+// ~10 ms coefficient glide: defeats zipper on a stepped band parameter without
+// audibly smearing an automation move.
+static constexpr double kCoefSmoothMs = 10.0;
+
 Eq::Eq() {
     for (int b = 0; b < kBands; b++) {
         fFreq[b]   = kDefFreq[b];
@@ -97,6 +101,7 @@ Eq::Eq() {
         fQ[b]      = kDefQ[b];
     }
     for (int b = 0; b < kBands; b++) ComputeBand(b);
+    SnapCoeffs();
     Reset();
 }
 
@@ -106,15 +111,22 @@ void Eq::SetBand(int band, float freqHz, float gainDb, float q) {
     fGainDb[band] = gainDb;
     fQ[band]      = q;
     ComputeBand(band);
+    if (fCoefSmooth <= 0.0)   // not yet Prepared: apply immediately (no glide)
+        SnapCoeffs();
 }
 
 void Eq::Prepare(double sampleRate) {
     if (sampleRate > 0) fSampleRate = sampleRate;
+    fCoefSmooth = 1.0 - std::exp(-1.0 / (kCoefSmoothMs * 0.001 * fSampleRate));
     for (int b = 0; b < kBands; b++) ComputeBand(b);
+    SnapCoeffs();   // start on-target: no glide transient at playback start
     for (int i = 0; i < kFftSize; i++)                 // Hann window
         fWin[i] = 0.5f - 0.5f * (float)std::cos(2.0 * kPi * i / (kFftSize - 1));
     fCapPos = 0;
-    fMagCount.store(0, std::memory_order_relaxed);
+    fSnapIdx.store(-1, std::memory_order_relaxed);      // no published frame yet
+    fSnapSeq.store(0, std::memory_order_relaxed);
+    fMagCount = 0;
+    fMagSeq   = 0;
     Reset();
 }
 
@@ -144,24 +156,43 @@ static void Fft(double* re, double* im, int n) {
     }
 }
 
-// Capture one mono input sample; when the buffer fills, window + FFT it and
-// store the magnitude spectrum (dB) for the editor. Called from Process (RT).
-void Eq::PushSpectrumSample(float mono) {
+// RT: buffer one mono input sample; when a full frame fills, publish it into
+// the snapshot buffer the UI is NOT reading and bump the version. No FFT here —
+// only a copy + two atomic stores, so the audio thread stays cheap.
+void Eq::CaptureSpectrumSample(float mono) {
     fCap[fCapPos++] = mono;
     if (fCapPos < kFftSize) return;
     fCapPos = 0;
-    for (int i = 0; i < kFftSize; i++) { fRe[i] = fCap[i] * fWin[i]; fIm[i] = 0.0; }
-    Fft(fRe, fIm, kFftSize);
-    for (int k = 0; k < kBins; k++) {
-        const double mag = std::sqrt(fRe[k] * fRe[k] + fIm[k] * fIm[k]) / (kFftSize * 0.5);
-        fMag[k] = (float)(20.0 * std::log10(mag > 1e-7 ? mag : 1e-7));
-    }
-    fMagCount.store(kBins, std::memory_order_release);
+    const int pub = fSnapIdx.load(std::memory_order_relaxed);
+    const int w   = (pub == 0) ? 1 : 0;   // write the buffer the UI isn't reading
+    for (int i = 0; i < kFftSize; i++) fCapSnap[w][i] = fCap[i];
+    fSnapIdx.store(w, std::memory_order_release);
+    fSnapSeq.fetch_add(1, std::memory_order_release);
 }
 
+// UI thread: run the FFT on the newest published frame (only when a new one has
+// arrived since last time), cache the magnitudes, and copy them out. The
+// transform runs HERE, off the audio thread.
 int Eq::Spectrum(float* magDb, int maxBins) const {
-    const int n = fMagCount.load(std::memory_order_acquire);
-    const int cnt = n < maxBins ? n : maxBins;
+    const int idx = fSnapIdx.load(std::memory_order_acquire);
+    if (idx >= 0) {
+        const unsigned seq = fSnapSeq.load(std::memory_order_acquire);
+        if (seq != fMagSeq) {   // a new frame was captured -> (re)transform
+            for (int i = 0; i < kFftSize; i++) {
+                fRe[i] = fCapSnap[idx][i] * fWin[i];
+                fIm[i] = 0.0;
+            }
+            Fft(fRe, fIm, kFftSize);
+            for (int k = 0; k < kBins; k++) {
+                const double mag = std::sqrt(fRe[k] * fRe[k] + fIm[k] * fIm[k])
+                                   / (kFftSize * 0.5);
+                fMag[k] = (float)(20.0 * std::log10(mag > 1e-7 ? mag : 1e-7));
+            }
+            fMagCount = kBins;
+            fMagSeq   = seq;
+        }
+    }
+    const int cnt = fMagCount < maxBins ? fMagCount : maxBins;
     for (int i = 0; i < cnt; i++) magDb[i] = fMag[i];
     return cnt;
 }
@@ -174,7 +205,14 @@ void Eq::ComputeBand(int b) {
         case Peak:
         default:        c = Peaking(fFreq[b], fSampleRate, fGainDb[b], fQ[b]); break;
     }
-    fB0[b] = c.b0; fB1[b] = c.b1; fB2[b] = c.b2; fA1[b] = c.a1; fA2[b] = c.a2;
+    fTB0[b] = c.b0; fTB1[b] = c.b1; fTB2[b] = c.b2; fTA1[b] = c.a1; fTA2[b] = c.a2;
+}
+
+void Eq::SnapCoeffs() {
+    for (int b = 0; b < kBands; b++) {
+        fB0[b] = fTB0[b]; fB1[b] = fTB1[b]; fB2[b] = fTB2[b];
+        fA1[b] = fTA1[b]; fA2[b] = fTA2[b];
+    }
 }
 
 void Eq::Reset() {
@@ -199,11 +237,13 @@ float Eq::MagnitudeResponseDb(float freqHz) const {
     const double c2 = std::cos(2.0 * w), s2 = std::sin(2.0 * w);
     double totalDb = 0.0;
     for (int b = 0; b < kBands; b++) {
+        // Draw the SETTLED (target) response so the curve tracks the knobs
+        // immediately, not the gliding live coefficients.
         // H(e^jw) = (b0 + b1 e^-jw + b2 e^-2jw)/(1 + a1 e^-jw + a2 e^-2jw).
-        const double nr = fB0[b] + fB1[b] * c1 + fB2[b] * c2;
-        const double ni = -(fB1[b] * s1 + fB2[b] * s2);
-        const double dr = 1.0 + fA1[b] * c1 + fA2[b] * c2;
-        const double di = -(fA1[b] * s1 + fA2[b] * s2);
+        const double nr = fTB0[b] + fTB1[b] * c1 + fTB2[b] * c2;
+        const double ni = -(fTB1[b] * s1 + fTB2[b] * s2);
+        const double dr = 1.0 + fTA1[b] * c1 + fTA2[b] * c2;
+        const double di = -(fTA1[b] * s1 + fTA2[b] * s2);
         const double num = nr * nr + ni * ni;
         const double den = dr * dr + di * di;
         if (den > 1e-20 && num > 1e-20)
@@ -214,7 +254,16 @@ float Eq::MagnitudeResponseDb(float freqHz) const {
 
 void Eq::Process(float* stereo, int frames) {
     for (int i = 0; i < frames; i++) {
-        PushSpectrumSample(0.5f * (stereo[i * 2] + stereo[i * 2 + 1]));  // pre-EQ
+        CaptureSpectrumSample(0.5f * (stereo[i * 2] + stereo[i * 2 + 1]));  // pre-EQ
+        // Glide each band's live coefficients toward target (shared across
+        // channels) so a stepped band parameter ramps in instead of clicking.
+        for (int b = 0; b < kBands; b++) {
+            fB0[b] += (fTB0[b] - fB0[b]) * fCoefSmooth;
+            fB1[b] += (fTB1[b] - fB1[b]) * fCoefSmooth;
+            fB2[b] += (fTB2[b] - fB2[b]) * fCoefSmooth;
+            fA1[b] += (fTA1[b] - fA1[b]) * fCoefSmooth;
+            fA2[b] += (fTA2[b] - fA2[b]) * fCoefSmooth;
+        }
         for (int ch = 0; ch < 2; ch++) {
             double x = stereo[i * 2 + ch];
             for (int b = 0; b < kBands; b++) {

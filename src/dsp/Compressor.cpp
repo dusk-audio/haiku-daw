@@ -10,6 +10,7 @@ Compressor::Compressor(double thresholdDb, double ratio,
     : fThresholdDb(thresholdDb), fRatio(ratio),
       fAttackMs(attackMs), fReleaseMs(releaseMs), fMakeupDb(makeupDb) {
     Recompute();
+    fMakeupCur = fMakeupLin;
 }
 
 void Compressor::SetParams(double thresholdDb, double ratio,
@@ -20,12 +21,21 @@ void Compressor::SetParams(double thresholdDb, double ratio,
     fReleaseMs   = releaseMs;
     fMakeupDb    = makeupDb;
     Recompute();
+    if (fCoefSmooth <= 0.0)   // not yet Prepared: apply makeup immediately
+        fMakeupCur = fMakeupLin;
 }
+
+// ~10 ms glide on the makeup gain so an automated makeup step ramps instead of
+// clicking. Threshold/ratio changes already reach the output through the
+// attack/release gain envelope, so only makeup needs explicit smoothing.
+static constexpr double kMakeupSmoothMs = 10.0;
 
 void Compressor::Prepare(double sampleRate) {
     if (sampleRate > 0)
         fSampleRate = sampleRate;
+    fCoefSmooth = 1.0 - std::exp(-1.0 / (kMakeupSmoothMs * 0.001 * fSampleRate));
     Recompute();
+    fMakeupCur = fMakeupLin;   // start on-target
     Reset();
 }
 
@@ -80,7 +90,11 @@ void Compressor::Process(float* stereo, int frames) {
 
         if (fEnv < minEnv) minEnv = fEnv;
 
-        const double g = fEnv * fMakeupLin;
+        // Glide makeup gain toward its target so an automated makeup step can't
+        // click; the compression envelope (fEnv) is already smoothed.
+        fMakeupCur += (fMakeupLin - fMakeupCur) * fCoefSmooth;
+
+        const double g = fEnv * fMakeupCur;
         stereo[i * 2 + 0] = static_cast<float>(l * g);
         stereo[i * 2 + 1] = static_cast<float>(r * g);
     }

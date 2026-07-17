@@ -55,7 +55,9 @@ private:
     // Smoothing coefficients (per-sample) and cached linear range floor.
     double fAttackCoef  = 0.0;
     double fReleaseCoef = 0.0;
-    double fRangeFloor  = 0.001;   // 10^(-rangeDb/20), lowest gain when closed
+    double fRangeFloor  = 0.001;   // target 10^(-rangeDb/20), lowest gain closed
+    double fFloorCur    = 0.001;   // live range floor, glided toward fRangeFloor
+    double fCoefSmooth  = 0.0;     // per-sample glide factor (0 = snap), set in Prepare
 
     // Stereo-linked smoothed GAIN envelope (linear, 1 = fully open).
     double fEnv = 1.0;

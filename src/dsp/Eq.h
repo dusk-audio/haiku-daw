@@ -30,8 +30,10 @@ public:
     void Process(float* stereo, int frames) override;
     void Reset() override;
     void SetParam(int slot, float value) override;   // band*3 + {freq,gain,Q}
-    // Live input spectrum (magnitude dB per FFT bin, low->high). For the FFT
-    // analyzer overlay; RT-writer, UI-reader.
+    // Live input spectrum (magnitude dB per FFT bin, low->high) for the analyzer
+    // overlay. The RT thread only CAPTURES input frames; this call runs the FFT
+    // itself on the UI thread (it is polled from the meter loop), keeping the
+    // transform off the audio thread.
     int Spectrum(float* magDb, int maxBins) const override;
     const char* Name() const override { return "EQ"; }
 
@@ -48,27 +50,47 @@ public:
     float MagnitudeResponseDb(float freqHz) const;
 
 private:
-    void ComputeBand(int b);
-    void PushSpectrumSample(float mono);   // capture input; run FFT when full
+    void ComputeBand(int b);   // -> target coefficients for band b
+    void SnapCoeffs();         // live = target for all bands (no glide)
+    void CaptureSpectrumSample(float mono);   // RT: buffer input; publish a frame
 
     double fSampleRate = 48000.0;
 
-    // FFT analyzer state: capture the EQ input, window + transform when the
-    // buffer fills, and store magnitudes (dB) for the editor overlay.
-    float  fCap[kFftSize] = {};
-    int    fCapPos = 0;
+    // FFT analyzer handoff. The RT thread captures the EQ input into fCap and,
+    // each time a full frame fills, copies it into the buffer the UI is NOT
+    // reading (fCapSnap[!published]) and bumps fSnapSeq. The UI thread's
+    // Spectrum() runs the actual FFT lazily on the latest published snapshot, so
+    // the O(N log N) transform stays OFF the audio thread — the RT side only
+    // does a 512-float copy + two atomic stores. Double-buffered + versioned so
+    // the reader never sees a half-written frame.
+    float  fCap[kFftSize] = {};      // RT capture ring
+    int    fCapPos = 0;              // RT
     float  fWin[kFftSize] = {};      // Hann window (built in Prepare)
-    float  fMag[kBins] = {};         // last magnitude spectrum (dB)
-    std::atomic<int> fMagCount{0};   // bins available (0 before first FFT)
-    double fRe[kFftSize] = {};       // FFT scratch
-    double fIm[kFftSize] = {};
+    float  fCapSnap[2][kFftSize] = {{}};  // RT-published frame snapshots
+    std::atomic<int>      fSnapIdx{-1};   // published buffer index (-1 = none)
+    std::atomic<unsigned> fSnapSeq{0};    // frame version (bumped on publish)
+
+    // UI-thread FFT cache — mutable: Spectrum() is logically const but derives
+    // and caches the transform of the newest snapshot. Touched only on the UI
+    // thread (the meter poll), never from Process().
+    mutable float    fMag[kBins] = {};   // last computed magnitude spectrum (dB)
+    mutable int      fMagCount = 0;      // bins in fMag (0 before first FFT)
+    mutable unsigned fMagSeq   = 0;      // fSnapSeq the cache was computed from
+    mutable double   fRe[kFftSize] = {}; // FFT scratch (UI thread only)
+    mutable double   fIm[kFftSize] = {};
 
     float  fFreq[kBands];
     float  fGainDb[kBands];
     float  fQ[kBands];
 
-    // Normalized biquad coefficients per band (a0 folded in).
+    // Live normalized biquad coefficients per band (a0 folded in) used by
+    // Process, and the targets they glide toward. Automation moves the targets;
+    // Process one-pole-smooths the live coeffs per sample so a coefficient step
+    // can't click (zipper). Converged (no automation) => live == target, so the
+    // static response is unchanged.
     double fB0[kBands], fB1[kBands], fB2[kBands], fA1[kBands], fA2[kBands];
+    double fTB0[kBands], fTB1[kBands], fTB2[kBands], fTA1[kBands], fTA2[kBands];
+    double fCoefSmooth = 0.0;   // per-sample glide factor (0 = snap), set in Prepare
 
     // Per-band Direct Form I state: [band][channel] x[n-1],x[n-2],y[n-1],y[n-2].
     double fX1[kBands][2], fX2[kBands][2], fY1[kBands][2], fY2[kBands][2];

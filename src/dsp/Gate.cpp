@@ -10,6 +10,7 @@ Gate::Gate(double thresholdDb, double ratio,
     : fThresholdDb(thresholdDb), fRatio(ratio),
       fAttackMs(attackMs), fReleaseMs(releaseMs), fRangeDb(rangeDb) {
     Recompute();
+    fFloorCur = fRangeFloor;
 }
 
 void Gate::SetParams(double thresholdDb, double ratio,
@@ -20,12 +21,21 @@ void Gate::SetParams(double thresholdDb, double ratio,
     fReleaseMs   = releaseMs;
     fRangeDb     = rangeDb;
     Recompute();
+    if (fCoefSmooth <= 0.0)   // not yet Prepared: apply range floor immediately
+        fFloorCur = fRangeFloor;
 }
+
+// ~10 ms glide on the range floor so an automated range step ramps instead of
+// stepping the closed-gate gain. Threshold/ratio already reach the output
+// through the attack/release gain envelope, so only the floor needs smoothing.
+static constexpr double kFloorSmoothMs = 10.0;
 
 void Gate::Prepare(double sampleRate) {
     if (sampleRate > 0)
         fSampleRate = sampleRate;
+    fCoefSmooth = 1.0 - std::exp(-1.0 / (kFloorSmoothMs * 0.001 * fSampleRate));
     Recompute();
+    fFloorCur = fRangeFloor;   // start on-target
     Reset();
 }
 
@@ -55,9 +65,13 @@ void Gate::Process(float* stereo, int frames) {
     const double ratio    = fRatio < 1.0 ? 1.0 : fRatio;
     const double slope    = ratio - 1.0;         // dB attenuation per dB under
     const double threshDb = fThresholdDb;
-    const double floorGain = fRangeFloor;
 
     for (int i = 0; i < frames; i++) {
+        // Glide the range floor toward its target so an automated range step
+        // can't step the closed-gate gain; the envelope (fEnv) is already smoothed.
+        fFloorCur += (fRangeFloor - fFloorCur) * fCoefSmooth;
+        const double floorGain = fFloorCur;
+
         const double l = stereo[i * 2 + 0];
         const double r = stereo[i * 2 + 1];
 
