@@ -5,6 +5,7 @@
 
 #include "../src/engine/Exporter.h"
 #include "../src/engine/WavSource.h"
+#include "../src/dsp/Loudness.h"
 #include "../src/model/Project.h"
 
 #include <cmath>
@@ -454,6 +455,67 @@ int main() {
         CHECK(pk <= 1.0f + 1e-3f);     // no full-scale Inf blast survived
         std::remove(out.c_str());
         std::remove(nanWav);
+    }
+
+    // Loudness normalization: export a sustained note normalized to a target
+    // integrated LUFS with a true-peak ceiling. Measure the output's integrated
+    // loudness + true peak and confirm (a) it hit the target, and (b) a loud
+    // target that would clip is backed off to respect the ceiling.
+    {
+        // Measure integrated LUFS + true-peak dBTP of a 32-bit-float WAV.
+        auto measure = [](const std::string& path, float* lufs, float* tp) -> bool {
+            WavSource s;
+            if (!s.Open(path)) return false;
+            Loudness m; m.Prepare(s.FrameRate()); m.SetIntegratedEnabled(true);
+            const float* c = nullptr; size_t f = 0;
+            while (s.ReadChunk(&c, &f)) m.Process(c, (int)f);
+            *lufs = m.IntegratedLufs();
+            *tp   = m.TruePeakDb();
+            return true;
+        };
+        auto build = []() {
+            Project p; p.sampleRate = 48000.0; p.masterGain = 1.0f;
+            Track m; m.id = p.NextTrackId(); m.type = TrackType::Midi;
+            m.gain = 0.5f; m.pan = 0.0f;      // start well below the target
+            MidiNote n; n.pitch = 57; n.velocity = 100;
+            n.startFrame = 0; n.lengthFrames = (Frame)(48000 * 3);   // 3 s > gate
+            if (m.midiClips.empty()) { MidiClip mc; mc.id = 1; mc.startFrame = 0;
+                                       mc.lengthFrames = 1; m.midiClips.push_back(mc); }
+            m.midiClips.front().notes.push_back(n);
+            m.midiClips.front().lengthFrames = n.lengthFrames;
+            p.AddTrack(m);
+            return p;
+        };
+        const std::string path = "/tmp/haiku_daw_norm.wav";
+
+        // (a) Normalize to -16 LUFS, ceiling -1 dBTP. Sine-ish note has low crest,
+        // so the target is reachable without hitting the ceiling.
+        {
+            Project p = build();
+            ExportNormalize nz; nz.enabled = true;
+            nz.targetLufs = -16.0f; nz.truePeakCeil = -1.0f;
+            std::remove(path.c_str());
+            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            float lufs = 0, tp = 0;
+            CHECK(measure(path, &lufs, &tp));
+            CHECK(std::fabs(lufs - (-16.0f)) < 1.5f);   // hit the loudness target
+            CHECK(tp <= -1.0f + 0.5f);                  // within the ceiling
+            std::remove(path.c_str());
+        }
+
+        // (b) Ask for a very loud target (-3 LUFS): the true-peak ceiling must
+        // win, so the output true peak stays at/under the ceiling (no clipping).
+        {
+            Project p = build();
+            ExportNormalize nz; nz.enabled = true;
+            nz.targetLufs = -3.0f; nz.truePeakCeil = -1.0f;
+            std::remove(path.c_str());
+            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            float lufs = 0, tp = 0;
+            CHECK(measure(path, &lufs, &tp));
+            CHECK(tp <= -1.0f + 0.3f);                  // ceiling respected
+            std::remove(path.c_str());
+        }
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

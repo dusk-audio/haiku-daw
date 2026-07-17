@@ -6,6 +6,7 @@
 #include "../synth/Synth.h"
 #include "../dsp/EffectFactory.h"
 #include "../dsp/IEffect.h"
+#include "../dsp/Loudness.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Crossfade.h"
 
@@ -126,7 +127,7 @@ void PlaceClip(const Clip& c, double scale, double outRate,
 } // namespace
 
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate, int bitDepth) {
+               double outRate, int bitDepth, ExportNormalize norm) {
     EnableDenormalFlush();
     if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 16;
     const double projRate = project.sampleRate;
@@ -379,6 +380,31 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // with the RT engine's pre-DAC guard (P0 #1); the offline path lacked it.
     for (size_t i = 0; i < nfloats; ++i)
         if (!std::isfinite(master[i])) master[i] = 0.0f;
+
+    // Loudness normalization (offline): measure the finished master's integrated
+    // loudness + true peak, then apply one gain that brings it to the target
+    // LUFS — reduced if needed so the true peak never crosses the ceiling.
+    if (norm.enabled) {
+        Loudness meter;
+        meter.Prepare(outRate);
+        meter.SetIntegratedEnabled(true);   // whole-program gated loudness
+        const int64_t kBlk = 8192;
+        for (int64_t off = 0; off < totalOut; off += kBlk) {
+            const int64_t n = std::min(kBlk, totalOut - off);
+            meter.Process(master.data() + off * 2, static_cast<int>(n));
+        }
+        const float lufs = meter.IntegratedLufs();
+        const float tp   = meter.TruePeakDb();
+        // Only normalize measurable program (silence stays silent).
+        if (lufs > Loudness::kSilenceLufs + 1.0f) {
+            float gainDb = norm.targetLufs - lufs;
+            if (tp + gainDb > norm.truePeakCeil)   // true-peak safety wins
+                gainDb = norm.truePeakCeil - tp;
+            const float g = std::pow(10.0f, gainDb / 20.0f);
+            if (std::isfinite(g) && g > 0.0f)
+                for (size_t i = 0; i < nfloats; ++i) master[i] *= g;
+        }
+    }
 
     WavWriter writer;
     const bool floatOut = (bitDepth == 32);

@@ -30,8 +30,22 @@ namespace daw {
 //
 // `bitDepth` selects the output sample format: 16 or 24 = PCM (16-bit is
 // TPDF-dithered), 32 = IEEE float. Any other value falls back to 16.
+//
+// `norm` optionally loudness-normalizes the finished master to a target
+// integrated loudness (ITU-R BS.1770 / EBU R128), backing the gain off so the
+// export never exceeds a true-peak ceiling (dBTP). This is gain-based
+// normalization with true-peak safety, not a look-ahead limiter: when the
+// target can't be reached without exceeding the ceiling, the ceiling wins and
+// the result lands below target rather than clipping.
+struct ExportNormalize {
+    bool  enabled      = false;
+    float targetLufs   = -14.0f;   // integrated LUFS target (e.g. -14 streaming)
+    float truePeakCeil = -1.0f;    // dBTP ceiling the output must not exceed
+};
+
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate = 0.0, int bitDepth = 16);
+               double outRate = 0.0, int bitDepth = 16,
+               ExportNormalize norm = {});
 
 // Bounce each non-bus track to its own WAV stem under `dir` (named
 // "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by
