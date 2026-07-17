@@ -209,8 +209,17 @@ void PianoRollView::Draw(BRect) {
     const float span = kVelLaneH - 12.0f;
     for (size_t i = 0; i < fNotes.size(); i++) {
         const MidiNote& n = fNotes[i];
-        const float x = FrameToX(n.startFrame);
-        if (x < kKbdW || x > w) continue;
+        const float x0 = FrameToX(n.startFrame);
+        const float x1 = FrameToX(n.startFrame + n.lengthFrames);
+        const float ny = PitchToY(n.pitch);
+        // Draw a lollipop iff its note is visible in the grid above — the SAME
+        // cull the note loop uses (start/end x AND pitch row). Otherwise a note
+        // moved/split/glued to an off-screen pitch leaves an orphan lollipop, and
+        // a note whose body scrolls in from the left shows with none: the
+        // lollipop appears "separated" from its note.
+        if (x1 < kKbdW || x0 > w || ny + kRowH < kToolbarH || ny > velTop)
+            continue;
+        const float x = std::max(x0, kKbdW);   // align to the note's drawn left edge
         const bool sel = i < fSel.size() && fSel[i];
         const float top = base - (n.velocity / 127.0f) * span;
         SetHighColor(sel ? Rgb(255, 240, 140) : Rgb(110, 180, 250));
@@ -360,9 +369,19 @@ void PianoRollView::GlueNoteAt(int i) {
 }
 
 int PianoRollView::VelNoteAtX(float x) const {
+    const float w      = Bounds().Width();
+    const float velTop = VelLaneTop();
     int best = -1; float bestd = 8.0f;
     for (size_t i = 0; i < fNotes.size(); i++) {
-        const float d = std::fabs(FrameToX(fNotes[i].startFrame) - x);
+        const MidiNote& n = fNotes[i];
+        const float x0 = FrameToX(n.startFrame);
+        const float x1 = FrameToX(n.startFrame + n.lengthFrames);
+        const float ny = PitchToY(n.pitch);
+        // Only grab a note whose lollipop is actually drawn (same visibility as
+        // the velocity-lane draw), so a click can't seize an off-screen note.
+        if (x1 < kKbdW || x0 > w || ny + kRowH < kToolbarH || ny > velTop)
+            continue;
+        const float d = std::fabs(std::max(x0, kKbdW) - x);
         if (d < bestd) { bestd = d; best = (int)i; }
     }
     return best;
