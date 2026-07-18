@@ -69,7 +69,8 @@ static double Envelope(double rel, double noteLen,
 }
 
 void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
-                   float* out, size_t frames, Frame blockStart, float gain) const {
+                   float* out, size_t frames, Frame blockStart,
+                   float gainL, float gainR) const {
     const double sr = fSampleRate;
     const double a = std::max(0.0f, inst.attack)  * sr;
     const double d = std::max(0.0f, inst.decay)   * sr;
@@ -85,7 +86,7 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
 
         const double freq = NoteFreq(n.pitch);
         const double cyclesPerFrame = freq / sr;
-        const float  amp = (n.velocity / 127.0f) * 0.2f * gain;
+        const float  amp = (n.velocity / 127.0f) * 0.2f;   // channel gain is per-side
         const double noteLen = (double)n.lengthFrames;
 
         for (size_t i = 0; i < frames; i++) {
@@ -97,8 +98,8 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
             if (env <= 0.0) continue;
             const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * rel,
                                           cyclesPerFrame) * env) * amp;
-            out[i * 2 + 0] += smp;
-            out[i * 2 + 1] += smp;
+            out[i * 2 + 0] += smp * gainL;
+            out[i * 2 + 1] += smp * gainR;
         }
     }
 }

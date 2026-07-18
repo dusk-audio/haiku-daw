@@ -53,4 +53,28 @@ inline float MidiChannelGain(const std::vector<MidiClipEvent>& events, Frame at)
     return (float)vol / 127.0f * (float)expr / 127.0f;
 }
 
+// CC10 (pan) at `at` as a position in [-1, 1]; absent/64 = centered (0).
+inline float MidiChannelPan(const std::vector<MidiClipEvent>& events, Frame at) {
+    const int pan = CcValueAt(events, 10, at, 64);
+    float p = ((float)pan - 64.0f) / 63.0f;
+    if (p < -1.0f) p = -1.0f;
+    if (p >  1.0f) p =  1.0f;
+    return p;
+}
+
+// Per-channel gains a MIDI track's notes render through: the CC7 x CC11 scalar
+// (MidiChannelGain) placed by the CC10 pan. The pan is a BALANCE law — unity at
+// center, attenuating only the opposite channel — deliberately not equal-power:
+// the synth voice is already written to both channels, and an equal-power law
+// would pull a centered channel down 3 dB, changing the level of every existing
+// project that has no CC10. With CC10 absent this is exactly gL == gR ==
+// MidiChannelGain, so playback and bounces are unchanged.
+inline void MidiChannelGains(const std::vector<MidiClipEvent>& events, Frame at,
+                             float* gL, float* gR) {
+    const float g = MidiChannelGain(events, at);
+    const float p = MidiChannelPan(events, at);
+    if (gL) *gL = g * ((p > 0.0f) ? (1.0f - p) : 1.0f);
+    if (gR) *gR = g * ((p < 0.0f) ? (1.0f + p) : 1.0f);
+}
+
 } // namespace daw

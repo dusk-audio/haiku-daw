@@ -23,10 +23,19 @@ public:
     void SetSampleRate(double sr) { if (sr > 0) fSampleRate = sr; }
 
     // Add every note sounding in [blockStart, blockStart+frames) into the
-    // interleaved-stereo `out`, scaled by `gain`, using the instrument's
-    // waveform + ADSR (release rings past note-off). Never allocates.
+    // interleaved-stereo `out`, scaled per channel by `gainL`/`gainR`, using the
+    // instrument's waveform + ADSR (release rings past note-off). Separate L/R
+    // gains let the caller place the voice with a MIDI channel pan (CC10) without
+    // a second pass over the buffer. Never allocates.
     void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
-                float* out, size_t frames, Frame blockStart, float gain) const;
+                float* out, size_t frames, Frame blockStart,
+                float gainL, float gainR) const;
+
+    // Convenience: the same gain on both channels (centered).
+    void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
+                float* out, size_t frames, Frame blockStart, float gain) const {
+        Render(notes, inst, out, frames, blockStart, gain, gain);
+    }
 
 private:
     double fSampleRate;

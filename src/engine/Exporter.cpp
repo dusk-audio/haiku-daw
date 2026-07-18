@@ -368,7 +368,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
                     n.lengthFrames = ToOut(n.lengthFrames, scale);
                 }
             // Render in blocks so the CC7 (volume) x CC11 (expression) channel
-            // gain is re-evaluated as it steps. Events stay in project frames;
+            // gain and the CC10 pan are re-evaluated as they step. Events stay in
+            // project frames;
             // the block start (output frames) maps back via 1/scale. A small
             // block (~10 ms) keeps CC resolution close to the live engine's
             // per-buffer granularity, so a bounce steps like playback.
@@ -377,9 +378,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
             for (int64_t off = 0; off < totalOut; off += kBlk) {
                 const int64_t nn = std::min<int64_t>(kBlk, totalOut - off);
                 const Frame pf = (Frame)(off / scale);   // project frame @ block
-                const float cg = MidiChannelGain(events, pf);
+                float cgl, cgr;
+                MidiChannelGains(events, pf, &cgl, &cgr);
                 synth.Render(notes, t.instrument, nb + off * 2, (size_t)nn,
-                             off, cg);
+                             off, cgl, cgr);
             }
         }   // Bus: nb already holds the summed upstream (dry).
 

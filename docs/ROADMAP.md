@@ -254,8 +254,14 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   The Exporter (host-tested: CC7 mutes/halves/passes) and the Engine render MIDI
   notes through this per-block gain, so a `.mid`'s volume/expression plays back.
   Engine wiring cross-compiles; VM audio-runtime pending.
-- *Remaining:* CC10 pan + pitch-bend + mod-wheel (pitch/mod need synth phase
-  integration — the synth is stateless); per-block CC smoothing (stepped today);
+- ✅ Channel pan (CC10): `MidiChannelPan` + `MidiChannelGains` fold the CC7×CC11
+  magnitude into per-side gains, and `Synth::Render` takes stereo gains so a
+  voice is placed without a second pass. A BALANCE law (unity at center, only the
+  far channel attenuates) — deliberately not equal-power, so a project with no
+  CC10 is unchanged. Engine + Exporter wired; host-tested (`midicontrol_tests`
+  plus an end-to-end bounce case: hard-left silences R, centered == no CC10).
+- *Remaining:* pitch-bend + mod-wheel (both modulate frequency, so the stateless
+  synth needs phase integration — deferred); per-block CC smoothing (stepped today);
   **CC lanes** in the piano roll (velocity-lane-style, VM-gated); live-MIDI CC
   recording (`MidiPort`/`MidiRecorder`); per-track MIDI input demux;
   MIDI clock/MTC; sysex.

@@ -242,6 +242,46 @@ int main() {
     CHECK(pcMute < pcFull * 0.02f);                              // CC7=0 mutes
     CHECK(std::fabs(pcHalf - pcFull * (64.0f / 127.0f)) < pcFull * 0.1f); // ~half
 
+    // --- CC10 (channel pan) places the synth in the bounce: 0 = hard left,
+    // 127 = hard right, 64 = centered and bit-for-bit the same as no CC10 at all
+    // (the balance law is unity at center, so existing projects don't shift).
+    auto lrWithCC10 = [&](bool withCc, int pan, float* outL, float* outR) {
+        Project pr; pr.sampleRate = SR; pr.masterGain = 1.0f;
+        Track m; m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        MidiNote n2 = note; n2.startFrame = 0; n2.lengthFrames = (Frame)(SR / 2);
+        PutNote(m, n2);
+        if (withCc)
+            m.midiClips.front().events.push_back({ MidiClipEvent::CC, 0, 10, pan });
+        pr.AddTrack(m);
+        const std::string p = "/tmp/haiku_daw_export_cc10.wav";
+        std::remove(p.c_str());
+        *outL = *outR = -1.0f;
+        if (!ExportWav(pr, p, SR, 32)) return;
+        WavSource s; if (!s.Open(p)) return;
+        float pkL = 0.0f, pkR = 0.0f; const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f))
+            for (size_t i = 0; i < f; ++i) {
+                pkL = std::max(pkL, std::fabs(c[i * 2 + 0]));
+                pkR = std::max(pkR, std::fabs(c[i * 2 + 1]));
+            }
+        std::remove(p.c_str());
+        *outL = pkL; *outR = pkR;
+    };
+    float nL, nR, cL, cR, lL, lR, rL, rR;
+    lrWithCC10(false, 0,   &nL, &nR);     // no CC10 at all
+    lrWithCC10(true,  64,  &cL, &cR);     // explicit center
+    lrWithCC10(true,  0,   &lL, &lR);     // hard left
+    lrWithCC10(true,  127, &rL, &rR);     // hard right
+    CHECK(nL > 0.05f && nR > 0.05f);
+    CHECK(std::fabs(nL - nR) < nL * 0.02f);       // no CC10 -> centered
+    CHECK(std::fabs(cL - nL) < nL * 0.02f);       // explicit center == no CC10
+    CHECK(std::fabs(cR - nR) < nR * 0.02f);       //   (no level change)
+    CHECK(lR < lL * 0.02f);                       // hard left -> right silent
+    CHECK(std::fabs(lL - nL) < nL * 0.02f);       //   near side unchanged
+    CHECK(rL < rR * 0.02f);                       // hard right -> left silent
+    CHECK(std::fabs(rR - nR) < nR * 0.02f);
+
     // Stems: two MIDI tracks -> two isolated WAV files, each with signal.
     {
         Project p; p.sampleRate = SR; p.masterGain = 1.0f;

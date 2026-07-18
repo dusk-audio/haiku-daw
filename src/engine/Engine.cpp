@@ -864,9 +864,13 @@ void Engine::FillBuffer(float* out, size_t frames) {
         const bool live = b.liveMonitor && !fLiveNotes.empty();
         if (!b.notes.empty() || live) {     // MIDI: render dry then fader
             if (!b.notes.empty()) {
-                // CC7 (volume) x CC11 (expression) channel gain, per block.
-                const float cg = MidiChannelGain(b.events, blockStart);
-                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart, cg);
+                // CC7 (volume) x CC11 (expression) channel gain, placed by the
+                // CC10 pan, per block. Live-monitor notes below stay centered at
+                // unity — the channel controls belong to the clip's events.
+                float cgl, cgr;
+                MidiChannelGains(b.events, blockStart, &cgl, &cgr);
+                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart,
+                              cgl, cgr);
             }
             if (live)                        // live keyboard through this voice
                 fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);

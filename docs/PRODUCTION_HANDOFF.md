@@ -162,7 +162,15 @@ checks still need Marc at the VM** (see "What's next" item 1).
      render each MIDI node's notes through this per-block channel gain, so a
      `.mid`'s volume/expression now plays back. Engine change cross-compiles;
      **VM audio-runtime unverified**.
-   - Next: CC10 pan; pitch-bend + CC1 mod-wheel (both modulate frequency, so the
+   - Done: **CC10 channel pan** — `MidiChannelPan` / `MidiChannelGains` (kit-free)
+     fold CC7×CC11 into per-side gains and `Synth::Render` gained a stereo-gain
+     overload, so a voice is placed as it is written (no second buffer pass). The
+     pan is a BALANCE law (unity at center, only the far side attenuates), not
+     equal-power, so a project without CC10 renders exactly as before. Engine +
+     Exporter wired; host-tested (`midicontrol_tests` + an end-to-end bounce:
+     hard-left silences R, explicit center == no CC10). Engine cross-compiles;
+     **VM audio-runtime unverified.**
+   - Next: pitch-bend + CC1 mod-wheel (both modulate frequency, so the
      stateless `Synth` needs phase integration — deferred); smoothing the stepped
      per-block CC; **CC lanes in the piano roll** (like the velocity lane, VM-
      gated GUI); live-MIDI CC recording (hook the remaining `BMidiLocalConsumer`

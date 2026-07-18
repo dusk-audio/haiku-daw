@@ -81,6 +81,45 @@ int main() {
         CHECK(PitchBendAt(ev, 600) == 4000);
     }
 
+    // CC10 pan: absent/64 = centered; 0 = hard left, 127 = hard right.
+    {
+        std::vector<MidiClipEvent> ev;
+        CHECK(std::fabs(MidiChannelPan(ev, 100) - 0.0f) < 1e-6f);   // absent -> center
+        ev.push_back(CC(10, 100, 64));
+        CHECK(std::fabs(MidiChannelPan(ev, 200) - 0.0f) < 1e-6f);
+        ev.push_back(CC(10, 300, 0));
+        CHECK(std::fabs(MidiChannelPan(ev, 400) - (-1.0f)) < 1e-4f); // hard left
+        ev.push_back(CC(10, 500, 127));
+        CHECK(std::fabs(MidiChannelPan(ev, 600) - 1.0f) < 1e-4f);    // hard right (clamped)
+    }
+
+    // Channel gains: with no CC10 the pan is unity so gL == gR == MidiChannelGain
+    // (existing projects are bit-identical); CC10 attenuates only the far side.
+    {
+        std::vector<MidiClipEvent> ev = { CC(7, 0, 127), CC(11, 0, 127) };
+        float l = 0.0f, r = 0.0f;
+        MidiChannelGains(ev, 10, &l, &r);
+        CHECK(std::fabs(l - 1.0f) < 1e-6f);          // centered -> untouched
+        CHECK(std::fabs(r - 1.0f) < 1e-6f);
+
+        ev.push_back(CC(10, 100, 0));                // hard left
+        MidiChannelGains(ev, 200, &l, &r);
+        CHECK(std::fabs(l - 1.0f) < 1e-4f);          // near side keeps unity
+        CHECK(r < 1e-4f);                            // far side silent
+
+        ev.push_back(CC(10, 300, 127));              // hard right
+        MidiChannelGains(ev, 400, &l, &r);
+        CHECK(l < 1e-4f);
+        CHECK(std::fabs(r - 1.0f) < 1e-4f);
+
+        // Pan scales the CC7 x CC11 magnitude, it doesn't replace it.
+        ev.push_back(CC(7,  500, 64));               // ~half volume
+        ev.push_back(CC(10, 500, 64));               // back to center
+        MidiChannelGains(ev, 600, &l, &r);
+        CHECK(std::fabs(l - 64.0f / 127.0f) < 1e-4f);
+        CHECK(std::fabs(r - 64.0f / 127.0f) < 1e-4f);
+    }
+
     std::printf("midicontrol_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }
