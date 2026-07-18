@@ -34,6 +34,7 @@ static const char* EffName(EffectType t) {
         case EffectType::Saturator:  return "Saturator";
         case EffectType::Gate:       return "Gate";
         case EffectType::Widener:    return "Widener";
+        case EffectType::Limiter:    return "Limiter";
         default:                     return "Biquad";
     }
 }
@@ -53,6 +54,9 @@ static std::vector<KnobDef> KnobsFor(EffectType t) {
             return {{"Thr dB", 0, -80, 0}, {"Ratio", 1, 1, 20}, {"Atk ms", 2, 0.1f, 100},
                     {"Rel ms", 3, 5, 1000}, {"Range", 4, 0, 80}};
         case EffectType::Widener: return {{"Width", 0, 0, 2}, {"Pan", 1, -1, 1}, {"Gain", 2, 0, 2}};
+        case EffectType::Limiter:
+            return {{"Ceil dB", 0, -24, 0}, {"Look ms", 1, 0.1f, 20}, {"Rel ms", 2, 1, 2000},
+                    {"In dB", 3, 0, 24}};
         case EffectType::Eq:
             return {{"Low Q", 2, 0.3f, 8}, {"LoM Q", 5, 0.3f, 8}, {"Mid Q", 8, 0.3f, 8},
                     {"HiM Q", 11, 0.3f, 8}, {"Hi Q", 14, 0.3f, 8}};
@@ -436,11 +440,11 @@ void EffectsView::Draw(BRect) {
     // Add-effect buttons.
     float ay = PanelTop(fChain.size());
     const char* adds[8] = { "Add EQ", "Add Delay", "Add Reverb", "Add Compressor",
-                            "Add Saturator", "Add Gate", "Add Widener", "" };
-    const EffectType at[7] = { EffectType::Eq, EffectType::Delay, EffectType::Reverb,
+                            "Add Saturator", "Add Gate", "Add Widener", "Add Limiter" };
+    const EffectType at[8] = { EffectType::Eq, EffectType::Delay, EffectType::Reverb,
                                EffectType::Compressor, EffectType::Saturator,
-                               EffectType::Gate, EffectType::Widener };
-    for (int k = 0; k < 7; k++) {
+                               EffectType::Gate, EffectType::Widener, EffectType::Limiter };
+    for (int k = 0; k < 8; k++) {
         BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
         SetHighColor(ColHeaderHi()); FillRect(b);
         SetHighColor(ColGrid());     StrokeRect(b);
@@ -478,6 +482,7 @@ static EffectDesc MakeDefault(EffectType t) {
         case EffectType::Saturator:  return SaturatorDesc();
         case EffectType::Gate:       return GateDesc();
         case EffectType::Widener:    return WidenerDesc();
+        case EffectType::Limiter:    return LimiterDesc();
         case EffectType::Eq:
         default:                     return EqDesc();
     }

@@ -53,6 +53,8 @@ int main() {
     stack.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(700.0f)), a);
     stack.Execute(std::make_unique<AddEffectCommand>(t1,
         CompressorDesc(-18.0f, 3.0f, 5.0f, 80.0f, 6.0f)), a);   // p4 = makeup
+    stack.Execute(std::make_unique<AddEffectCommand>(t1,
+        LimiterDesc(-2.0f, 4.0f, 90.0f, 3.0f)), a);   // type 9 must survive round-trip
 
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), a);
     TrackId t2 = a.Tracks().back().id;
@@ -118,10 +120,13 @@ int main() {
     CHECK(std::abs(bt1.clips[0].gain - 0.6f) < 1e-4f);   // per-clip gain roundtrips
     CHECK(bt1.clips[0].takeGroup == 7);
     CHECK(bt1.clips[0].takeActive == false);
-    CHECK(bt1.fx.size() == 2);
+    CHECK(bt1.fx.size() == 3);
     CHECK(bt1.fx[0].type == EffectType::Biquad);
     CHECK(bt1.fx[1].type == EffectType::Compressor);
     CHECK(std::abs(bt1.fx[1].p(4) - 6.0f) < 1e-4f);   // makeup persisted
+    CHECK(bt1.fx[2].type == EffectType::Limiter);      // type 9 not clamped to Biquad
+    CHECK(std::abs(bt1.fx[2].p(0) - (-2.0f)) < 1e-4f); // ceiling persisted
+    CHECK(std::abs(bt1.fx[2].p(2) - 90.0f) < 1e-4f);   // release persisted
     CHECK(bt1.sends.size() == 1);
     CHECK(bt1.sends[0].dest == t2);
     CHECK(std::abs(bt1.sends[0].level - 0.4f) < 1e-4f);

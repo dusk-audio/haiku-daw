@@ -8,6 +8,7 @@
 #include "Saturator.h"
 #include "Gate.h"
 #include "Widener.h"
+#include "LookaheadLimiter.h"
 
 namespace daw {
 
@@ -58,6 +59,9 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
                 new Gate(d.p(0), d.p(1), d.p(2), d.p(3), d.p(4)));
         case EffectType::Widener:
             return std::unique_ptr<IEffect>(new Widener(d.p(0), d.p(1), d.p(2)));
+        case EffectType::Limiter:
+            return std::unique_ptr<IEffect>(
+                new LookaheadLimiter(d.p(0), d.p(1), d.p(2), d.p(3)));
     }
     return nullptr;
 }

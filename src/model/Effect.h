@@ -17,11 +17,12 @@
 
 namespace daw {
 
-// Order is the serialized id (0..8); do not reorder without bumping the file
-// format (see ProjectIO). Biquad is kept for loading older projects; new tone
-// shaping uses the parametric Eq.
+// Order is the serialized id (0..9); do not reorder without bumping the file
+// format (see ProjectIO). Append new types at the end so existing ids stay put.
+// Biquad is kept for loading older projects; new tone shaping uses the
+// parametric Eq.
 enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq,
-                        Saturator, Gate, Widener, Plugin };
+                        Saturator, Gate, Widener, Plugin, Limiter };
 
 struct EffectDesc {
     EffectType         type = EffectType::Biquad;
@@ -37,6 +38,7 @@ struct EffectDesc {
     //   Saturator:  [drive [0,1], mix [0,1], output trim dB]
     //   Gate:       [threshold dB, ratio, attack ms, release ms, range dB]
     //   Widener:    [width [0,2], pan [-1,1], gain]
+    //   Limiter:    [ceiling dB, lookahead ms, release ms, input gain dB]
 
     // Read a param with a safe default for missing slots.
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
@@ -90,6 +92,13 @@ inline EffectDesc WidenerDesc(float width = 1.0f, float pan = 0.0f,
                               float gain = 1.0f) {
     return EffectDesc{EffectType::Widener, {width, pan, gain}};
 }
+// Live look-ahead brickwall limiter — the one built-in effect with non-zero
+// reported latency (== lookaheadMs), so it exercises plugin-delay compensation.
+inline EffectDesc LimiterDesc(float ceilingDb = -1.0f, float lookaheadMs = 5.0f,
+                              float releaseMs = 60.0f, float inGainDb = 0.0f) {
+    return EffectDesc{EffectType::Limiter,
+                      {ceilingDb, lookaheadMs, releaseMs, inGainDb}};
+}
 // Default parametric EQ: low shelf, three peaks, high shelf, all flat.
 inline EffectDesc EqDesc() {
     return EffectDesc{EffectType::Eq, {
@@ -116,6 +125,7 @@ inline void FxParamRange(EffectType t, int slot, float* mn, float* mx) {
         case EffectType::Saturator:  pick({{0,1},{0,1},{-24,24}}); break;
         case EffectType::Gate:       pick({{-80,0},{1,20},{0.1f,100},{5,1000},{0,80}}); break;
         case EffectType::Widener:    pick({{0,2},{-1,1},{0,2}}); break;
+        case EffectType::Limiter:    pick({{-24,0},{0.1f,20},{1,2000},{0,24}}); break;
         case EffectType::Eq: {
             const int w = slot % 3;
             if (w == 0) { lo = 20; hi = 18000; }

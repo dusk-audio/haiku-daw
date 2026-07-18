@@ -45,6 +45,7 @@ add_library(daw_model
     src/dsp/Eq.cpp              # kit-free 5-band EQ (Multi-Q filter math)
     src/dsp/Loudness.cpp        # kit-free BS.1770 LUFS + true-peak meter
     src/dsp/Limiter.cpp         # kit-free offline look-ahead true-peak limiter
+    src/dsp/LookaheadLimiter.cpp # kit-free live look-ahead limiter (reports PDC latency)
     src/dsp/Saturator.cpp       # kit-free tape saturation (tape-echo port)
     src/dsp/Gate.cpp            # kit-free noise gate / expander
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
@@ -151,6 +152,10 @@ add_test(NAME loudness_tests COMMAND loudness_tests)
 add_executable(limiter_tests tests/limiter_tests.cpp)
 target_link_libraries(limiter_tests PRIVATE daw_model)
 add_test(NAME limiter_tests COMMAND limiter_tests)
+
+add_executable(lookahead_limiter_tests tests/lookahead_limiter_tests.cpp)
+target_link_libraries(lookahead_limiter_tests PRIVATE daw_model)
+add_test(NAME lookahead_limiter_tests COMMAND lookahead_limiter_tests)
 
 add_executable(smoothing_tests tests/smoothing_tests.cpp)
 target_link_libraries(smoothing_tests PRIVATE daw_model)

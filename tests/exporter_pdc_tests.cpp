@@ -12,6 +12,7 @@
 #include "../src/engine/WavWriter.h"
 #include "../src/dsp/EffectFactory.h"
 #include "../src/dsp/IEffect.h"
+#include "../src/model/Effect.h"
 #include "../src/model/Project.h"
 
 #include <algorithm>
@@ -236,10 +237,33 @@ int main() {
     CHECK(MaxAbsIn(pre, P - 1, P + 2) > 1.2f);          // direct + pre-send summed
     CHECK(MaxAbsIn(pre, P + N - 2, P + N + 3) < 0.3f);  // no split at P+N
 
+    // --- A REAL built-in latent effect: the live LookaheadLimiter (the first
+    // built-in reporting non-zero latency). With the impulse under its ceiling it
+    // is a pure La-frame delay, so PDC must make it transparent exactly as it does
+    // the synthetic plugin — proof the generic LatencySamples() sum picks up a
+    // real EffectDesc, not just the Plugin hook. 5 ms @ 48 k == 240 frames.
+    const int LA = 240;
+    Project prL;
+    prL.sampleRate = SR; prL.masterGain = 1.0f;
+    Track tL; tL.id = prL.NextTrackId(); tL.type = TrackType::Audio;
+    tL.gain = 1.0f; tL.pan = 0.0f;
+    { Clip c; c.id = prL.NextClipId(); c.startFrame = P; c.lengthFrames = LEN;
+      c.sourcePath = wav; tL.clips.push_back(c); }
+    tL.fx.push_back(LimiterDesc(0.0f, 5.0f, 60.0f, 0.0f));   // ceiling 0 dB
+    prL.AddTrack(tL);
+    const std::string realPath = "/tmp/haiku_daw_pdc_real.wav";
+    std::remove(realPath.c_str());
+    CHECK(ExportWav(prL, realPath, SR, 32));
+    int64_t nReal = 0;
+    std::vector<float> real = ReadAll(realPath, &nReal);
+    CHECK(std::llabs(PeakFrame(real) - P) <= 1);            // transparent: peak at P
+    CHECK(MaxAbsIn(real, P + LA - 2, P + LA + 3) < 0.25f);  // not shifted to P+La
+    CHECK(std::llabs(nReal - nDry) <= 1);                   // length unchanged by PDC
+
     std::remove(wav.c_str());
     std::remove(dryPath.c_str()); std::remove(latPath.c_str());
     std::remove(sibPath.c_str()); std::remove(zeroPath.c_str());
-    std::remove(prePath.c_str());
+    std::remove(prePath.c_str()); std::remove(realPath.c_str());
     SetPluginFactory(nullptr);
 
     std::printf("exporter_pdc_tests: %d checks, %d failures\n", g_checks, g_fails);
