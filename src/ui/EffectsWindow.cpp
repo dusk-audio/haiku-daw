@@ -6,6 +6,7 @@
 #include "../plugin/PluginHost.h"
 
 #include <MenuItem.h>
+#include <MessageRunner.h>
 #include <PopUpMenu.h>
 #include <ScrollBar.h>
 
@@ -15,10 +16,23 @@
 
 namespace daw {
 
+// Self-addressed: fires once a wheel gesture has gone quiet (see ScheduleCommit).
+static constexpr uint32 kMsgFxCommit = 'fxcm';
+// A wheel notch moves 1/40 of a parameter's range (1/200 with Shift, for trim).
+static constexpr float  kWheelCoarse = 40.0f;
+static constexpr float  kWheelFine   = 200.0f;
+// How long the wheel must sit still before the edit becomes one undo step.
+static constexpr bigtime_t kWheelCommitDelay = 400000;   // 400 ms
+
 static constexpr float kPanelPad = 8.0f;
 static constexpr float kTitleH   = 22.0f;
 static constexpr float kKnobW    = 68.0f;
 static constexpr float kKnobH    = 86.0f;
+// Dial geometry inside a knob cell (see DrawKnob): centre offset from the cell
+// top, body radius, and how far the tick ring extends past it.
+static constexpr float kDialCy   = 42.0f;
+static constexpr float kDialR    = 20.0f;
+static constexpr float kDialTick = 6.0f;
 static constexpr float kGraphH   = 156.0f;
 static constexpr float kSelH     = 26.0f;    // reverb type-selector row
 static constexpr float kBtnW     = 22.0f;
@@ -92,6 +106,16 @@ EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
     SetViewColor(ColBackground());
 }
 
+EffectsView::~EffectsView() {
+    delete fCommit;
+}
+
+void EffectsView::FlushPendingEdit() {
+    if (!fCommit) return;
+    delete fCommit; fCommit = nullptr;
+    Apply();
+}
+
 void EffectsView::UpdateScrollRange() {
     if (BScrollView* sv = dynamic_cast<BScrollView*>(Parent()))
         if (BScrollBar* bar = sv->ScrollBar(B_VERTICAL)) {
@@ -154,8 +178,8 @@ void EffectsView::Apply() {
 void EffectsView::DrawKnob(BRect r, const char* label, float value,
                            float mn, float mx) {
     const float cx = (r.left + r.right) * 0.5f;
-    const float cy = r.top + 42;      // pushed down so the dial clears the label
-    const float rad = 20.0f;
+    const float cy = r.top + kDialCy;   // pushed down so the dial clears the label
+    const float rad = kDialR;
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
 
@@ -170,7 +194,7 @@ void EffectsView::DrawKnob(BRect r, const char* label, float value,
         const float ux = (float)std::sin(a), uy = -(float)std::cos(a);
         SetHighColor(tf <= t + 0.001 ? ColAccent() : ColGrid());
         StrokeLine(BPoint(cx + ux * (rad + 2), cy + uy * (rad + 2)),
-                   BPoint(cx + ux * (rad + 6), cy + uy * (rad + 6)));
+                   BPoint(cx + ux * (rad + kDialTick), cy + uy * (rad + kDialTick)));
     }
     // Body.
     SetHighColor(ColHeaderHi());
@@ -652,6 +676,90 @@ void EffectsView::MouseUp(BPoint) {
     fDragEffect = fDragSlot = fDragKind = -1;
 }
 
+// A wheel gesture has no mouse-up to commit on, so fold its notches into ONE
+// undoable edit: every notch previews live and restarts this timer, and the
+// commit fires once the wheel goes quiet. (SetFxCommand deliberately does not
+// coalesce — it assumes one command per gesture — so committing per notch would
+// push a separate undo step for every click of the wheel.)
+void EffectsView::ScheduleCommit() {
+    BMessage m(kMsgFxCommit);
+    // Construct before destroying, so a throwing allocation can't leave fCommit
+    // dangling for the destructor to delete a second time.
+    BMessageRunner* next = new BMessageRunner(BMessenger(this), &m,
+                                              kWheelCommitDelay, 1);
+    delete fCommit;                  // restart: only the last notch commits
+    fCommit = next;
+}
+
+// Wheel over a control edits it instead of scrolling the panel list. Over a knob
+// it nudges that knob; over an EQ band handle it nudges that band's Q — the one
+// band parameter the 2D graph drag can't reach (drag is freq x gain), so the
+// wheel completes the gesture without leaving the curve.
+bool EffectsView::WheelAdjust(BPoint where, float dy) {
+    Hit h;
+    const int kind = HitTest(where, &h);
+    int   slot = -1;
+    float mn = 0.0f, mx = 1.0f;
+    if (kind == 0) {              // knob: its own drawn range
+        // A knob's hit cell is deliberately much larger than the dial so that
+        // click-drag is forgiving. The wheel must not be: that cell is mostly
+        // blank panel, and claiming it would turn an ordinary scroll past the
+        // knob row into a silent parameter change. Require the drawn dial.
+        const float cx = (h.rect.left + h.rect.right) * 0.5f;
+        const float cy = h.rect.top + kDialCy;
+        const float ox = where.x - cx, oy = where.y - cy;   // offset from centre
+        const float reach = kDialR + kDialTick;
+        if (ox * ox + oy * oy > reach * reach) return false;
+        slot = h.slot; mn = h.min; mx = h.max;
+    } else if (kind == 5) {       // EQ band handle -> that band's Q
+        slot = h.slot * 3 + 2;
+        FxParamRange(EffectType::Eq, slot, &mn, &mx);
+    } else {
+        return false;             // empty panel space: let the list scroll
+    }
+    if (h.effect < 0 || h.effect >= (int)fChain.size() || mx <= mn) return false;
+
+    EffectDesc& d = fChain[h.effect];
+    if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
+    const float step = (mx - mn)
+                     / ((modifiers() & B_SHIFT_KEY) ? kWheelFine : kWheelCoarse);
+    // Wheel-up is a negative delta; negate so up raises, matching the knobs'
+    // drag-up-to-raise feel.
+    float v = d.params[(size_t)slot] - dy * step;
+    if (v < mn) v = mn; if (v > mx) v = mx;
+    if (v == d.params[(size_t)slot]) return true;   // already at the rail
+    d.params[(size_t)slot] = v;
+
+    // Same live path as a knob drag: the running engine hears it immediately.
+    BMessage live(kMsgFxLive);
+    live.AddInt64("track", (int64)fTrack);
+    live.AddInt32("fx", h.effect);
+    live.AddInt32("slot", slot);
+    live.AddFloat("val", v);
+    fApply.SendMessage(&live);
+
+    ScheduleCommit();
+    Invalidate();
+    return true;
+}
+
+void EffectsView::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgFxCommit) {   // wheel went quiet: fold it into one step
+        FlushPendingEdit();
+        return;
+    }
+    if (msg->what == B_MOUSE_WHEEL_CHANGED) {
+        float dy = 0.0f;
+        if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
+            // The wheel message carries no position; ask for the pointer.
+            BPoint pt; uint32 buttons = 0;
+            GetMouse(&pt, &buttons, false);
+            if (WheelAdjust(pt, dy)) return;
+        }
+    }
+    BView::MessageReceived(msg);
+}
+
 // --- window ---------------------------------------------------------------
 
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
@@ -699,6 +807,7 @@ void EffectsWindow::DispatchMessage(BMessage* m, BHandler* h) {
 }
 
 bool EffectsWindow::QuitRequested() {
+    if (fView) fView->FlushPendingEdit();   // don't drop an in-flight wheel edit
     BMessage closed(kMsgFxWinClosed);
     closed.AddInt64("track", (int64)fTrack);
     fApply.SendMessage(&closed);

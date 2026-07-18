@@ -17,6 +17,8 @@
 
 #include <vector>
 
+class BMessageRunner;
+
 namespace daw {
 
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
@@ -45,11 +47,13 @@ class EffectsView : public BView {
 public:
     EffectsView(BRect frame, std::vector<EffectDesc> chain, TrackId track,
                 BMessenger apply);
+    ~EffectsView() override;
 
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void MouseUp(BPoint where) override;
+    void MessageReceived(BMessage* msg) override;   // wheel-adjust + its commit
 
     float ContentHeight() const;    // total stacked height (for the scroll bar)
     void  UpdateScrollRange();      // re-fit the enclosing scroll bar to content
@@ -57,6 +61,11 @@ public:
     // Live meters from the engine (per-fx gain reduction + one EQ spectrum).
     void SetMeters(const float* gr, int grN,
                    const float* spec, int specN, int specFx);
+
+    // Commit a wheel edit whose debounce timer has not fired yet. The window
+    // calls this on close: the engine already heard the change (kMsgFxLive), so
+    // dropping the commit would leave the model behind the audio.
+    void FlushPendingEdit();
 
 private:
     void  Apply();
@@ -72,6 +81,11 @@ private:
     void  DrawCompCurve(BRect r, const EffectDesc& d, int effIdx);
     int   HitTest(BPoint where, Hit* out) const;
 
+    // Mouse-wheel parameter edit. Returns false when the pointer is not over a
+    // control, so the wheel keeps scrolling the panel list.
+    bool  WheelAdjust(BPoint where, float dy);
+    void  ScheduleCommit();   // debounce wheel notches into one undo step
+
     std::vector<EffectDesc> fChain;
     TrackId    fTrack;
     BMessenger fApply;
@@ -86,6 +100,9 @@ private:
     float fDragMin = 0, fDragMax = 1;
     BPoint fDragStart;
     float fDragStartVal = 0;
+
+    // Pending debounced commit of a wheel gesture (null when idle).
+    BMessageRunner* fCommit = nullptr;
 
     // Live meters (set from the engine via SetMeters).
     static constexpr int kSpecMax = 256;
