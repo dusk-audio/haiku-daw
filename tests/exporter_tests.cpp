@@ -282,6 +282,52 @@ int main() {
     CHECK(rL < rR * 0.02f);                       // hard right -> left silent
     CHECK(std::fabs(rR - nR) < nR * 0.02f);
 
+    // --- A CC7 step mid-note GLIDES instead of cutting. The controller is only
+    // sampled once per block, so without smoothing the amplitude would drop in a
+    // single step at a block boundary; the ramp spreads it over that block. This
+    // also proves the exporter carries the previous block's end gain forward.
+    {
+        Project pr; pr.sampleRate = SR; pr.masterGain = 1.0f;
+        Track m; m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        m.instrument.waveform = (int)Waveform::Sine;   // steady tone: envelope is
+        m.instrument.attack = 0.001f; m.instrument.decay = 0.0f;   // the CC, not
+        m.instrument.sustain = 1.0f;  m.instrument.release = 0.0f; // the ADSR
+        MidiNote n2 = note; n2.startFrame = 0; n2.lengthFrames = (Frame)SR;
+        PutNote(m, n2);
+        m.midiClips.front().events.push_back({ MidiClipEvent::CC, 0, 7, 127 });
+        m.midiClips.front().events.push_back(
+            { MidiClipEvent::CC, (Frame)(SR / 2), 7, 0 });      // full -> silent
+        pr.AddTrack(m);
+        const std::string p = "/tmp/haiku_daw_export_ccramp.wav";
+        std::remove(p.c_str());
+        CHECK(ExportWav(pr, p, SR, 32));
+        std::vector<float> d;
+        { WavSource s;
+          if (s.Open(p)) { const float* c = nullptr; size_t f = 0;
+              while (s.ReadChunk(&c, &f)) d.insert(d.end(), c, c + f * 2); } }
+        std::remove(p.c_str());
+
+        const int W = 32;                       // peak envelope, 32-frame windows
+        std::vector<float> env;
+        for (size_t i = 0; i + W <= d.size() / 2; i += W) {
+            float pk = 0.0f;
+            for (int k = 0; k < W; k++) pk = std::max(pk, std::fabs(d[(i + k) * 2]));
+            env.push_back(pk);
+        }
+        float mx = 0.0f;
+        for (float v : env) mx = std::max(mx, v);
+        CHECK(mx > 0.01f);                      // the note sounded
+        int lastFull = -1, firstQuiet = -1;
+        for (int i = 0; i < (int)env.size(); i++)
+            if (env[i] > 0.8f * mx) lastFull = i;
+        for (int i = lastFull + 1; i < (int)env.size(); i++)
+            if (env[i] < 0.05f * mx) { firstQuiet = i; break; }
+        CHECK(lastFull >= 0 && firstQuiet > lastFull);
+        // A one-block fade is ~512 frames; an unsmoothed step would be < 1 window.
+        CHECK((firstQuiet - lastFull) * W >= 256);
+    }
+
     // Stems: two MIDI tracks -> two isolated WAV files, each with signal.
     {
         Project p; p.sampleRate = SR; p.masterGain = 1.0f;

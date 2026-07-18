@@ -375,13 +375,21 @@ bool ExportWav(const Project& project, const std::string& outPath,
             // per-buffer granularity, so a bounce steps like playback.
             const std::vector<MidiClipEvent> events = t.CollectEvents();
             const int64_t kBlk = 512;
+            // Previous block's end gains: each block ramps from them to its own
+            // target so a stepped controller glides, matching the live engine.
+            // Negative = first block, which snaps instead of sweeping from unity.
+            float lastL = -1.0f, lastR = -1.0f;
             for (int64_t off = 0; off < totalOut; off += kBlk) {
                 const int64_t nn = std::min<int64_t>(kBlk, totalOut - off);
                 const Frame pf = (Frame)(off / scale);   // project frame @ block
                 float cgl, cgr;
                 MidiChannelGains(events, pf, &cgl, &cgr);
+                const StereoGain to{cgl, cgr};
+                const StereoGain from = (lastL < 0.0f) ? to
+                                                       : StereoGain{lastL, lastR};
                 synth.Render(notes, t.instrument, nb + off * 2, (size_t)nn,
-                             off, cgl, cgr);
+                             off, from, to);
+                lastL = cgl; lastR = cgr;
             }
         }   // Bus: nb already holds the summed upstream (dry).
 

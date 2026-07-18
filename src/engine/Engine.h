@@ -335,6 +335,13 @@ private:
         float                                 statGain = 1.0f;  // ValueAt default
         float                                 statPan  = 0.0f;
         bool                                  hasAuto  = false;
+        // Last MIDI channel gains (CC7 x CC11, placed by CC10) applied at the end
+        // of the previous block. The next block ramps from here to its own target
+        // so a stepped controller glides instead of clicking. Negative = not yet
+        // established (first block after Load/seek), which snaps instead of
+        // gliding from a stale value.
+        float                                 chanL    = -1.0f;
+        float                                 chanR    = -1.0f;
 
         // The atomic members make Bus non-copyable and suppress the implicit
         // move, but fBuses is a std::vector<Bus> that moves on growth/erase.
@@ -358,7 +365,8 @@ private:
               outDelay(std::move(o.outDelay)),
               gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
               fxAuto(std::move(o.fxAuto)),
-              statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto) {}
+              statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto),
+              chanL(o.chanL), chanR(o.chanR) {}
         Bus& operator=(Bus&& o) noexcept {
             if (this == &o) return *this;
             id = o.id; output = o.output;
@@ -378,6 +386,7 @@ private:
             gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
             fxAuto = std::move(o.fxAuto);
             statGain = o.statGain; statPan = o.statPan; hasAuto = o.hasAuto;
+            chanL = o.chanL; chanR = o.chanR;
             return *this;
         }
     };

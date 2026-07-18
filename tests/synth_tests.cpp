@@ -150,6 +150,63 @@ int main() {
         CHECK(aliasE < 0.1 * fundE);         // aliases well below the fundamental
     }
 
+    // Ramped channel gain: rendering from `from` to `to` scales the identical
+    // note by a linear (i+1)/frames glide, so a controller the caller samples
+    // once per block de-zippers instead of stepping at the block seam.
+    {
+        const size_t N = 512;
+        std::vector<float> flat(N * 2, 0.0f), ramp(N * 2, 0.0f);
+        synth.Render(notes, inst, flat.data(), N, 0, 1.0f);
+        synth.Render(notes, inst, ramp.data(), N, 0,
+                     StereoGain{0.0f, 0.0f}, StereoGain{1.0f, 1.0f});
+        float maxErr = 0.0f;
+        for (size_t i = 0; i < N; i++) {
+            const float a = (float)(i + 1) / (float)N;
+            maxErr = std::max(maxErr, std::fabs(ramp[i * 2 + 0] - flat[i * 2 + 0] * a));
+            maxErr = std::max(maxErr, std::fabs(ramp[i * 2 + 1] - flat[i * 2 + 1] * a));
+        }
+        CHECK(maxErr < 1e-5f);                       // exact linear glide
+        // Reaches the target on the final frame, so the next block can start
+        // there and the gain is continuous across the whole render.
+        CHECK(std::fabs(ramp[(N - 1) * 2 + 0] - flat[(N - 1) * 2 + 0]) < 1e-5f);
+        CHECK(rms(ramp) < rms(flat));                // and it really is quieter
+    }
+
+    // from == to is exactly the constant-gain path: a project where no controller
+    // moves renders bit-identically to before smoothing existed.
+    {
+        const size_t N = 512;
+        std::vector<float> constant(N * 2, 0.0f), same(N * 2, 0.0f);
+        synth.Render(notes, inst, constant.data(), N, 0, 0.5f, 0.25f);
+        synth.Render(notes, inst, same.data(), N, 0,
+                     StereoGain{0.5f, 0.25f}, StereoGain{0.5f, 0.25f});
+        float d = 0.0f;
+        for (size_t i = 0; i < N * 2; i++)
+            d = std::max(d, std::fabs(constant[i] - same[i]));
+        CHECK(d == 0.0f);                            // bit-identical
+    }
+
+    // Continuity: two half-blocks chained (0->0.5 then 0.5->1) match one whole
+    // block ramped 0->1 at the seam, which is what the engine/exporter rely on
+    // when they carry the previous block's end gain into the next.
+    {
+        const size_t N = 512, H = N / 2;
+        std::vector<float> whole(N * 2, 0.0f), split(N * 2, 0.0f);
+        synth.Render(notes, inst, whole.data(), N, 0,
+                     StereoGain{0.0f, 0.0f}, StereoGain{1.0f, 1.0f});
+        synth.Render(notes, inst, split.data(), H, 0,
+                     StereoGain{0.0f, 0.0f}, StereoGain{0.5f, 0.5f});
+        synth.Render(notes, inst, split.data() + H * 2, H, (Frame)H,
+                     StereoGain{0.5f, 0.5f}, StereoGain{1.0f, 1.0f});
+        // The two schemes sample the same ramp on a half-frame offset, so allow a
+        // one-step tolerance; the point is that no discontinuity appears at H.
+        const float tol = 1.0f / (float)H;
+        float d = 0.0f;
+        for (size_t i = 0; i < N * 2; i++)
+            d = std::max(d, std::fabs(whole[i] - split[i]));
+        CHECK(d < tol);                              // no seam jump
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

@@ -869,8 +869,16 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 // unity — the channel controls belong to the clip's events.
                 float cgl, cgr;
                 MidiChannelGains(b.events, blockStart, &cgl, &cgr);
+                // Glide from where the last block ended so a stepped controller
+                // doesn't click at the block seam; snap on the first block after
+                // a Load/seek (chanL < 0) rather than sweeping from a stale value.
+                const StereoGain to{cgl, cgr};
+                const StereoGain from = (b.chanL < 0.0f) ? to
+                                                         : StereoGain{b.chanL, b.chanR};
                 fSynth.Render(b.notes, b.instrument, nb, frames, blockStart,
-                              cgl, cgr);
+                              from, to);
+                b.chanL = cgl;
+                b.chanR = cgr;
             }
             if (live)                        // live keyboard through this voice
                 fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);

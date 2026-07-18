@@ -17,21 +17,42 @@
 
 namespace daw {
 
+// Per-channel gain at a block boundary. Render ramps between two of these so a
+// controller the caller only samples once per block glides instead of stepping.
+struct StereoGain {
+    float l = 1.0f;
+    float r = 1.0f;
+};
+
 class Synth {
 public:
     explicit Synth(double sampleRate = 48000.0) : fSampleRate(sampleRate) {}
     void SetSampleRate(double sr) { if (sr > 0) fSampleRate = sr; }
 
     // Add every note sounding in [blockStart, blockStart+frames) into the
-    // interleaved-stereo `out`, scaled per channel by `gainL`/`gainR`, using the
-    // instrument's waveform + ADSR (release rings past note-off). Separate L/R
-    // gains let the caller place the voice with a MIDI channel pan (CC10) without
-    // a second pass over the buffer. Never allocates.
+    // interleaved-stereo `out`, using the instrument's waveform + ADSR (release
+    // rings past note-off), scaled per channel by a gain that RAMPS linearly from
+    // `from` to `to` across the block. Separate L/R gains let the caller place the
+    // voice with a MIDI channel pan (CC10) without a second pass over the buffer;
+    // the ramp de-zippers the channel controllers, which the engine and exporter
+    // evaluate only once per block — a stepped CC7/CC10/CC11 would otherwise jump
+    // at every block boundary and click. Pass the previous block's `to` as the
+    // next block's `from` and the gain is continuous across the whole render.
+    // `from == to` is the common case and costs exactly what a constant gain did.
+    // Never allocates.
     void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
                 float* out, size_t frames, Frame blockStart,
-                float gainL, float gainR) const;
+                StereoGain from, StereoGain to) const;
 
-    // Convenience: the same gain on both channels (centered).
+    // Convenience: a constant per-channel gain across the block.
+    void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
+                float* out, size_t frames, Frame blockStart,
+                float gainL, float gainR) const {
+        Render(notes, inst, out, frames, blockStart,
+               StereoGain{gainL, gainR}, StereoGain{gainL, gainR});
+    }
+
+    // Convenience: the same constant gain on both channels (centered).
     void Render(const std::vector<MidiNote>& notes, const Instrument& inst,
                 float* out, size_t frames, Frame blockStart, float gain) const {
         Render(notes, inst, out, frames, blockStart, gain, gain);

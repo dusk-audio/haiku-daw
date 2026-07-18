@@ -70,8 +70,16 @@ static double Envelope(double rel, double noteLen,
 
 void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
                    float* out, size_t frames, Frame blockStart,
-                   float gainL, float gainR) const {
+                   StereoGain from, StereoGain to) const {
     const double sr = fSampleRate;
+
+    // Linear per-sample glide from `from` to `to`, reaching `to` exactly on the
+    // last frame so the next block can start where this one ended (continuous).
+    // A constant gain (the common case: no controller moved) skips the lerp.
+    const bool  ramping = (from.l != to.l) || (from.r != to.r);
+    const float step    = frames > 0 ? 1.0f / (float)frames : 0.0f;
+    const float dL      = (to.l - from.l) * step;
+    const float dR      = (to.r - from.r) * step;
     const double a = std::max(0.0f, inst.attack)  * sr;
     const double d = std::max(0.0f, inst.decay)   * sr;
     const double s = std::clamp(inst.sustain, 0.0f, 1.0f);
@@ -98,8 +106,10 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
             if (env <= 0.0) continue;
             const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * rel,
                                           cyclesPerFrame) * env) * amp;
-            out[i * 2 + 0] += smp * gainL;
-            out[i * 2 + 1] += smp * gainR;
+            const float gl = ramping ? (from.l + dL * (float)(i + 1)) : to.l;
+            const float gr = ramping ? (from.r + dR * (float)(i + 1)) : to.r;
+            out[i * 2 + 0] += smp * gl;
+            out[i * 2 + 1] += smp * gr;
         }
     }
 }

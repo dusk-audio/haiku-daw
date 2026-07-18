@@ -170,9 +170,19 @@ checks still need Marc at the VM** (see "What's next" item 1).
      Exporter wired; host-tested (`midicontrol_tests` + an end-to-end bounce:
      hard-left silences R, explicit center == no CC10). Engine cross-compiles;
      **VM audio-runtime unverified.**
+   - Done: **per-block CC smoothing** — `Synth::Render` takes a `StereoGain` pair
+     and glides linearly across the block (reaching the target on the last frame);
+     the Engine (per `Bus`, added to both hand-written move ops) and the Exporter
+     carry the previous block's end gain forward, so a stepped CC7/CC10/CC11 ramps
+     instead of clicking at the block seam. `from == to` is bit-identical to the
+     old constant path (a project with no controller movement is unchanged) and
+     the first block after Load/seek snaps rather than sweeping from a stale
+     value. Host-tested (`synth_tests` glide/continuity/constant-path + an
+     end-to-end bounce asserting a CC7 step fades over a block; that test was
+     verified to FAIL with the ramp defeated). **VM audio-runtime unverified.**
    - Next: pitch-bend + CC1 mod-wheel (both modulate frequency, so the
-     stateless `Synth` needs phase integration — deferred); smoothing the stepped
-     per-block CC; **CC lanes in the piano roll** (like the velocity lane, VM-
+     stateless `Synth` needs phase integration — deferred);
+     **CC lanes in the piano roll** (like the velocity lane, VM-
      gated GUI); live-MIDI CC recording (hook the remaining `BMidiLocalConsumer`
      overrides in `MidiPort.cpp`, extend `MidiRecorder`); per-track MIDI input
      demux (`MainWindow.cpp` uses one merged consumer for all armed tracks);

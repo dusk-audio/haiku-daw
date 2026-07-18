@@ -260,8 +260,16 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   far channel attenuates) — deliberately not equal-power, so a project with no
   CC10 is unchanged. Engine + Exporter wired; host-tested (`midicontrol_tests`
   plus an end-to-end bounce case: hard-left silences R, centered == no CC10).
+- ✅ Per-block CC smoothing: `Synth::Render` takes a `StereoGain` pair and ramps
+  linearly across the block, reaching the target on the last frame; the engine
+  (per `Bus`) and the exporter carry the previous block's end gain forward, so a
+  stepped CC7/CC10/CC11 glides instead of clicking at the block seam. `from ==
+  to` is bit-identical to the old constant path, and the first block after a
+  Load/seek snaps rather than sweeping from a stale value. Host-tested
+  (`synth_tests` ramp/continuity + an end-to-end bounce asserting a CC7 step
+  fades over a block — the test fails if the ramp is defeated).
 - *Remaining:* pitch-bend + mod-wheel (both modulate frequency, so the stateless
-  synth needs phase integration — deferred); per-block CC smoothing (stepped today);
+  synth needs phase integration — deferred);
   **CC lanes** in the piano roll (velocity-lane-style, VM-gated); live-MIDI CC
   recording (`MidiPort`/`MidiRecorder`); per-track MIDI input demux;
   MIDI clock/MTC; sysex.
