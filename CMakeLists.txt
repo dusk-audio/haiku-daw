@@ -185,6 +185,12 @@ add_executable(midi_tests tests/midi_tests.cpp)
 target_link_libraries(midi_tests PRIVATE daw_model)
 add_test(NAME midi_tests COMMAND midi_tests)
 
+# Live-input routing (which keyboard/channel reaches which track). Header-only
+# and kit-free, so it needs no library at all.
+add_executable(midirouting_tests tests/midirouting_tests.cpp)
+target_link_libraries(midirouting_tests PRIVATE daw_model)
+add_test(NAME midirouting_tests COMMAND midirouting_tests)
+
 # Adversarial fuzz corpora: malformed WAV / project input must fail cleanly,
 # never crash / hang / OOM. Run under ASan for teeth: cmake -DDAW_SANITIZE=ON.
 add_executable(wavsource_fuzz_tests tests/wavsource_fuzz_tests.cpp)

@@ -25,6 +25,7 @@
 #include "../dsp/Loudness.h"
 #include "../synth/Synth.h"
 #include "../midi/IMidiInput.h"
+#include "../midi/MidiRouting.h"
 #include "Metronome.h"
 #include "IMonitorSource.h"
 
@@ -169,6 +170,16 @@ public:
     // drain, so the RT thread is the sole consumer).
     void SetLiveMidi(IMidiInput* in) { fLiveMidi.store(in); }
 
+    // Per-track live-input routing. The caller (MainWindow) resolves each MIDI
+    // track's endpoint NAME to a Midi Kit producer id when it opens the input
+    // and pushes the result here; the RT thread then filters purely on ids. A
+    // track with no entry stays permissive (hears every source), so this is a
+    // no-op until inputs are actually assigned. Safe to call while playing.
+    void SetMidiRoutes(const std::vector<MidiInputRoute>& routes);
+private:
+    void ApplyMidiRoutes();   // push fMidiRoutes onto the current buses
+public:
+
     // After detaching a monitor/live-MIDI source (SetMonitorSource(nullptr) or
     // SetLiveMidi(nullptr)), call this before destroying that source object.
     // Returns true once no in-flight RT callback can still dereference the old
@@ -282,6 +293,7 @@ private:
         uint8_t channel   = 0;
         Frame   start     = 0;       // engine frame the note-on landed on
         Frame   off       = 0;       // engine frame of note-off (if releasing)
+        int32_t source    = 0;       // endpoint the note-on arrived from
     };
     static constexpr int kMaxLiveVoices = 64;
 
@@ -308,6 +320,16 @@ private:
         bool                                  isBus   = false;
         std::atomic<bool>                     audible{true};
         bool                                  liveMonitor = false;  // armed MIDI: synth live input
+        // Live-input route for this track: which endpoint (Midi Kit producer
+        // id, 0 = any) and which MIDI channel (1..16, 0 = all) its monitored
+        // notes may come from, so two keyboards drive two tracks independently.
+        // Atomic because arming/assignment can change while the player runs.
+        std::atomic<int32_t>                  inEndpoint{0};
+        std::atomic<int>                      inChannel{0};
+        // This bus's share of the live voices, rebuilt per block on the RT
+        // thread from the shared voice pool. Reserved at Load so the RT rebuild
+        // never allocates.
+        std::vector<MidiNote>                 liveNotes;
         std::vector<std::unique_ptr<IEffect>> fx;
         std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
         // Aux sends: destination node index into fBuses, linear level, and a PDC
@@ -360,6 +382,9 @@ private:
               isBus(o.isBus),
               audible(o.audible.load(std::memory_order_relaxed)),
               liveMonitor(o.liveMonitor),
+              inEndpoint(o.inEndpoint.load(std::memory_order_relaxed)),
+              inChannel(o.inChannel.load(std::memory_order_relaxed)),
+              liveNotes(std::move(o.liveNotes)),
               fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
               sendTargets(std::move(o.sendTargets)),
               outDelay(std::move(o.outDelay)),
@@ -380,6 +405,9 @@ private:
             isBus = o.isBus;
             audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
             liveMonitor = o.liveMonitor;
+            inEndpoint.store(o.inEndpoint.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            liveNotes = std::move(o.liveNotes);
             fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
             sendTargets = std::move(o.sendTargets);
             outDelay = std::move(o.outDelay);
@@ -403,6 +431,10 @@ private:
     std::vector<float>                        fScratch;   // (unused after routing)
     Synth                                     fSynth;     // MIDI voice renderer
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
+    // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
+    // the engine at the loop seam, which rebuilds every Bus; without this the
+    // demux would silently revert to "every track hears everything" mid-take.
+    std::vector<MidiInputRoute>               fMidiRoutes;
     std::atomic<bool>                         fMonitorOnly{false}; // idle monitor mode
     Frame                                     fMonFrame = 0;       // free-running monitor clock
     LiveVoice                                 fVoices[kMaxLiveVoices];

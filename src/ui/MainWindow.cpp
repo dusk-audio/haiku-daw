@@ -1039,7 +1039,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                     + (Frame)((double)(ev[i].timeUs - fMidiT0)
                                               * 1e-6 * fProject->sampleRate);
                                 if (mf < fRecStart) mf = fRecStart;
-                                fMidiRec.OnEvent(ev[i], mf);
+                                FeedMidiEvent(ev[i], mf);
                             }
                     }
                     // Loop-record: at the loop end, rewind the engine to the
@@ -1064,9 +1064,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         if (capturing)
                             fTimeline->SetLiveAudio(fRecorder.get(), fProject->sampleRate);
                         if (midiCap) {
-                            std::set<TrackId> mt(fMidiRecTracks.begin(),
-                                                 fMidiRecTracks.end());
-                            fTimeline->SetLiveMidiNotes(mt, fMidiRec.SnapshotNotes(ph));
+                            std::map<TrackId, std::vector<MidiNote>> live;
+                            for (TrackId id : fMidiRecTracks)
+                                live[id] = fMidiRecs[id].SnapshotNotes(ph);
+                            fTimeline->SetLiveMidiNotes(std::move(live));
                         }
                     }
                     fMeter->SetLevels(capturing ? fRecorder->PeakL() : fEngine->PeakL(),
@@ -1167,6 +1168,7 @@ void MainWindow::StartPlayback() {
     // Re-apply the effect-meter focus onto the fresh engine (else an open FX
     // editor's GR/FFT meters die on every play / loop-wrap / seek rebuild).
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
+    fEngine->SetMidiRoutes(fMidiRoutes);   // survives the rebuild, as above
     fPlaying = true;
     if (fTransport) fTransport->SetPlaying(true);
     UpdatePulse();
@@ -1210,6 +1212,10 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
         fEngine->SetInputMonitor(AudioMonitorOn());
     }
     if (fMidiIn) fEngine->SetLiveMidi(fMidiIn->MonitorInput());
+    // Routes live on the Engine, and this is a BRAND NEW one — without this the
+    // loop-record seam would quietly drop the demux mid-take and every armed
+    // track would start hearing every keyboard.
+    fEngine->SetMidiRoutes(fMidiRoutes);
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
     return true;
 }
@@ -1255,6 +1261,36 @@ void MainWindow::StartCapture() {
     StartMidiCapture();
 }
 
+// Resolve every MIDI track's endpoint NAME to the producer id it currently has,
+// and hand the routes to the engine. Names are the durable assignment (ids get
+// reshuffled across sessions), but only ids reach the RT thread, so the lookup
+// happens once here rather than per event. A track whose named endpoint is not
+// present right now gets no route and stays permissive — it hears whatever is
+// connected instead of going silent because a device was unplugged.
+void MainWindow::ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps) {
+    fMidiRoutes.clear();
+    for (const Track& t : fProject->Tracks()) {
+        if (t.type != TrackType::Midi || t.input.kind != InputSource::kMidi)
+            continue;
+        for (const MidiEndpointInfo& e : eps)
+            if (e.isProducer && e.name == t.input.name) {
+                fMidiRoutes.push_back(MidiInputRoute{ t.id, e.id,
+                                                      t.input.channel });
+                break;
+            }
+    }
+    if (fEngine) fEngine->SetMidiRoutes(fMidiRoutes);
+}
+
+// Hand one live event to each armed track that accepts it. This is where record
+// demux happens: two keyboards on two armed tracks fill two separate takes.
+void MainWindow::FeedMidiEvent(const MidiEvent& e, Frame at) {
+    for (TrackId id : fMidiRecTracks) {
+        if (!RouteAccepts(RouteFor(fMidiRoutes, id), e)) continue;
+        fMidiRecs[id].OnEvent(e, at);
+    }
+}
+
 // Open a MIDI consumer, connect the input endpoint of every MIDI track that is
 // armed OR input-monitored (so you hear yourself either way), and begin the
 // note-pairing recorder. Recorded clips still drop only on armed tracks.
@@ -1282,12 +1318,14 @@ void MainWindow::StartMidiCapture() {
                 break;
             }
     }
+    ResolveMidiRoutes(eps);   // ids for the demux (engine + per-track recorders)
     // Discard events queued before this take (both the record and monitor
     // rings) so stale pre-connect notes don't record or sound, then start.
     MidiEvent tmp[64];
     while (fMidiIn->ReadEvents(tmp, 64) > 0) {}
     while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
-    fMidiRec.Begin(fRecStart);
+    fMidiRecs.clear();
+    for (TrackId id : fMidiRecTracks) fMidiRecs[id].Begin(fRecStart);
     fMidiT0 = system_time();
     // Route live events to the engine so armed MIDI tracks sound as you play.
     if (fEngine) fEngine->SetLiveMidi(fMidiIn->MonitorInput());
@@ -1305,9 +1343,14 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
             Frame mf = fRecStart + (Frame)((double)(ev[i].timeUs - fMidiT0)
                                            * 1e-6 * fProject->sampleRate);
             if (mf < fRecStart) mf = fRecStart;
-            fMidiRec.OnEvent(ev[i], mf);
+            FeedMidiEvent(ev[i], mf);
         }
-    const MidiClip take = fMidiRec.End(endFrame);
+    // Close every armed track's take. Each holds only the events its own route
+    // accepted, so two keyboards produce two different regions.
+    std::map<TrackId, MidiClip> takes;
+    for (TrackId id : fMidiRecTracks)
+        takes[id] = fMidiRecs[id].End(endFrame);
+    fMidiRecs.clear();
     if (fEngine) {
         fEngine->SetLiveMidi(nullptr);            // stop monitoring this source
         // Wait out any in-flight RT deref. If quiescence can't be confirmed,
@@ -1319,22 +1362,31 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
 
     std::vector<TrackId> targets;
     targets.swap(fMidiRecTracks);
-    if (take.notes.empty()) return;   // nothing played: no clip
 
-    // Loop-record: split the linear take into one region per loop pass and stack
-    // them as a take group on each armed track (last non-empty pass active), the
-    // MIDI mirror of the audio LoopTakes path. fLoopRecord is still set here —
-    // StopRecording resets it only after this returns.
+    // Each target drops only what IT captured. A track whose keyboard stayed
+    // silent gets no clip, even while another track was recording.
+    bool any = false;
     const Transport& tr = fProject->transport;
-    if (fLoopRecord && tr.loopEnabled && tr.loopEnd > tr.loopStart) {
-        const Frame loopLen = tr.loopEnd - tr.loopStart;
-        const std::vector<std::vector<MidiNote>> passes =
-            SplitMidiLoopTakes(take.notes, loopLen);
-        int last = -1;   // index of the last non-empty pass
-        for (size_t k = 0; k < passes.size(); k++)
-            if (!passes[k].empty()) last = (int)k;
-        if (last < 0) return;   // every pass silent
-        for (TrackId target : targets) {
+    const bool loopTakes =
+        fLoopRecord && tr.loopEnabled && tr.loopEnd > tr.loopStart;
+
+    for (TrackId target : targets) {
+        const auto it = takes.find(target);
+        if (it == takes.end() || it->second.notes.empty()) continue;
+        const MidiClip& take = it->second;
+
+        // Loop-record: split this track's linear take into one region per pass
+        // and stack them as a take group (last non-empty pass active), the MIDI
+        // mirror of the audio LoopTakes path. fLoopRecord is still set here —
+        // StopRecording resets it only after this returns.
+        if (loopTakes) {
+            const Frame loopLen = tr.loopEnd - tr.loopStart;
+            const std::vector<std::vector<MidiNote>> passes =
+                SplitMidiLoopTakes(take.notes, loopLen);
+            int last = -1;   // index of the last non-empty pass
+            for (size_t k = 0; k < passes.size(); k++)
+                if (!passes[k].empty()) last = (int)k;
+            if (last < 0) continue;   // every pass silent on this track
             const int group = ++fTakeGroup;
             auto macro = std::make_unique<MacroCommand>("Loop MIDI Takes");
             for (size_t k = 0; k < passes.size(); k++) {
@@ -1348,17 +1400,15 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
                 macro->Add(std::make_unique<AddMidiClipCommand>(target, c));
             }
             fStack->Execute(std::move(macro), *fProject);
+        } else {
+            MidiClip c = take;         // AddMidiClipCommand assigns a fresh id
+            c.id = kInvalidClipId;
+            fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c),
+                            *fProject);
         }
-        fTimeline->ZoomToFit();
-        return;
+        any = true;
     }
-
-    for (TrackId target : targets) {
-        MidiClip c = take;             // AddMidiClipCommand assigns a fresh id
-        c.id = kInvalidClipId;
-        fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
-    }
-    fTimeline->ZoomToFit();   // show the whole take after recording
+    if (any) fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
 void MainWindow::ReloadActiveEngine() {
@@ -1431,6 +1481,7 @@ void MainWindow::UpdateMidiMonitor() {
         fMidiIn.reset();
         return;
     }
+    ResolveMidiRoutes(eps);   // demux: each track hears only its own endpoint
     MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
     while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
     fEngine->SetLiveMidi(fMidiIn->MonitorInput());

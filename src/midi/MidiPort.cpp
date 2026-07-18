@@ -55,7 +55,15 @@ public:
     }
 
 private:
-    void Emit(const MidiEvent& e) { fRec->Push(e); fMon->Push(e); }
+    // Stamp the producer this message came from before queueing it. Several
+    // keyboards feed this one consumer, and GetProducerID() is only valid for
+    // the message being delivered right now, so it must be read here on the
+    // delivery thread — downstream all that survives is the id.
+    void Emit(MidiEvent e) {
+        e.source = GetProducerID();
+        fRec->Push(e);
+        fMon->Push(e);
+    }
     MidiEventRing* fRec;
     MidiEventRing* fMon;
 };

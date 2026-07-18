@@ -27,6 +27,12 @@ struct MidiEvent {
     int16_t  bend    = 0;   // pitch bend, -8192..8191 (kPitchBend only)
     int64_t  timeUs  = 0;   // arrival time in the system_time() microsecond
                             // domain; 0 = "now" / unstamped
+    // Which endpoint this arrived from (the Midi Kit producer id), so several
+    // keyboards can be told apart and routed to different tracks. Stamped by
+    // MidiInputPort at the kit edge. 0 = unknown/untagged, which every route
+    // accepts — host tests and loopback sources never set it. Kept LAST so the
+    // aggregate initializers above stay valid.
+    int32_t  source  = 0;
 
     static MidiEvent NoteOn(uint8_t ch, uint8_t note, uint8_t vel, int64_t t = 0) {
         // Running-status convention: a note-on with velocity 0 is a note-off.

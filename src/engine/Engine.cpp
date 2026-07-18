@@ -318,6 +318,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         b.events = t.CollectEvents();         // channel CC/PB (absolute frames)
         b.instrument = t.instrument;
         b.liveMonitor = monitor;             // synth live input into this bus
+        // Reserve this bus's share of the live voices up front: UpdateLiveVoices
+        // fills it on the RT thread every block and must never allocate there.
+        b.liveNotes.reserve(kMaxLiveVoices);
         b.audible.store(audible || monitor, std::memory_order_relaxed);  // monitor overrides mute/solo
         float mgl, mgr; EqualPowerGains(t.gain, t.pan, &mgl, &mgr);
         b.midiGainL.store(mgl, std::memory_order_relaxed);
@@ -520,6 +523,10 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         fNodePeakL[i].store(0.0f);
         fNodePeakR[i].store(0.0f);
     }
+    // Re-apply live-input routing onto the freshly built buses, so a rebuild
+    // (loop-record seam, effect add, tempo edit) keeps the demux instead of
+    // reverting every track to hearing every keyboard.
+    ApplyMidiRoutes();
 
     return B_OK;
 }
@@ -690,8 +697,22 @@ float Engine::TrackPeakR(TrackId id) const {
     return 0.0f;
 }
 
+void Engine::SetMidiRoutes(const std::vector<MidiInputRoute>& routes) {
+    fMidiRoutes = routes;
+    ApplyMidiRoutes();
+}
+
+void Engine::ApplyMidiRoutes() {
+    for (Bus& b : fBuses) {
+        const MidiInputRoute r = RouteFor(fMidiRoutes, b.id);
+        b.inEndpoint.store(r.endpoint, std::memory_order_relaxed);
+        b.inChannel.store(r.channel, std::memory_order_relaxed);
+    }
+}
+
 void Engine::UpdateLiveVoices(Frame blockStart) {
     fLiveNotes.clear();
+    for (Bus& b : fBuses) b.liveNotes.clear();
     IMidiInput* in = fLiveMidi.load(std::memory_order_relaxed);
     if (!in) {                       // monitoring off: release every voice
         for (LiveVoice& v : fVoices) v.active = false;
@@ -715,12 +736,16 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
                         if (fVoices[k].start < fVoices[slot].start) slot = k;
                 }
                 fVoices[slot] = LiveVoice{ true, false, e.data1, e.data2,
-                                           e.channel, blockStart, 0 };
+                                           e.channel, blockStart, 0, e.source };
             } else if (e.IsNoteOff()) {
+                // Match the source too: the same key on a second keyboard is a
+                // different voice, and letting its note-off close this one would
+                // cut the first keyboard's note short.
                 for (int k = 0; k < kMaxLiveVoices; k++)
                     if (fVoices[k].active && !fVoices[k].releasing
                         && fVoices[k].pitch == e.data1
-                        && fVoices[k].channel == e.channel) {
+                        && fVoices[k].channel == e.channel
+                        && fVoices[k].source == e.source) {
                         fVoices[k].releasing = true;
                         fVoices[k].off       = blockStart;
                         break;
@@ -744,7 +769,22 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
         }
         Frame len = v.releasing ? (v.off - v.start) : kHeld;
         if (len < 1) len = 1;
-        fLiveNotes.push_back(MidiNote{ (int)v.pitch, (int)v.vel, v.start, len });
+        const MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        fLiveNotes.push_back(note);
+        // Hand the voice to each monitored bus whose route accepts it, so two
+        // keyboards drive two tracks instead of both tracks hearing everything.
+        // Reserved at Load, so these push_backs never allocate on the RT thread.
+        MidiEvent probe;
+        probe.channel = v.channel;
+        probe.source  = v.source;
+        for (Bus& b : fBuses) {
+            if (!b.liveMonitor) continue;
+            if (!RouteAccepts(b.inEndpoint.load(std::memory_order_relaxed),
+                              b.inChannel.load(std::memory_order_relaxed), probe))
+                continue;
+            if (b.liveNotes.size() < b.liveNotes.capacity())
+                b.liveNotes.push_back(note);
+        }
     }
 }
 
@@ -766,10 +806,10 @@ void Engine::FillBuffer(float* out, size_t frames) {
         float pl = 0.0f, pr = 0.0f;
         for (size_t idx = 0; idx < fBuses.size(); idx++) {
             Bus& b = fBuses[idx];
-            if (!b.liveMonitor || fLiveNotes.empty()) continue;
+            if (!b.liveMonitor || b.liveNotes.empty()) continue;
             float* nb = fNodeBufs[idx].data();
             std::memset(nb, 0, nfloats * sizeof(float));
-            fSynth.Render(fLiveNotes, b.instrument, nb, frames, bs, 1.0f);
+            fSynth.Render(b.liveNotes, b.instrument, nb, frames, bs, 1.0f);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
@@ -861,7 +901,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
 
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
             s->Mix(nb, frames, blockStart);
-        const bool live = b.liveMonitor && !fLiveNotes.empty();
+        const bool live = b.liveMonitor && !b.liveNotes.empty();
         if (!b.notes.empty() || live) {     // MIDI: render dry then fader
             if (!b.notes.empty()) {
                 // CC7 (volume) x CC11 (expression) channel gain, placed by the
@@ -881,7 +921,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 b.chanR = cgr;
             }
             if (live)                        // live keyboard through this voice
-                fSynth.Render(fLiveNotes, b.instrument, nb, frames, blockStart, 1.0f);
+                fSynth.Render(b.liveNotes, b.instrument, nb, frames, blockStart, 1.0f);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {

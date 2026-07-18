@@ -1545,20 +1545,21 @@ void TimelineView::SetRecording(bool active, Frame start, Frame length) {
     fRecStart  = start;
     fRecLen    = length;
     if (!active) {                 // take finished: drop live content
-        fLiveNoteTracks.clear();
         fLiveNotes.clear();
         fLiveRec = nullptr;
     }
     Invalidate();   // simplest; the region grows every poll anyway
 }
 
-void TimelineView::DrawLiveMidi(BRect region) {
+void TimelineView::DrawLiveMidi(BRect region, TrackId track) {
     // Map a fixed pitch window across the region height (same span the piano
     // roll centers on). Notes are clip-relative to fRecStart.
+    const auto it = fLiveNotes.find(track);
+    if (it == fLiveNotes.end()) return;
     const int   loPitch = 36, hiPitch = 96;       // 5 octaves
     const float h = region.Height();
     SetHighColor(Rgb(240, 230, 150));
-    for (const MidiNote& n : fLiveNotes) {
+    for (const MidiNote& n : it->second) {
         float x0 = FrameToX(fRecStart + n.startFrame);
         float x1 = FrameToX(fRecStart + n.startFrame + n.lengthFrames);
         if (x1 < region.left)  continue;
@@ -1865,8 +1866,8 @@ void TimelineView::DrawLanes(BRect update) {
                 StrokeRect(rb);
                 // Live take content: MIDI notes (armed MIDI tracks) or the audio
                 // waveform envelope streamed from the recorder, drawn as it grows.
-                if (t.type == TrackType::Midi && fLiveNoteTracks.count(t.id))
-                    DrawLiveMidi(rb);
+                if (t.type == TrackType::Midi && fLiveNotes.count(t.id))
+                    DrawLiveMidi(rb, t.id);
                 else if (t.type == TrackType::Audio && fLiveRec)
                     DrawLiveAudio(rb);
                 SetHighColor(ColText());

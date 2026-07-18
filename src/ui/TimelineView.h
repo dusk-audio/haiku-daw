@@ -113,10 +113,11 @@ public:
     // MIDI notes (clip-relative to the record start) for the armed MIDI tracks,
     // and the audio waveform envelope streamed from the Recorder. Cleared by
     // SetRecording(false, ...).
-    void SetLiveMidiNotes(const std::set<TrackId>& tracks,
-                          std::vector<MidiNote> notes) {
-        fLiveNoteTracks = tracks;
-        fLiveNotes      = std::move(notes);
+    // Live take content per armed MIDI track. Keyed by track because inputs are
+    // demuxed: with two keyboards each track is capturing its own notes, so a
+    // single shared list would draw the wrong take on both.
+    void SetLiveMidiNotes(std::map<TrackId, std::vector<MidiNote>> perTrack) {
+        fLiveNotes = std::move(perTrack);
     }
     void SetLiveAudio(const Recorder* rec, double projectRate) {
         fLiveRec      = rec;
@@ -129,7 +130,7 @@ private:
     // Iterate visible bar/beat gridlines: fn(x, isBar, barNumber).
     void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
     void DrawTrackHeader(const Track& t, BRect lane);
-    void DrawLiveMidi(BRect region);   // in-progress notes while recording
+    void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
     void DrawLiveAudio(BRect region);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
     // `fadeIn`/`fadeOut` are the EFFECTIVE fades (the clip's own combined with
@@ -270,8 +271,8 @@ private:
     Frame          fRecStart  = 0;
     Frame          fRecLen    = 0;
     // Live take content while recording (see SetLiveMidiNotes / SetLiveAudio).
-    std::set<TrackId>     fLiveNoteTracks;
-    std::vector<MidiNote> fLiveNotes;         // clip-relative to fRecStart
+    // Notes are clip-relative to fRecStart, per capturing track.
+    std::map<TrackId, std::vector<MidiNote>> fLiveNotes;
     const Recorder*       fLiveRec = nullptr; // non-owning; valid during capture
     double                fLiveProjRate = 48000.0;
 };

@@ -62,6 +62,11 @@ private:
     void StopRecording();
     void StartCapture();             // open the Recorder (after any count-in)
     void StartMidiCapture();         // connect armed MIDI inputs, begin the take
+    // Resolve each MIDI track's endpoint NAME to a live producer id and publish
+    // the routes to fMidiRoutes + the engine. Called wherever the input opens.
+    void ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps);
+    // Feed one live event to every armed track whose route accepts it.
+    void FeedMidiEvent(const MidiEvent& e, Frame at);
     void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
     void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
     void StopMidiMonitor();          // tear down the idle monitor engine + input
@@ -122,8 +127,15 @@ private:
     // MIDI capture: a consumer connected to the armed MIDI tracks' input
     // endpoints, feeding a note-pairing recorder. Independent of the audio path.
     std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
-    MidiRecorder              fMidiRec;
+    // One recorder per armed MIDI track, not one shared: inputs are demuxed, so
+    // each track pairs only the events its own route accepts. With a single
+    // keyboard every track's route is permissive and they all capture the same
+    // stream, exactly as before.
+    std::map<TrackId, MidiRecorder> fMidiRecs;
     std::vector<TrackId>      fMidiRecTracks; // armed MIDI targets for the take
+    // Endpoint id + channel each MIDI track listens to, resolved from the
+    // track's endpoint NAME when the input is opened (see ResolveMidiRoutes).
+    std::vector<MidiInputRoute> fMidiRoutes;
     bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
     bool                      fMonitoring = false;  // idle live-monitor engine up
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll

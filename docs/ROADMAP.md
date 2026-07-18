@@ -297,11 +297,24 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   host-tested (the test fails if either command clobbers the other's half).
   Like note edits, controllers are snapshotted at engine Load, so a change is
   heard on the next Start.
+- ✅ Per-track MIDI input demux: `MidiEvent` carries the endpoint it arrived
+  from (stamped from `GetProducerID()` at the kit edge, so one consumer still
+  serves every keyboard), and kit-free `midi/MidiRouting.h` decides which track
+  an event reaches — by endpoint id and by the track's MIDI channel filter
+  (`InputSource::channel`, 1..16, 0 = all). `MainWindow` resolves endpoint
+  *names* to live producer ids once when the input opens; only ids reach the RT
+  thread. Monitoring demuxes per `Bus` (each gets its own live-note list,
+  reserved at Load so the RT fan-out never allocates) and recording demuxes per
+  track (one `MidiRecorder` each), so two keyboards drive and record two tracks
+  independently. Untagged events (host tests, loopback) stay permissive, and a
+  single keyboard behaves exactly as before. Host-tested (`midirouting_tests`,
+  which fails if the endpoint filter is defeated). **VM runtime pending: needs
+  two MIDI sources to exercise.**
 - *Remaining:* pitch-bend + mod-wheel (both modulate frequency, so the stateless
   synth needs phase integration — deferred); a generic "other CC" lane (today
   only the three audible controllers are offered); live-MIDI CC recording
-  (`MidiPort`/`MidiRecorder`); per-track MIDI input demux; MIDI clock/MTC;
-  sysex.
+  (`MidiPort`/`MidiRecorder` capture note on/off only — CC/bend are dropped);
+  MIDI clock/MTC; sysex.
 
 ## Phase I — Plugins (long-term)
 
