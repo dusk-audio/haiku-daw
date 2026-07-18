@@ -90,8 +90,14 @@ void LookaheadLimiter::Process(float* x, int frames) {
     float minGain = 1.0f;
 
     for (int f = 0; f < frames; ++f) {
-        const float gl = x[f * 2 + 0] * inG;
-        const float gr = x[f * 2 + 1] * inG;
+        float gl = x[f * 2 + 0] * inG;
+        float gr = x[f * 2 + 1] * inG;
+        // Flush non-finite input to 0: a NaN peak defeats the window-max compare
+        // (NaN <= x is false) and would let the ceiling slip for La frames; an Inf
+        // would emit Inf*0 = NaN downstream. Keep the limiter's output finite and
+        // the ceiling guarantee intact regardless of upstream garbage.
+        if (!std::isfinite(gl)) gl = 0.0f;
+        if (!std::isfinite(gr)) gr = 0.0f;
         const float peak = std::max(std::fabs(gl), std::fabs(gr));
         const std::int64_t i = fCounter;
 

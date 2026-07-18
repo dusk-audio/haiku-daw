@@ -24,6 +24,12 @@ namespace daw {
 enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq,
                         Saturator, Gate, Widener, Plugin, Limiter };
 
+// Highest valid serialized EffectType id. Every place that validates a
+// deserialized/message type (ProjectIO load, the MainWindow kMsgApplyFx handler)
+// gates against this so a new type is never silently coerced to Biquad. Point it
+// at the LAST enumerator — appending a type then updates every gate at once.
+inline constexpr int kMaxEffectTypeId = static_cast<int>(EffectType::Limiter);
+
 struct EffectDesc {
     EffectType         type = EffectType::Biquad;
     std::vector<float> params;

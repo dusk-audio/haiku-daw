@@ -131,8 +131,8 @@ float EffectsView::PanelTop(size_t i) const {
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    // 7 built-in add buttons + one per loaded plugin.
-    const int addRows = 7 + (int)PluginHost::Instance().Plugins().size();
+    // 8 built-in add buttons + one per loaded plugin.
+    const int addRows = 8 + (int)PluginHost::Instance().Plugins().size();
     y += addRows * 26 + 12;
     return y;
 }

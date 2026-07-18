@@ -321,7 +321,7 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             EffectDesc e;
             int type = 0, count = 0;
             iss >> type >> count;
-            if (type < 0 || type > 9) type = 0;
+            if (type < 0 || type > kMaxEffectTypeId) type = 0;
             e.type = (EffectType)type;
             for (int i = 0; i < count && i < kMaxListCount; i++) {
                 float v = 0.0f; if (!(iss >> v)) break; e.params.push_back(v);
@@ -465,7 +465,7 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             EffectDesc e;
             int type = 0, count = 0;
             iss >> type >> count;
-            if (type < 0 || type > 9) type = 0;
+            if (type < 0 || type > kMaxEffectTypeId) type = 0;
             e.type = (EffectType)type;
             for (int i = 0; i < count && i < kMaxListCount; i++) {
                 float v = 0.0f;

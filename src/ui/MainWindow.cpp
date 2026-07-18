@@ -692,7 +692,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int32 type = 0, epIdx = 0;
             for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
                 EffectDesc d;
-                d.type = (type >= 0 && type <= 8) ? (EffectType)type
+                d.type = (type >= 0 && type <= kMaxEffectTypeId) ? (EffectType)type
                                                   : EffectType::Biquad;
                 BString pn;
                 if (msg->FindString("en", i, &pn) == B_OK)
