@@ -227,10 +227,17 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   take earlier by the record round-trip latency (host-tested), plumbed into the
   take-placement path via `MainWindow::fRoundTripFrames` (0 until the device
   latency is queried — Media Kit, VM-gated).
-- *Remaining:* a live latent effect that actually reports latency (e.g. a
-  look-ahead limiter as an `IEffect`); the Media-Kit device-latency query feeding
-  `fRoundTripFrames`; round-trip compensation for the punch/loop-record paths;
-  BBT/playhead report offset by the master latency during playback.
+- ✅ Live latent effect: `dsp/LookaheadLimiter` — the first built-in reporting a
+  non-zero `IEffect::LatencySamples()`, so PDC is now exercised by a real
+  built-in (before it, every delay line was length 0). Streaming look-ahead
+  brickwall limiter (La-frame delay + sliding window-max gain, RT-safe); output
+  lags input by exactly La frames. Host-tested (`lookahead_limiter_tests`) and
+  `exporter_pdc_tests` gained a real-`LimiterDesc` transparency case. Engine +
+  Exporter pick up its latency generically; addable from the effects editor.
+  **VM audio-runtime verification pending.**
+- *Remaining:* the Media-Kit device-latency query feeding `fRoundTripFrames`;
+  round-trip compensation for the punch/loop-record paths; BBT/playhead report
+  offset by the master latency during playback.
 
 ## Phase Z — MIDI depth  ◐ IN PROGRESS
 

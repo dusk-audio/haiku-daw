@@ -134,10 +134,16 @@ checks still need Marc at the VM** (see "What's next" item 1).
      (cross-compiles clean, **VM audio-runtime unverified**). **Record round-trip
      math** `RecordPlan::CompensateRoundTrip` (`recordplan_tests`), plumbed via
      `MainWindow::fRoundTripFrames` (0 = off).
-   - Next: a live `IEffect` that reports real latency (e.g. a look-ahead limiter)
-     to exercise PDC on target; the Media-Kit device-latency query into
-     `fRoundTripFrames`; punch/loop-record round-trip compensation; offset the
-     playhead/BBT readout by the master latency during playback.
+   - Done: a live latent `IEffect` — `dsp/LookaheadLimiter`, the first built-in
+     reporting non-zero `LatencySamples()` (streaming look-ahead brickwall
+     limiter: La-frame delay + sliding window-max gain, RT-safe, output lags input
+     by exactly La; ceiling held in the sample domain). Engine + Exporter sum its
+     latency generically; addable in the effects editor. Host-tested
+     (`lookahead_limiter_tests`; `exporter_pdc_tests` real-`LimiterDesc`
+     transparency case), ASan-clean. **VM audio-runtime unverified.**
+   - Next: the Media-Kit device-latency query into `fRoundTripFrames`; punch/loop-
+     record round-trip compensation; offset the playhead/BBT readout by the master
+     latency during playback.
 
 4. **Phase Z — MIDI depth** ◐ *event model + IO landed (host-tested); synth
    apply + CC-lane UI next.*
