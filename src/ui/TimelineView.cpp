@@ -8,9 +8,12 @@
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
 #include "../engine/Recorder.h" // live capture waveform envelope
+#include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
 #include "Widgets.h"            // shared pan knob draw
 
+#include <Entry.h>
 #include <MenuItem.h>
+#include <Path.h>
 #include <PopUpMenu.h>
 #include <Window.h>
 
@@ -20,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <strings.h>   // strcasecmp (dropped-file extension match)
 
 namespace daw {
 
@@ -132,6 +136,13 @@ void TimelineView::CycleAuto(TrackId id) {
     Invalidate();
 }
 
+// Case-insensitive filename-extension match, used to route a dropped file to the
+// audio or the MIDI importer (Tracker gives us paths, not MIME types).
+static bool DroppedExtIs(const char* path, const char* ext) {
+    const char* dot = std::strrchr(path, '.');
+    return dot && strcasecmp(dot + 1, ext) == 0;
+}
+
 void TimelineView::MessageReceived(BMessage* msg) {
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         float dy = 0.0f;
@@ -156,6 +167,51 @@ void TimelineView::MessageReceived(BMessage* msg) {
             imp.AddString("path", path);
             imp.AddInt64("tid", (int64)tid);
             imp.AddInt64("start", (int64)start);
+            if (Window()) BMessenger(Window()).SendMessage(&imp);
+        }
+        return;
+    }
+    // Files dropped from Tracker (or any other B_SIMPLE_DATA source): import
+    // each ref onto the track it landed on, at the snapped drop position.
+    if (msg->what == B_SIMPLE_DATA && fProject) {
+        const BPoint where = ConvertFromScreen(msg->DropPoint());
+        Frame start = Snapped(XToFrame(where.x));
+        if (start < 0) start = 0;
+        const int dropIdx = TrackIndexAt(where);
+        entry_ref ref;
+        // Walks the target down consecutive tracks so a multi-file audio drop
+        // lands side by side instead of stacked. Only audio advances it: a .mid
+        // makes its own tracks, so counting it would skip a lane.
+        int audioPlaced = 0;
+        for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++) {
+            BEntry entry(&ref, true);   // traverse symlinks
+            BPath path;
+            if (entry.InitCheck() != B_OK || !entry.IsFile()
+                || entry.GetPath(&path) != B_OK)
+                continue;
+            const char* p = path.Path();
+
+            BMessage imp;
+            if (DroppedExtIs(p, "wav")) {
+                TrackId tid = kInvalidTrackId;
+                const int idx = dropIdx >= 0 ? dropIdx + audioPlaced : -1;
+                if (idx >= 0 && idx < (int)fProject->Tracks().size())
+                    tid = fProject->Tracks()[(size_t)idx].id;
+                imp.what = kMsgBrowserImport;
+                imp.AddString("path", p);
+                imp.AddInt64("tid", (int64)tid);
+                imp.AddInt64("start", (int64)start);
+                ++audioPlaced;
+            } else if (DroppedExtIs(p, "mid") || DroppedExtIs(p, "midi")) {
+                imp.what = kMsgDropMidi;      // makes its own MIDI tracks
+                imp.AddString("path", p);
+                imp.AddInt64("start", (int64)start);
+            } else {
+                std::fprintf(stderr,
+                             "TimelineView: ignoring dropped '%s' (want .wav/.mid)\n",
+                             p);
+                continue;
+            }
             if (Window()) BMessenger(Window()).SendMessage(&imp);
         }
         return;
@@ -300,8 +356,10 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
     if (!c) return;
     BPoint sp = ConvertToScreen(BPoint(kHeaderWidth + 40, kRulerHeight + 40));
     BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
-    PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame, c->notes,
+    PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame,
+                                    c->lengthFrames, c->notes,
                                     fProject->tempoMap, fProject->sampleRate,
+                                    fProject->transport.playhead,
                                     BMessenger(Window()));
     roll->Show();
     // Register the roll so the main window can push the playhead ("tapehead").
@@ -1762,10 +1820,17 @@ void TimelineView::DrawLanes(BRect update) {
             StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
         });
 
+        // Effective fades for this lane: the clips' own fades folded together
+        // with any auto-crossfade implied by overlaps. Same call the engine and
+        // the exporter make, so the drawing shows the fades that actually sound.
+        const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
+
+        std::size_t ci = 0;
         for (const Clip& c : t.clips) {
+            const ClipFades& ef = fades[ci++];
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // only the active take of a group is drawn
-            DrawClip(c, lane, TrackColor(t.colorIndex));
+            DrawClip(c, lane, TrackColor(t.colorIndex), ef.fadeIn, ef.fadeOut);
             if (c.takeGroup > 0) {   // "T k/N" badge on the active take
                 int n = 0, k = 0;
                 for (const Clip& o : t.clips)
@@ -1781,6 +1846,7 @@ void TimelineView::DrawLanes(BRect update) {
                 DrawString(tb, BPoint(bx, lane.bottom - 16));
             }
         }
+        DrawCrossfades(t, lane);
 
         if (t.type == TrackType::Midi)
             DrawMidiNotes(t, lane);
@@ -2011,7 +2077,45 @@ void TimelineView::HandleAutoMouseDown(const Track& t, BRect lane, int idx,
     Invalidate(lane);
 }
 
-void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
+// Where two clips overlap, mark the auto-crossfade: a tinted band over the
+// overlap plus the crossing ramps (earlier clip out, later clip in). Drawn after
+// the lane's blocks, because the later clip is painted on top of the earlier one
+// and would otherwise hide its fade-out. The overlap comes from the same
+// CrossfadeOverlap the renderers use, so this can't disagree with what sounds.
+void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
+    if (t.clips.size() < 2) return;
+    const float top = lane.top + 3, bot = lane.bottom - 3;
+
+    for (std::size_t i = 0; i + 1 < t.clips.size(); i++) {
+        const Clip& a = t.clips[i];
+        const Clip& b = t.clips[i + 1];
+        const Frame ov = CrossfadeOverlap(a, b);
+        if (ov <= 0) continue;
+
+        float x0 = FrameToX(b.startFrame);
+        float x1 = FrameToX(b.startFrame + ov);
+        if (x1 < kHeaderWidth || x0 > lane.right) continue;
+        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+        if (x1 > lane.right)   x1 = lane.right;
+        if (x1 <= x0) continue;
+
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+        SetHighColor(255, 232, 120, 40);            // warm tint over the overlap
+        FillRect(BRect(x0, top, x1, bot));
+        SetDrawingMode(B_OP_COPY);
+
+        SetHighColor(Rgb(255, 232, 120));
+        StrokeLine(BPoint(x0, top), BPoint(x1, bot));   // a fading out
+        StrokeLine(BPoint(x0, bot), BPoint(x1, top));   // b fading in
+        SetHighColor(ColClipBorder());
+        StrokeLine(BPoint(x0, top), BPoint(x0, bot));   // overlap boundaries
+        StrokeLine(BPoint(x1, top), BPoint(x1, bot));
+    }
+}
+
+void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
+                            Frame fadeIn, Frame fadeOut) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
     if (x1 < kHeaderWidth || x0 > lane.right)
@@ -2025,15 +2129,17 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base) {
     DrawClipWave(c, block);
 
     // Fade ramps: a diagonal from the block corner up to where the fade ends.
+    // These are the effective fades, so an auto-crossfade with a neighbour draws
+    // here too rather than only being audible.
     SetHighColor(ColClipBorder());
-    if (c.fadeInFrames > 0) {
-        float fx = FrameToX(c.startFrame + c.fadeInFrames);
+    if (fadeIn > 0) {
+        float fx = FrameToX(c.startFrame + fadeIn);
         if (fx > block.left)
             StrokeLine(BPoint(block.left, block.bottom),
                        BPoint(fx < block.right ? fx : block.right, block.top));
     }
-    if (c.fadeOutFrames > 0) {
-        float fx = FrameToX(c.startFrame + c.lengthFrames - c.fadeOutFrames);
+    if (fadeOut > 0) {
+        float fx = FrameToX(c.startFrame + c.lengthFrames - fadeOut);
         if (fx < block.right)
             StrokeLine(BPoint(fx > block.left ? fx : block.left, block.top),
                        BPoint(block.right, block.bottom));

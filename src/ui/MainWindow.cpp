@@ -842,6 +842,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgDropMidi: {   // a .mid dropped on the timeline
+            const char* path = nullptr;
+            int64 start = 0;
+            if (msg->FindString("path", &path) == B_OK && path) {
+                msg->FindInt64("start", &start);
+                ImportMidi(path, (Frame)start);
+            }
+            break;
+        }
         case kMsgRegionNormalize: case kMsgRegionReverse: case kMsgRegionStrip: {
             int64 tid = 0, cid = 0;
             if (msg->FindInt64("track", &tid) != B_OK) break;
@@ -1644,7 +1653,7 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
     fTimeline->Invalidate();
 }
 
-void MainWindow::ImportMidi(const char* path) {
+void MainWindow::ImportMidi(const char* path, Frame at) {
     SmfData d;
     if (!ReadSmf(path, d)) {
         std::fprintf(stderr, "MainWindow: cannot import MIDI '%s'\n", path);
@@ -1663,7 +1672,7 @@ void MainWindow::ImportMidi(const char* path) {
         if (st.notes.empty() && st.events.empty())
             continue;                               // skip conductor/empty tracks
         MidiClip clip;
-        clip.startFrame = 0;
+        clip.startFrame = at < 0 ? 0 : at;   // notes stay clip-relative
         Frame maxEnd = 0;
         for (const SmfNote& sn : st.notes) {
             MidiNote mn;

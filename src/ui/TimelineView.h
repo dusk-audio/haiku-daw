@@ -38,6 +38,11 @@ constexpr uint32 kMsgRegionReverse   = 'rrev';
 constexpr uint32 kMsgRegionStrip     = 'rstp';
 constexpr uint32 kMsgFreezeTrack     = 'frtk';
 
+// A .mid file dropped on the timeline from Tracker (or any B_SIMPLE_DATA
+// source): string "path" + int64 "start" (the snapped drop frame). Audio drops
+// reuse the sample browser's kMsgBrowserImport instead.
+constexpr uint32 kMsgDropMidi = 'dpmd';
+
 class TimelineView : public BView {
 public:
     // BView already has a Frame() method; without this typedef every
@@ -127,8 +132,15 @@ private:
     void DrawLiveMidi(BRect region);   // in-progress notes while recording
     void DrawLiveAudio(BRect region);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
-    void DrawClip(const Clip& c, BRect lane, rgb_color base);
+    // `fadeIn`/`fadeOut` are the EFFECTIVE fades (the clip's own combined with
+    // any auto-crossfade from overlapping a neighbour), so the drawing matches
+    // what the engine and exporter render. See model/Crossfade.h.
+    void DrawClip(const Clip& c, BRect lane, rgb_color base,
+                  Frame fadeIn, Frame fadeOut);
     void DrawClipWave(const Clip& c, BRect block);
+    // Overlap X + tint, drawn after a lane's clips so the earlier clip's ramp is
+    // not buried under the later clip's block.
+    void DrawCrossfades(const Track& t, BRect lane);
     void DrawPlayhead();
     void DrawDragGhost();   // clip-move preview rectangle
 

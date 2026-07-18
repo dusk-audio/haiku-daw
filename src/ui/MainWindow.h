@@ -81,7 +81,9 @@ private:
     void SaveSettings();
     void ImportAudio(const char* path);   // add a WAV as a clip (first track/playhead)
     void ImportAudioAt(const char* path, TrackId track, Frame start);  // drop target
-    void ImportMidi(const char* path);    // .mid -> new MIDI tracks (tempo-relative)
+    // .mid -> new MIDI tracks (tempo-relative). `at` places the created regions
+    // on the timeline (a drop position); 0 = the start of the project.
+    void ImportMidi(const char* path, Frame at = 0);
     void ExportMidi(const char* path);    // project MIDI tracks -> .mid
     void RebuildPeaks();             // rebuild waveform envelopes after load
 

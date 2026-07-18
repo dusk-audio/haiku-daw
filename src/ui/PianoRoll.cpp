@@ -52,8 +52,10 @@ static const char* NoteName(int pitch, char* buf, size_t n) {
 }
 
 PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
-                             Frame clipStart, std::vector<MidiNote> notes,
-                             TempoMap tempo, double sampleRate, BMessenger apply)
+                             Frame clipStart, Frame clipLength,
+                             std::vector<MidiNote> notes,
+                             TempoMap tempo, double sampleRate, Frame playhead,
+                             BMessenger apply)
     : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
       fNotes(std::move(notes)), fTrack(track), fClip(clip),
       fClipStart(clipStart), fTempo(tempo),
@@ -61,6 +63,20 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
     SetViewColor(ColBackground());
     fTempo.sampleRate = sampleRate;
     fSel.assign(fNotes.size(), 0);
+
+    // Open focused on the tapehead. The main window only pushes the playhead
+    // during transport, so seed it here to draw it right away, and centre the
+    // view on it -- but only while it is inside this region. Outside it there is
+    // nothing to edit there, so fall back to the region's head (scroll 0).
+    const Frame rel = playhead - fClipStart;
+    if (playhead >= 0 && rel >= 0 && (clipLength <= 0 || rel <= clipLength)) {
+        fPlayhead = playhead;
+        const double visible = ((double)frame.Width() - kKbdW) * fFramesPerPixel;
+        if (visible > 0) {
+            fScrollFrame = rel - (Frame)(visible * 0.5);
+            if (fScrollFrame < 0) fScrollFrame = 0;
+        }
+    }
 }
 
 void PianoRollView::SelectOnly(int i) {
@@ -517,8 +533,8 @@ void PianoRollView::MouseDown(BPoint where) {
         return;
     }
 
-    // Empty space: begin a marquee. If the pointer doesn't move, MouseUp
-    // treats it as a click and adds a note. Additive keeps prior selection.
+    // Empty space (Pointer tool): begin a marquee selection. Additive keeps the
+    // prior selection. Creating notes is the Pencil/Brush tools' job.
     fDrag = Drag::Marquee;
     fMarqueeCur = where;
     fPreMarquee = additive ? fSel : std::vector<char>(fNotes.size(), 0);
@@ -594,31 +610,17 @@ void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
     Invalidate();
 }
 
-void PianoRollView::MouseUp(BPoint where) {
+void PianoRollView::MouseUp(BPoint) {
     const Drag was = fDrag;
     fDrag = Drag::None;
     fDragNote = -1;
     fVelLaneDrag = false;
 
     if (was == Drag::Marquee) {
-        const float moved = std::fabs(where.x - fDownPoint.x)
-                          + std::fabs(where.y - fDownPoint.y);
-        if (moved < 4.0f) {
-            // A click on empty space (no marquee drag): add a note, selected.
-            MidiNote n;
-            Frame start = Snapped(XToFrame(fDownPoint.x));
-            if (start < 0) start = 0;
-            n.startFrame   = start;
-            n.pitch        = std::clamp(YToPitch(fDownPoint.y), 0, 127);
-            n.velocity     = 100;
-            // Beat length at the note's ABSOLUTE position (start is clip-relative)
-            // so variable tempo before the region gives the right length.
-            n.lengthFrames = (Frame)fTempo.FramesPerBeatAt(start + fClipStart);
-            fNotes.push_back(n);
-            fSel.assign(fNotes.size(), 0);
-            fSel.back() = 1;
-            Apply();
-        }
+        // A click on empty space that never became a drag just clears the
+        // selection (MouseDown already did that). It must NOT add a note: only
+        // the Pencil and Brush tools create, and the marquee path is reachable
+        // only with the Pointer tool.
         Invalidate();
         return;
     }
@@ -674,13 +676,16 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
 // --- window ---------------------------------------------------------------
 
 PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
-                     daw::Frame clipStart, std::vector<MidiNote> notes,
-                     TempoMap tempo, double sampleRate, BMessenger apply)
+                     daw::Frame clipStart, daw::Frame clipLength,
+                     std::vector<MidiNote> notes,
+                     TempoMap tempo, double sampleRate, daw::Frame playhead,
+                     BMessenger apply)
     : BWindow(frame, "Piano Roll", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
     fMain = apply;
-    fView = new PianoRollView(Bounds(), track, clip, clipStart, std::move(notes),
-                              tempo, sampleRate, apply);
+    fView = new PianoRollView(Bounds(), track, clip, clipStart, clipLength,
+                              std::move(notes), tempo, sampleRate, playhead,
+                              apply);
     AddChild(fView);
     fView->MakeFocus(true);
 }

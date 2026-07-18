@@ -55,6 +55,32 @@ int main() {
         CHECK(f[1].fadeIn == 100);
     }
 
+    // CrossfadeOverlap is the shared rule: the renderers derive fades from it and
+    // the timeline draws the overlap band from it. Pin it directly so the two can
+    // never disagree about where a crossfade is or how long it lasts.
+    {
+        CHECK(CrossfadeOverlap(mk(0, 1000), mk(1000, 1000)) == 0);   // butting
+        CHECK(CrossfadeOverlap(mk(0, 1000), mk(1200, 500)) == 0);    // a gap
+        CHECK(CrossfadeOverlap(mk(0, 1000), mk(700, 1000)) == 300);
+        CHECK(CrossfadeOverlap(mk(0, 1000), mk(200, 100)) == 100);   // short b
+        // A user fade does not widen the overlap (only the effective fade).
+        CHECK(CrossfadeOverlap(mk(0, 1000, 0, 500), mk(800, 1000)) == 200);
+        // Stacked loop-record takes are alternatives, never crossfade partners.
+        {
+            Clip a = mk(0, 1000), b = mk(700, 1000);
+            a.takeGroup = 1; b.takeGroup = 1;
+            CHECK(CrossfadeOverlap(a, b) == 0);
+        }
+        // The overlap the timeline shades must equal the later clip's auto
+        // fade-in, so the band and the ramp always line up.
+        {
+            std::vector<Clip> cs = { mk(0, 1000), mk(600, 1000) };
+            auto f = ComputeCrossfades(cs);
+            CHECK(CrossfadeOverlap(cs[0], cs[1]) == f[1].fadeIn);
+            CHECK(CrossfadeOverlap(cs[0], cs[1]) == f[0].fadeOut);
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

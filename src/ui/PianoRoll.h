@@ -3,10 +3,12 @@
 // Custom-drawn (piano keyboard column + pitch x time note grid), on its own
 // looper thread. Edits a local snapshot of the track's notes and posts the full
 // updated list to the main window (kMsgApplyNotes), which owns model mutation.
-// Add (click empty), move/resize (drag), delete (right-click), velocity
-// (Ctrl-drag). Tempo-map-aware grid + snap. Multi-select: Command-click toggles
-// a note, drag on empty space marquee-selects, and move/resize/velocity/delete
-// act on the whole selection.
+// A tool palette across the top picks the click behaviour: Pointer selects and
+// moves/resizes, Pencil/Brush create, Eraser/Scissors/Glue/Velocity act on the
+// note under the cursor. Right-click deletes and Ctrl-drag sets velocity with
+// any tool. Tempo-map-aware grid + snap. Multi-select: Command-click toggles a
+// note, drag on empty space marquee-selects (Pointer), and move/resize/velocity/
+// delete act on the whole selection.
 #pragma once
 
 #include "../model/Project.h"
@@ -36,9 +38,13 @@ constexpr uint32 kMsgRollOpened = 'rlop';
 class PianoRollView : public BView {
 public:
     using Frame = daw::Frame;
+    // `playhead` is the transport position when the editor opened (absolute
+    // frames, <0 = none): the view opens scrolled to it when it falls inside the
+    // region, so double-clicking a region under the tapehead lands you there.
     PianoRollView(BRect frame, TrackId track, ClipId clip, Frame clipStart,
-                  std::vector<MidiNote> notes,
-                  TempoMap tempo, double sampleRate, BMessenger apply);
+                  Frame clipLength, std::vector<MidiNote> notes,
+                  TempoMap tempo, double sampleRate, Frame playhead,
+                  BMessenger apply);
 
     void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
 
@@ -116,8 +122,9 @@ private:
 class PianoRoll : public BWindow {
 public:
     PianoRoll(BRect frame, TrackId track, ClipId clip, daw::Frame clipStart,
-              std::vector<MidiNote> notes,
-              TempoMap tempo, double sampleRate, BMessenger apply);
+              daw::Frame clipLength, std::vector<MidiNote> notes,
+              TempoMap tempo, double sampleRate, daw::Frame playhead,
+              BMessenger apply);
     void MessageReceived(BMessage* msg) override;   // forwards kMsgRollPlayhead
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 private:

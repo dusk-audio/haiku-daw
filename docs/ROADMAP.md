@@ -82,7 +82,11 @@ sort, with sends, a monitor section, and BS.1770 metering.
 - ✅ Per-track color + height (C4): 6-color palette + variable lane height
   (LaneRect sums heights); name menu Next Color / Taller / Shorter.
 - ✅ Crossfade (C5): kit-free `ComputeCrossfades` — overlapping clips auto
-  fade-out/in; engine + Exporter derive effective fades. Host-tested.
+  fade-out/in; engine + Exporter derive effective fades. Host-tested. The
+  timeline now *draws* it too (it was audible but invisible): clips render their
+  effective fades, and the overlap gets a tinted band + crossing ramps. Both the
+  renderers and the UI derive the span from one shared `CrossfadeOverlap`, so
+  what you see can't drift from what you hear.
 - ✅ Multi-select + range ops (C6): clip selection (click / Shift-click /
   rubber-band / Esc), group move, Delete, Ctrl-D duplicate — each one undo step
   via `MacroCommand`. (MIDI-note multi-select deferred.) MIDI regions also
@@ -133,8 +137,14 @@ with the local cross-compiler, runtime pending on the VM.
 - ✅ Live `BQuery` browser (`SampleBrowser`, View > Sample Browser): name filter
   over the boot volume, lists audio files + their duration/BPM, double-click
   imports, BPM field tags the selection. Compile-checked + VM-built.
-- *Later:* drag-and-drop into the timeline; BPM/key range predicates; Tracker
-  MIME attr registration so columns show there too.
+- ✅ Drag-and-drop into the timeline: the arrangement accepts `B_SIMPLE_DATA`
+  drops from Tracker/the desktop — `.wav` imports onto the track under the
+  cursor at the snapped drop frame (multi-file drops walk down consecutive
+  lanes), `.mid` goes through `ImportMidi` at the drop position. Other
+  extensions are logged and skipped.
+- *Later:* BPM/key range predicates; Tracker MIME attr registration so columns
+  show there too; `RefsReceived` on the app so icon/Deskbar drops and "Open
+  With" work too (today only drops onto the open window do).
 
 ## Phase G — UI / UX polish pass  ✅ DONE
 
@@ -147,7 +157,9 @@ with the local cross-compiler, runtime pending on the VM.
   tick + dB, stereo meters, pan, M/S, and a master strip; live peaks pushed.
 - ✅ **Piano-roll MIDI editor** (`PianoRoll`): keyboard column + pitch×time grid,
   tempo-map grid/snap, add/move/resize/delete/velocity; opens on MIDI
-  track-name double-click.
+  track-name double-click. Opens focused on the tapehead when the playhead is
+  inside the region (else at the region head). Note creation belongs to the
+  Pencil/Brush tools only — the Pointer selects and marquees.
 - ✅ Code-review pass over the whole codebase: fixed EQ shelf NaN, delay
   runaway feedback, self-send routing collapse, MacroCommand failed-subcommand
   undo (data loss), AppSettings zero-clobber, WavSource OOB, WavWriter race,
@@ -156,6 +168,13 @@ with the local cross-compiler, runtime pending on the VM.
   **EQ frequency-response graph** with draggable per-band handles
   (`Eq::MagnitudeResponseDb`), **compressor transfer curve**, per-effect
   reorder/remove/add, vertical scroll.
+- ✅ Wheel-adjust in the effects editor: the wheel over a knob's dial nudges it
+  (Shift = fine), and over an EQ band handle nudges that band's **Q** — the one
+  band parameter the freq×gain graph drag can't reach. Hit-tested against the
+  drawn dial, not the (much larger) click-drag cell, so scrolling the panel list
+  doesn't nudge parameters in passing. `SetFxCommand` takes one command per
+  gesture, so notches preview live and a debounce timer folds them into a single
+  undo step (flushed on window close so the model can't lag the engine).
 - ✅ Transport: custom dark Play/Stop/Rec buttons (lit by state) + themed Vol
   fader.
 - *Later:* live compressor GR meter (needs per-effect engine telemetry), tidy
