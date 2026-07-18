@@ -27,6 +27,12 @@ namespace daw {
 // + int64 "ns","nl" (note frames are clip-relative).
 constexpr uint32 kMsgApplyNotes = 'ntap';
 
+// The CC lane's edited controller list: int64 "track" + int64 "clip"; per event
+// int32 "et" (type), int32 "ed" (CC number), int32 "ev" (value) + int64 "es"
+// (clip-relative frame). Separate from kMsgApplyNotes so a controller edit never
+// rewrites notes and vice versa.
+constexpr uint32 kMsgApplyEvents = 'evap';
+
 // MainWindow -> piano roll: current playhead (int64 "ph", absolute frames; a
 // negative value hides it).
 constexpr uint32 kMsgRollPlayhead = 'rlph';
@@ -43,6 +49,7 @@ public:
     // region, so double-clicking a region under the tapehead lands you there.
     PianoRollView(BRect frame, TrackId track, ClipId clip, Frame clipStart,
                   Frame clipLength, std::vector<MidiNote> notes,
+                  std::vector<MidiClipEvent> events,
                   TempoMap tempo, double sampleRate, Frame playhead,
                   BMessenger apply);
 
@@ -62,10 +69,28 @@ private:
     int   YToPitch(float y) const;
     Frame Snapped(Frame f) const;
     int   NoteAt(BPoint where) const;   // -1 none
-    float VelLaneTop() const;           // y where the velocity lane begins
+    float VelLaneTop() const;           // y where the bottom lane begins
     int   VelNoteAtX(float x) const;    // nearest note to a velocity-lane click
     void  SetVelocityFromLane(float y); // set dragged/selected note velocity
     void  Apply();
+
+    // --- bottom lane ------------------------------------------------------
+    // The strip under the grid shows either note velocity or one continuous
+    // controller. Only the CCs the synth actually renders are offered, so an
+    // edit here is always audible: CC7 volume x CC11 expression is the channel
+    // gain and CC10 is the pan (see model/MidiControl.h).
+    struct LaneDef { const char* label; int cc; };   // cc < 0 = velocity
+    static const LaneDef kLanes[4];
+    int   fLane = 0;                    // index into kLanes (0 = velocity)
+    BRect LanePickRect() const;         // the lane selector button
+    // CC-lane geometry + editing.
+    float CcValueToY(int value) const;  // 0..127 -> y inside the lane
+    int   CcYToValue(float y) const;    // inverse, clamped to 0..127
+    int   CcEventAtX(float x) const;    // index into fEvents, -1 if none near
+    void  SetCcAt(BPoint where);        // add/replace a point at the click
+    void  EraseCcAt(BPoint where);      // right-click delete
+    void  ApplyEvents();
+    void  DrawCcLane(BRect lane);
 
     // Editing tools (a toolbar across the top selects the active one).
     enum class Tool { Pointer, Pencil, Brush, Eraser, Scissors, Glue, Velocity };
@@ -86,6 +111,7 @@ private:
     void  CaptureDragOrigin();
 
     std::vector<MidiNote> fNotes;
+    std::vector<MidiClipEvent> fEvents;   // the region's controller events
     std::vector<char>     fSel;   // 1 = selected, parallel to fNotes
     TrackId    fTrack;
     ClipId     fClip;
@@ -101,7 +127,7 @@ private:
 
     void ZoomBy(double factor);    // horizontal zoom about the view
 
-    enum class Drag { None, Move, Resize, Velocity, Marquee, Brush, Erase };
+    enum class Drag { None, Move, Resize, Velocity, Marquee, Brush, Erase, Cc };
     Drag  fDrag = Drag::None;
     int   fDragNote = -1;
     Frame fGrabOffset = 0;
@@ -123,6 +149,7 @@ class PianoRoll : public BWindow {
 public:
     PianoRoll(BRect frame, TrackId track, ClipId clip, daw::Frame clipStart,
               daw::Frame clipLength, std::vector<MidiNote> notes,
+              std::vector<MidiClipEvent> events,
               TempoMap tempo, double sampleRate, daw::Frame playhead,
               BMessenger apply);
     void MessageReceived(BMessage* msg) override;   // forwards kMsgRollPlayhead

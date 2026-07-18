@@ -291,6 +291,33 @@ static void test_undo_unification() {
     CHECK(p.FindTrack(tid)->CollectNotes().size() == 1);
     stack.Undo(p);
     CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->notes.empty());
+
+    // SetMidiClipEventsCommand (the piano roll's CC lane) writes controllers
+    // WITHOUT disturbing notes, and undo restores the previous controller list.
+    // The two commands must stay disjoint: a controller edit that dropped notes
+    // (or the reverse) would silently destroy the other half of the region.
+    stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+        tid, mcId, std::vector<MidiNote>{ n }), p);
+    MidiClipEvent cc; cc.type = MidiClipEvent::CC; cc.data = 7;
+    cc.value = 40; cc.startFrame = 500;
+    stack.Execute(std::make_unique<SetMidiClipEventsCommand>(
+        tid, mcId, std::vector<MidiClipEvent>{ cc }), p);
+    {
+        const MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->events.size() == 1);
+        CHECK(c->events[0].data == 7 && c->events[0].value == 40);
+        CHECK(c->notes.size() == 1);          // notes survived the CC edit
+        CHECK(p.FindTrack(tid)->CollectEvents().size() == 1);
+    }
+    stack.Undo(p);                            // undo only the controller edit
+    {
+        const MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->events.empty());
+        CHECK(c->notes.size() == 1);          // and the notes are still there
+    }
+    stack.Undo(p);   // undo the note set
+    CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->notes.empty());
+
     stack.Undo(p);   // undo the clip add
     CHECK(p.FindTrack(tid)->midiClips.empty());
 

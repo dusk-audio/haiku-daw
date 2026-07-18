@@ -673,6 +673,24 @@ private:
     std::vector<MidiNote> fNew, fOld;
 };
 
+// Replace a MIDI region's controller events (CC / pitch-bend / program /
+// pressure), leaving its notes untouched — the mirror of
+// SetMidiClipNotesCommand, which touches only `notes`. The piano roll's CC lane
+// edits a snapshot and posts it wholesale; one undo step per gesture.
+class SetMidiClipEventsCommand : public Command {
+public:
+    SetMidiClipEventsCommand(TrackId track, ClipId clip,
+                             std::vector<MidiClipEvent> events)
+        : fTrack(track), fClip(clip), fNew(std::move(events)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Controllers"; }
+private:
+    TrackId                    fTrack;
+    ClipId                     fClip;
+    std::vector<MidiClipEvent> fNew, fOld;
+};
+
 // Set a track's color index / lane height (view props; discrete, undoable).
 class SetTrackColorCommand : public Command {
 public:

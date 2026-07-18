@@ -51,13 +51,24 @@ static const char* NoteName(int pitch, char* buf, size_t n) {
     return buf;
 }
 
+// Bottom-lane choices. Velocity plus the controllers the synth actually renders
+// (CC7 x CC11 = channel gain, CC10 = pan), so editing one is always audible.
+const PianoRollView::LaneDef PianoRollView::kLanes[4] = {
+    { "Vel",  -1 },
+    { "Vol",   7 },
+    { "Expr", 11 },
+    { "Pan",  10 },
+};
+
 PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
                              Frame clipStart, Frame clipLength,
                              std::vector<MidiNote> notes,
+                             std::vector<MidiClipEvent> events,
                              TempoMap tempo, double sampleRate, Frame playhead,
                              BMessenger apply)
     : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
-      fNotes(std::move(notes)), fTrack(track), fClip(clip),
+      fNotes(std::move(notes)), fEvents(std::move(events)),
+      fTrack(track), fClip(clip),
       fClipStart(clipStart), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
     SetViewColor(ColBackground());
@@ -214,16 +225,18 @@ void PianoRollView::Draw(BRect) {
         }
     }
 
-    // Velocity lane: one "lollipop" (stem + dot) per note, height = velocity.
+    // Bottom lane: note velocity, or one continuous controller.
     SetHighColor(Rgb(18, 20, 25));
     FillRect(BRect(0, velTop, w, h));
     SetHighColor(ColGrid());
     StrokeLine(BPoint(0, velTop), BPoint(w, velTop));
-    SetHighColor(Rgb(150, 156, 165));
-    DrawString("Vel", BPoint(6, velTop + 13));
+    if (fLane > 0) DrawCcLane(BRect(0, velTop, w, h));
+    // Lane selector (click to cycle Vel -> Vol -> Expr -> Pan).
+    DrawButton(this, LanePickRect(), kLanes[fLane].label, fLane > 0,
+               fLane > 0 ? Rgb(120, 200, 160) : ColAccent());
     const float base = h - 5.0f;
     const float span = kVelLaneH - 12.0f;
-    for (size_t i = 0; i < fNotes.size(); i++) {
+    for (size_t i = 0; fLane == 0 && i < fNotes.size(); i++) {
         const MidiNote& n = fNotes[i];
         const float x0 = FrameToX(n.startFrame);
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
@@ -403,6 +416,135 @@ int PianoRollView::VelNoteAtX(float x) const {
     return best;
 }
 
+// --- bottom lane (velocity or one controller) ------------------------------
+
+BRect PianoRollView::LanePickRect() const {
+    const float top = VelLaneTop();
+    return BRect(4, top + 3, 46, top + 19);
+}
+
+// The lane plots 0..127 between the same baseline/span the velocity lollipops
+// use, so switching lanes doesn't shift the drawing around.
+float PianoRollView::CcValueToY(int value) const {
+    const float base = Bounds().Height() - 5.0f;
+    const float span = kVelLaneH - 12.0f;
+    return base - ((float)std::clamp(value, 0, 127) / 127.0f) * span;
+}
+
+int PianoRollView::CcYToValue(float y) const {
+    const float base = Bounds().Height() - 5.0f;
+    const float span = kVelLaneH - 12.0f;
+    if (span <= 0) return 0;
+    return std::clamp((int)((base - y) / span * 127.0f + 0.5f), 0, 127);
+}
+
+// Nearest event of the active controller within a few pixels of x, else -1.
+int PianoRollView::CcEventAtX(float x) const {
+    if (fLane <= 0) return -1;
+    const int cc = kLanes[fLane].cc;
+    int   best = -1;
+    float bestD = 7.0f;   // grab radius in pixels
+    for (size_t i = 0; i < fEvents.size(); i++) {
+        const MidiClipEvent& e = fEvents[i];
+        if (e.type != MidiClipEvent::CC || e.data != cc) continue;
+        const float d = std::fabs(FrameToX(e.startFrame) - x);
+        if (d < bestD) { bestD = d; best = (int)i; }
+    }
+    return best;
+}
+
+// Add a controller point at the click, or move the one already at that frame.
+// Snapped in time so drawing a ramp lands on the grid like note entry does.
+void PianoRollView::SetCcAt(BPoint where) {
+    if (fLane <= 0) return;
+    const int cc = kLanes[fLane].cc;
+    Frame f = Snapped(XToFrame(where.x));
+    if (f < 0) f = 0;
+    const int v = CcYToValue(where.y);
+
+    for (MidiClipEvent& e : fEvents)
+        if (e.type == MidiClipEvent::CC && e.data == cc && e.startFrame == f) {
+            e.value = v;      // one point per controller per frame
+            return;
+        }
+    MidiClipEvent e;
+    e.type = MidiClipEvent::CC;
+    e.data = cc;
+    e.startFrame = f;
+    e.value = v;
+    fEvents.push_back(e);
+}
+
+void PianoRollView::EraseCcAt(BPoint where) {
+    const int i = CcEventAtX(where.x);
+    if (i < 0) return;
+    fEvents.erase(fEvents.begin() + i);
+    ApplyEvents();
+    Invalidate();
+}
+
+void PianoRollView::ApplyEvents() {
+    BMessage m(kMsgApplyEvents);
+    m.AddInt64("track", (int64)fTrack);
+    m.AddInt64("clip",  (int64)fClip);
+    for (const MidiClipEvent& e : fEvents) {
+        m.AddInt32("et", (int32)e.type);
+        m.AddInt32("ed", (int32)e.data);
+        m.AddInt32("ev", (int32)e.value);
+        m.AddInt64("es", (int64)e.startFrame);
+    }
+    fApply.SendMessage(&m);
+}
+
+// A controller is a STEP function (CcValueAt takes the latest event at or before
+// the frame), so draw it as a staircase rather than joining the dots — the shape
+// on screen is then exactly what the engine renders.
+void PianoRollView::DrawCcLane(BRect lane) {
+    const int cc = kLanes[fLane].cc;
+    const float w = lane.right;
+
+    // Gather this controller's points in time order.
+    std::vector<const MidiClipEvent*> pts;
+    for (const MidiClipEvent& e : fEvents)
+        if (e.type == MidiClipEvent::CC && e.data == cc) pts.push_back(&e);
+    std::sort(pts.begin(), pts.end(),
+              [](const MidiClipEvent* a, const MidiClipEvent* b) {
+                  return a->startFrame < b->startFrame;
+              });
+
+    // Value in force before the first point: what MidiControl falls back to when
+    // the controller is absent (unity for vol/expr, centre for pan).
+    const int def = (cc == 10) ? 64 : 127;
+    SetHighColor(Rgb(120, 200, 160));
+
+    // Walk left to right holding each value until the next point, then stepping
+    // to it. Everything is clipped to the grid area, so points scrolled off to
+    // the left still contribute the value they hold at the left edge.
+    float heldY = CcValueToY(def);
+    float x = kKbdW;
+    for (const MidiClipEvent* e : pts) {
+        const float ex = std::min(FrameToX(e->startFrame), w);
+        const float ey = CcValueToY(e->value);
+        if (ex > x) StrokeLine(BPoint(x, heldY), BPoint(ex, heldY));   // hold
+        if (ex >= kKbdW) StrokeLine(BPoint(ex, heldY), BPoint(ex, ey)); // step
+        x = std::max(ex, (float)kKbdW);
+        heldY = ey;
+    }
+    if (x < w) StrokeLine(BPoint(x, heldY), BPoint(w, heldY));   // hold to the end
+
+    // Handles on top, so a point stays grabbable even where steps overlap.
+    for (const MidiClipEvent* e : pts) {
+        const float x = FrameToX(e->startFrame);
+        if (x < kKbdW || x > w) continue;
+        const float y = CcValueToY(e->value);
+        SetHighColor(Rgb(190, 240, 210));
+        FillEllipse(BRect(x - 3, y - 3, x + 3, y + 3));
+        SetHighColor(Rgb(30, 60, 50));
+        StrokeEllipse(BRect(x - 3, y - 3, x + 3, y + 3));
+        SetHighColor(Rgb(120, 200, 160));
+    }
+}
+
 // Map a y in the velocity lane to a velocity and apply it to the dragged note
 // (and, if it's part of the selection, every selected note).
 void PianoRollView::SetVelocityFromLane(float y) {
@@ -429,9 +571,26 @@ void PianoRollView::MouseDown(BPoint where) {
         return;
     }
 
-    // Velocity lane (bottom strip): grab the nearest note's lollipop and drag
-    // its velocity. Works across the full width (including the keyboard column).
+    // Bottom lane. The selector cycles which lane is shown; below that it is
+    // either the velocity lollipops or the active controller's envelope.
     if (where.y >= VelLaneTop()) {
+        if (LanePickRect().Contains(where)) {
+            fLane = (fLane + 1) % (int)(sizeof(kLanes) / sizeof(kLanes[0]));
+            Invalidate();
+            return;
+        }
+        int32 lb = 0;
+        if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+            m->FindInt32("buttons", &lb);
+        if (fLane > 0) {           // CC lane: draw points, right-click deletes
+            if (where.x < kKbdW) return;
+            if (lb & B_SECONDARY_MOUSE_BUTTON) { EraseCcAt(where); return; }
+            fDrag = Drag::Cc;
+            SetCcAt(where);
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            Invalidate();
+            return;
+        }
         const int vn = VelNoteAtX(where.x);
         if (vn >= 0) {
             fDrag = Drag::Velocity;
@@ -548,6 +707,8 @@ void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
 
     if (fDrag == Drag::Brush) { PaintBrush(where); return; }
     if (fDrag == Drag::Erase) { EraseAt(where);   return; }
+    // Painting a controller ramp: keep dropping points along the drag.
+    if (fDrag == Drag::Cc)    { SetCcAt(where); Invalidate(); return; }
 
     if (fDrag == Drag::Marquee) {
         fMarqueeCur = where;
@@ -624,6 +785,11 @@ void PianoRollView::MouseUp(BPoint) {
         Invalidate();
         return;
     }
+    if (was == Drag::Cc) {   // controllers, not notes: their own command
+        ApplyEvents();
+        Invalidate();
+        return;
+    }
     if (was != Drag::None) { Apply(); Invalidate(); }
 }
 
@@ -678,14 +844,15 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
 PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
                      daw::Frame clipStart, daw::Frame clipLength,
                      std::vector<MidiNote> notes,
+                     std::vector<MidiClipEvent> events,
                      TempoMap tempo, double sampleRate, daw::Frame playhead,
                      BMessenger apply)
     : BWindow(frame, "Piano Roll", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
     fMain = apply;
     fView = new PianoRollView(Bounds(), track, clip, clipStart, clipLength,
-                              std::move(notes), tempo, sampleRate, playhead,
-                              apply);
+                              std::move(notes), std::move(events),
+                              tempo, sampleRate, playhead, apply);
     AddChild(fView);
     fView->MakeFocus(true);
 }

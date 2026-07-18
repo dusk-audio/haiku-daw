@@ -769,6 +769,21 @@ void SetMidiClipNotesCommand::Undo(Project& p) {
             c->notes = fOld;
 }
 
+bool SetMidiClipEventsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fOld = c->events;
+    c->events = fNew;
+    return true;
+}
+void SetMidiClipEventsCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (MidiClip* c = t->FindMidiClip(fClip))
+            c->events = fOld;
+}
+
 // --- SetTrackColor / SetTrackHeight -----------------------------------
 
 bool SetTrackColorCommand::Do(Project& p) {

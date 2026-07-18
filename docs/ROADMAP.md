@@ -258,7 +258,7 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   round-trip compensation for the punch/loop-record paths; BBT/playhead report
   offset by the master latency during playback.
 
-## Phase Z — MIDI depth  ◐ IN PROGRESS
+## Phase Z — MIDI depth  ◐ IN PROGRESS (channel controls done end to end)
 
 - ✅ Event model (kit-free, host-tested): `MidiClipEvent` (CC / pitch-bend /
   program / channel-pressure) stored clip-relative on `MidiClip.events`;
@@ -287,11 +287,21 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   Load/seek snaps rather than sweeping from a stale value. Host-tested
   (`synth_tests` ramp/continuity + an end-to-end bounce asserting a CC7 step
   fades over a block — the test fails if the ramp is defeated).
+- ✅ CC lanes in the piano roll: the bottom strip switches between note velocity
+  and one continuous controller — only the ones the synth renders (CC7 Vol,
+  CC11 Expr, CC10 Pan), so every edit here is audible. Click/drag paints points,
+  right-click deletes; drawn as a *staircase* because `CcValueAt` is a step
+  function, so the shape on screen is what the engine renders. Edits post
+  `kMsgApplyEvents` -> `SetMidiClipEventsCommand`, which touches only
+  `MidiClip::events` — the disjointness from `SetMidiClipNotesCommand` is
+  host-tested (the test fails if either command clobbers the other's half).
+  Like note edits, controllers are snapshotted at engine Load, so a change is
+  heard on the next Start.
 - *Remaining:* pitch-bend + mod-wheel (both modulate frequency, so the stateless
-  synth needs phase integration — deferred);
-  **CC lanes** in the piano roll (velocity-lane-style, VM-gated); live-MIDI CC
-  recording (`MidiPort`/`MidiRecorder`); per-track MIDI input demux;
-  MIDI clock/MTC; sysex.
+  synth needs phase integration — deferred); a generic "other CC" lane (today
+  only the three audible controllers are offered); live-MIDI CC recording
+  (`MidiPort`/`MidiRecorder`); per-track MIDI input demux; MIDI clock/MTC;
+  sysex.
 
 ## Phase I — Plugins (long-term)
 

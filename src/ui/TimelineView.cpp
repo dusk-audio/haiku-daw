@@ -357,7 +357,7 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
     BPoint sp = ConvertToScreen(BPoint(kHeaderWidth + 40, kRulerHeight + 40));
     BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
     PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame,
-                                    c->lengthFrames, c->notes,
+                                    c->lengthFrames, c->notes, c->events,
                                     fProject->tempoMap, fProject->sampleRate,
                                     fProject->transport.playhead,
                                     BMessenger(Window()));

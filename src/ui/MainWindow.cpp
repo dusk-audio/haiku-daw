@@ -633,6 +633,44 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgApplyEvents: {
+            // The piano roll's CC lane posts one region's controller list.
+            // Undoable via SetMidiClipEventsCommand, which leaves notes alone.
+            int64 tid = 0, cid = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("clip", &cid);
+            Track* tr = fProject->FindTrack((TrackId)tid);
+            if (tr && tr->FindMidiClip((ClipId)cid)) {
+                std::vector<MidiClipEvent> events;
+                int32 type = 0;
+                for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
+                    // Every field must be present and in range. A partial or
+                    // out-of-range event would land as a CC0 at frame 0 — which
+                    // no lane draws, so it would be invisible in the editor yet
+                    // still saved into the project and written to any SMF
+                    // export. Drop it instead of persisting a ghost.
+                    int32 data = 0, val = 0; int64 st = 0;
+                    if (msg->FindInt32("ed", i, &data) != B_OK) continue;
+                    if (msg->FindInt32("ev", i, &val)  != B_OK) continue;
+                    if (msg->FindInt64("es", i, &st)   != B_OK) continue;
+                    if (type < MidiClipEvent::CC
+                        || type > MidiClipEvent::ChannelPressure) continue;
+                    if (data < 0 || data > 127) continue;
+                    const int32 vmax =
+                        (type == MidiClipEvent::PitchBend) ? 16383 : 127;
+                    if (val < 0 || val > vmax) continue;
+                    if (st < 0) continue;      // clip-relative; negative is junk
+                    MidiClipEvent e;
+                    e.type = type; e.data = data; e.value = val;
+                    e.startFrame = (Frame)st;
+                    events.push_back(e);
+                }
+                fStack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                    (TrackId)tid, (ClipId)cid, std::move(events)), *fProject);
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgRenameTrack: {
             int64 tid = 0; const char* name = nullptr;
             msg->FindInt64("track", &tid);
