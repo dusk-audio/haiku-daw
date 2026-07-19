@@ -214,11 +214,23 @@ float EffectsView::PanelTop(size_t i) const {
     return y;
 }
 
+// Number of LV2 add-buttons the panel offers: one per HOSTABLE plugin. The host
+// filters out anything it could not instantiate, so every row here is one the
+// user can actually add. Zero when this build has no LV2 support.
+static size_t Lv2AddRowCount() {
+#ifdef DAW_HAVE_LV2
+    return Lv2Host::Instance().Plugins().size();
+#else
+    return 0;
+#endif
+}
+
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    // 8 built-in add buttons + one per loaded plugin.
-    const int addRows = 8 + (int)PluginHost::Instance().Plugins().size();
+    // 8 built-in add buttons, one per loaded add-on, one per hostable LV2 plugin.
+    const int addRows = 8 + (int)PluginHost::Instance().Plugins().size()
+                          + (int)Lv2AddRowCount();
     y += addRows * 26 + 12;
     return y;
 }
@@ -557,6 +569,23 @@ void EffectsView::Draw(BRect) {
         fHits.push_back({ (int)EffectType::Plugin, 4, (int)k, b, 0, 0 });
         ay += 26;
     }
+#ifdef DAW_HAVE_LV2
+    // One button per hostable LV2 plugin (slot carries the listing index),
+    // exactly as for the add-ons above. Without this there is no way to create
+    // an Lv2 insert from the UI at all; the plugin browser will eventually
+    // replace this whole column with one button.
+    const std::vector<Lv2PluginInfo>& lv2 = Lv2Host::Instance().Plugins();
+    for (size_t k = 0; k < lv2.size(); k++) {
+        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
+        SetHighColor(ColHeaderHi()); FillRect(b);
+        SetHighColor(ColGrid());     StrokeRect(b);
+        SetHighColor(ColAccent());
+        std::string lbl = "Add " + lv2[k].name + " (LV2)";
+        DrawString(lbl.c_str(), BPoint(b.left + 10, b.bottom - 6));
+        fHits.push_back({ (int)EffectType::Lv2, 4, (int)k, b, 0, 0 });
+        ay += 26;
+    }
+#endif
 }
 
 // --- interaction ----------------------------------------------------------
@@ -693,7 +722,26 @@ void EffectsView::MouseDown(BPoint where) {
                     fChain.push_back(d);
                     Apply(); Invalidate(); UpdateScrollRange();
                 }
-            } else {
+            }
+#ifdef DAW_HAVE_LV2
+            else if ((EffectType)h.effect == EffectType::Lv2) {
+                const std::vector<Lv2PluginInfo>& pl =
+                    Lv2Host::Instance().Plugins();
+                if (h.slot >= 0 && h.slot < (int)pl.size()) {
+                    EffectDesc d;
+                    d.type = EffectType::Lv2;
+                    d.pluginName = pl[h.slot].uri;   // the URI is the persisted id
+                    // Seed the plugin's OWN port defaults, never zeros: these
+                    // plugins expose an `Enabled` control whose default is 1, and
+                    // a zero-filled descriptor would insert a silent plugin.
+                    for (const Lv2ParamInfo& pp : pl[h.slot].params)
+                        d.params.push_back(pp.def);
+                    fChain.push_back(d);
+                    Apply(); Invalidate(); UpdateScrollRange();
+                }
+            }
+#endif
+            else {
                 fChain.push_back(MakeDefault((EffectType)h.effect));
                 Apply(); Invalidate(); UpdateScrollRange();
             }
