@@ -182,7 +182,7 @@ if(DAW_LV2_ENABLED)
     # whatever each machine happens to have installed — and the two dev machines
     # have entirely different sets while CI would have neither. That left the
     # MonoDual path, non-zero latency and the rejection paths all dependent on
-    # luck. These four plugins have exactly-known behaviour, so lv2_fixture_tests
+    # luck. These five plugins have exactly-known behaviour, so lv2_fixture_tests
     # asserts on VALUES and gets the same answer everywhere.
     #
     # Never installed: LV2_PATH is pointed at the build tree for that one test.

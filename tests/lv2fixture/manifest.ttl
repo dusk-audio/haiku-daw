@@ -23,3 +23,8 @@
     a lv2:Plugin ;
     lv2:binary <daw_test_plugins.so> ;
     rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:cv-port>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .

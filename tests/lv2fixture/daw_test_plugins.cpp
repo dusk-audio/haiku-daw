@@ -14,7 +14,7 @@
 //   - the rejection paths depended on a specific broken bundle and a specific
 //     sfizz install being present.
 //
-// These four plugins are deliberately trivial DSP with exactly-known behaviour,
+// These five plugins are deliberately trivial DSP with exactly-known behaviour,
 // so the tests can assert on VALUES (this sample equals that one, latency is
 // exactly 64) instead of on properties. They are never installed anywhere; the
 // build points LV2_PATH at the build tree.
@@ -171,6 +171,11 @@ void StereoLatentCleanup(LV2_Handle h) { delete static_cast<StereoLatent*>(h); }
 //   bad-topology  — 3 audio in / 1 audio out, none optional.
 //   needs-feature — fine topology, but requires worker:schedule (declared in the
 //                   TTL), which this host does not implement.
+//   cv-port       — perfect 2/2 audio topology, plus a MANDATORY CV input. A CV
+//                   port carries one float per frame, so the small inert buffer
+//                   that satisfies an atom port would be overrun by a whole
+//                   block. The host has no correctly-sized buffer to offer and
+//                   must decline the plugin rather than host it unsafely.
 // Both still provide working entry points: if the host ever wrongly accepts one,
 // the failure should be a clean assertion, not a crash in the fixture.
 // ---------------------------------------------------------------------------
@@ -203,6 +208,9 @@ const LV2_Descriptor kDescriptors[] = {
       InertInstantiate, InertConnect, nullptr,
       InertRun, nullptr, InertCleanup, nullptr },
     { "urn:haiku-daw:test:needs-feature",
+      InertInstantiate, InertConnect, nullptr,
+      InertRun, nullptr, InertCleanup, nullptr },
+    { "urn:haiku-daw:test:cv-port",
       InertInstantiate, InertConnect, nullptr,
       InertRun, nullptr, InertCleanup, nullptr },
 };

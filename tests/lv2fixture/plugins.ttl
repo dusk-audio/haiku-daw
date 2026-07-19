@@ -95,3 +95,28 @@
         a lv2:AudioPort , lv2:OutputPort ;
         lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
     ] .
+
+# --- Must be REJECTED: hostable audio shape, but a mandatory CV port --------
+# CV is audio-rate (one float per frame). Pointing it at the small inert buffer
+# that satisfies an atom port would let the plugin write a whole block past the
+# end of it, so an unrecognised MANDATORY port makes the plugin unhostable even
+# though its audio topology is a clean 2 in / 2 out.
+<urn:haiku-daw:test:cv-port>
+    a lv2:Plugin ;
+    doap:name "DAW Test CV Port" ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "inL" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "inR" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "outL" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
+    ] , [
+        a lv2:CVPort , lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "cv" ; lv2:name "CV In"
+    ] .

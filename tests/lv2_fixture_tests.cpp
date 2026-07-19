@@ -1,6 +1,6 @@
 // Deterministic LV2 host tests, run against the fixture bundle this repo builds
 // (tests/lv2fixture/). LV2_PATH is pointed at the build tree by CTest, so this
-// test sees exactly four plugins with exactly-known behaviour on every machine.
+// test sees five plugins of exactly-known behaviour on every machine.
 //
 // lv2_host_tests is the complement: it runs against whatever is really installed
 // and can therefore only assert INVARIANTS ("everything listed instantiates").
@@ -14,8 +14,10 @@
 //     finally exercised against a non-zero value. Every plugin installed on
 //     either dev machine reports 0, which made all prior latency assertions
 //     vacuously true.
-//   - Rejection — a bad topology and an unsatisfiable required feature, instead
-//     of depending on a specific broken bundle or sfizz being installed.
+//   - Rejection — a bad topology, an unsatisfiable required feature, and a
+//     mandatory CV port, instead of depending on a specific broken bundle or a
+//     particular sfizz install being present. The CV case had no real example
+//     on any available machine and was previously unit-tested only.
 //   - Param slot order, ranges and clamping, against a real bundle rather than a
 //     hand-written port table.
 
@@ -44,6 +46,7 @@ const char* kMonoGain    = "urn:haiku-daw:test:mono-gain";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
+const char* kCvPort      = "urn:haiku-daw:test:cv-port";
 
 constexpr int kLatentFrames = 64;   // must match the fixture
 
@@ -51,7 +54,7 @@ bool Near(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps;
 
 // LV2_PATH also carries the system spec bundles (see CMakeLists: without them
 // lilv has no class hierarchy to resolve against), so the machine's own plugins
-// are visible here too. Every count below is therefore scoped to OUR four URIs,
+// are visible here too. Every count below is therefore scoped to OUR five URIs,
 // which keeps the assertions exact on any machine instead of coupling them to
 // whatever happens to be installed.
 bool IsFixtureUri(const std::string& uri) {
@@ -90,9 +93,9 @@ int main() {
         return 1;
     }
 
-    // Exactly two of our four are hostable, and exactly two are refused.
+    // Exactly two of our five are hostable; the other three are refused.
     CHECK(mineHosted == 2);
-    CHECK(mineRejected == 2);
+    CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
 
@@ -116,6 +119,22 @@ int main() {
             std::printf("  rejected %s: %s\n", f->name.c_str(), f->reason.c_str());
             CHECK(f->reason.find("feature") != std::string::npos);
             CHECK(f->reason.find("worker") != std::string::npos);
+        }
+
+        // A clean 2-in/2-out plugin that still must be refused, because it has a
+        // MANDATORY CV port. CV is audio-rate, so the inert buffer that
+        // satisfies an atom port would be overrun by a whole block — there is no
+        // correctly-sized buffer to offer, and hosting it anyway would be a
+        // memory-safety bug in the plugin's address space. This path previously
+        // had no real example anywhere and was covered only by a hand-written
+        // port table in lv2_portmap_tests.
+        CHECK(host.Find(kCvPort) == nullptr);
+        CHECK(host.Create(kCvPort, 48000.0) == nullptr);
+        const Lv2RejectInfo* c = FindReject(rejects, kCvPort);
+        CHECK(c != nullptr);
+        if (c) {
+            std::printf("  rejected %s: %s\n", c->name.c_str(), c->reason.c_str());
+            CHECK(c->reason.find("required port") != std::string::npos);
         }
     }
 
