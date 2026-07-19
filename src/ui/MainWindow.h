@@ -82,6 +82,9 @@ private:
     void PushFxMeters();             // engine fx meters -> effects window
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
+    // Decode the loaded project's soundfonts into the SoundfontCache before
+    // the engine is built (it only ever looks them up). Warns about misses.
+    void PrimeSoundfonts();
     void LoadSettings();             // ~/config/settings/HaikuDAW/settings
     void SaveSettings();
     void ImportAudio(const char* path);   // add a WAV as a clip (first track/playhead)

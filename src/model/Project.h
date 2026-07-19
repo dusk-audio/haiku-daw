@@ -132,7 +132,7 @@ struct Track {
     AutomationLane          gainAuto; // volume envelope (absolute gain; empty = static)
     AutomationLane          panAuto;  // pan envelope (absolute pan; empty = static)
     std::vector<FxAutoLane> fxAuto;   // effect-parameter automation lanes
-    Instrument              instrument; // synth voice (MIDI tracks)
+    InstrumentDesc          instrument; // voice: synth or soundfont (MIDI tracks)
     InputSource             input;    // record input (MIDI endpoint / audio in)
 
     // Freeze (render-to-audio): when frozen, the track plays a single rendered

@@ -637,24 +637,30 @@ private:
     std::vector<EffectDesc> fNew, fOld;
 };
 
-// Set a MIDI track's synth instrument. Coalesces (its editor's native sliders
-// post continuously) so a slider drag is one undo step.
+// Set a MIDI track's voice. Coalesces (its editor's native sliders post
+// continuously) so a slider drag is one undo step.
 class SetInstrumentCommand : public Command {
 public:
-    SetInstrumentCommand(TrackId track, Instrument inst)
-        : fTrack(track), fNew(inst) {}
+    SetInstrumentCommand(TrackId track, InstrumentDesc inst)
+        : fTrack(track), fNew(std::move(inst)) {}
     bool Do(Project& p) override;
     void Undo(Project& p) override;
     std::string Name() const override { return "Set Instrument"; }
     bool CoalesceInto(Command* prev) override {
         auto* p = dynamic_cast<SetInstrumentCommand*>(prev);
         if (!p || p->fTrack != fTrack) return false;
+        // Don't fold a change of voice KIND (or of soundfont file) into a
+        // slider drag: swapping the instrument is a deliberate step the user
+        // expects to undo on its own, not part of the tweak before it.
+        if (p->fNew.type != fNew.type || p->fNew.path != fNew.path
+            || p->fNew.sf2Preset != fNew.sf2Preset)
+            return false;
         p->fNew = fNew;
         return true;
     }
 private:
-    TrackId    fTrack;
-    Instrument fNew, fOld;
+    TrackId        fTrack;
+    InstrumentDesc fNew, fOld;
 };
 
 // Replace one MIDI region's note list (piano-roll edits). One step per gesture

@@ -43,6 +43,14 @@ public:
     // The returned pointer is valid until the next ReadChunk call.
     bool ReadChunk(const float** outStereo, size_t* outFrames);
 
+    // Decode the next block WITHOUT the stereo widening ReadChunk applies: the
+    // buffer holds *outFrames * SourceChannels() interleaved floats, exactly
+    // the channel layout the file stores. The sampler uses this so a mono drum
+    // hit stays mono (half the memory, and the true mono signal is preserved).
+    // Same streaming contract as ReadChunk otherwise; don't mix the two on one
+    // WavSource, since both advance the same read cursor.
+    bool ReadChunkNative(const float** outNative, size_t* outFrames);
+
 private:
     std::ifstream fFile;
     bool     fValid       = false;
@@ -62,6 +70,12 @@ private:
 
     std::vector<uint8_t> fRaw;     // one block of raw file bytes
     std::vector<float>   fStereo;  // converted interleaved stereo out
+    std::vector<float>   fNative;  // converted, source channel count preserved
+
+    // Read the next block of raw bytes into fRaw. Returns the frame count
+    // decoded (0 at end of data) and advances fBytesRead. Shared by
+    // ReadChunk and ReadChunkNative, which differ only in how they convert.
+    size_t ReadRawBlock();
 
     float SampleToFloat(const uint8_t* p) const;   // one sample -> [-1,1]
 };

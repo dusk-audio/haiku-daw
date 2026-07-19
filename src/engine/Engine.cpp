@@ -229,7 +229,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         return err;
     }
     fOutputRate = fPlayer->Format().frame_rate;
-    fSynth.SetSampleRate(fOutputRate);
+    // Instruments are built per bus below, already at fOutputRate — there is
+    // no shared synth left to retune here.
     fMetronome = Metronome(fOutputRate, project.tempoBPM,
                            project.timeSig.numerator);
     fMasterGain.store(project.masterGain);
@@ -316,7 +317,9 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 fEndFrame = n.startFrame + n.lengthFrames;
         b.notes = std::move(notes);
         b.events = t.CollectEvents();         // channel CC/PB (absolute frames)
-        b.instrument = t.instrument;
+        // The voice is built here, off the RT thread. A soundfont one resolves
+        // against the SoundfontCache and never decodes — see InstrumentFactory.
+        b.instrument = MakeInstrument(t.instrument, fOutputRate);
         b.liveMonitor = monitor;             // synth live input into this bus
         // Reserve this bus's share of the live voices up front: UpdateLiveVoices
         // fills it on the RT thread every block and must never allocate there.
@@ -809,7 +812,8 @@ void Engine::FillBuffer(float* out, size_t frames) {
             if (!b.liveMonitor || b.liveNotes.empty()) continue;
             float* nb = fNodeBufs[idx].data();
             std::memset(nb, 0, nfloats * sizeof(float));
-            fSynth.Render(b.liveNotes, b.instrument, nb, frames, bs, 1.0f);
+            if (b.instrument)
+                b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
@@ -915,13 +919,14 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (b.chanL < 0.0f) ? to
                                                          : StereoGain{b.chanL, b.chanR};
-                fSynth.Render(b.notes, b.instrument, nb, frames, blockStart,
-                              from, to);
+                if (b.instrument)
+                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to);
                 b.chanL = cgl;
                 b.chanR = cgr;
             }
             if (live)                        // live keyboard through this voice
-                fSynth.Render(b.liveNotes, b.instrument, nb, frames, blockStart, 1.0f);
+                if (b.instrument)
+                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {

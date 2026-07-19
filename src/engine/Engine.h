@@ -23,7 +23,8 @@
 #include "../model/Pdc.h"
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
-#include "../synth/Synth.h"
+#include "../synth/IInstrument.h"
+#include "../synth/InstrumentFactory.h"
 #include "../midi/IMidiInput.h"
 #include "../midi/MidiRouting.h"
 #include "Metronome.h"
@@ -308,7 +309,7 @@ private:
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
         std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
-        Instrument                            instrument;// synth voice (MIDI)
+        std::unique_ptr<IInstrument>          instrument;// voice (MIDI)
         // Live mix params: written by the UI thread (UpdateMix) and read by the
         // RT callback (FillBuffer). Atomic + relaxed so a concurrent fader move
         // can't tear a float into a NaN/garbage gain. Independent scalars with no
@@ -429,7 +430,6 @@ private:
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
     std::vector<float>                        fScratch;   // (unused after routing)
-    Synth                                     fSynth;     // MIDI voice renderer
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
     // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
     // the engine at the loop seam, which rebuilds every Bus; without this the

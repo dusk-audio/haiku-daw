@@ -204,9 +204,17 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         }
 
         if (t.type == TrackType::Midi) {
-            const Instrument& in = t.instrument;
+            // The `instrument` line keeps its exact original 5 fields, always
+            // written, so an older build still reads this project (it just
+            // plays the synth voice). A soundfont adds a SEPARATE optional
+            // line rather than widening this one.
+            const Instrument& in = t.instrument.synth;
             f << "instrument " << in.waveform << " " << in.attack << " "
               << in.decay << " " << in.sustain << " " << in.release << "\n";
+            if (t.instrument.UsesSoundfont())
+                f << "soundfont " << (int)t.instrument.type << " "
+                  << t.instrument.sf2Preset << " "
+                  << Quote(t.instrument.path) << "\n";
         }
 
         if (t.input.kind != InputSource::kNone)
@@ -455,11 +463,31 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
         else if (kw == "mev" && haveTrack && curMidiIdx >= 0) {
             MidiClipEvent e;
             long long st = 0;
-            iss >> e.type >> st >> e.data >> e.value;
+            // A failed extraction leaves these ZEROED, which passes the range
+            // check below and would store a bogus CC at frame 0. Fail the load
+            // instead, like the `track` record does — the temp project is
+            // discarded, so the live session is untouched.
+            if (!(iss >> e.type >> st >> e.data >> e.value))
+                return false;
+            // An unknown type is FORWARD compatibility, not corruption — a newer
+            // build may define more — so skip it, the same way an unknown line
+            // keyword is skipped. Everything below only has to hold for the
+            // types this build actually interprets.
+            if (e.type < MidiClipEvent::CC || e.type > MidiClipEvent::ChannelPressure)
+                continue;
+            // Range-check before storing: NOTHING downstream re-checks these.
+            // MidiChannelGain (MidiControl.h) divides the raw CC7/CC11 values by
+            // 127 with no clamp, so a stored value of 65535 is a ~516x gain on
+            // that track's notes, and PitchBendAt returns e.value verbatim. A
+            // record that cannot be interpreted is corruption, so fail the load
+            // like the `track` record does — the temp project is discarded and
+            // the live session is untouched.
+            const int maxValue = (e.type == MidiClipEvent::PitchBend) ? 16383 : 127;
+            if (st < 0 || e.data < 0 || e.data > 127
+                || e.value < 0 || e.value > maxValue)
+                return false;
             e.startFrame = (Frame)st;
-            // Ignore an unknown/garbage event type rather than store it.
-            if (e.type >= MidiClipEvent::CC && e.type <= MidiClipEvent::ChannelPressure)
-                cur.midiClips[(size_t)curMidiIdx].events.push_back(e);
+            cur.midiClips[(size_t)curMidiIdx].events.push_back(e);
         }
         else if (kw == "fx" && haveTrack) {
             EffectDesc e;
@@ -491,7 +519,24 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             iss >> in.waveform >> in.attack >> in.decay >> in.sustain
                 >> in.release;
             if (in.waveform < 0 || in.waveform > 3) in.waveform = 0;
-            cur.instrument = in;
+            cur.instrument.synth = in;
+        }
+        else if (kw == "soundfont" && haveTrack) {
+            int type = 0, preset = 0;
+            iss >> type >> preset;
+            // Clamp into range like the waveform above: a file from a newer
+            // build (or a corrupt one) must not select a voice this build
+            // cannot make. Falling back to Synth keeps the track audible.
+            if (type < 0 || type > kMaxInstrumentTypeId)
+                type = (int)InstrumentType::Synth;
+            if (preset < 0) preset = 0;
+            cur.instrument.type      = (InstrumentType)type;
+            cur.instrument.sf2Preset = preset;
+            cur.instrument.path      = Unquote(line, escaped);
+            // A soundfont voice with no path can never load; keep it on the
+            // synth rather than leaving a broken descriptor behind.
+            if (cur.instrument.path.empty())
+                cur.instrument.type = InstrumentType::Synth;
         }
         else if (kw == "input" && haveTrack) {
             InputSource in;

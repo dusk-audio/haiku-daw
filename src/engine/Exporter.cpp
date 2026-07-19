@@ -3,7 +3,8 @@
 #include "WavSource.h"
 #include "WavWriter.h"
 #include "Resampler.h"
-#include "../synth/Synth.h"
+#include "../synth/IInstrument.h"
+#include "../synth/InstrumentFactory.h"
 #include "../dsp/EffectFactory.h"
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
@@ -164,7 +165,6 @@ bool ExportWav(const Project& project, const std::string& outPath,
     if (totalOut <= 0)
         return false;   // nothing to render
 
-    Synth synth(outRate);
 
     const auto& tracks = project.Tracks();
 
@@ -214,7 +214,12 @@ bool ExportWav(const Project& project, const std::string& outPath,
     PdcGraph pdc;
     const bool pdcOk = routingOk && ComputePdc(pnodes, edges, pdc);
     const int masterFxLat = chainLatency(project.masterFx);
-    const int64_t pad = pdcOk ? (int64_t)pdc.totalLatency + masterFxLat : 0;
+    // The master chain's latency delays the mix whether or not the NODE graph
+    // solved, so it always contributes to the pad that gets trimmed. Dropping
+    // it on the fallback path (pad = 0) shifted the whole bounce late by the
+    // master chain's latency and cut that much off the tail. Only the node-graph
+    // term is conditional.
+    const int64_t pad = (pdcOk ? (int64_t)pdc.totalLatency : 0) + masterFxLat;
     const int64_t totalOutPadded = totalOut + pad;
 
     // `nfloats` / `totalOut` are the LOGICAL output length (natural content and
@@ -277,15 +282,23 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // dest.inLat - node.inLat instead — otherwise a pre-fader send from a latent
     // node lands node.fxLatency samples early.
     auto addSends = [&](const Track& t, bool pre, const float* nb) {
+        // A failed routing solve means the graph had a cycle and `order` fell
+        // back to flat (everything straight to master). Aux sends are part of
+        // that same edge set, so honouring them here would route signal along
+        // edges the fallback explicitly abandoned — and in an order that is no
+        // longer topological, so a send could land in a bus already mixed.
+        if (!routingOk) return;
         for (const Send& s : t.sends) {
             if (s.preFader != pre || s.dest == kInvalidTrackId
                 || s.dest == t.id) continue;   // ignore a self-send
             auto d = idx.find(s.dest);
             if (d == idx.end()) continue;
             float* db = nodeVec(d->second).data();   // dest is always persistent
-            const int64_t delay = pre
-                ? (int64_t)pdc.InLat(s.dest) - pdc.InLat(t.id)   // pre-fader tap
-                : (int64_t)pdc.EdgeDelay(t.id, s.dest);          // post-fader tap
+            // Only consult the PDC graph when it actually solved; an unsolved
+            // one has no node entries, so every lookup would silently read 0.
+            const int64_t delay = !pdcOk ? 0
+                : (pre ? (int64_t)pdc.InLat(s.dest) - pdc.InLat(t.id)   // pre-fader
+                       : (int64_t)pdc.EdgeDelay(t.id, s.dest));         // post-fader
             sumDelayed(db, nb, s.level, delay);
         }
     };
@@ -361,6 +374,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
                           nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
             }
         } else if (audible && t.type == TrackType::Midi) {
+            // One voice per track, built at the OUTPUT rate. The sampler is
+            // stateless like the synth, so a bounce reproduces live playback
+            // block for block even though the block size differs.
+            std::unique_ptr<IInstrument> inst = MakeInstrument(t.instrument, outRate);
             std::vector<MidiNote> notes = t.CollectNotes();
             if (scale != 1.0)
                 for (MidiNote& n : notes) {
@@ -387,8 +404,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (lastL < 0.0f) ? to
                                                        : StereoGain{lastL, lastR};
-                synth.Render(notes, t.instrument, nb + off * 2, (size_t)nn,
-                             off, from, to);
+                inst->Render(notes, nb + off * 2, (size_t)nn, off, from, to);
                 lastL = cgl; lastR = cgr;
             }
         }   // Bus: nb already holds the summed upstream (dry).
@@ -438,7 +454,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
             auto d = idx.find(t.output);
             if (d != idx.end()) { dst = nodeVec(d->second).data(); destId = t.output; }
         }
-        sumDelayed(dst, nb, 1.0f, pdc.EdgeDelay(t.id, destId));
+        sumDelayed(dst, nb, 1.0f, pdcOk ? pdc.EdgeDelay(t.id, destId) : 0);
     }
 
     // Master bus FX chain (applied to the summed mix before master gain).

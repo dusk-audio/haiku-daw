@@ -7,6 +7,7 @@
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
+#include "../synth/SampleBank.h"
 #include "PianoRoll.h"
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
@@ -820,19 +821,41 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case kMsgApplyInstrument: {
             // An InstrumentWindow posts the edited voice. Undoable via a
-            // coalescing SetInstrumentCommand. Applies on the next Play.
+            // coalescing SetInstrumentCommand, and pushed straight into the
+            // running engine below so it is heard immediately.
+            // A soundfont is already resident in the SoundfontCache by now —
+            // the editor loaded it on its own looper before posting — so this
+            // handler never touches the disk.
             int64 tid = 0;
             msg->FindInt64("track", &tid);
             if (fProject->FindTrack((TrackId)tid)) {
-                Instrument in;
-                int32 wv = 0; float a = 0, d = 0, s = 0, r = 0;
+                InstrumentDesc in;
+                int32 wv = 0, ty = 0, ps = 0; float a = 0, d = 0, s = 0, r = 0;
+                const char* path = nullptr;
+                msg->FindInt32("type", &ty);
                 msg->FindInt32("wave", &wv);
                 msg->FindFloat("a", &a); msg->FindFloat("d", &d);
                 msg->FindFloat("s", &s); msg->FindFloat("r", &r);
-                in.waveform = (wv >= 0 && wv <= 3) ? wv : 0;
-                in.attack = a; in.decay = d; in.sustain = s; in.release = r;
+                msg->FindInt32("preset", &ps);
+                msg->FindString("path", &path);
+                in.type = (ty >= 0 && ty <= kMaxInstrumentTypeId)
+                              ? (InstrumentType)ty : InstrumentType::Synth;
+                in.synth.waveform = (wv >= 0 && wv <= 3) ? wv : 0;
+                in.synth.attack = a; in.synth.decay = d;
+                in.synth.sustain = s; in.synth.release = r;
+                in.path = path ? path : "";
+                in.sf2Preset = ps > 0 ? ps : 0;
+                if (in.path.empty()) in.type = InstrumentType::Synth;
                 fStack->Execute(std::make_unique<SetInstrumentCommand>(
                     (TrackId)tid, in), *fProject);
+                // Apply it to the running engine, the way an effect change
+                // does. A voice swap is always structural — there is no
+                // in-place equivalent of SyncFx for an instrument — so rebuild.
+                // The soundfont is already in the cache (the editor loaded it
+                // before posting), so this is a cheap graph rebuild, not a
+                // decode. Without this the edit sat in the model and was only
+                // heard after the next manual stop/play.
+                ReloadActiveEngine();
                 fTimeline->Invalidate();
             }
             break;
@@ -928,11 +951,23 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Live; the engine reads project.masterGain each poll (and at Load).
             fProject->masterGain = fMaster->Value() / 100.0f;
             break;
+        // Undo/redo can change anything the running engine was built from — an
+        // instrument, an fx chain, a clip, the tempo. The forward paths reload
+        // the engine for those; without the same call here the model and the
+        // audio disagree until the next manual stop/play.
         case MSG_UNDO:
-            if (fStack->CanUndo()) { fStack->Undo(*fProject); fTimeline->Invalidate(); }
+            if (fStack->CanUndo()) {
+                fStack->Undo(*fProject);
+                ReloadActiveEngine();
+                fTimeline->Invalidate();
+            }
             break;
         case MSG_REDO:
-            if (fStack->CanRedo()) { fStack->Redo(*fProject); fTimeline->Invalidate(); }
+            if (fStack->CanRedo()) {
+                fStack->Redo(*fProject);
+                ReloadActiveEngine();
+                fTimeline->Invalidate();
+            }
             break;
         case MSG_PASTE:
             fTimeline->PasteAtPlayhead();
@@ -1159,6 +1194,16 @@ void MainWindow::StartPlayback() {
     if (fEngine->Load(*fProject, start, minEnd) != B_OK) {
         std::fprintf(stderr, "MainWindow: nothing to play\n");
         fEngine.reset();
+        // Leave the transport genuinely stopped. ReloadActiveEngine calls this
+        // while fPlaying is ALREADY true, and Load failing there is reachable —
+        // an undo that removes the last clip is enough. Returning without
+        // clearing the flag left fPlaying true with a null fEngine: the
+        // transport button stayed lit, the pulse kept firing for an engine that
+        // no longer existed, and live monitoring refused to start because it
+        // believed playback still owned the engine.
+        fPlaying = false;
+        if (fTransport) fTransport->SetPlaying(false);
+        UpdatePulse();
         return;
     }
     fEngine->Start();
@@ -1372,7 +1417,10 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
 
     for (TrackId target : targets) {
         const auto it = takes.find(target);
-        if (it == takes.end() || it->second.notes.empty()) continue;
+        if (it == takes.end()) continue;
+        // Notes OR controllers make a take worth keeping: a pass that only moved
+        // the expression pedal still recorded something.
+        if (it->second.notes.empty() && it->second.events.empty()) continue;
         const MidiClip& take = it->second;
 
         // Loop-record: split this track's linear take into one region per pass
@@ -1387,6 +1435,10 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
             for (size_t k = 0; k < passes.size(); k++)
                 if (!passes[k].empty()) last = (int)k;
             if (last < 0) continue;   // every pass silent on this track
+            // Controllers recorded during the take get dealt into the same
+            // passes, each seeded with the value in force when it began.
+            const std::vector<std::vector<MidiClipEvent>> evPasses =
+                SplitMidiLoopEvents(take.events, loopLen, (int)passes.size());
             const int group = ++fTakeGroup;
             auto macro = std::make_unique<MacroCommand>("Loop MIDI Takes");
             for (size_t k = 0; k < passes.size(); k++) {
@@ -1395,6 +1447,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
                 c.startFrame   = tr.loopStart;
                 c.lengthFrames = loopLen;
                 c.notes        = passes[k];
+                if (k < evPasses.size()) c.events = evPasses[k];
                 c.takeGroup    = group;
                 c.takeActive   = ((int)k == last);
                 macro->Add(std::make_unique<AddMidiClipCommand>(target, c));
@@ -1678,6 +1731,45 @@ void MainWindow::SaveTo(const char* path) {
     fLastDir = fTakeDir;
 }
 
+// Decode every soundfont the loaded project references, here on the UI thread.
+//
+// This has to happen before the engine is built: MakeInstrument only LOOKS UP
+// the SoundfontCache, and Engine::Load runs again at every loop-record seam,
+// where a decode would stall the audio thread. A track whose file has moved
+// falls back to the synth voice, which is audible rather than silent — say so
+// once, listing the tracks, instead of failing the whole project open.
+void MainWindow::PrimeSoundfonts() {
+    std::string missing;
+    int nMissing = 0;
+    for (const Track& t : fProject->Tracks()) {
+        if (t.type != TrackType::Midi || !t.instrument.UsesSoundfont()) continue;
+        if (t.instrument.path.empty()) continue;
+        std::string err;
+        if (SoundfontCache::Instance().Load(t.instrument.path,
+                                            t.instrument.sf2Preset, &err))
+            continue;
+        if (nMissing < 8) {
+            missing += "\n  " + t.name + ": " + t.instrument.path;
+            if (!err.empty()) missing += "  (" + err + ")";
+        }
+        nMissing++;
+    }
+    if (nMissing == 0) return;
+    if (nMissing > 8) {
+        char more[64];
+        std::snprintf(more, sizeof more, "\n  ...and %d more", nMissing - 8);
+        missing += more;
+    }
+    const std::string text =
+        "Some instruments could not be loaded. Those tracks will play the "
+        "built-in synth voice until the files are available again."
+        + missing;
+    BAlert* a = new BAlert("Soundfonts", text.c_str(), "OK", nullptr, nullptr,
+                           B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    a->SetShortcut(0, B_ESCAPE);
+    a->Go(nullptr);   // async: don't block the load
+}
+
 void MainWindow::LoadFrom(const char* path) {
     StopPlayback();
     StopRecording();
@@ -1688,6 +1780,7 @@ void MainWindow::LoadFrom(const char* path) {
     fTakeDir = DirOfPath(path);
     fLastDir = fTakeDir;
     fStack->Clear();          // history from the previous project is invalid
+    PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine
     RebuildPeaks();           // waveform envelopes for the loaded clips
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
     fTimeline->SetProject(fProject);

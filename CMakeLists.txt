@@ -51,6 +51,12 @@ add_library(daw_model
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
+    src/synth/SampleBank.cpp    # kit-free loaded-soundfont store + cache
+    src/synth/SfzParser.cpp     # kit-free SFZ -> LoadedInstrument
+    src/synth/Sampler.cpp       # kit-free stateless multisample player
+    src/synth/Sf2Reader.cpp     # kit-free SF2 metadata reader (DuskStudio port)
+    src/synth/Sf2ToRegions.cpp  # kit-free SF2 preset -> regions + PCM
+    src/synth/InstrumentFactory.cpp # InstrumentDesc -> IInstrument
     src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
 )
 target_include_directories(daw_model PUBLIC src)
@@ -84,6 +90,22 @@ add_test(NAME effect_tests COMMAND effect_tests)
 add_executable(synth_tests tests/synth_tests.cpp)
 target_link_libraries(synth_tests PRIVATE daw_model)
 add_test(NAME synth_tests COMMAND synth_tests)
+
+add_executable(sfz_parser_tests tests/sfz_parser_tests.cpp)
+target_link_libraries(sfz_parser_tests PRIVATE daw_model)
+add_test(NAME sfz_parser_tests COMMAND sfz_parser_tests)
+
+add_executable(sampler_tests tests/sampler_tests.cpp)
+target_link_libraries(sampler_tests PRIVATE daw_model)
+add_test(NAME sampler_tests COMMAND sampler_tests)
+
+add_executable(sf2_tests tests/sf2_tests.cpp)
+target_link_libraries(sf2_tests PRIVATE daw_model)
+add_test(NAME sf2_tests COMMAND sf2_tests)
+
+add_executable(instrument_io_tests tests/instrument_io_tests.cpp)
+target_link_libraries(instrument_io_tests PRIVATE daw_model)
+add_test(NAME instrument_io_tests COMMAND instrument_io_tests)
 
 add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)

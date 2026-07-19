@@ -323,17 +323,17 @@ static void test_undo_unification() {
 
     // Coalescing: two consecutive SetInstrumentCommand -> ONE undo step that
     // restores the original instrument (before the first).
-    const int origWave = p.FindTrack(tid)->instrument.waveform;
-    Instrument i1; i1.waveform = 1;
-    Instrument i2; i2.waveform = 3;
+    const int origWave = p.FindTrack(tid)->instrument.synth.waveform;
+    InstrumentDesc i1; i1.synth.waveform = 1;
+    InstrumentDesc i2; i2.synth.waveform = 3;
     stack.Execute(std::make_unique<SetInstrumentCommand>(tid, i1), p);
     stack.Execute(std::make_unique<SetInstrumentCommand>(tid, i2), p);
-    CHECK(p.FindTrack(tid)->instrument.waveform == 3);   // latest applied
+    CHECK(p.FindTrack(tid)->instrument.synth.waveform == 3);   // latest applied
     CHECK(stack.Undo(p));                                 // single undo...
-    CHECK(p.FindTrack(tid)->instrument.waveform == origWave);  // ...to original
+    CHECK(p.FindTrack(tid)->instrument.synth.waveform == origWave);  // ...to original
     // Only one entry existed for the coalesced pair (next undo hits the note cmd
     // era, not a second instrument step) — verify the instrument didn't step.
-    CHECK(p.FindTrack(tid)->instrument.waveform == origWave);
+    CHECK(p.FindTrack(tid)->instrument.synth.waveform == origWave);
 
     // SetTrackColor / Height do + undo.
     stack.Execute(std::make_unique<SetTrackColorCommand>(tid, 3), p);

@@ -10,19 +10,13 @@
 // richer waveforms/wavetables arrive.
 #pragma once
 
+#include "IInstrument.h"        // StereoGain
 #include "../model/Project.h"
 
 #include <cstddef>
 #include <vector>
 
 namespace daw {
-
-// Per-channel gain at a block boundary. Render ramps between two of these so a
-// controller the caller only samples once per block glides instead of stepping.
-struct StereoGain {
-    float l = 1.0f;
-    float r = 1.0f;
-};
 
 class Synth {
 public:

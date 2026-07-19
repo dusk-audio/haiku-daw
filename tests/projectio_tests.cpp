@@ -67,7 +67,7 @@ int main() {
     { auto add = std::make_unique<AddMidiClipCommand>(t2, mc);
       stack.Execute(std::move(add), a); }
     { Instrument in; in.waveform = 2; in.attack = 0.01f; in.decay = 0.2f;
-      in.sustain = 0.5f; in.release = 0.3f; a.FindTrack(t2)->instrument = in; }
+      in.sustain = 0.5f; in.release = 0.3f; a.FindTrack(t2)->instrument.synth = in; }
 
     // Aux send from track 1 to a bus (id t2 stands in as a dest here).
     { std::vector<Send> s = {{t2, 0.4f, true}};
@@ -168,10 +168,10 @@ int main() {
       CHECK(ev.size() == 2);
       CHECK(ev[0].startFrame == 2100);                       // 2000 + 100
       CHECK(ev[1].startFrame == 2700); }
-    CHECK(bt2.instrument.waveform == 2);
-    CHECK(std::abs(bt2.instrument.decay - 0.2f) < 1e-4f);
-    CHECK(std::abs(bt2.instrument.sustain - 0.5f) < 1e-4f);
-    CHECK(std::abs(bt2.instrument.release - 0.3f) < 1e-4f);
+    CHECK(bt2.instrument.synth.waveform == 2);
+    CHECK(std::abs(bt2.instrument.synth.decay - 0.2f) < 1e-4f);
+    CHECK(std::abs(bt2.instrument.synth.sustain - 0.5f) < 1e-4f);
+    CHECK(std::abs(bt2.instrument.synth.release - 0.3f) < 1e-4f);
 
     // A new track after load must get a fresh id, not collide with loaded ones.
     CommandStack s2;
@@ -223,6 +223,57 @@ int main() {
         CHECK(keep.Tracks().size() == 1);          // project untouched
         CHECK(keep.Tracks().front().name == "Keep");
         std::remove(bogus);
+    }
+
+    // `mev` field ranges. Nothing downstream re-checks these: MidiChannelGain
+    // divides the raw CC7/CC11 values by 127 with no clamp, so an out-of-range
+    // value stored here is a large gain on that track's notes. An unknown TYPE
+    // is different — that's forward compatibility, and must be skipped rather
+    // than rejected.
+    {
+        const char* mp = "mev_range_tmp.dawproj";
+        auto writeMev = [&](const char* mev) {
+            std::ofstream mf(mp);
+            mf << "DAW 1 1\n"
+               << "track 1 midi 1 0 0 0 0 0 \"T\" 0 60 0 0 0\n"
+               << "midiclip 1 0 48000 0 0 0 0 1\n"
+               << mev << "\n"
+               << "endtrack\nenddaw\n";
+        };
+        auto loads = [&](const char* mev) {
+            writeMev(mev);
+            Project q;
+            const bool ok = ProjectIO::Load(q, mp);
+            std::remove(mp);
+            return ok;
+        };
+        auto eventCount = [&](const char* mev) -> size_t {
+            writeMev(mev);
+            Project q;
+            const bool ok = ProjectIO::Load(q, mp);
+            std::remove(mp);
+            if (!ok || q.Tracks().empty() || q.Tracks()[0].midiClips.empty())
+                return 0;
+            return q.Tracks()[0].midiClips[0].events.size();
+        };
+
+        CHECK(loads("mev 0 100 11 88"));            // in-range CC
+        CHECK(eventCount("mev 0 100 11 88") == 1);
+        CHECK(loads("mev 1 100 0 12000"));          // in-range pitch bend
+        CHECK(eventCount("mev 1 100 0 12000") == 1);
+        CHECK(loads("mev 1 100 0 16383"));          // bend upper bound
+
+        CHECK(!loads("mev 0 100 11 65535"));        // CC value past 127
+        CHECK(!loads("mev 0 100 11 -5"));           // negative CC value
+        CHECK(!loads("mev 0 100 9999 64"));         // CC number past 127
+        CHECK(!loads("mev 0 -100 11 64"));          // negative clip-relative frame
+        CHECK(!loads("mev 1 100 0 16384"));         // bend past 14 bits
+        CHECK(!loads("mev 0 100"));                 // truncated record
+
+        // An unrecognised type is skipped, not rejected: a newer build may
+        // define more, and this build simply has nothing to do with it.
+        CHECK(loads("mev 9 100 11 64"));
+        CHECK(eventCount("mev 9 100 11 64") == 0);
     }
 
     // Markers: add (kept sorted) / rename / remove commands, undo, IO round-trip.

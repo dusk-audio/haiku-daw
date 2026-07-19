@@ -75,7 +75,11 @@ bool WavSource::Open(const std::string& path) {
         std::fprintf(stderr, "WavSource: missing fmt or data chunk\n");
         return false;
     }
-    if (fChannels < 1 || fBytesPerSample < 1) {
+    // fChannels is a raw uint16 from the file. Only "< 1" was rejected, so a
+    // declared 65535 channels made ReadRawBlock size its buffer at
+    // 8192 frames * 4 bytes * 65535 = ~2 GB before reading a single byte.
+    // 64 is well past any real multichannel file.
+    if (fChannels < 1 || fChannels > 64 || fBytesPerSample < 1) {
         std::fprintf(stderr, "WavSource: bad fmt (ch=%d bits=%d)\n",
                      fChannels, fBitsPerSample);
         return false;
@@ -106,6 +110,24 @@ bool WavSource::Open(const std::string& path) {
         std::fprintf(stderr, "WavSource: invalid sample rate %g\n", fSampleRate);
         return false;
     }
+
+    // The data chunk's declared size is untrusted: clamp it to the bytes the
+    // file actually contains, so TotalFrames (which callers size buffers from)
+    // can never exceed reality.
+    fFile.clear();
+    fFile.seekg(0, std::ios::end);
+    const int64_t fileLen = (int64_t)fFile.tellg();
+    if (fileLen < 0) {
+        // tellg() failed: we cannot bound the declared size against anything,
+        // and keeping it would let TotalFrames advertise bytes that are not
+        // there. Reject rather than trust the header.
+        std::fprintf(stderr, "WavSource: cannot determine file length\n");
+        return false;
+    }
+    if (fileLen <= fDataStart)
+        fDataBytes = 0;                        // header present, payload empty
+    else if (fDataBytes > fileLen - fDataStart)
+        fDataBytes = fileLen - fDataStart;
 
     const int frameSize = fBytesPerSample * fChannels;
     fTotalFrames = fDataBytes / frameSize;
@@ -158,14 +180,16 @@ float WavSource::SampleToFloat(const uint8_t* p) const {
     return 0.0f;
 }
 
-bool WavSource::ReadChunk(const float** outStereo, size_t* outFrames) {
+// Read the next block of raw file bytes into fRaw. Returns the number of whole
+// frames read (0 at end of data). Shared by ReadChunk / ReadChunkNative.
+size_t WavSource::ReadRawBlock() {
     if (!fValid)
-        return false;
+        return 0;
 
     const int frameSize = fBytesPerSample * fChannels;
     const int64_t bytesLeft = fDataBytes - fBytesRead;
     if (bytesLeft < frameSize)
-        return false;   // end of data
+        return 0;   // end of data
 
     const size_t kBlockFrames = 8192;
     size_t frames = bytesLeft / frameSize;
@@ -173,13 +197,22 @@ bool WavSource::ReadChunk(const float** outStereo, size_t* outFrames) {
 
     const size_t rawBytes = frames * frameSize;
     if (fRaw.size() < rawBytes) fRaw.resize(rawBytes);
-    if (fStereo.size() < frames * 2) fStereo.resize(frames * 2);
 
     fFile.read(reinterpret_cast<char*>(fRaw.data()), rawBytes);
     const std::streamsize got = fFile.gcount();
-    if (got <= 0) return false;
+    if (got <= 0) return 0;
     frames = (size_t)got / frameSize;   // in case of a short final read
-    fBytesRead += frames * frameSize;
+    fBytesRead += (int64_t)frames * frameSize;
+    return frames;
+}
+
+bool WavSource::ReadChunk(const float** outStereo, size_t* outFrames) {
+    const size_t frames = ReadRawBlock();
+    if (frames == 0)
+        return false;
+
+    const int frameSize = fBytesPerSample * fChannels;
+    if (fStereo.size() < frames * 2) fStereo.resize(frames * 2);
 
     // Convert each frame's first two channels to stereo float.
     for (size_t f = 0; f < frames; f++) {
@@ -193,6 +226,26 @@ bool WavSource::ReadChunk(const float** outStereo, size_t* outFrames) {
     }
 
     *outStereo = fStereo.data();
+    *outFrames = frames;
+    return true;
+}
+
+bool WavSource::ReadChunkNative(const float** outNative, size_t* outFrames) {
+    const size_t frames = ReadRawBlock();
+    if (frames == 0)
+        return false;
+
+    const int frameSize = fBytesPerSample * fChannels;
+    const size_t n = frames * (size_t)fChannels;
+    if (fNative.size() < n) fNative.resize(n);
+
+    for (size_t f = 0; f < frames; f++) {
+        const uint8_t* base = fRaw.data() + f * frameSize;
+        for (int c = 0; c < fChannels; c++)
+            fNative[f * fChannels + c] = SampleToFloat(base + c * fBytesPerSample);
+    }
+
+    *outNative = fNative.data();
     *outFrames = frames;
     return true;
 }

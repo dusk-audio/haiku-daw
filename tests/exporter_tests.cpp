@@ -290,9 +290,9 @@ int main() {
         Project pr; pr.sampleRate = SR; pr.masterGain = 1.0f;
         Track m; m.id = pr.NextTrackId(); m.type = TrackType::Midi;
         m.gain = 1.0f; m.pan = 0.0f;
-        m.instrument.waveform = (int)Waveform::Sine;   // steady tone: envelope is
-        m.instrument.attack = 0.001f; m.instrument.decay = 0.0f;   // the CC, not
-        m.instrument.sustain = 1.0f;  m.instrument.release = 0.0f; // the ADSR
+        m.instrument.synth.waveform = (int)Waveform::Sine;   // steady tone: envelope is
+        m.instrument.synth.attack = 0.001f; m.instrument.synth.decay = 0.0f;   // the CC, not
+        m.instrument.synth.sustain = 1.0f;  m.instrument.synth.release = 0.0f; // the ADSR
         MidiNote n2 = note; n2.startFrame = 0; n2.lengthFrames = (Frame)SR;
         PutNote(m, n2);
         m.midiClips.front().events.push_back({ MidiClipEvent::CC, 0, 7, 127 });
