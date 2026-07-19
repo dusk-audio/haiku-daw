@@ -239,6 +239,97 @@ int main() {
         CHECK(q2.Tracks()[0].input.kind == InputSource::kNone);
     }
 
+    // --- MidiRecorder: live controllers land in the take ---------------------
+    {
+        MidiRecorder rec;
+        rec.Begin(1000);
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 100), 1000);
+        rec.OnEvent(MidiEvent::NoteOn(0, 60, 90),        1100);
+        rec.OnEvent(MidiEvent::ControlChange(0, 11, 64), 1200);
+        rec.OnEvent(MidiEvent::NoteOff(0, 60, 0),        1300);
+        const MidiClip c = rec.End(1400);
+        CHECK(c.notes.size() == 1);
+        CHECK(c.events.size() == 2);
+        // Clip-relative, like the notes.
+        CHECK(c.events[0].type == MidiClipEvent::CC);
+        CHECK(c.events[0].data == 7 && c.events[0].value == 100);
+        CHECK(c.events[0].startFrame == 0);
+        CHECK(c.events[1].data == 11 && c.events[1].startFrame == 200);
+    }
+
+    // A controller resending the value already in force adds no point: it is a
+    // step function, so repeats only cost scan time later. A CHANGE still lands,
+    // and the same value on a DIFFERENT controller is not a repeat.
+    {
+        MidiRecorder rec;
+        rec.Begin(0);
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 100), 0);
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 100), 10);   // dropped
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 100), 20);   // dropped
+        rec.OnEvent(MidiEvent::ControlChange(0, 11, 100), 30);  // other CC: kept
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 90), 40);    // changed: kept
+        const MidiClip c = rec.End(100);
+        CHECK(c.events.size() == 3);
+        CHECK(c.events[1].data == 11);
+        CHECK(c.events[2].data == 7 && c.events[2].value == 90);
+    }
+
+    // A fresh take records the opening value even when it matches where the
+    // previous take left off -- otherwise the region would start with no point
+    // and fall back to the absent-controller default on playback.
+    {
+        MidiRecorder rec;
+        rec.Begin(0);
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 40), 0);
+        rec.End(100);
+        rec.Begin(0);
+        rec.OnEvent(MidiEvent::ControlChange(0, 7, 40), 0);
+        const MidiClip c2 = rec.End(100);
+        CHECK(c2.events.size() == 1);
+        CHECK(c2.events[0].value == 40);
+    }
+
+    // Pitch bend: MidiEvent carries it signed, the model stores raw 14-bit.
+    {
+        MidiRecorder rec;
+        rec.Begin(0);
+        MidiEvent b;
+        b.type = MidiEvent::kPitchBend; b.channel = 0; b.bend = 0;
+        rec.OnEvent(b, 0);                       // centre -> 8192
+        b.bend = 4096; rec.OnEvent(b, 50);
+        const MidiClip c = rec.End(100);
+        CHECK(c.events.size() == 2);
+        CHECK(c.events[0].type == MidiClipEvent::PitchBend);
+        CHECK(c.events[0].value == 8192);
+        CHECK(c.events[1].value == 8192 + 4096);
+    }
+
+    // --- SplitMidiLoopEvents -------------------------------------------------
+    // Controllers are dealt into the pass they were played in, and each later
+    // pass inherits the value in force when it began -- so a stacked take sounds
+    // the same played alone as it did in the pass it was recorded in.
+    {
+        std::vector<MidiClipEvent> evs;
+        auto cc = [](int data, int value, Frame at) {
+            MidiClipEvent e; e.type = MidiClipEvent::CC;
+            e.data = data; e.value = value; e.startFrame = at; return e;
+        };
+        evs.push_back(cc(7, 100, 10));    // pass 0
+        evs.push_back(cc(7, 50, 1010));   // pass 1
+        const auto passes = SplitMidiLoopEvents(evs, 1000, 3);
+        CHECK(passes.size() == 3);
+        // Pass 0: just its own point.
+        CHECK(passes[0].size() == 1);
+        CHECK(passes[0][0].value == 100 && passes[0][0].startFrame == 10);
+        // Pass 1: seeded with CC7=100 at 0, then its own re-based point.
+        CHECK(passes[1].size() == 2);
+        CHECK(passes[1][0].value == 100 && passes[1][0].startFrame == 0);
+        CHECK(passes[1][1].value == 50  && passes[1][1].startFrame == 10);
+        // Pass 2 played nothing but still carries the value in force (50).
+        CHECK(passes[2].size() == 1);
+        CHECK(passes[2][0].value == 50 && passes[2][0].startFrame == 0);
+    }
+
     std::printf("midi_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;
 }
