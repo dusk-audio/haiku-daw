@@ -61,6 +61,42 @@ add_library(daw_model
 )
 target_include_directories(daw_model PUBLIC src)
 
+# --- LV2 plugin hosting (lilv) ----------------------------------------
+# On by default, but it DEGRADES rather than fails: with lilv absent no LV2 code
+# is compiled, the EffectFactory hook is never registered, and an
+# EffectType::Lv2 insert loads as an index-aligned nullptr hole in the chain —
+# the same graceful path an unavailable native add-on already takes. So a project
+# saved on a machine with LV2 still opens everywhere else, minus the effect.
+# -DDAW_LV2=OFF forces that stub path even where lilv IS installed, which is what
+# the Haiku VM currently builds (HaikuPorts has lilv, it just isn't installed).
+# daw_model itself never links lilv: the LV2 host is its own target so the
+# kit-free model layer stays dependency-free.
+option(DAW_LV2 "Host LV2 plugins via lilv (auto-disabled when lilv is missing)" ON)
+set(DAW_LV2_ENABLED OFF)
+if(DAW_LV2)
+    find_package(PkgConfig QUIET)
+    if(PKG_CONFIG_FOUND)
+        pkg_check_modules(LILV lilv-0)
+    endif()
+    if(LILV_FOUND)
+        set(DAW_LV2_ENABLED ON)
+        message(STATUS "LV2 hosting enabled (lilv ${LILV_VERSION})")
+    else()
+        message(STATUS "lilv not found - building without LV2 support")
+    endif()
+endif()
+
+if(DAW_LV2_ENABLED)
+    add_library(daw_lv2 src/plugin/Lv2Host.cpp)
+    target_include_directories(daw_lv2 PUBLIC src ${LILV_INCLUDE_DIRS})
+    target_link_directories(daw_lv2 PUBLIC ${LILV_LIBRARY_DIRS})
+    target_link_libraries(daw_lv2 PUBLIC daw_model ${LILV_LIBRARIES})
+    # PUBLIC so anything linking this target (the app's factory registration,
+    # and the effects editor's param listing later) compiles its LV2 branch only
+    # where the host actually exists.
+    target_compile_definitions(daw_lv2 PUBLIC DAW_HAVE_LV2=1)
+endif()
+
 # Host-buildable tests. Run with: ctest  (or the binaries directly)
 enable_testing()
 add_executable(model_tests tests/model_tests.cpp)
@@ -125,6 +161,22 @@ add_test(NAME fx_insert_tests COMMAND fx_insert_tests)
 add_executable(fx_insert_render_tests tests/fx_insert_render_tests.cpp)
 target_link_libraries(fx_insert_render_tests PRIVATE daw_model)
 add_test(NAME fx_insert_render_tests COMMAND fx_insert_render_tests)
+
+# LV2 port mapping: topology classification, param slot ordering, latency-port
+# precedence, block chunking. Pure data -> plan logic with no lilv in it, so it
+# is built and run UNCONDITIONALLY — including on machines with no LV2 at all,
+# which is exactly where a regression in it would otherwise go unnoticed.
+add_executable(lv2_portmap_tests tests/lv2_portmap_tests.cpp)
+target_link_libraries(lv2_portmap_tests PRIVATE daw_model)
+add_test(NAME lv2_portmap_tests COMMAND lv2_portmap_tests)
+
+# The real thing against whatever LV2 plugins the machine has: scan, filter,
+# instantiate, process. Skips (and passes) when no hostable plugin is installed.
+if(DAW_LV2_ENABLED)
+    add_executable(lv2_host_tests tests/lv2_host_tests.cpp)
+    target_link_libraries(lv2_host_tests PRIVATE daw_lv2)
+    add_test(NAME lv2_host_tests COMMAND lv2_host_tests)
+endif()
 
 add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
@@ -298,6 +350,11 @@ if(HAIKU)
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.
     target_link_libraries(daw PRIVATE daw_engine be tracker)
+
+    # Brings in DAW_HAVE_LV2, which is what gates the registration in main.cpp.
+    if(DAW_LV2_ENABLED)
+        target_link_libraries(daw PRIVATE daw_lv2)
+    endif()
 
     # --- Sample effect add-on (plugin ABI demo) -----------------------
     # A Haiku shared add-on (.so) the host loads at runtime. Only needs the

@@ -15,6 +15,14 @@
 #include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
 
+// Defined by the daw_lv2 target, which exists only when CMake found lilv. With
+// it absent nothing below is compiled, the LV2 factory hook is never installed,
+// and an EffectType::Lv2 insert degrades to a null effect the same way an
+// unavailable native add-on does.
+#ifdef DAW_HAVE_LV2
+#include "plugin/Lv2Host.h"
+#endif
+
 #include <Application.h>
 #include <FindDirectory.h>
 #include <Path.h>
@@ -115,9 +123,21 @@ static void InstallPlugins() {
     }
 }
 
+// Scan the LV2 bundle path once at startup and install the EffectFactory hook.
+// Reads the filesystem and parses RDF, so it belongs here beside InstallPlugins
+// and nowhere near the audio thread. lilv uses its own default search path
+// (LV2_PATH, else the system and per-user bundle directories), so there is no
+// directory for us to name.
+static void InstallLv2() {
+#ifdef DAW_HAVE_LV2
+    Lv2Host::Instance().ScanAll();
+#endif
+}
+
 int main(int argc, char** argv) {
     BApplication app("application/x-vnd.DuskAudio-HaikuDAW");
     InstallPlugins();
+    InstallLv2();
 
     std::vector<std::string> wavs;
     for (int i = 1; i < argc; i++)
