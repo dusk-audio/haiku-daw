@@ -370,6 +370,7 @@ void InspectorView::MouseDown(BPoint where) {
             fDrag = Drag::FxSlot;
             fDragFxFrom = i;
             fDragFxTo   = i;
+            fDragFxTrack = id;
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
@@ -458,7 +459,12 @@ void InspectorView::MouseUp(BPoint) {
     if (!t) return;
     if (mode == Drag::FxSlot) {
         const int from = fDragFxFrom, to = fDragFxTo;
+        const TrackId dragTrack = fDragFxTrack;
         fDragFxFrom = fDragFxTo = -1;
+        fDragFxTrack = kInvalidTrackId;
+        // Row indices address the chain they were taken from. If the selection
+        // moved on since, they mean nothing here.
+        if (dragTrack != t->id) { Refresh(); return; }
         const int nfx = (int)t->fx.size();
         if (from < 0 || from >= nfx) { Refresh(); return; }
         if (to < 0 || to >= nfx || to == from) {

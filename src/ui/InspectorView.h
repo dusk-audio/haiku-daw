@@ -56,6 +56,10 @@ private:
     enum class Drag { None, Fader, Pan, FxSlot };
     int   fDragFxFrom = -1;     // insert being dragged, and where it would land
     int   fDragFxTo   = -1;
+    // The track the drag started on. Row indices mean nothing without it: if the
+    // selection changed mid-drag they would address a DIFFERENT chain, and the
+    // reorder would silently scramble the wrong track.
+    TrackId fDragFxTrack = kInvalidTrackId;
     Drag  fDrag = Drag::None;
     float fDragOrig  = 0.0f;   // gain/pan at drag start (for undo)
     float fDragStartY = 0.0f;  // cursor y at drag start (pan knob = vertical)
