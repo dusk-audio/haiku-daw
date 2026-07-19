@@ -131,8 +131,14 @@ public:
           fName(std::move(name)), fUrids(urids) {
         fSequenceType = fUrids.Map(LV2_ATOM__Sequence);
 
+        // fCtrl is built alongside fLayout.controlIn during the scan, so the two
+        // should already agree. Make that an INVARIANT rather than an assumption:
+        // SetParam indexes fCtrl after bounds-checking against fControlIn, and a
+        // silent divergence between them would be an out-of-bounds read on a path
+        // driven by automation.
         fControlIn.resize(fLayout.controlIn.size(), 0.0f);
-        for (size_t i = 0; i < fControlIn.size() && i < fCtrl.size(); i++)
+        fCtrl.resize(fControlIn.size());
+        for (size_t i = 0; i < fControlIn.size(); i++)
             fControlIn[i] = fCtrl[i].def;
         fControlOut.resize(fLayout.controlOut.size(), 0.0f);
 
@@ -233,13 +239,18 @@ private:
         std::vector<std::vector<uint64_t>> atomOut;
     };
 
+    // deactivate() is only legal on an instance that was activated. Instantiate
+    // activates nothing until every instance exists, so a MonoDual plugin whose
+    // SECOND instance fails to instantiate leaves a live-but-unactivated first
+    // one to clean up — deactivating that is out of contract.
     void Teardown() {
         for (Inst& inst : fInstances) {
             if (!inst.handle) continue;
-            lilv_instance_deactivate(inst.handle);
+            if (fActivated) lilv_instance_deactivate(inst.handle);
             lilv_instance_free(inst.handle);
         }
         fInstances.clear();
+        fActivated = false;
     }
 
     // Rebuild the options block for `rate`. Held as members because LV2 options
@@ -305,6 +316,7 @@ private:
 
         for (int k = 0; k < n; k++) ConnectPorts(k);
         for (Inst& inst : fInstances) lilv_instance_activate(inst.handle);
+        fActivated = true;
 
         fRate = rate;
         LatchLatency();
@@ -388,8 +400,9 @@ private:
     std::vector<float> fIn[2], fOut[2];
     std::vector<float> fSilence, fDiscard;   // unrouted optional audio ports
 
-    double fRate    = 0.0;
-    int    fLatency = 0;
+    double fRate      = 0.0;
+    int    fLatency   = 0;
+    bool   fActivated = false;   // guards deactivate(); see Teardown
 
     LV2_URID fSequenceType = 0;
 
