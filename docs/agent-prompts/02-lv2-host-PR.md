@@ -292,9 +292,16 @@ total.
 - **No third-party plugin with non-zero latency has ever been hosted.** The
   fixture proves the mechanism end to end, but every real plugin on both machines
   reports 0, so the interaction with a real latent plugin is still unexercised.
-- **Sample-rate change mid-session.** `Prepare` at a changed rate re-instantiates
-  and is exercised by the degenerate-call test, but no plugin was checked for
-  correct audio across a real rate change.
+- ~~Sample-rate change mid-session.~~ **Covered.** `Prepare` at a changed rate
+  re-instantiates, and the fixture now asserts the user's parameters survive it
+  (mutation-verified: re-applying defaults on re-instantiate fails three checks).
+  A bug was found and fixed doing this — output control values were being carried
+  across, so a plugin that does not write its latency port at activate would have
+  had us reporting the latency from the OLD rate.
+- ~~Reset() was never checked to do anything.~~ **Covered.** The engine calls it
+  on every seek to stop stale audio bleeding across the jump; the fixture fills
+  the latent plugin's delay line, resets, and asserts the buffered signal never
+  emerges (mutation-verified: a no-op Reset fails).
 - **Param mapping against a rich REAL plugin.** The fixture covers slot order,
   ranges and clamping exactly; of the installed plugins, only 4K EQ 2 (26 ports,
   and only after being built DSP-only for Haiku) has a meaningful control set.
