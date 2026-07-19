@@ -1,8 +1,10 @@
 # feat(lv2): host LV2 plugins as inserts behind IEffect
 
-Package 02. Branch `feature/lv2-host` off `b7d95d3`, four commits:
+Package 02. Branch `feature/lv2-host` off `b7d95d3`:
 
 ```
+efdb8e2 test(lv2): add a mandatory-CV-port fixture, closing the last unit-test-only reject path
+e542b53 test(lv2): build a real LV2 bundle as a fixture, and assert on values
 7c53349 test(lv2): report each hostable plugin's topology and whether the monoDual path ran
 046e65d fix(lv2): find plugins on Haiku, where lilv's default search path finds none
 52604e6 fix(lv2): make the control-array invariant real, and don't deactivate an unactivated instance
@@ -202,11 +204,14 @@ principle, and both are on paths where failure would be silent.
 
 | Environment | Result |
 | --- | --- |
-| Linux host, lilv 0.28.0 | **44/44** ctest, 0 warnings |
+| Linux host, lilv 0.28.0 | **45/45** ctest, 0 warnings |
 | Linux host, `-DDAW_LV2=OFF` | **43/43** ctest, 0 warnings |
-| Linux host, `-DDAW_SANITIZE=ON` (ASan+UBSan) | **44/44**, including 9 real third-party plugins instantiated and run |
-| Haiku VM, LV2 **enabled**, lilv 0.24.20 | **44/44**, **0 errors, 0 warnings**, 4 real plugins hosted, `daw` built |
+| Linux host, `-DDAW_SANITIZE=ON` (ASan+UBSan) | **45/45**, including 9 real third-party plugins instantiated and run |
+| Haiku VM, LV2 **enabled**, lilv 0.24.20 | **45/45**, **0 errors, 0 warnings**, real plugins hosted, `daw` built |
 | Haiku VM, LV2 auto-disabled (before lilv was installed) | **43/43**, 0 errors, 0 warnings |
+
+(Counts are 45/44/43 depending on how many LV2 test targets the configuration
+builds; every configuration is fully green.)
 
 The VM matters because `src/main.cpp` and `src/ui/` cannot compile on Linux at all —
 the VM is their only compile check, and `main.cpp` is where the factory gets
@@ -233,38 +238,66 @@ Fixed by supplying Haiku's real bundle directories via `setenv(..., 0)`, so an
 explicitly-set `LV2_PATH` still wins. This is the strongest argument in this package
 for building on the target platform rather than trusting a Linux green tick.
 
-## Coverage across the two machines
+## Coverage: the fixture, and the two machines
 
-The two platforms cover *different* halves of the feature, which is why both matter:
+`tests/lv2fixture/` is a real LV2 bundle **built by this repo** — five plugins of
+exactly-known behaviour, never installed, with CTest pointing `LV2_PATH` at the
+build tree. It exists because `lv2_host_tests` can only assert INVARIANTS
+("everything listed instantiates") against whatever a machine happens to have, and
+the two dev machines have entirely different plugin sets while CI would have
+neither. The fixture asserts **values**, identically everywhere.
 
-| Path | Linux (9 plugins) | Haiku (4 plugins) |
-| --- | --- | --- |
-| Stereo, one instance | 9 plugins | Example Scope (Stereo) |
-| **MonoDual, two instances** | *none installed* | **3 plugins**, incl. eg-amp |
-| Feature rejection (`worker:schedule`) | sfizz, sfizz-multi | — |
-| Topology rejection | 5 plugins | 3 plugins |
-| Malformed-bundle rejection | tape_machine_2 | — |
-| Optional-audio-port silence path | Multi-Comp | — |
+| Path | Fixture | Linux (9 plugins) | Haiku (4 plugins) |
+| --- | --- | --- | --- |
+| Stereo, one instance | stereo-latent | 9 plugins | Example Scope (Stereo) |
+| **MonoDual, two instances** | mono-gain, with per-channel routing asserted | *none installed* | 3 plugins |
+| **Non-zero latency** | 64 frames, reported AND applied | *none — all report 0* | *none — all report 0* |
+| **Latency must not move** | reports 999 from run 2 while delaying 64 | — | — |
+| Topology rejection | 3-in/1-out | 5 plugins | 3 plugins |
+| Feature rejection | worker:schedule | sfizz, sfizz-multi | — |
+| **Required CV port rejection** | cv-port | *no example* | *no example* |
+| Malformed-bundle rejection | — | tape_machine_2 | — |
+| Optional-audio silence path | — | Multi-Comp | — |
+| Param slot order / ranges / clamping | exact values | 2 JUCE boilerplate ports | 0–1 params |
 
-Haiku's `eg-amp` ("Simple Amplifier", monoDual, 1 param) is also the plugin that
-**altered the signal** there — so the two-instance per-channel routing is proven to
-process audio correctly, not merely to avoid crashing.
+Two assertions the fixture buys that nothing else could, both mutation-verified:
 
-## What is still NOT verified — read before trusting this
+- **MonoDual routing.** L and R are fed *different* signals, so a host that wired
+  both instances to channel 0 fails. Mutating `ConnectPorts` to do exactly that
+  yields `got L=2.000 R=2.000 (want 2.000 / 1.000)` — and every invariant-style
+  test still passes under that mutation.
+- **Latency latching.** The latent plugin reports 64 at activate then 999 from its
+  second run onward, while still delaying 64 — which is what real plugins do (4K
+  EQ 2 was measured going 0 → 27 → 0). Mutating `LatencySamples()` to re-read the
+  port live fails two checks. Against any plugin that always reports the same
+  number, that rule is simply untestable.
 
-- **Non-zero latency has never been observed on either machine.** Every hostable
-  plugin reports 0, before and after running blocks. The latency assertions in
-  `lv2_host_tests` are therefore *vacuous*; the latching logic and the
-  designation-over-property precedence are covered only by the pure unit tests. A
-  plugin that publishes latency solely from `run()` would report 0 here — that was
-  explicitly checked for and does not occur with these plugins, but it remains
-  untested against one that does.
-- **The required-unknown-port rejection (CV) has no real example.** Unit-tested only.
-- **Param mapping is exercised narrowly**: width 2 on Linux (JUCE boilerplate ports),
-  width 0–1 on Haiku. No installed plugin exposes a rich control-port set.
-- **Sample-rate re-instantiation via `Prepare` at a changed rate** is exercised by the
-  degenerate-call test, but no plugin was checked for correct behaviour across a real
-  rate change mid-session.
+A third thing the fixture surfaced: with `LV2_PATH` pointing at the fixture dir
+*alone*, lilv has no lv2core to resolve the plugin-class hierarchy against and
+leaks a node inside `lilv_world_load_plugin_classes` — caught by ASan, gone as
+soon as the spec dir is on the path. `LV2_PATH` therefore includes the system spec
+bundles (located with `pkg_get_variable(... lv2 lv2dir)`, which resolves correctly
+on Haiku's packagefs too). That makes the machine's own plugins visible, so every
+count in the fixture test is scoped to its own five URIs rather than to the world
+total.
+
+## What is still NOT verified
+
+- **Dynamic-latency policy is an open decision, not a gap.** 4K EQ 2 genuinely
+  moves its reported latency at runtime (0 → 27 → 0). The host latches at activate
+  and so reports 0 for it, leaving playback ~27 samples out whenever that EQ is
+  doing work with oversampling on. No fixed value is correct for such a plugin;
+  see the options in the handoff notes. The *mechanism* is now well tested — the
+  *policy* needs a call.
+- **No third-party plugin with non-zero latency has ever been hosted.** The
+  fixture proves the mechanism end to end, but every real plugin on both machines
+  reports 0, so the interaction with a real latent plugin is still unexercised.
+- **Sample-rate change mid-session.** `Prepare` at a changed rate re-instantiates
+  and is exercised by the degenerate-call test, but no plugin was checked for
+  correct audio across a real rate change.
+- **Param mapping against a rich REAL plugin.** The fixture covers slot order,
+  ranges and clamping exactly; of the installed plugins, only 4K EQ 2 (26 ports,
+  and only after being built DSP-only for Haiku) has a meaningful control set.
 
 ## For package 03 (inserts UI) — two things you need to know
 
