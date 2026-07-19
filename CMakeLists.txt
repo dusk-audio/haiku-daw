@@ -223,6 +223,15 @@ if(DAW_LV2_ENABLED)
     add_dependencies(lv2_fixture_tests daw_test_plugins)
     add_test(NAME lv2_fixture_tests COMMAND lv2_fixture_tests)
 
+    # LV2 inserts through the real render graph, bounced to WAV and compared
+    # sample-exactly. The only test covering MakeEffect -> chain -> RunInsertSlot
+    # -> Exporter with a real plugin, and the only one covering PDC across the
+    # LV2 boundary. Shares the fixture and its LV2_PATH.
+    add_executable(lv2_render_tests tests/lv2_render_tests.cpp)
+    target_link_libraries(lv2_render_tests PRIVATE daw_lv2)
+    add_dependencies(lv2_render_tests daw_test_plugins)
+    add_test(NAME lv2_render_tests COMMAND lv2_render_tests)
+
     # LV2_PATH = our fixture + the system SPEC bundles.
     #
     # The spec bundles are not optional decoration. With the fixture dir alone,
@@ -245,7 +254,7 @@ if(DAW_LV2_ENABLED)
     endif()
     # The host's Haiku default path uses setenv(overwrite=0), so this wins there
     # too and the test sees the same world on both platforms.
-    set_tests_properties(lv2_fixture_tests PROPERTIES
+    set_tests_properties(lv2_fixture_tests lv2_render_tests PROPERTIES
         ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
 endif()
 
