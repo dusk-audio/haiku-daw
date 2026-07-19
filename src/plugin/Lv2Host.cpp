@@ -112,6 +112,7 @@ const std::vector<std::string>& SupportedFeatures() {
 struct Lv2ControlMeta {
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
     bool  hasMin = false, hasMax = false;
+    bool  isInteger = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,7 +229,7 @@ public:
         if (slot < 0 || (size_t)slot >= fControlIn.size()) return;
         const Lv2ControlMeta& m = fCtrl[(size_t)slot];
         fControlIn[(size_t)slot] =
-            ClampLv2Param(value, m.mn, m.mx, m.hasMin, m.hasMax);
+            ClampLv2Param(value, m.mn, m.mx, m.hasMin, m.hasMax, m.isInteger);
     }
 
     int LatencySamples() const override { return fLatency; }
@@ -530,6 +531,9 @@ void Lv2Host::ScanAll() {
     LilvNode* nReports  = lilv_new_uri(w, LV2_CORE__reportsLatency);
     LilvNode* nDesig    = lilv_new_uri(w, LV2_CORE__designation);
     LilvNode* nLatency  = lilv_new_uri(w, LV2_CORE__latency);
+    LilvNode* nInteger  = lilv_new_uri(w, LV2_CORE__integer);
+    LilvNode* nToggled  = lilv_new_uri(w, LV2_CORE__toggled);
+    LilvNode* nEnum     = lilv_new_uri(w, LV2_CORE__enumeration);
 
     const LilvPlugins* all = lilv_world_get_all_plugins(w);
     LILV_FOREACH(plugins, it, all) {
@@ -614,6 +618,12 @@ void Lv2Host::ScanAll() {
                     lilv_node_free(pn);
                 }
 
+                // All three mean "whole numbers only" as far as a host is
+                // concerned, so they collapse to one flag.
+                s.isInteger = lilv_port_has_property(p, port, nInteger)
+                           || lilv_port_has_property(p, port, nToggled)
+                           || lilv_port_has_property(p, port, nEnum);
+
                 if (!isInput) {
                     // The two latency mechanisms, read SEPARATELY so the
                     // designation can take precedence over the deprecated
@@ -631,7 +641,8 @@ void Lv2Host::ScanAll() {
             }
 
             if (s.role == Lv2PortRole::ControlIn)
-                ctrl.push_back({ s.mn, s.mx, s.def, s.hasMin, s.hasMax });
+                ctrl.push_back({ s.mn, s.mx, s.def, s.hasMin, s.hasMax,
+                                 s.isInteger });
             specs.push_back(s);
         }
 
@@ -653,7 +664,7 @@ void Lv2Host::ScanAll() {
         info.monoDual = layout.topology == Lv2Topology::MonoDual;
         for (const Lv2PortSpec& s : specs)
             if (s.role == Lv2PortRole::ControlIn)
-                info.params.push_back({ s.name, s.mn, s.mx, s.def });
+                info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger });
 
         fImpl->plugins.push_back(info);
         fImpl->entries.push_back({ p, layout, ctrl });
@@ -663,7 +674,8 @@ void Lv2Host::ScanAll() {
     lilv_node_free(nInput);    lilv_node_free(nOutput);
     lilv_node_free(nAtom);     lilv_node_free(nOptional);
     lilv_node_free(nReports);  lilv_node_free(nDesig);
-    lilv_node_free(nLatency);
+    lilv_node_free(nLatency);   lilv_node_free(nInteger);
+    lilv_node_free(nToggled);   lilv_node_free(nEnum);
 
     // Install the hook even when nothing was found, so an Lv2 descriptor always
     // takes the same code path (and still degrades to a null effect) whether the

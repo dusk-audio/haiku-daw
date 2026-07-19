@@ -193,14 +193,30 @@ if(DAW_LV2_ENABLED)
         LIBRARY_OUTPUT_DIRECTORY "${DAW_LV2_FIXTURE_ROOT}/daw_test.lv2")
     target_include_directories(daw_test_plugins PRIVATE ${LILV_INCLUDE_DIRS})
 
-    # The .ttl files ARE the plugin as far as lilv is concerned; copy them in
-    # beside the binary so the bundle is complete.
-    add_custom_command(TARGET daw_test_plugins POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/manifest.ttl"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/plugins.ttl"
-                "${DAW_LV2_FIXTURE_ROOT}/daw_test.lv2/"
-        COMMENT "Assembling LV2 test fixture bundle")
+    # The .ttl files ARE the plugin as far as lilv is concerned: the port
+    # descriptions, ranges and properties all live there, not in the binary. So
+    # they are build OUTPUTS with a declared dependency on their sources, not a
+    # POST_BUILD copy hung off the library.
+    #
+    # POST_BUILD was the obvious thing and was wrong: it only runs when the .so
+    # itself relinks, so editing a .ttl left the built bundle stale and the tests
+    # silently kept asserting against the OLD metadata. That cost a confusing
+    # round of "the test says this port isn't toggled, but the TTL says it is".
+    set(DAW_LV2_FIXTURE_BUNDLE "${DAW_LV2_FIXTURE_ROOT}/daw_test.lv2")
+    set(_fixture_ttl_outputs "")
+    foreach(_ttl manifest.ttl plugins.ttl)
+        add_custom_command(
+            OUTPUT  "${DAW_LV2_FIXTURE_BUNDLE}/${_ttl}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${DAW_LV2_FIXTURE_BUNDLE}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/${_ttl}"
+                    "${DAW_LV2_FIXTURE_BUNDLE}/${_ttl}"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/${_ttl}"
+            COMMENT "Updating LV2 fixture ${_ttl}")
+        list(APPEND _fixture_ttl_outputs "${DAW_LV2_FIXTURE_BUNDLE}/${_ttl}")
+    endforeach()
+    add_custom_target(daw_test_plugins_ttl DEPENDS ${_fixture_ttl_outputs})
+    add_dependencies(daw_test_plugins daw_test_plugins_ttl)
 
     add_executable(lv2_fixture_tests tests/lv2_fixture_tests.cpp)
     target_link_libraries(lv2_fixture_tests PRIVATE daw_lv2)

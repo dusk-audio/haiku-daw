@@ -12,6 +12,7 @@
 // Kit-free (STL only).
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -73,6 +74,14 @@ struct Lv2PortSpec {
     // clamping every value to a fabricated 0..1.
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
     bool  hasMin = false, hasMax = false;
+
+    // The port only accepts whole numbers: lv2:integer, lv2:toggled (0 or 1) or
+    // lv2:enumeration (pick one of a set). All three are reported as one flag
+    // because the host does the same thing for each -- snap to whole numbers.
+    // Ignoring this lets a continuous control write 0.03 into a toggle, which is
+    // meaningless to the plugin and is what a generic slider UI will do unless
+    // told otherwise.
+    bool  isInteger = false;
 
     std::string name;
 };
@@ -218,10 +227,18 @@ inline int Lv2ChunkFrames(int remaining) {
 // automation or a corrupt project file can produce one, and a NaN in a control
 // port propagates into the plugin's output and from there into the mix bus.
 inline float ClampLv2Param(float v, float mn, float mx,
-                           bool hasMin, bool hasMax) {
-    if (!(v == v)) return hasMin ? mn : 0.0f;    // NaN
-    if (hasMin && v < mn) return mn;
-    if (hasMax && v > mx) return mx;
+                           bool hasMin, bool hasMax, bool isInteger = false) {
+    if (!(v == v)) v = hasMin ? mn : 0.0f;       // NaN
+    if (hasMin && v < mn) v = mn;
+    if (hasMax && v > mx) v = mx;
+    if (isInteger) {
+        v = std::floor(v + 0.5f);
+        // Rounding can step back outside a fractional bound (a 0.5..3.5 integer
+        // port is legal), so re-clamp rather than trusting the bounds to be
+        // whole numbers themselves.
+        if (hasMin && v < mn) v = mn;
+        if (hasMax && v > mx) v = mx;
+    }
     return v;
 }
 

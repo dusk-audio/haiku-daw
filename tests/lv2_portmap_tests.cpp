@@ -307,6 +307,27 @@ int main() {
         CHECK(ClampLv2Param(nan, -3.0f, 1.0f, false, false) == 0.0f);
         CHECK(!std::isnan(ClampLv2Param(nan, 0.0f, 1.0f, true, true)));
 
+        // An integer/toggled/enumeration port snaps to whole numbers. Without
+        // this a continuous slider writes values like 0.03 into a two-state
+        // control, which means nothing to the plugin.
+        CHECK(ClampLv2Param(0.03f, 0.0f, 1.0f, true, true, true) == 0.0f);
+        CHECK(ClampLv2Param(0.5f,  0.0f, 1.0f, true, true, true) == 1.0f);  // .5 rounds up
+        CHECK(ClampLv2Param(0.49f, 0.0f, 1.0f, true, true, true) == 0.0f);
+        CHECK(ClampLv2Param(1.7f,  0.0f, 3.0f, true, true, true) == 2.0f);
+        CHECK(ClampLv2Param(-0.4f, -3.0f, 3.0f, true, true, true) == 0.0f);
+        CHECK(ClampLv2Param(-1.6f, -3.0f, 3.0f, true, true, true) == -2.0f);
+        // Out of range first, then snapped.
+        CHECK(ClampLv2Param(99.0f, 0.0f, 2.0f, true, true, true) == 2.0f);
+        // NaN into an integer port still lands on a defined whole number.
+        CHECK(ClampLv2Param(nan, 0.0f, 1.0f, true, true, true) == 0.0f);
+        // Rounding must not escape a FRACTIONAL bound: 0.5..3.5 is a legal
+        // integer port, and 0.6 rounds to 1 which is inside it, but 0.51 must
+        // not round to 1 and then be reported below the minimum.
+        CHECK(ClampLv2Param(0.51f, 0.5f, 3.5f, true, true, true) == 1.0f);
+        CHECK(ClampLv2Param(3.9f,  0.5f, 3.5f, true, true, true) == 3.5f);
+        // The same values are left alone when the port is continuous.
+        CHECK(ClampLv2Param(0.03f, 0.0f, 1.0f, true, true, false) == 0.03f);
+
         // Infinities are ordinary out-of-range values where a bound exists.
         const float inf = std::numeric_limits<float>::infinity();
         CHECK(ClampLv2Param(inf, 0.0f, 1.0f, true, true) == 1.0f);

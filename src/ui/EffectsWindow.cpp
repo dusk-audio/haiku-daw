@@ -114,20 +114,23 @@ static constexpr size_t kMaxPluginKnobs = 5;
 // descriptor came from. `name` points into the host's own listing, which is
 // built once at startup and never mutated afterwards — the same lifetime the
 // add-on knob labels already relied on.
-struct HostParam { const char* name; float mn; float mx; float def; };
+struct HostParam { const char* name; float mn; float mx; float def;
+                   bool isInteger; };
 
 static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
     std::vector<HostParam> out;
     if (d.type == EffectType::Plugin) {
         if (const PluginInfo* pi = FindPlugin(d.pluginName))
             for (const PluginParamInfo& p : pi->params)
-                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def });
+                // The add-on ABI does not describe integer/toggled ports, so a
+                // native plugin's params are always treated as continuous.
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, false });
     }
 #ifdef DAW_HAVE_LV2
     else if (d.type == EffectType::Lv2) {
         if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
             for (const Lv2ParamInfo& p : pi->params)
-                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def });
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, p.isInteger });
     }
 #endif
     return out;
@@ -624,7 +627,8 @@ void EffectsView::Draw(BRect) {
 
                 char buf[32];
                 std::snprintf(buf, sizeof buf,
-                              (p.mx - p.mn) >= 100.0f ? "%.0f" : "%.2f", val);
+                              (p.isInteger || (p.mx - p.mn) >= 100.0f)
+                                  ? "%.0f" : "%.2f", val);
                 SetHighColor(ColTextDim());
                 DrawString(buf, BPoint(panel.right - kParamValW - 2, ry + 15));
                 ry += kParamRowH;
@@ -757,6 +761,12 @@ void EffectsView::MouseDown(BPoint where) {
             fDragEffect = h.effect; fDragSlot = h.slot; fDragKind = kind;
             fDragMin = h.min; fDragMax = h.max;
             fDragRect = h.rect;
+            fDragInteger = false;
+            if (kind == 9 && h.effect >= 0 && h.effect < (int)fChain.size()) {
+                const std::vector<HostParam> hp = HostParamsFor(fChain[h.effect]);
+                if (h.slot >= 0 && h.slot < (int)hp.size())
+                    fDragInteger = hp[(size_t)h.slot].isInteger;
+            }
             fDragStart = where;
             fDragStartVal = (fDragEffect >= 0 && fDragEffect < (int)fChain.size())
                             ? fChain[fDragEffect].p((size_t)fDragSlot) : 0;
@@ -897,7 +907,15 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         float t = (fDragRect.Width() > 0)
                   ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
         if (t < 0) t = 0; if (t > 1) t = 1;
-        setP(fDragSlot, fDragMin + t * (fDragMax - fDragMin));
+        float v = fDragMin + t * (fDragMax - fDragMin);
+        // A toggle or enum port only accepts whole numbers; a continuous drag
+        // would otherwise write values like 0.03 into a two-state control.
+        if (fDragInteger) {
+            v = std::floor(v + 0.5f);
+            if (v < fDragMin) v = fDragMin;
+            if (v > fDragMax) v = fDragMax;
+        }
+        setP(fDragSlot, v);
     } else if (fDragKind == 5) {   // eq handle: x -> freq (log), y -> gain
         // Recover the graph rect for this effect to map coordinates.
         const float top = PanelTop((size_t)fDragEffect) + kTitleH + 4;

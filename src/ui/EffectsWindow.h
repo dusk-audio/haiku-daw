@@ -111,6 +111,9 @@ private:
     // to be remembered rather than recomputed from a layout that has since
     // scrolled.
     BRect fDragRect;
+    // Set when the dragged parameter accepts whole numbers only (lv2:toggled and
+    // friends), so the drag snaps instead of writing fractions into a toggle.
+    bool  fDragInteger = false;
 
     // Pending debounced commit of a wheel gesture (null when idle).
     BMessageRunner* fCommit = nullptr;

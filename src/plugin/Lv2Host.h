@@ -27,6 +27,11 @@ namespace daw {
 struct Lv2ParamInfo {
     std::string name;
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
+    // Whole numbers only (lv2:integer / lv2:toggled / lv2:enumeration). The
+    // editor needs this to stop a continuous slider writing 0.03 into a toggle.
+    // PluginParamInfo has no equivalent -- the native add-on ABI does not
+    // describe it -- so a shared reader must default this to false.
+    bool  isInteger = false;
 };
 
 struct Lv2PluginInfo {

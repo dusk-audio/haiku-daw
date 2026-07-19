@@ -152,10 +152,13 @@ int main() {
                 CHECK(Near(p->params[0].def, 1.0f));
                 CHECK(Near(p->params[0].mn, 0.0f));
                 CHECK(Near(p->params[0].mx, 4.0f));
+                CHECK(!p->params[0].isInteger);      // Gain is continuous
                 CHECK(p->params[1].name == "Extra");
-                CHECK(Near(p->params[1].def, 0.25f));
-                CHECK(Near(p->params[1].mn, -1.0f));
+                CHECK(Near(p->params[1].def, 0.0f));
+                CHECK(Near(p->params[1].mn, 0.0f));
                 CHECK(Near(p->params[1].mx, 1.0f));
+                // lv2:toggled read off a real bundle, not a hand-written table.
+                CHECK(p->params[1].isInteger);
             }
         }
         const Lv2PluginInfo* m = host.Find(kMonoGain);
