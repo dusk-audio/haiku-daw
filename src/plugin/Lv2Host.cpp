@@ -13,6 +13,7 @@
 #include <lv2/parameters/parameters.h>
 #include <lv2/urid/urid.h>
 
+#include <cstdlib>   // setenv, for the Haiku bundle search path
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -483,6 +484,27 @@ void Lv2Host::ScanAll() {
     fImpl->scanned = true;
 
     if (!fImpl->world) return;
+
+    // lilv's built-in default search path is POSIX-shaped (~/.lv2,
+    // /usr/local/lib/lv2, /usr/lib/lv2) and names no directory that exists on
+    // Haiku. A stock Haiku install therefore finds ZERO plugins: lilv reports no
+    // plugins at all rather than an error, so the feature would be silently dead
+    // on the platform this DAW actually targets, with nothing in any log to say
+    // why. Verified on the VM — /boot/system/lib/lv2 ships eg-amp and friends,
+    // and lilv walked straight past them.
+    //
+    // overwrite = 0, so an LV2_PATH the user set explicitly always wins. User
+    // directories come first so a locally built bundle shadows the system copy
+    // of the same plugin, which is the order PluginHost scans in too.
+#ifdef __HAIKU__
+    setenv("LV2_PATH",
+           "/boot/home/config/non-packaged/lib/lv2:"
+           "/boot/home/config/lib/lv2:"
+           "/boot/system/non-packaged/lib/lv2:"
+           "/boot/system/lib/lv2",
+           0);
+#endif
+
     lilv_world_load_all(fImpl->world);
     LilvWorld* w = fImpl->world;
 
