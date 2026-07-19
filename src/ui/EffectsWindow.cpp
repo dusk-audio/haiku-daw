@@ -5,6 +5,13 @@
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../plugin/PluginHost.h"
 
+// Only linked when CMake found lilv; DAW_HAVE_LV2 comes from the daw_lv2 target.
+// Without it every LV2 branch below compiles out and an Lv2 insert simply shows
+// no knobs, the same as an add-on that isn't installed.
+#ifdef DAW_HAVE_LV2
+#include "../plugin/Lv2Host.h"
+#endif
+
 #include <MenuItem.h>
 #include <MessageRunner.h>
 #include <PopUpMenu.h>
@@ -86,25 +93,71 @@ static const PluginInfo* FindPlugin(const std::string& name) {
     return nullptr;
 }
 
-// Knob row for a descriptor. Plugins derive their knobs (label + range) from
-// the loaded add-on's parameter metadata; built-ins use the static table.
-static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
+// How many of a plugin's parameters fit on the single knob row. Built-ins top
+// out at 5 (Compressor, Gate), so the row is already sized for it. A plugin with
+// more than this shows its first few; the generic vertical parameter panel is
+// what will eventually show them all.
+static constexpr size_t kMaxPluginKnobs = 5;
+
+// One effect parameter as described by whichever host owns the plugin.
+//
+// PluginParamInfo (add-ons) and Lv2ParamInfo (LV2) deliberately carry the same
+// field names, so this struct is the ONLY place that has to know which host a
+// descriptor came from. `name` points into the host's own listing, which is
+// built once at startup and never mutated afterwards — the same lifetime the
+// add-on knob labels already relied on.
+struct HostParam { const char* name; float mn; float mx; float def; };
+
+static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
+    std::vector<HostParam> out;
     if (d.type == EffectType::Plugin) {
-        std::vector<KnobDef> ks;
         if (const PluginInfo* pi = FindPlugin(d.pluginName))
-            for (size_t i = 0; i < pi->params.size() && i < 5; i++)
-                ks.push_back({ pi->params[i].name.c_str(), (int)i,
-                               pi->params[i].mn, pi->params[i].mx });
+            for (const PluginParamInfo& p : pi->params)
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def });
+    }
+#ifdef DAW_HAVE_LV2
+    else if (d.type == EffectType::Lv2) {
+        if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
+            for (const Lv2ParamInfo& p : pi->params)
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def });
+    }
+#endif
+    return out;
+}
+
+// Grow `d.params` so `slot` is addressable, giving any slot we have to invent a
+// value the plugin's OWN port default rather than zero.
+//
+// Zero is not a neutral choice. Every LV2 plugin available here exposes an
+// `Enabled` control whose default is 1, so zero-filling to reach a later slot
+// switches the plugin off and it renders silence — which looks exactly like a
+// broken host. Built-ins have no host metadata and keep the old zero fill, which
+// matches their documented param layouts.
+static void EnsureParamSlot(EffectDesc& d, int slot) {
+    if (slot < 0 || (int)d.params.size() > slot) return;
+    const std::vector<HostParam> hp = HostParamsFor(d);
+    const size_t oldSize = d.params.size();
+    d.params.resize((size_t)slot + 1, 0.0f);
+    for (size_t i = oldSize; i < d.params.size() && i < hp.size(); i++)
+        d.params[i] = hp[i].def;
+}
+
+// Knob row for a descriptor. Plugin- and LV2-backed effects derive their knobs
+// (label + range) from their host's parameter metadata; built-ins use the static
+// table. Falling through to that table for a plugin would be actively harmful:
+// its default is the Biquad row, whose knobs write Hz-scale values into whatever
+// ports happen to sit at slots 1 and 2.
+static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin || d.type == EffectType::Lv2) {
+        std::vector<KnobDef> ks;
+        const std::vector<HostParam> hp = HostParamsFor(d);
+        for (size_t i = 0; i < hp.size() && i < kMaxPluginKnobs; i++)
+            ks.push_back({ hp[i].name, (int)i, hp[i].mn, hp[i].mx });
+        // Empty when the host has no metadata for this id — an add-on that
+        // isn't installed, an LV2 URI that didn't resolve, or a build with no
+        // LV2 support at all. That is already a supported, harmless state.
         return ks;
     }
-    // LV2 knobs come from the plugin's own port metadata, which this build has
-    // no way to read yet (the LV2 host is a separate change). Show NO knobs
-    // rather than falling through to the built-in table: that default is the
-    // Biquad row, whose knobs would write Hz-scale values into whatever LV2
-    // ports happen to sit at slots 1 and 2. An empty row is already a supported
-    // state — a Plugin whose add-on isn't loaded renders the same way.
-    if (d.type == EffectType::Lv2)
-        return {};
     return KnobsFor(d.type);
 }
 
@@ -662,7 +715,7 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         fApply.SendMessage(&m);
     };
     auto setP = [&](int slot, float v) {
-        if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
+        EnsureParamSlot(d, slot);
         d.params[slot] = v;
         live(slot, v);
     };
@@ -736,7 +789,7 @@ bool EffectsView::WheelAdjust(BPoint where, float dy) {
     if (h.effect < 0 || h.effect >= (int)fChain.size() || mx <= mn) return false;
 
     EffectDesc& d = fChain[h.effect];
-    if ((int)d.params.size() <= slot) d.params.resize(slot + 1, 0.0f);
+    EnsureParamSlot(d, slot);
     const float step = (mx - mn)
                      / ((modifiers() & B_SHIFT_KEY) ? kWheelFine : kWheelCoarse);
     // Wheel-up is a negative delta; negate so up raises, matching the knobs'
