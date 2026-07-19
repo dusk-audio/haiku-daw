@@ -120,7 +120,19 @@ int main() {
     // --- Every listed plugin really instantiates -------------------------
     // This is the whole point of filtering at scan time: the listing is a
     // promise, and this is the test that the promise is kept.
-    int altered = 0;
+    //
+    // Each plugin's shape is printed because the two topologies take genuinely
+    // different code paths — MonoDual runs TWO instances, one per channel,
+    // sharing one control array — and which of them a given machine exercises
+    // depends entirely on what is installed. Without this line a run that
+    // covered only stereo plugins is indistinguishable from one that covered
+    // both, and the mono path is the easier of the two to get wrong.
+    int altered = 0, monoDualSeen = 0;
+    for (const Lv2PluginInfo& info : plugins) {
+        if (info.monoDual) monoDualSeen++;
+        std::printf("  %-28s %-9s params=%zu\n", info.name.c_str(),
+                    info.monoDual ? "monoDual" : "stereo", info.params.size());
+    }
     for (const Lv2PluginInfo& info : plugins) {
         std::unique_ptr<IEffect> fx = host.Create(info.uri, 48000.0);
         CHECK(fx != nullptr);
@@ -167,8 +179,9 @@ int main() {
     // With a handful of plugins available, a completely transparent set is
     // implausible; with only one or two it is entirely possible (a flat EQ at
     // its defaults IS transparent), so this only asserts where it is meaningful.
-    std::printf("lv2_host_tests: %d of %zu plugin(s) altered the signal\n",
-                altered, plugins.size());
+    std::printf("lv2_host_tests: %d of %zu plugin(s) altered the signal; "
+                "%d exercised the monoDual (two-instance) path\n",
+                altered, plugins.size(), monoDualSeen);
     if (plugins.size() >= 3) CHECK(altered >= 1);
 
     // --- The over-max block path -----------------------------------------
