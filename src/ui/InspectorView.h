@@ -43,6 +43,7 @@ private:
 
     // Control rects (recomputed in Layout()).
     BRect fMuteR, fSoloR, fArmR, fMonR, fInputR, fOutR, fSendsR, fFxR, fInstR;
+    BRect fGroupR;              // mute-group assignment
     // The insert-slot list block, and the row rect for one slot inside it.
     // Layout(), Draw() and MouseDown() all derive rows from FxRowRect so they
     // cannot disagree about where a row is.

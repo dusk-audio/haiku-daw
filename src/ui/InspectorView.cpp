@@ -55,47 +55,65 @@ BRect InspectorView::FxRowRect(int i) const {
 void InspectorView::Layout() {
     const float w = Bounds().Width();
     const float pad = 10.0f;
-    const float bw = w - pad * 2.0f;   // full-width control
+    const float bw = w - pad * 2.0f;       // full-width control
     const float hw = (bw - 6.0f) * 0.5f;   // half-width (two side by side)
 
+    // Top-to-bottom in SIGNAL-FLOW order, the way a console strip reads:
+    // input -> inserts -> sends -> output -> group -> automation, then the
+    // pan/fader controls, and finally the per-track switches. The transport-ish
+    // buttons (record, monitor, mute, solo) sit at the bottom where they are a
+    // constant target, instead of at the top pushing the signal path down.
     float y = 46.0f;
-    fMuteR = BRect(pad,           y, pad + 30,      y + 20);
-    fSoloR = BRect(pad + 36,      y, pad + 66,      y + 20);
-    fArmR  = BRect(pad + 72,      y, pad + 102,     y + 20);
-    y += 28;
-    fInputR = BRect(pad, y, pad + bw, y + 20); y += 26;
-    fMonR   = BRect(pad, y, pad + bw, y + 20); y += 28;
-    fOutR   = BRect(pad,           y, pad + hw,     y + 20);
-    fSendsR = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
-    // The instrument slot gets its own full-width row ABOVE the inserts, so the
-    // one-instrument-plus-N-inserts model is visible in the strip: a MIDI track
-    // has exactly one voice, and any number of inserts after it.
-    if (const Track* it = CurrentTrack())
-        if (it->type == TrackType::Midi) {
-            fInstR = BRect(pad, y, pad + bw, y + 20);
-            y += 26;
-        } else {
-            fInstR = BRect();
-        }
-    else fInstR = BRect();
 
-    // Insert slots: one row per effect plus a trailing empty one to add into.
-    // Capped so a long chain cannot push the fader off the bottom of the strip;
-    // the overflow row says how many are hidden and opens the full editor.
-    const size_t nfx = CurrentTrack() ? CurrentTrack()->fx.size() : 0;
-    fFxRows = (int)(nfx < kMaxFxRows ? nfx + 1 : kMaxFxRows);
+    // 1. Input selection.
+    fInputR = BRect(pad, y, pad + bw, y + 20); y += 26;
+
+    // 2. Instrument (MIDI voice), then the inserts. The instrument gets its own
+    //    full-width row above them, so the one-voice-plus-N-inserts model reads
+    //    correctly rather than looking like just another insert.
+    const Track* t = CurrentTrack();
+    if (t && t->type == TrackType::Midi) {
+        fInstR = BRect(pad, y, pad + bw, y + 20);
+        y += 26;
+    } else {
+        fInstR = BRect();
+    }
+
+    const size_t nfx = t ? t->fx.size() : 0;
+    fFxRows   = (int)(nfx < kMaxFxRows ? nfx + 1 : kMaxFxRows);
     fFxSlotsR = BRect(pad, y, pad + bw, y + fFxRows * kFxRowH);
     y += fFxRows * kFxRowH + 6;
-    fFxR = BRect();             // the old single "FX n" button is gone
+    fFxR = BRect();                    // the old single "FX n" button is gone
 
+    // 3-5. Sends, output, group -- one full-width row each, in the order the
+    //      signal actually leaves the strip.
+    fSendsR = BRect(pad, y, pad + bw, y + 20); y += 26;
+    fOutR   = BRect(pad, y, pad + bw, y + 20); y += 26;
+    fGroupR = BRect(pad, y, pad + bw, y + 20); y += 26;
+
+    // 6. Automation.
     fAutoR  = BRect(pad, y, pad + bw, y + 20);
-    y += 20 + 20;               // button + a labelled gap ("Pan") before the knob
-    // Pan knob (centered); its "Pan" label sits in the gap above it.
+    y += 20 + 20;                      // button + the labelled gap before "Pan"
+
+    // 7. Pan knob (centred); its "Pan" label sits in the gap above it.
     const float knob = 46.0f;
-    fPanR   = BRect(w * 0.5f - knob * 0.5f, y, w * 0.5f + knob * 0.5f, y + knob);
+    fPanR = BRect(w * 0.5f - knob * 0.5f, y, w * 0.5f + knob * 0.5f, y + knob);
     y += knob + 18;
-    // Fader (left) + VU meter (right), side by side, centered as a unit.
-    const float bottom = Bounds().bottom - 26.0f;
+
+    // Bottom-anchored rows, measured UP from the bottom edge so they stay put
+    // however tall the insert list grows: mute/solo last, record/monitor above
+    // it, and the fader's dB readout above that.
+    const float msY  = Bounds().bottom - 24.0f;
+    const float recY = msY - 26.0f;
+    fMuteR = BRect(pad,          msY, pad + hw, msY + 20);
+    fSoloR = BRect(pad + hw + 6, msY, pad + bw, msY + 20);
+    fArmR  = BRect(pad,          recY, pad + hw, recY + 20);
+    fMonR  = BRect(pad + hw + 6, recY, pad + bw, recY + 20);
+
+    // 8. Fader + VU meter, filling whatever is left between the pan knob and
+    //    the bottom rows. Clamped so a long insert list cannot invert it.
+    float bottom = recY - 20.0f;
+    if (bottom < y + 40.0f) bottom = y + 40.0f;
     fFaderR = BRect(w * 0.5f - 42.0f, y, w * 0.5f - 4.0f, bottom);
     fMeterR = BRect(w * 0.5f + 6.0f,  y, w * 0.5f + 24.0f, bottom);
 }
@@ -128,9 +146,11 @@ void InspectorView::Draw(BRect) {
                BPoint(10, 40));
 
     const rgb_color accent = midi ? ColMidiAccent() : ColAudioAccent();
-    DrawButton(this, fMuteR, "M", t->muted,  ColMute());
-    DrawButton(this, fSoloR, "S", t->soloed, ColSolo());
-    DrawButton(this, fArmR,  "R", t->armed,  ColRec());
+    // Bottom rows: record + monitoring, then mute + solo.
+    DrawButton(this, fArmR,  "Record", t->armed, ColRec());
+    DrawButton(this, fMonR,  "Monitor", t->inputMonitor, ColMon());
+    DrawButton(this, fMuteR, "Mute", t->muted,  ColMute());
+    DrawButton(this, fSoloR, "Solo", t->soloed, ColSolo());
 
     // Input source.
     char ib[64];
@@ -147,15 +167,22 @@ void InspectorView::Draw(BRect) {
     DrawButton(this, fInputR, ib, t->input.kind != InputSource::kNone,
                Rgb(52, 104, 74));
 
-    DrawButton(this, fMonR, "Input Monitor", t->inputMonitor, ColMon());
-
-    // Output routing + sends.
-    DrawButton(this, fOutR,
-               t->output == kInvalidTrackId ? "Out: Mst" : "Out: Bus",
-               t->output != kInvalidTrackId, accent);
+    // Sends, output routing, group.
     char sb[16];
     std::snprintf(sb, sizeof(sb), "Sends %zu", t->sends.size());
     DrawButton(this, fSendsR, sb, !t->sends.empty(), accent);
+
+    DrawButton(this, fOutR,
+               t->output == kInvalidTrackId ? "Out: Mst" : "Out: Bus",
+               t->output != kInvalidTrackId, accent);
+
+    // Mute group: muting any member mutes the whole group. The model has
+    // carried this since before the inspector existed, reachable only from the
+    // timeline's context menu.
+    char gb[24];
+    if (t->muteGroup > 0) std::snprintf(gb, sizeof(gb), "Group %d", t->muteGroup);
+    else                  std::snprintf(gb, sizeof(gb), "Group: \xE2\x80\x94");
+    DrawButton(this, fGroupR, gb, t->muteGroup > 0, accent);
 
     // Instrument slot (MIDI only), visually distinct from the inserts below it.
     if (midi && fInstR.IsValid())
@@ -328,6 +355,30 @@ void InspectorView::MouseDown(BPoint where) {
         else if (pick > 0 && (size_t)(pick - 1) < targets.size())
             fStack->Execute(std::make_unique<SetTrackOutputCommand>(id, targets[(size_t)(pick - 1)]), *fProject);
         Refresh();
+        return;
+    }
+    if (fGroupR.Contains(where)) {
+        BPopUpMenu* menu = new BPopUpMenu("group", false, false);
+        BMenuItem* none = new BMenuItem("None", NULL);
+        none->SetMarked(t->muteGroup == 0);
+        menu->AddItem(none);
+        for (int g = 1; g <= 4; g++) {       // same four the timeline offers
+            char lb[16];
+            std::snprintf(lb, sizeof(lb), "Group %d", g);
+            BMenuItem* gi = new BMenuItem(lb, NULL);
+            gi->SetMarked(t->muteGroup == g);
+            menu->AddItem(gi);
+        }
+        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+        const int32 pick = sel ? menu->IndexOf(sel) : -1;
+        delete menu;
+        if (pick >= 0) {
+            // Through the command stack like every other edit here -- a direct
+            // write would be invisible to undo.
+            fStack->Execute(std::make_unique<SetTrackMuteGroupCommand>(
+                                id, (int)pick), *fProject);
+            Refresh();
+        }
         return;
     }
     if (fSendsR.Contains(where)) {
