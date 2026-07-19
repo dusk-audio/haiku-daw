@@ -232,6 +232,35 @@ int main() {
             CHECK(b.Tracks().front().fx[1].mix == 0.5f);
     }
 
+    // The closest thing to actually RUNNING an old binary: take a file that
+    // carries `fxin` and rename the keyword to one THIS build does not know.
+    // The loader then treats the line exactly as a pre-feature build treats
+    // `fxin` — it falls through to the ignore-unknown branch — so what comes out
+    // is precisely what an old build would have produced. Everything else on the
+    // track must survive intact, and the insert state must fall back to the
+    // EffectDesc defaults (which is also the "lossy downgrade" documented in the
+    // PR: the data is skipped, not preserved).
+    {
+        std::vector<EffectDesc> fx = { EqDesc(), SaturatorDesc() };
+        fx[1].bypassed = true;
+        fx[1].mix      = 0.5f;
+        Project b;
+        CHECK(LoadPatched(fx, "fxin", "fxinFROMNEWERBUILD 1 1 0.5\n", b));
+        CHECK(!b.Tracks().empty());
+        if (!b.Tracks().empty()) {
+            const Track& t = b.Tracks().front();
+            CHECK(t.fx.size() == 2);          // the chain itself is untouched
+            if (t.fx.size() == 2) {
+                CHECK(t.fx[0].type == EffectType::Eq);
+                CHECK(t.fx[1].type == EffectType::Saturator);
+                CHECK(t.fx[1].params.size() == 3);   // params still parsed
+                CHECK(t.fx[1].bypassed == false);    // ...insert state dropped
+                CHECK(t.fx[1].mix == 1.0f);
+            }
+            CHECK(t.name == "T");             // records after the skipped line
+        }
+    }
+
     // --- Malformed fxin: clamp the mix, skip a bad index ------------------
     // Two deliberately different policies. A mix outside [0,1] is meaningless
     // but harmless, so it clamps; an index that cannot address a slot has

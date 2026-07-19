@@ -672,55 +672,6 @@ void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
         (*chain)[(size_t)fxIndex]->SetParam(slot, value);
 }
 
-void Engine::RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
-                       float mix, float* buf, size_t frames, float* dry) {
-    if (!e) return;   // unavailable plugin: an index-aligned hole in the chain
-    const size_t nf    = frames * 2;   // interleaved floats
-    const size_t bytes = nf * sizeof(float);
-    mix = ClampFxMix(mix);
-
-    if (bypassed) {
-        // SOFT bypass: the insert stops processing but keeps reporting its
-        // LatencySamples(), so the PDC solve and every delay line sized from it
-        // stay valid — no rebuild, no seam, no click. IEffect requires that
-        // value to be constant across a Prepare()/Process() lifetime anyway
-        // (IEffect.h), so a hard bypass that changed it is not an option.
-        //
-        // Keeping the REPORTED latency obliges us to keep the REAL one: just
-        // skipping Process would drop N samples of actual delay while the graph
-        // still compensates for N, landing this path N samples EARLY against
-        // the rest of the mix — an audible flam on every bypass toggle, exactly
-        // the artifact soft bypass exists to avoid. So a latent insert passes
-        // its signal through the delay line alone. N == 0 (every built-in
-        // effect today) needs no line and costs nothing.
-        if (dryDelay.d == 0) return;
-        std::memcpy(dry, buf, bytes);
-        std::memset(buf, 0, bytes);
-        dryDelay.ProcessAdd(dry, buf, frames, 1.0f);
-        return;
-    }
-
-    if (mix >= 1.0f) {   // fully wet: the common path, a bare Process
-        // A LATENT insert additionally clocks its delay line with the dry input.
-        // The line contributes nothing here, but it must already hold the last
-        // N frames if the user toggles bypass on — otherwise the bypass path
-        // above would read a stale tail and emit it as a burst. Push() only
-        // writes the ring, so this cannot perturb `buf`.
-        if (dryDelay.d != 0) dryDelay.Push(buf, frames);
-        e->Process(buf, (int)frames);
-        return;
-    }
-
-    // out = dry*(1-mix) + wet*mix, with the dry leg delayed by the effect's own
-    // latency so the two legs stay phase-aligned rather than comb-filtering.
-    // (mix == 1 was handled above, so `mix` is strictly < 1 here and the dry leg
-    // always contributes.)
-    std::memcpy(dry, buf, bytes);
-    e->Process(buf, (int)frames);
-    for (size_t k = 0; k < nf; ++k) buf[k] *= mix;
-    dryDelay.ProcessAdd(dry, buf, frames, 1.0f - mix);
-}
-
 void Engine::SetFxTempo(double bpm) {
     for (Bus& b : fBuses)
         for (auto& fx : b.fx)
@@ -1051,7 +1002,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
         // Insert chain. Each slot honours its own bypass / wet-dry mix; the
         // plain fully-wet slot is a bare Process, as before.
         for (size_t fi = 0; fi < b.fx.size(); fi++)
-            RunInsert(b.fx[fi].get(), b.fxDryDelay[fi],
+            RunInsertSlot(b.fx[fi].get(), b.fxDryDelay[fi],
                       b.fxBypass[fi].load(std::memory_order_relaxed),
                       b.fxMix[fi].load(std::memory_order_relaxed),
                       nb, frames, fScratch.data());
@@ -1092,7 +1043,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
 
     // Master bus FX on the summed output (before gain/metering).
     for (size_t fi = 0; fi < fMasterFx.size(); fi++)
-        RunInsert(fMasterFx[fi].get(), fMasterFxDelay[fi],
+        RunInsertSlot(fMasterFx[fi].get(), fMasterFxDelay[fi],
                   fMasterFxBypass[fi].load(std::memory_order_relaxed),
                   fMasterFxMix[fi].load(std::memory_order_relaxed),
                   out, frames, fScratch.data());

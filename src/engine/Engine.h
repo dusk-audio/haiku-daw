@@ -18,6 +18,7 @@
 #include "WavSource.h"
 #include "Resampler.h"
 #include "FrameDelay.h"
+#include "InsertSlot.h"
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
@@ -276,13 +277,6 @@ private:
         fMeterSpecFx.store(specFx, std::memory_order_relaxed);
         fMeterSpecGen.fetch_add(1, std::memory_order_acq_rel);   // -> even
     }
-
-    // RT helper: run one insert slot over `buf` (interleaved stereo, `frames`
-    // frames), honouring soft bypass and the wet/dry mix. `dry` is preallocated
-    // scratch of at least frames*2 floats. RT-safe: arithmetic and memcpy over
-    // preallocated state only.
-    static void RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
-                          float mix, float* buf, size_t frames, float* dry);
 
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
                                const media_raw_audio_format& format);

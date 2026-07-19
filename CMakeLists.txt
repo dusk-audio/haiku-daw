@@ -107,6 +107,13 @@ add_executable(instrument_io_tests tests/instrument_io_tests.cpp)
 target_link_libraries(instrument_io_tests PRIVATE daw_model)
 add_test(NAME instrument_io_tests COMMAND instrument_io_tests)
 
+# RunInsertSlot itself, block by block: delay-line state carried ACROSS blocks
+# and a bypass toggle mid-stream — the live-only case no whole-render test can
+# reach, testable here only because the engine and Exporter now share it.
+add_executable(insertslot_tests tests/insertslot_tests.cpp)
+target_link_libraries(insertslot_tests PRIVATE daw_model)
+add_test(NAME insertslot_tests COMMAND insertslot_tests)
+
 # FX insert slots: per-insert bypass / wet-dry mix, their optional `fxin` /
 # `masterfxin` lines, and the EffectType::Lv2 factory hook.
 add_executable(fx_insert_tests tests/fx_insert_tests.cpp)
