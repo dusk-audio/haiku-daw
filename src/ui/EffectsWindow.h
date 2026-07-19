@@ -73,9 +73,14 @@ private:
     float PanelTop(size_t i) const;
 
     // A draggable knob/handle hit region discovered during a Draw pass.
+    // kind identifies what was hit. Every value here is dispatched by number in
+    // MouseDown/WheelAdjust, so a duplicate silently routes one control to
+    // another's handler and still compiles -- keep this list complete.
+    //   0 knob        1 move up      2 move down   3 remove     4 add
+    //   5 eq handle   6 FFT toggle   7 reverb type 8 delay sync
+    //   9 plugin parameter slider (vertical generic list)
     struct Hit { int effect; int kind; int slot; BRect rect;
-                 float min; float max; };   // kind: 0 knob,1 up,2 dn,3 remove,
-                                            // 4 add,5 eq-handle
+                 float min; float max; };
     void  DrawKnob(BRect r, const char* label, float value, float mn, float mx);
     void  DrawEqGraph(BRect r, const EffectDesc& d, int effIdx);
     void  DrawCompCurve(BRect r, const EffectDesc& d, int effIdx);
@@ -96,10 +101,16 @@ private:
     // Drag state.
     int   fDragEffect = -1;
     int   fDragSlot   = -1;
-    int   fDragKind   = -1;   // 0 knob, 5 eq-handle
+    int   fDragKind   = -1;   // 0 knob, 5 eq-handle, 9 parameter slider
     float fDragMin = 0, fDragMax = 1;
     BPoint fDragStart;
     float fDragStartVal = 0;
+    // The hit rect the drag started on. A knob drag is relative (delta from
+    // where it began) so it needs no rect, but a parameter slider is absolute --
+    // the value is wherever the pointer sits ALONG THE TRACK -- so the track has
+    // to be remembered rather than recomputed from a layout that has since
+    // scrolled.
+    BRect fDragRect;
 
     // Pending debounced commit of a wheel gesture (null when idle).
     BMessageRunner* fCommit = nullptr;

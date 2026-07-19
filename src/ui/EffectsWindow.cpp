@@ -44,6 +44,13 @@ static constexpr float kDialTick = 6.0f;
 static constexpr float kGraphH   = 156.0f;
 static constexpr float kSelH     = 26.0f;    // reverb type-selector row
 static constexpr float kBtnW     = 22.0f;
+// Generic plugin parameter list: one horizontal slider row per parameter. A
+// knob row cannot serve here -- it is capped at the five that fit across the
+// panel, and a plugin can expose far more (4K EQ 2 has 26). Vertical rows scale
+// to any count and give the label room to be read.
+static constexpr float kParamRowH   = 24.0f;
+static constexpr float kParamLabelW = 124.0f;
+static constexpr float kParamValW   = 64.0f;
 
 struct KnobDef { const char* label; int slot; float mn; float mx; };
 
@@ -126,6 +133,28 @@ static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
     return out;
 }
 
+// Number of parameters the owning host describes. Split from HostParamsFor so
+// the layout maths can ask "how many rows?" without building and throwing away a
+// vector of strings on every panel, for every panel, on every redraw.
+static size_t HostParamCount(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin) {
+        if (const PluginInfo* pi = FindPlugin(d.pluginName)) return pi->params.size();
+    }
+#ifdef DAW_HAVE_LV2
+    else if (d.type == EffectType::Lv2) {
+        if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
+            return pi->params.size();
+    }
+#endif
+    return 0;
+}
+
+// True when this effect is drawn as a vertical parameter list rather than the
+// fixed knob row: its parameters are described by a host, not by our table.
+static bool UsesParamList(const EffectDesc& d) {
+    return d.type == EffectType::Plugin || d.type == EffectType::Lv2;
+}
+
 // Grow `d.params` so `slot` is addressable, giving any slot we have to invent a
 // value the plugin's OWN port default rather than zero.
 //
@@ -200,11 +229,17 @@ void EffectsView::SetMeters(const float* gr, int grN,
 
 float EffectsView::PanelHeight(const EffectDesc& d) const {
     float h = kTitleH + 6;
+    if (UsesParamList(d)) {
+        // One row per parameter, or a single row for the "no parameters" notice
+        // an unresolved plugin id shows.
+        const size_t n = HostParamCount(d);
+        return h + (n ? (float)n : 1.0f) * kParamRowH + 8;
+    }
     if (d.type == EffectType::Eq || d.type == EffectType::Compressor)
         h += kGraphH;
     if (d.type == EffectType::Reverb || d.type == EffectType::Delay)
         h += kSelH;   // type / sync selector row
-    h += kKnobH;   // one knob row (all effects have <= 5 knobs)
+    h += kKnobH;   // one knob row (all built-ins have <= 5 knobs)
     return h + 8;
 }
 
@@ -551,14 +586,59 @@ void EffectsView::Draw(BRect) {
             knobTop += kSelH;
         }
 
-        // Knob row.
-        const std::vector<KnobDef> knobs = KnobsForDesc(d);
-        float kx = panel.left + 8;
-        for (const KnobDef& k : knobs) {
-            BRect kr(kx, knobTop, kx + kKnobW, knobTop + kKnobH);
-            DrawKnob(kr, k.label, d.p((size_t)k.slot), k.mn, k.mx);
-            fHits.push_back({ (int)i, 0, k.slot, kr, k.mn, k.mx });
-            kx += kKnobW + 4;
+        if (UsesParamList(d)) {
+            // Generic parameter list: label, slider, value -- one row each, for
+            // however many the plugin exposes.
+            const std::vector<HostParam> hp = HostParamsFor(d);
+            if (hp.empty()) {
+                SetHighColor(ColTextDim());
+                DrawString("No parameters (plugin not available)",
+                           BPoint(panel.left + 10, knobTop + 15));
+            }
+            float ry = knobTop;
+            for (size_t pi = 0; pi < hp.size(); pi++) {
+                const HostParam& p = hp[pi];
+                const float val = d.p(pi);
+
+                BString lbl(p.name);
+                TruncateString(&lbl, B_TRUNCATE_END, kParamLabelW - 6.0f);
+                SetHighColor(ColText());
+                DrawString(lbl.String(), BPoint(panel.left + 10, ry + 15));
+
+                BRect tr(panel.left + 10 + kParamLabelW, ry + 5,
+                         panel.right - 10 - kParamValW, ry + kParamRowH - 9);
+                if (tr.Width() > 8) {
+                    SetHighColor(ColHeaderHi()); FillRect(tr);
+                    SetHighColor(ColGrid());     StrokeRect(tr);
+                    float t = (p.mx > p.mn) ? (val - p.mn) / (p.mx - p.mn) : 0.0f;
+                    if (t < 0) t = 0; if (t > 1) t = 1;
+                    BRect fill(tr.left + 1, tr.top + 1,
+                               tr.left + 1 + (tr.Width() - 2) * t, tr.bottom - 1);
+                    if (fill.right > fill.left) {
+                        SetHighColor(ColAccent()); FillRect(fill);
+                    }
+                    // kind 9: a horizontal drag across THIS rect, so the rect
+                    // is what the drag has to map against (see MouseDown).
+                    fHits.push_back({ (int)i, 9, (int)pi, tr, p.mn, p.mx });
+                }
+
+                char buf[32];
+                std::snprintf(buf, sizeof buf,
+                              (p.mx - p.mn) >= 100.0f ? "%.0f" : "%.2f", val);
+                SetHighColor(ColTextDim());
+                DrawString(buf, BPoint(panel.right - kParamValW - 2, ry + 15));
+                ry += kParamRowH;
+            }
+        } else {
+            // Knob row.
+            const std::vector<KnobDef> knobs = KnobsForDesc(d);
+            float kx = panel.left + 8;
+            for (const KnobDef& k : knobs) {
+                BRect kr(kx, knobTop, kx + kKnobW, knobTop + kKnobH);
+                DrawKnob(kr, k.label, d.p((size_t)k.slot), k.mn, k.mx);
+                fHits.push_back({ (int)i, 0, k.slot, kr, k.mn, k.mx });
+                kx += kKnobW + 4;
+            }
         }
     }
 
@@ -651,11 +731,32 @@ void EffectsView::MouseDown(BPoint where) {
         return;
     }
 
+    // Double-clicking a parameter slider restores the plugin's own default for
+    // that port -- the only way back to it once a value has been dragged, since
+    // a generic list has no per-parameter menu.
+    int32 clicks = 0;
+    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+        m->FindInt32("clicks", &clicks);
+    if (kind == 9 && clicks > 1
+        && h.effect >= 0 && h.effect < (int)fChain.size()) {
+        EffectDesc& d = fChain[h.effect];
+        const std::vector<HostParam> hp = HostParamsFor(d);
+        if (h.slot >= 0 && h.slot < (int)hp.size()) {
+            EnsureParamSlot(d, h.slot);
+            d.params[(size_t)h.slot] = hp[(size_t)h.slot].def;
+            fDragEffect = -1;          // the dbl-click is not also a drag
+            Apply(); Invalidate();
+        }
+        return;
+    }
+
     switch (kind) {
         case 0:   // knob: begin a vertical drag
+        case 9:   // plugin parameter slider: horizontal drag across its track
         case 5: { // eq handle: 2D drag
             fDragEffect = h.effect; fDragSlot = h.slot; fDragKind = kind;
             fDragMin = h.min; fDragMax = h.max;
+            fDragRect = h.rect;
             fDragStart = where;
             fDragStartVal = (fDragEffect >= 0 && fDragEffect < (int)fChain.size())
                             ? fChain[fDragEffect].p((size_t)fDragSlot) : 0;
@@ -792,6 +893,11 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         float v = fDragStartVal + dv;
         if (v < fDragMin) v = fDragMin; if (v > fDragMax) v = fDragMax;
         setP(fDragSlot, v);
+    } else if (fDragKind == 9) {   // parameter slider: x across the track
+        float t = (fDragRect.Width() > 0)
+                  ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
+        if (t < 0) t = 0; if (t > 1) t = 1;
+        setP(fDragSlot, fDragMin + t * (fDragMax - fDragMin));
     } else if (fDragKind == 5) {   // eq handle: x -> freq (log), y -> gain
         // Recover the graph rect for this effect to map coordinates.
         const float top = PanelTop((size_t)fDragEffect) + kTitleH + 4;
@@ -847,6 +953,8 @@ bool EffectsView::WheelAdjust(BPoint where, float dy) {
         const float ox = where.x - cx, oy = where.y - cy;   // offset from centre
         const float reach = kDialR + kDialTick;
         if (ox * ox + oy * oy > reach * reach) return false;
+        slot = h.slot; mn = h.min; mx = h.max;
+    } else if (kind == 9) {       // plugin parameter slider
         slot = h.slot; mn = h.min; mx = h.max;
     } else if (kind == 5) {       // EQ band handle -> that band's Q
         slot = h.slot * 3 + 2;
