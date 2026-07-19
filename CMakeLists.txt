@@ -395,6 +395,17 @@ if(HAIKU)
     # WavSource + WavWriter are kit-free and live in daw_model.
     target_link_libraries(daw_engine PUBLIC daw_model be media midi2 root)
 
+    # Opens an LV2 plugin's OWN GUI in a Haiku window. A prototype, not part of
+    # the app: it is how the native-UI path gets developed and watched without
+    # the engine, model and undo stack attached. Needs lilv, so it is skipped
+    # when LV2 support is off.
+    if(DAW_LV2_ENABLED)
+        add_executable(lv2_ui_host prototypes/lv2_ui_host/main.cpp)
+        target_include_directories(lv2_ui_host PRIVATE ${LILV_INCLUDE_DIRS})
+        target_link_directories(lv2_ui_host PRIVATE ${LILV_LIBRARY_DIRS})
+        target_link_libraries(lv2_ui_host PRIVATE ${LILV_LIBRARIES} be root)
+    endif()
+
     add_executable(play_clip prototypes/play_clip/main.cpp)
     target_link_libraries(play_clip PRIVATE daw_engine)
 
