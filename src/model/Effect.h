@@ -17,23 +17,24 @@
 
 namespace daw {
 
-// Order is the serialized id (0..9); do not reorder without bumping the file
+// Order is the serialized id (0..10); do not reorder without bumping the file
 // format (see ProjectIO). Append new types at the end so existing ids stay put.
 // Biquad is kept for loading older projects; new tone shaping uses the
 // parametric Eq.
 enum class EffectType { Biquad, Delay, Reverb, Compressor, Eq,
-                        Saturator, Gate, Widener, Plugin, Limiter };
+                        Saturator, Gate, Widener, Plugin, Limiter, Lv2 };
 
 // Highest valid serialized EffectType id. Every place that validates a
 // deserialized/message type (ProjectIO load, the MainWindow kMsgApplyFx handler)
 // gates against this so a new type is never silently coerced to Biquad. Point it
 // at the LAST enumerator — appending a type then updates every gate at once.
-inline constexpr int kMaxEffectTypeId = static_cast<int>(EffectType::Limiter);
+inline constexpr int kMaxEffectTypeId = static_cast<int>(EffectType::Lv2);
 
 struct EffectDesc {
     EffectType         type = EffectType::Biquad;
     std::vector<float> params;
-    std::string        pluginName;   // set when type == Plugin (add-on id)
+    std::string        pluginName;   // set when type == Plugin (add-on id) or
+                                     // type == Lv2 (the plugin URI)
     // Per-type param layout:
     //   Biquad:     [mode(0 LP,1 HP,2 Peak), freq Hz, Q, gain dB]
     //   Delay:      [time s, feedback [0,1), mix [0,1], sync 0/1, division idx]
@@ -45,6 +46,22 @@ struct EffectDesc {
     //   Gate:       [threshold dB, ratio, attack ms, release ms, range dB]
     //   Widener:    [width [0,2], pan [-1,1], gain]
     //   Limiter:    [ceiling dB, lookahead ms, release ms, input gain dB]
+
+    // Insert-slot controls, shared by every effect type and applied by the host
+    // (engine / Exporter) AROUND Process, not by the effect itself.
+    //   bypassed — SOFT bypass: the insert stops processing but keeps reporting
+    //              its LatencySamples(), so PDC and every delay line sized from
+    //              it stay valid (no rebuild, no click). The host also routes the
+    //              signal through a matching delay, so the insert's REAL latency
+    //              is preserved too — otherwise the path would land early. See
+    //              Engine::RunInsert / the Exporter's applyFx.
+    //   mix      — wet/dry blend in [0,1]: out = dry*(1-mix) + wet*mix, with the
+    //              dry leg delayed by the effect's latency so the legs don't
+    //              comb-filter. 1 = fully wet, i.e. the pre-feature behavior.
+    // Declared LAST so every existing brace-init of the leading fields still
+    // compiles, the trailing members taking their defaults.
+    bool               bypassed = false;
+    float              mix      = 1.0f;
 
     // Read a param with a safe default for missing slots.
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }

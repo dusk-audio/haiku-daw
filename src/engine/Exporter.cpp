@@ -3,6 +3,7 @@
 #include "WavSource.h"
 #include "WavWriter.h"
 #include "Resampler.h"
+#include "FrameDelay.h"
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
 #include "../dsp/EffectFactory.h"
@@ -199,10 +200,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // aligned (a latent plugin is made transparent, not shifted). With no latent
     // effect anywhere pad == 0, every EdgeDelay is 0, and every path below is
     // byte-identical to an uncompensated render.
+    // A BYPASSED insert still contributes its latency: bypass is soft (the host
+    // routes the signal through a matching delay instead of processing it), so
+    // the chain's reported latency — and therefore every PDC delay solved from
+    // it — is constant whether or not an insert is bypassed. That is what makes
+    // toggling bypass free of rebuilds and of timing shifts.
     auto chainLatency = [&](const std::vector<EffectDesc>& fxDescs) -> int {
         int lat = 0;
         for (const EffectDesc& d : fxDescs) {
-            auto e = MakeEffect(d);
+            auto e = MakeEffect(d, outRate);
             if (e) { e->Prepare(outRate); lat += e->LatencySamples(); }
         }
         return lat;
@@ -315,12 +321,57 @@ bool ExportWav(const Project& project, const std::string& outPath,
         std::vector<std::unique_ptr<IEffect>> chain;
         bool any = false;
         for (const EffectDesc& d : fxDescs) {
-            auto e = MakeEffect(d);
+            auto e = MakeEffect(d, outRate);
             if (e) { e->Prepare(outRate); any = true; }
             chain.push_back(std::move(e));
         }
         if (!any) return;
+
         const int64_t kBlock = 8192;
+
+        // Insert-slot state, index-aligned with `chain` (see EffectDesc). Both
+        // the bypass path and the wet/dry blend need the insert's DRY input
+        // delayed by exactly the effect's own LatencySamples():
+        //   - bypass, because skipping Process would drop N samples of real
+        //     delay while the chain still reports (and PDC still compensates)
+        //     N — landing this path N samples early against its siblings;
+        //   - wet/dry, because blending an N-late wet with an undelayed dry
+        //     comb-filters the result.
+        // One line per insert serves both (they are mutually exclusive, and
+        // both carry the same dry signal). N == 0 — every built-in effect
+        // except the look-ahead limiter — leaves the line empty, so bypass is a
+        // plain skip and the blend is a plain accumulate, exactly as before.
+        std::vector<FrameDelay> dryDelay(chain.size());
+        std::vector<float>      mixes(chain.size(), 1.0f);
+        std::vector<char>       bypassed(chain.size(), 0);
+        bool anySlotState = false;
+        for (size_t i = 0; i < chain.size(); i++) {
+            if (!chain[i]) continue;   // unavailable plugin: nothing to bypass
+            const int lat = chain[i]->LatencySamples();
+            float m = fxDescs[i].mix;
+            if (!(m >= 0.0f)) m = 0.0f;   // also catches NaN
+            if (m > 1.0f)     m = 1.0f;
+            mixes[i]    = m;
+            bypassed[i] = fxDescs[i].bypassed ? 1 : 0;
+            // A plain fully-wet insert needs no delay line here. The RT engine
+            // DOES keep one clocked for a latent fully-wet insert, so its ring
+            // isn't stale if the user toggles bypass mid-playback — a case that
+            // cannot arise offline, where the slot state is fixed for the whole
+            // render. That clocked line is mixed in at level 0, so for finite
+            // samples it contributes exactly nothing and the two paths agree.
+            // NOTE: this is the one live/offline difference in the insert path,
+            // and it is reasoned rather than tested — nothing on a non-Haiku
+            // host can render through the engine to diff it against a bounce.
+            // If a bounce ever diverges from playback on a latent insert, look
+            // here first.
+            if (!bypassed[i] && m >= 1.0f) continue;   // plain wet insert
+            anySlotState = true;
+            dryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);
+        }
+        // One block's worth of dry copy, reused across blocks and inserts.
+        std::vector<float> dryBlock;
+        if (anySlotState) dryBlock.resize((size_t)kBlock * 2, 0.0f);
+
         for (int64_t off = 0; off < totalOutPadded; off += kBlock) {
             int64_t n = totalOutPadded - off;
             if (n > kBlock) n = kBlock;
@@ -331,8 +382,29 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 chain[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(pf, 0.0f));
             }
             float* p = buf + off * 2;
-            for (auto& e : chain)
-                if (e) e->Process(p, static_cast<int>(n));
+            const size_t nf = (size_t)n * 2;   // interleaved floats this block
+            for (size_t i = 0; i < chain.size(); i++) {
+                IEffect* e = chain[i].get();
+                if (!e) continue;
+                const float m = mixes[i];
+                if (bypassed[i]) {
+                    // Soft bypass. Zero latency: skip outright, no cost. Latent:
+                    // pass the signal through the delay line alone, so the
+                    // insert still delays by N without processing.
+                    if (dryDelay[i].d == 0) continue;
+                    std::copy(p, p + nf, dryBlock.begin());
+                    std::fill(p, p + nf, 0.0f);
+                    dryDelay[i].ProcessAdd(dryBlock.data(), p, (size_t)n, 1.0f);
+                    continue;
+                }
+                if (m >= 1.0f) { e->Process(p, static_cast<int>(n)); continue; }
+                // out = dry*(1-mix) + wet*mix, with the dry leg delayed by the
+                // effect's own latency so the two legs stay phase-aligned.
+                std::copy(p, p + nf, dryBlock.begin());
+                e->Process(p, static_cast<int>(n));
+                for (size_t k = 0; k < nf; ++k) p[k] *= m;
+                dryDelay[i].ProcessAdd(dryBlock.data(), p, (size_t)n, 1.0f - m);
+            }
         }
     };
 
@@ -457,26 +529,12 @@ bool ExportWav(const Project& project, const std::string& outPath,
         sumDelayed(dst, nb, 1.0f, pdcOk ? pdc.EdgeDelay(t.id, destId) : 0);
     }
 
-    // Master bus FX chain (applied to the summed mix before master gain).
-    {
-        std::vector<std::unique_ptr<IEffect>> masterFx;
-        for (const EffectDesc& d : project.masterFx) {
-            auto fx = MakeEffect(d);
-            if (!fx) continue;
-            fx->Prepare(outRate);
-            masterFx.push_back(std::move(fx));
-        }
-        if (!masterFx.empty()) {
-            const int64_t kBlock = 8192;
-            for (int64_t off = 0; off < totalOutPadded; off += kBlock) {
-                int64_t n = totalOutPadded - off;
-                if (n > kBlock) n = kBlock;
-                float* pm = master.data() + off * 2;
-                for (auto& fx : masterFx)
-                    fx->Process(pm, static_cast<int>(n));
-            }
-        }
-    }
+    // Master bus FX chain (applied to the summed mix before master gain). Runs
+    // through the same applyFx as a track chain so per-insert bypass / wet-dry
+    // behave identically on the master. It has no fx automation, and its content
+    // needs no input-latency offset (the mix already sits at buffer offset 0),
+    // hence the empty lane list and inLat 0.
+    applyFx(project.masterFx, master.data(), {}, 0);
 
     // PDC trim: the whole mix lags the timeline by `pad` frames (node graph +
     // master fx). Drop that leading latency so the bounce is timeline-aligned —

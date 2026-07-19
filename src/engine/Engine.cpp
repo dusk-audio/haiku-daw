@@ -43,6 +43,16 @@ static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
     *outR = gain * std::sin(theta);
 }
 
+// An insert's wet/dry is meaningless outside [0,1]. ProjectIO clamps on load,
+// but a chain assembled in memory (the effects editor, a Command) can hold
+// anything, so clamp again at the engine boundary. Written as !(m >= 0) so a
+// NaN clamps to 0 instead of slipping through every ordinary comparison and
+// poisoning the mix.
+static inline float ClampMix(float m) {
+    if (!(m >= 0.0f)) return 0.0f;
+    return m > 1.0f ? 1.0f : m;
+}
+
 // --- TrackStream ------------------------------------------------------
 
 TrackStream::TrackStream(TrackId track, const std::string& path,
@@ -377,10 +387,26 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         // effect that fails to build, e.g. a missing plugin add-on) so
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
         for (const EffectDesc& d : t->fx) {
-            auto fx = MakeEffect(d);
+            auto fx = MakeEffect(d, fOutputRate);
             if (fx) { fx->Prepare(fOutputRate); fx->SetTempo(project.tempoBPM); }
             b.fx.push_back(std::move(fx));
             b.fxTypes.push_back(d.type);
+        }
+        // Per-insert slot state, sized once the chain is built (arrays of
+        // atomics, so they are allocated rather than grown). The dry-delay line
+        // is sized from the effect's OWN latency, read after Prepare() — the
+        // point at which IEffect guarantees it is fixed — because that is what
+        // both the soft-bypass path and the wet/dry blend realign against.
+        if (!b.fx.empty()) {
+            b.fxBypass.reset(new std::atomic<bool>[b.fx.size()]);
+            b.fxMix.reset(new std::atomic<float>[b.fx.size()]);
+            b.fxDryDelay.assign(b.fx.size(), FrameDelay{});
+            for (size_t i = 0; i < b.fx.size(); i++) {
+                b.fxBypass[i].store(t->fx[i].bypassed, std::memory_order_relaxed);
+                b.fxMix[i].store(ClampMix(t->fx[i].mix), std::memory_order_relaxed);
+                const int lat = b.fx[i] ? b.fx[i]->LatencySamples() : 0;
+                b.fxDryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);
+            }
         }
         // Automation snapshot (RT-owned copy of the lanes).
         b.statGain = t->gain;
@@ -482,13 +508,35 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     // Master bus effect chain (applied to the summed output).
     fMasterFx.clear();
     fMasterFxTypes.clear();
+    fMasterFxDelay.clear();
+    // Insert state collected alongside, then moved into the atomic arrays once
+    // the final chain length is known (this chain DROPS effects that fail to
+    // build, so its indices don't track project.masterFx).
+    std::vector<char>  masterBypass;
+    std::vector<float> masterMix;
     for (const EffectDesc& d : project.masterFx) {
-        auto fx = MakeEffect(d);
+        auto fx = MakeEffect(d, fOutputRate);
         if (!fx) continue;
         fx->Prepare(fOutputRate);
         fx->SetTempo(project.tempoBPM);
+        const int lat = fx->LatencySamples();   // fixed once Prepare has run
+        fMasterFxDelay.emplace_back();
+        fMasterFxDelay.back().Prepare(lat > 0 ? (size_t)lat : 0);
+        masterBypass.push_back(d.bypassed ? 1 : 0);
+        masterMix.push_back(ClampMix(d.mix));
         fMasterFx.push_back(std::move(fx));
         fMasterFxTypes.push_back(d.type);
+    }
+    fMasterFxBypass.reset();
+    fMasterFxMix.reset();
+    if (!fMasterFx.empty()) {
+        fMasterFxBypass.reset(new std::atomic<bool>[fMasterFx.size()]);
+        fMasterFxMix.reset(new std::atomic<float>[fMasterFx.size()]);
+        for (size_t i = 0; i < fMasterFx.size(); i++) {
+            fMasterFxBypass[i].store(masterBypass[i] != 0,
+                                     std::memory_order_relaxed);
+            fMasterFxMix[i].store(masterMix[i], std::memory_order_relaxed);
+        }
     }
 
     // Master loudness meter. Integrated accumulation is disabled: it allocates
@@ -588,13 +636,24 @@ bool Engine::SyncFx(const Project& project) {
     bool allMatched = true;
     auto sync = [&](std::vector<std::unique_ptr<IEffect>>& fx,
                     const std::vector<EffectType>& types,
-                    const std::vector<EffectDesc>& descs) {
+                    const std::vector<EffectDesc>& descs,
+                    std::atomic<bool>* bypass, std::atomic<float>* mix) {
         if (fx.size() != descs.size()) { allMatched = false; return; }
         for (size_t i = 0; i < fx.size(); i++) {
             if (i >= types.size() || types[i] != descs[i].type) {
                 allMatched = false;   // an effect was replaced at this slot
                 continue;
             }
+            // Insert bypass / wet-dry are PUSHABLE, like params: they change
+            // what the host does around the effect, not the chain's structure —
+            // and, because bypass is soft, not its reported latency either. So
+            // they never count as a structural mismatch and a toggle never
+            // forces a rebuild. Pushed even for a nullptr slot (an unavailable
+            // plugin) so the state is already right if the chain is rebuilt.
+            if (bypass) bypass[i].store(descs[i].bypassed,
+                                        std::memory_order_relaxed);
+            if (mix)    mix[i].store(ClampMix(descs[i].mix),
+                                     std::memory_order_relaxed);
             if (!fx[i]) continue;
             for (size_t s = 0; s < descs[i].params.size(); s++)
                 fx[i]->SetParam((int)s, descs[i].params[s]);
@@ -602,9 +661,10 @@ bool Engine::SyncFx(const Project& project) {
     };
     for (Bus& b : fBuses) {
         const Track* t = project.FindTrack(b.id);
-        if (t) sync(b.fx, b.fxTypes, t->fx);
+        if (t) sync(b.fx, b.fxTypes, t->fx, b.fxBypass.get(), b.fxMix.get());
     }
-    sync(fMasterFx, fMasterFxTypes, project.masterFx);
+    sync(fMasterFx, fMasterFxTypes, project.masterFx,
+         fMasterFxBypass.get(), fMasterFxMix.get());
     return allMatched;
 }
 
@@ -620,6 +680,58 @@ void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
     if (!chain || fxIndex < 0 || fxIndex >= (int)chain->size()) return;
     if ((*chain)[(size_t)fxIndex])
         (*chain)[(size_t)fxIndex]->SetParam(slot, value);
+}
+
+void Engine::RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
+                       float mix, float* buf, size_t frames, float* dry) {
+    if (!e) return;   // unavailable plugin: an index-aligned hole in the chain
+    const size_t nf    = frames * 2;   // interleaved floats
+    const size_t bytes = nf * sizeof(float);
+    mix = ClampMix(mix);
+
+    if (bypassed) {
+        // SOFT bypass: the insert stops processing but keeps reporting its
+        // LatencySamples(), so the PDC solve and every delay line sized from it
+        // stay valid — no rebuild, no seam, no click. IEffect requires that
+        // value to be constant across a Prepare()/Process() lifetime anyway
+        // (IEffect.h), so a hard bypass that changed it is not an option.
+        //
+        // Keeping the REPORTED latency obliges us to keep the REAL one: just
+        // skipping Process would drop N samples of actual delay while the graph
+        // still compensates for N, landing this path N samples EARLY against
+        // the rest of the mix — an audible flam on every bypass toggle, exactly
+        // the artifact soft bypass exists to avoid. So a latent insert passes
+        // its signal through the delay line alone. N == 0 (every built-in
+        // effect today) needs no line and costs nothing.
+        if (dryDelay.d == 0) return;
+        std::memcpy(dry, buf, bytes);
+        std::memset(buf, 0, bytes);
+        dryDelay.ProcessAdd(dry, buf, frames, 1.0f);
+        return;
+    }
+
+    if (mix >= 1.0f && dryDelay.d == 0) {   // fully wet, zero latency: the
+        e->Process(buf, (int)frames);       // common path, untouched
+        return;
+    }
+
+    // out = dry*(1-mix) + wet*mix, with the dry leg delayed by the effect's own
+    // latency so the two legs stay phase-aligned rather than comb-filtering.
+    //
+    // A LATENT insert takes this path even at mix == 1, where the dry leg
+    // contributes nothing (level 0): ProcessAdd still clocks the delay line, so
+    // its ring keeps holding the current dry signal. Without that the ring
+    // would be stale the instant the user toggles bypass on, and the bypass
+    // path above would emit whatever audio was last written to it — a gap of
+    // silence, i.e. the click this whole design exists to avoid. The offline
+    // Exporter skips this clocking (its slot state is fixed for a whole render,
+    // so no toggle can happen) and the level-0 mix makes that unobservable in
+    // the output; see the matching note in Exporter's applyFx.
+    std::memcpy(dry, buf, bytes);
+    e->Process(buf, (int)frames);
+    if (mix != 1.0f)
+        for (size_t k = 0; k < nf; ++k) buf[k] *= mix;
+    dryDelay.ProcessAdd(dry, buf, frames, 1.0f - mix);
 }
 
 void Engine::SetFxTempo(double bpm) {
@@ -949,8 +1061,13 @@ void Engine::FillBuffer(float* out, size_t frames) {
             if (!b.fx[fa.fxIndex] || fa.lane.Count() == 0) continue;
             b.fx[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(blockStart, 0.0f));
         }
-        for (auto& fx : b.fx)
-            if (fx) fx->Process(nb, static_cast<int>(frames));
+        // Insert chain. Each slot honours its own bypass / wet-dry mix; the
+        // plain fully-wet slot is a bare Process, as before.
+        for (size_t fi = 0; fi < b.fx.size(); fi++)
+            RunInsert(b.fx[fi].get(), b.fxDryDelay[fi],
+                      b.fxBypass[fi].load(std::memory_order_relaxed),
+                      b.fxMix[fi].load(std::memory_order_relaxed),
+                      nb, frames, fScratch.data());
 
         // Effect metering: if this bus's track is the editor's focus, copy the
         // whole chain's meters into flat storage for the UI.
@@ -987,8 +1104,11 @@ void Engine::FillBuffer(float* out, size_t frames) {
     }
 
     // Master bus FX on the summed output (before gain/metering).
-    for (auto& fx : fMasterFx)
-        fx->Process(out, static_cast<int>(frames));
+    for (size_t fi = 0; fi < fMasterFx.size(); fi++)
+        RunInsert(fMasterFx[fi].get(), fMasterFxDelay[fi],
+                  fMasterFxBypass[fi].load(std::memory_order_relaxed),
+                  fMasterFxMix[fi].load(std::memory_order_relaxed),
+                  out, frames, fScratch.data());
     // Effect metering for the master chain (UI focus sentinel = ~0).
     if (fMeterTrack.load(std::memory_order_relaxed) == ~(TrackId)0)
         CaptureFxMeters(fMasterFx);

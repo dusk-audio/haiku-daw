@@ -28,12 +28,17 @@ static std::string baseProject() {
     Project a;
     CommandStack s;
     a.sampleRate = 44100.0; a.tempoBPM = 120.0; a.masterGain = 0.8f;
-    a.masterFx.push_back(ReverbDesc(0.5f, 0.3f));
+    // Give both chains NON-DEFAULT insert state, so the save emits `masterfxin`
+    // / `fxin` lines and the token poisoning below reaches their index, bypass
+    // and mix fields too (a huge/negative index, and "NaN" for the mix).
+    { EffectDesc rv = ReverbDesc(0.5f, 0.3f); rv.mix = 0.4f;
+      a.masterFx.push_back(rv); }
     s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr"), a);
     TrackId t1 = a.Tracks().front().id;
     Clip c; c.startFrame = 1000; c.lengthFrames = 2000; c.sourcePath = "m/a.wav";
     s.Execute(std::make_unique<AddClipCommand>(t1, c), a);
-    s.Execute(std::make_unique<AddEffectCommand>(t1, LowPassDesc(800.0f)), a);
+    { EffectDesc lp = LowPassDesc(800.0f); lp.bypassed = true; lp.mix = 0.75f;
+      s.Execute(std::make_unique<AddEffectCommand>(t1, lp), a); }
     { AutomationLane g; g.AddPoint(0, 1.0f); g.AddPoint(48000, 0.2f);
       s.Execute(std::make_unique<SetAutoLaneCommand>(t1, AutoLaneKind::Gain, g), a); }
     s.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), a);

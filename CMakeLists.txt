@@ -107,6 +107,18 @@ add_executable(instrument_io_tests tests/instrument_io_tests.cpp)
 target_link_libraries(instrument_io_tests PRIVATE daw_model)
 add_test(NAME instrument_io_tests COMMAND instrument_io_tests)
 
+# FX insert slots: per-insert bypass / wet-dry mix, their optional `fxin` /
+# `masterfxin` lines, and the EffectType::Lv2 factory hook.
+add_executable(fx_insert_tests tests/fx_insert_tests.cpp)
+target_link_libraries(fx_insert_tests PRIVATE daw_model)
+add_test(NAME fx_insert_tests COMMAND fx_insert_tests)
+
+# Insert bypass / wet-dry through the real render graph, asserted sample-exactly
+# against dry and fully-wet reference bounces (32-bit float, so no dither).
+add_executable(fx_insert_render_tests tests/fx_insert_render_tests.cpp)
+target_link_libraries(fx_insert_render_tests PRIVATE daw_model)
+add_test(NAME fx_insert_render_tests COMMAND fx_insert_render_tests)
+
 add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
 add_test(NAME projectio_tests COMMAND projectio_tests)

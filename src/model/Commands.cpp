@@ -679,6 +679,20 @@ void SetFxCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->fx = fOld;
 }
 
+bool SetFxBypassCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || fIndex < 0 || fIndex >= (int)t->fx.size())
+        return false;   // no such slot: not an edit, so nothing to undo either
+    fOld = t->fx[(size_t)fIndex].bypassed;
+    t->fx[(size_t)fIndex].bypassed = fNew;
+    return true;
+}
+void SetFxBypassCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t || fIndex < 0 || fIndex >= (int)t->fx.size()) return;
+    t->fx[(size_t)fIndex].bypassed = fOld;
+}
+
 // --- Markers ----------------------------------------------------------
 
 bool AddMarkerCommand::Do(Project& p) {

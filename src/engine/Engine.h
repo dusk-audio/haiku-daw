@@ -277,6 +277,13 @@ private:
         fMeterSpecGen.fetch_add(1, std::memory_order_acq_rel);   // -> even
     }
 
+    // RT helper: run one insert slot over `buf` (interleaved stereo, `frames`
+    // frames), honouring soft bypass and the wet/dry mix. `dry` is preallocated
+    // scratch of at least frames*2 floats. RT-safe: arithmetic and memcpy over
+    // preallocated state only.
+    static void RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
+                          float mix, float* buf, size_t frames, float* dry);
+
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
                                const media_raw_audio_format& format);
     void FillBuffer(float* out, size_t frames);
@@ -333,6 +340,21 @@ private:
         std::vector<MidiNote>                 liveNotes;
         std::vector<std::unique_ptr<IEffect>> fx;
         std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
+        // Per-insert slot state, parallel to fx (see model/Effect.h). Atomic
+        // because the UI thread pushes them through SyncFx while the RT callback
+        // reads them per block — like the fader gains above: independent scalars
+        // with no cross-field invariant, so relaxed ordering is sufficient. Held
+        // as arrays rather than std::vector<std::atomic<>> (which cannot grow,
+        // an atomic being neither copyable nor movable), sized once at Load, the
+        // same shape as fNodePeakL/R.
+        std::unique_ptr<std::atomic<bool>[]>  fxBypass;
+        std::unique_ptr<std::atomic<float>[]> fxMix;
+        // Per-insert dry-path delay of that effect's own LatencySamples(). Both
+        // the soft-bypass path and the wet/dry blend need the dry signal delayed
+        // by exactly that, and they are mutually exclusive, so one line serves
+        // both. Length 0 (a plain accumulate, no cost) for every zero-latency
+        // effect — which is every built-in but the look-ahead limiter.
+        std::vector<FrameDelay>               fxDryDelay;
         // Aux sends: destination node index into fBuses, linear level, and a PDC
         // delay line aligning this send to the dest's input latency. Taps this
         // node's post-FX output. Dest node indices are resolved at Load, so the
@@ -387,6 +409,8 @@ private:
               inChannel(o.inChannel.load(std::memory_order_relaxed)),
               liveNotes(std::move(o.liveNotes)),
               fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
+              fxBypass(std::move(o.fxBypass)), fxMix(std::move(o.fxMix)),
+              fxDryDelay(std::move(o.fxDryDelay)),
               sendTargets(std::move(o.sendTargets)),
               outDelay(std::move(o.outDelay)),
               gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
@@ -410,6 +434,8 @@ private:
             inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
             liveNotes = std::move(o.liveNotes);
             fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
+            fxBypass = std::move(o.fxBypass); fxMix = std::move(o.fxMix);
+            fxDryDelay = std::move(o.fxDryDelay);
             sendTargets = std::move(o.sendTargets);
             outDelay = std::move(o.outDelay);
             gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
@@ -429,7 +455,16 @@ private:
     std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
-    std::vector<float>                        fScratch;   // (unused after routing)
+    // Master-chain insert state, same shape and rules as Bus::fxBypass/fxMix/
+    // fxDryDelay above. Note fMasterFx DROPS effects that fail to build, so
+    // these are parallel to fMasterFx, not to project.masterFx.
+    std::unique_ptr<std::atomic<bool>[]>      fMasterFxBypass;
+    std::unique_ptr<std::atomic<float>[]>     fMasterFxMix;
+    std::vector<FrameDelay>                   fMasterFxDelay;
+    // One block of dry signal, held while an insert's wet leg is computed in
+    // place. Preallocated at Load (RT never allocates); nodes and the master run
+    // sequentially inside one callback, so a single buffer serves them all.
+    std::vector<float>                        fScratch;
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
     // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
     // the engine at the loop seam, which rebuilds every Bus; without this the

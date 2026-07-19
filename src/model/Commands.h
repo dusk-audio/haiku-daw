@@ -637,6 +637,28 @@ private:
     std::vector<EffectDesc> fNew, fOld;
 };
 
+// Toggle one insert's bypass on a track chain. SetFxCommand already carries
+// bypass/mix (it replaces the whole chain of descriptors), but a bypass click
+// is not a chain edit: this keeps the Edit menu reading "Bypass Effect" instead
+// of "Edit Effects", and keeps the undo entry small. Deliberately does NOT
+// coalesce — each toggle is a discrete decision the user undoes one at a time,
+// unlike a knob drag.
+class SetFxBypassCommand : public Command {
+public:
+    SetFxBypassCommand(TrackId track, int fxIndex, bool bypassed)
+        : fTrack(track), fIndex(fxIndex), fNew(bypassed) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override {
+        return fNew ? "Bypass Effect" : "Enable Effect";
+    }
+private:
+    TrackId fTrack;
+    int     fIndex;
+    bool    fNew;
+    bool    fOld = false;
+};
+
 // Set a MIDI track's voice. Coalesces (its editor's native sliders post
 // continuously) so a slider drag is one undo step.
 class SetInstrumentCommand : public Command {

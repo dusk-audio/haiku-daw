@@ -79,6 +79,25 @@ std::string Resolve(const std::string& stored, const std::string& baseDir) {
 // driving an unbounded allocation. Real chains/lanes are far smaller.
 constexpr int kMaxListCount = 100000;
 
+// Apply one parsed `fxin`/`masterfxin` record (insert bypass + wet/dry mix) to
+// `chain`. Two different malformed-input policies, each matched to the field:
+//   - an INDEX that can't address a slot is skipped, like a `send` to a missing
+//     track — there is nothing to attach the state to, and failing the whole
+//     load over it would lose the rest of a recoverable project;
+//   - a MIX outside [0,1] is clamped rather than rejected, because it is
+//     meaningless but harmless (unlike an `mev` field, where an out-of-range
+//     value means the record itself is garbage, so that one fails the load).
+// The `!(mix >= 0)` form also catches a NaN, which no ordinary comparison would.
+void ApplyFxInsert(std::vector<EffectDesc>& chain, int index, int bypassed,
+                   float mix) {
+    if (index < 0 || index >= (int)chain.size())
+        return;
+    if (!(mix >= 0.0f)) mix = 0.0f;
+    if (mix > 1.0f)     mix = 1.0f;
+    chain[(size_t)index].bypassed = (bypassed != 0);
+    chain[(size_t)index].mix      = mix;
+}
+
 } // namespace
 
 bool ProjectIO::Save(const Project& p, const std::string& path) {
@@ -120,6 +139,16 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         for (float v : e.params) f << " " << v;
         if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
         f << "\n";
+    }
+    // Per-insert bypass / wet-dry mix for the master chain, one optional line
+    // per NON-DEFAULT insert, written after every `masterfx` line so the index
+    // it names already addresses a loaded slot. Skipping the defaults keeps a
+    // project that never touches an insert byte-identical to a pre-feature save.
+    for (size_t i = 0; i < p.masterFx.size(); i++) {
+        const EffectDesc& e = p.masterFx[i];
+        if (!e.bypassed && e.mix == 1.0f) continue;
+        f << "masterfxin " << i << " " << (e.bypassed ? 1 : 0) << " "
+          << e.mix << "\n";
     }
 
     // Tempo/meter map. Frame 0 is seeded from `tempo`/`timesig` above, so only
@@ -177,6 +206,14 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             for (float v : e.params) f << " " << v;
             if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
             f << "\n";
+        }
+        // Per-insert bypass / wet-dry mix, after this track's `fx` lines (see
+        // the master chain above for the format rationale).
+        for (size_t i = 0; i < t.fx.size(); i++) {
+            const EffectDesc& e = t.fx[i];
+            if (!e.bypassed && e.mix == 1.0f) continue;
+            f << "fxin " << i << " " << (e.bypassed ? 1 : 0) << " "
+              << e.mix << "\n";
         }
 
         for (const Send& s : t.sends)
@@ -336,6 +373,15 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             }
             if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
             p.masterFx.push_back(e);
+        }
+        else if (kw == "masterfxin") {
+            // Optional; absent in files from before insert slots existed, in
+            // which case the chain keeps EffectDesc's defaults (not bypassed,
+            // mix 1.0 = fully wet) and behaves exactly as it used to. A
+            // truncated line leaves the unread fields at those same defaults.
+            int index = -1, byp = 0; float mix = 1.0f;
+            iss >> index >> byp >> mix;
+            ApplyFxInsert(p.masterFx, index, byp, mix);
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "tempochange") {
@@ -502,6 +548,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             }
             if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
             cur.fx.push_back(e);
+        }
+        else if (kw == "fxin" && haveTrack) {
+            int index = -1, byp = 0; float mix = 1.0f;
+            iss >> index >> byp >> mix;
+            ApplyFxInsert(cur.fx, index, byp, mix);
         }
         else if (kw == "fxauto" && haveTrack) {
             FxAutoLane fa;

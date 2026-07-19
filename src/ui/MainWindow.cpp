@@ -736,6 +736,19 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BString pn;
                 if (msg->FindString("en", i, &pn) == B_OK)
                     d.pluginName = pn.String();
+                // Insert-slot state. Absent fields keep EffectDesc's defaults
+                // (not bypassed, fully wet); mix is clamped here the same way
+                // ProjectIO clamps it on load, since this message crosses a
+                // thread boundary from an editor that may not have a slot UI.
+                int32 byp = 0;
+                if (msg->FindInt32("eb", i, &byp) == B_OK)
+                    d.bypassed = (byp != 0);
+                float mix = 1.0f;
+                if (msg->FindFloat("em", i, &mix) == B_OK) {
+                    if (!(mix >= 0.0f)) mix = 0.0f;   // also catches NaN
+                    if (mix > 1.0f)     mix = 1.0f;
+                    d.mix = mix;
+                }
                 int32 count = 0;
                 msg->FindInt32("ec", i, &count);
                 for (int32 j = 0; j < count; j++) {

@@ -15,7 +15,10 @@ namespace daw {
 static PluginFactoryFn gPluginFactory = nullptr;
 void SetPluginFactory(PluginFactoryFn fn) { gPluginFactory = fn; }
 
-std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
+static Lv2FactoryFn gLv2Factory = nullptr;
+void SetLv2Factory(Lv2FactoryFn fn) { gLv2Factory = fn; }
+
+std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d, double sampleRate) {
     if (d.type == EffectType::Plugin) {
         if (!gPluginFactory) return nullptr;
         auto e = gPluginFactory(d.pluginName);
@@ -25,6 +28,17 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d) {
         return e;
     }
     switch (d.type) {
+        case EffectType::Lv2: {
+            // Same fallback as an unavailable native plugin: no hook installed
+            // (every non-Haiku host, and Haiku before the LV2 layer registers)
+            // or an unresolvable URI yields nullptr.
+            if (!gLv2Factory) return nullptr;
+            std::unique_ptr<IEffect> e(gLv2Factory(d, sampleRate));
+            if (e)   // apply stored params
+                for (size_t i = 0; i < d.params.size(); i++)
+                    e->SetParam((int)i, d.params[i]);
+            return e;
+        }
         case EffectType::Biquad: {
             Biquad::Type mode = Biquad::Type::LowPass;
             if (d.p(0) == 1.0f) mode = Biquad::Type::HighPass;

@@ -49,6 +49,7 @@ static const char* EffName(EffectType t) {
         case EffectType::Gate:       return "Gate";
         case EffectType::Widener:    return "Widener";
         case EffectType::Limiter:    return "Limiter";
+        case EffectType::Lv2:        return "LV2";
         default:                     return "Biquad";
     }
 }
@@ -168,6 +169,13 @@ void EffectsView::Apply() {
         m.AddInt32("et", (int32)(int)d.type);
         m.AddInt32("ec", (int32)d.params.size());
         m.AddString("en", d.pluginName.c_str());   // empty for built-ins
+        // Insert-slot state travels with the descriptor. This editor doesn't
+        // expose it yet (the slot UI is separate), but the snapshot it was
+        // opened with may already carry it, and flattening without these would
+        // silently reset every insert to un-bypassed / fully wet on the next
+        // knob move.
+        m.AddInt32("eb", d.bypassed ? 1 : 0);
+        m.AddFloat("em", d.mix);
         for (float v : d.params) m.AddFloat("ep", v);
     }
     fApply.SendMessage(&m);
