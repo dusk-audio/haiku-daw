@@ -211,12 +211,22 @@ void InspectorView::Draw(BRect) {
         }
     }
 
-    // Drop indicator while a slot is being dragged to a new position.
+    // Drop indicator: the row the dragged insert will OCCUPY, framed in the
+    // track accent.
+    //
+    // Deliberately a row highlight and not an insertion line between rows. The
+    // drop target is computed as "the row under the pointer" and clamped to the
+    // real inserts, so it names a slot, not a gap -- drag an insert onto row 3
+    // and it takes row 3, pushing the previous occupant aside. A line drawn
+    // above the row would promise "insert BEFORE this one", which is a different
+    // result whenever the drag moves downward, and the code would be right while
+    // the drawing lied.
     if (fDrag == Drag::FxSlot && fDragFxTo >= 0 && fDragFxTo < fFxRows) {
         const BRect r = FxRowRect(fDragFxTo);
         if (r.IsValid()) {
             SetHighColor(accent);
-            StrokeLine(BPoint(r.left, r.top - 1), BPoint(r.right, r.top - 1));
+            StrokeRect(r);
+            StrokeRect(r.InsetByCopy(1.0f, 1.0f));   // 2 px: reads as a target
         }
     }
 
