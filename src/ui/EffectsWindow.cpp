@@ -13,6 +13,7 @@
 #endif
 
 #include <MenuItem.h>
+#include <String.h>
 #include <MessageRunner.h>
 #include <PopUpMenu.h>
 #include <ScrollBar.h>
@@ -265,8 +266,17 @@ void EffectsView::DrawKnob(BRect r, const char* label, float value,
     if (t < 0) t = 0; if (t > 1) t = 1;
 
     // Label (centered above, clear of the dial + its tick ring).
+    //
+    // Built-in labels are written to fit ("Thr dB", "Atk ms"), but plugin
+    // parameter names come from the plugin and are routinely wider than a cell
+    // -- a 26-param LV2 EQ has "HPF Frequency" next to "LPF Frequency". Left
+    // alone they overdraw their neighbours into an unreadable run of text, so
+    // clip to the cell and let the ellipsis show there is more.
     SetHighColor(ColText());
-    DrawString(label, BPoint(cx - StringWidth(label) * 0.5f, r.top + 10));
+    BString lbl(label);
+    TruncateString(&lbl, B_TRUNCATE_END, r.Width() - 2.0f);
+    DrawString(lbl.String(),
+               BPoint(cx - StringWidth(lbl.String()) * 0.5f, r.top + 10));
 
     // Tick scale around the -135..+135 sweep; the reached ticks are lit.
     for (int i = 0; i <= 10; i++) {
@@ -452,6 +462,16 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColText());
         const char* title = EffName(d.type);
         if (d.type == EffectType::Plugin) title = d.pluginName.c_str();
+#ifdef DAW_HAVE_LV2
+        // pluginName is the URI for LV2, which is unreadable in a title bar
+        // ("https://dusk-audio.github.io/plugins/4k-eq-2"). Show the display
+        // name the host read from the bundle; fall back to the bare type when
+        // the URI does not resolve, which is what an uninstalled plugin shows.
+        else if (d.type == EffectType::Lv2) {
+            if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
+                title = pi->name.c_str();
+        }
+#endif
         else if (d.type == EffectType::Reverb) {
             const int algo = (int)(d.p(2) + 0.5f);
             title = algo == 1 ? "Reverb - Plate"
