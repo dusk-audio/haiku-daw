@@ -418,6 +418,7 @@ if(HAIKU)
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
+        src/ui/PluginBrowser.cpp
         src/ui/SendsWindow.cpp
         src/ui/InstrumentWindow.cpp
         src/ui/PianoRoll.cpp

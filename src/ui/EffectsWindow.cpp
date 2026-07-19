@@ -4,6 +4,7 @@
 #include "../dsp/Eq.h"
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../plugin/PluginHost.h"
+#include "PluginBrowser.h"
 
 // Only linked when CMake found lilv; DAW_HAVE_LV2 comes from the daw_lv2 target.
 // Without it every LV2 branch below compiles out and an Lv2 insert simply shows
@@ -253,24 +254,10 @@ float EffectsView::PanelTop(size_t i) const {
     return y;
 }
 
-// Number of LV2 add-buttons the panel offers: one per HOSTABLE plugin. The host
-// filters out anything it could not instantiate, so every row here is one the
-// user can actually add. Zero when this build has no LV2 support.
-static size_t Lv2AddRowCount() {
-#ifdef DAW_HAVE_LV2
-    return Lv2Host::Instance().Plugins().size();
-#else
-    return 0;
-#endif
-}
-
 float EffectsView::ContentHeight() const {
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
-    // 8 built-in add buttons, one per loaded add-on, one per hostable LV2 plugin.
-    const int addRows = 8 + (int)PluginHost::Instance().Plugins().size()
-                          + (int)Lv2AddRowCount();
-    y += addRows * 26 + 12;
+    y += 26 + 12;   // the single "Add Effect..." button
     return y;
 }
 
@@ -646,50 +633,17 @@ void EffectsView::Draw(BRect) {
         }
     }
 
-    // Add-effect buttons.
-    float ay = PanelTop(fChain.size());
-    const char* adds[8] = { "Add EQ", "Add Delay", "Add Reverb", "Add Compressor",
-                            "Add Saturator", "Add Gate", "Add Widener", "Add Limiter" };
-    const EffectType at[8] = { EffectType::Eq, EffectType::Delay, EffectType::Reverb,
-                               EffectType::Compressor, EffectType::Saturator,
-                               EffectType::Gate, EffectType::Widener, EffectType::Limiter };
-    for (int k = 0; k < 8; k++) {
-        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
-        SetHighColor(ColHeaderHi()); FillRect(b);
-        SetHighColor(ColGrid());     StrokeRect(b);
-        SetHighColor(ColAccent());   DrawString(adds[k], BPoint(b.left + 10, b.bottom - 6));
-        fHits.push_back({ (int)at[k], 4, 0, b, 0, 0 });
-        ay += 26;
-    }
-    // One button per loaded plugin add-on (slot carries the plugin index).
-    const std::vector<PluginInfo>& plugins = PluginHost::Instance().Plugins();
-    for (size_t k = 0; k < plugins.size(); k++) {
-        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
-        SetHighColor(ColHeaderHi()); FillRect(b);
-        SetHighColor(ColGrid());     StrokeRect(b);
-        SetHighColor(ColAccent());
-        std::string lbl = "Add " + plugins[k].name;
-        DrawString(lbl.c_str(), BPoint(b.left + 10, b.bottom - 6));
-        fHits.push_back({ (int)EffectType::Plugin, 4, (int)k, b, 0, 0 });
-        ay += 26;
-    }
-#ifdef DAW_HAVE_LV2
-    // One button per hostable LV2 plugin (slot carries the listing index),
-    // exactly as for the add-ons above. Without this there is no way to create
-    // an Lv2 insert from the UI at all; the plugin browser will eventually
-    // replace this whole column with one button.
-    const std::vector<Lv2PluginInfo>& lv2 = Lv2Host::Instance().Plugins();
-    for (size_t k = 0; k < lv2.size(); k++) {
-        BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
-        SetHighColor(ColHeaderHi()); FillRect(b);
-        SetHighColor(ColGrid());     StrokeRect(b);
-        SetHighColor(ColAccent());
-        std::string lbl = "Add " + lv2[k].name + " (LV2)";
-        DrawString(lbl.c_str(), BPoint(b.left + 10, b.bottom - 6));
-        fHits.push_back({ (int)EffectType::Lv2, 4, (int)k, b, 0, 0 });
-        ay += 26;
-    }
-#endif
+    // ONE button, opening the searchable browser. It used to be a button per
+    // available effect, which does not survive a real plugin collection: the
+    // column sits below the chain, so a single 26-parameter plugin pushed every
+    // add button off the visible area.
+    const float ay = PanelTop(fChain.size());
+    BRect b(kPanelPad, ay, w - kPanelPad, ay + 22);
+    SetHighColor(ColHeaderHi()); FillRect(b);
+    SetHighColor(ColGrid());     StrokeRect(b);
+    SetHighColor(ColAccent());
+    DrawString("Add Effect...", BPoint(b.left + 10, b.bottom - 6));
+    fHits.push_back({ 0, 4, 0, b, 0, 0 });   // kind 4 = open the browser
 }
 
 // --- interaction ----------------------------------------------------------
@@ -840,42 +794,8 @@ void EffectsView::MouseDown(BPoint where) {
                 Apply(); Invalidate(); UpdateScrollRange();
             }
             break;
-        case 4:   // add (h.effect carries the EffectType; slot = plugin index)
-            if ((EffectType)h.effect == EffectType::Plugin) {
-                const std::vector<PluginInfo>& pl =
-                    PluginHost::Instance().Plugins();
-                if (h.slot >= 0 && h.slot < (int)pl.size()) {
-                    EffectDesc d;
-                    d.type = EffectType::Plugin;
-                    d.pluginName = pl[h.slot].name;
-                    for (const PluginParamInfo& pp : pl[h.slot].params)
-                        d.params.push_back(pp.def);   // seed defaults
-                    fChain.push_back(d);
-                    Apply(); Invalidate(); UpdateScrollRange();
-                }
-            }
-#ifdef DAW_HAVE_LV2
-            else if ((EffectType)h.effect == EffectType::Lv2) {
-                const std::vector<Lv2PluginInfo>& pl =
-                    Lv2Host::Instance().Plugins();
-                if (h.slot >= 0 && h.slot < (int)pl.size()) {
-                    EffectDesc d;
-                    d.type = EffectType::Lv2;
-                    d.pluginName = pl[h.slot].uri;   // the URI is the persisted id
-                    // Seed the plugin's OWN port defaults, never zeros: these
-                    // plugins expose an `Enabled` control whose default is 1, and
-                    // a zero-filled descriptor would insert a silent plugin.
-                    for (const Lv2ParamInfo& pp : pl[h.slot].params)
-                        d.params.push_back(pp.def);
-                    fChain.push_back(d);
-                    Apply(); Invalidate(); UpdateScrollRange();
-                }
-            }
-#endif
-            else {
-                fChain.push_back(MakeDefault((EffectType)h.effect));
-                Apply(); Invalidate(); UpdateScrollRange();
-            }
+        case 4:   // "Add Effect..." -> open the browser; it posts the choice back
+            OpenBrowser();
             break;
     }
 }
@@ -1006,7 +926,44 @@ bool EffectsView::WheelAdjust(BPoint where, float dy) {
     return true;
 }
 
+// Open the searchable plugin browser. It runs its own looper and posts
+// kMsgPluginChosen back to this view; it never touches the model.
+void EffectsView::OpenBrowser() {
+    BRect wr(160, 160, 620, 560);
+    if (BWindow* w = Window()) {
+        // Offer it beside the editor rather than at a fixed screen position.
+        BRect f = w->Frame();
+        wr.OffsetTo(f.right + 12, f.top);
+    }
+    (new PluginBrowser(wr, fTrack, BMessenger(this), fApply))->Show();
+}
+
 void EffectsView::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgPluginChosen) {
+        int32 type = 0;
+        const char* name = nullptr;
+        if (msg->FindInt32("type", &type) != B_OK) return;
+        msg->FindString("name", &name);
+        if (type < 0 || type > kMaxEffectTypeId) return;   // never trust a message
+
+        const EffectType t = (EffectType)type;
+        EffectDesc d;
+        if (EffectHasPluginName(t)) {
+            d.type       = t;
+            d.pluginName = name ? name : "";
+            if (d.pluginName.empty()) return;
+            // Seed the host's own defaults, never zeros: an LV2 plugin typically
+            // has an `Enabled` port defaulting to 1, so a zero-filled descriptor
+            // would insert a plugin that renders silence.
+            for (const HostParam& p : HostParamsFor(d))
+                d.params.push_back(p.def);
+        } else {
+            d = MakeDefault(t);
+        }
+        fChain.push_back(d);
+        Apply(); Invalidate(); UpdateScrollRange();
+        return;
+    }
     if (msg->what == kMsgFxCommit) {   // wheel went quiet: fold it into one step
         FlushPendingEdit();
         return;

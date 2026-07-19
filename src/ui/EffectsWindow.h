@@ -85,6 +85,7 @@ private:
     void  DrawEqGraph(BRect r, const EffectDesc& d, int effIdx);
     void  DrawCompCurve(BRect r, const EffectDesc& d, int effIdx);
     int   HitTest(BPoint where, Hit* out) const;
+    void  OpenBrowser();      // "Add Effect..." -> searchable plugin browser
 
     // Mouse-wheel parameter edit. Returns false when the pointer is not over a
     // control, so the wheel keeps scrolling the panel list.
