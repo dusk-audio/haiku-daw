@@ -31,11 +31,13 @@ a track or master insert chain like any built-in effect.
 | Reason | Real examples on the dev host |
 | --- | --- |
 | Requires a feature we do not implement | sfizz, sfizz-multi (`worker:schedule`) |
-| Audio topology out of scope | DuskAmp (1 in / 2 out), Multi-Synth (0 in / 2 out), GrooveMind, Chord Analyzer Headless / MIDI, the eg-\* examples |
-| Required port of a class we cannot size | *(none installed — see "untested" below)* |
+| Audio topology out of scope | DuskAmp (1 in / 2 out), Multi-Synth (0 in / 2 out), GrooveMind, Chord Analyzer Headless / MIDI, eg-fifths, eg-params, eg-metro |
+| Required port of a class we cannot size | *(no example on either machine — unit-tested only)* |
 | Malformed bundle | tape_machine_2 (TTL syntax error at line 388) |
 
-Result on this machine: **9 hostable, 10 rejected**, out of 19 plugins lilv finds.
+Result on the Linux dev host: **9 hostable, 10 rejected** out of 19 plugins lilv finds.
+On the Haiku VM: **4 hostable, 3 rejected** out of 7 (the LV2 example plugins).
+Note `eg-amp` is *hosted* on Haiku (mono 1-in/1-out) — it is not installed on Linux.
 
 ## Features provided at instantiation
 
