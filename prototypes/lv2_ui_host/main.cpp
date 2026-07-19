@@ -136,6 +136,11 @@ std::string FileUriToPath(const char* uri) {
 } // namespace
 
 int main(int argc, char** argv) {
+    // Unbuffered: this is a diagnostic tool, and its output is usually being
+    // watched through a redirect while the window is up. Block buffering would
+    // hold every line until exit, which is exactly when it stops being useful.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+
     if (argc < 2) {
         std::printf("usage: %s <plugin-uri> | --list\n", argv[0]);
         return 1;
