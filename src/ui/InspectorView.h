@@ -35,6 +35,7 @@ private:
     Track*       CurrentTrackMut() const;
     void Layout();                    // recompute control rects for the width
     void Refresh();                   // repaint + tell the window to refresh
+    void MessageReceived(BMessage* msg) override;   // plugin browser's choice
 
     Project*      fProject;
     CommandStack* fStack;
@@ -42,11 +43,19 @@ private:
 
     // Control rects (recomputed in Layout()).
     BRect fMuteR, fSoloR, fArmR, fMonR, fInputR, fOutR, fSendsR, fFxR, fInstR;
+    // The insert-slot list block, and the row rect for one slot inside it.
+    // Layout(), Draw() and MouseDown() all derive rows from FxRowRect so they
+    // cannot disagree about where a row is.
+    BRect fFxSlotsR;
+    int   fFxRows = 0;          // rows drawn, including the trailing empty slot
+    BRect FxRowRect(int i) const;
     BRect fAutoR, fPanR, fFaderR, fMeterR;
     float fPeakL = 0.0f, fPeakR = 0.0f;   // selected track output level
 
     // Fader / pan drag (preview by writing the model, commit one command on up).
-    enum class Drag { None, Fader, Pan };
+    enum class Drag { None, Fader, Pan, FxSlot };
+    int   fDragFxFrom = -1;     // insert being dragged, and where it would land
+    int   fDragFxTo   = -1;
     Drag  fDrag = Drag::None;
     float fDragOrig  = 0.0f;   // gain/pan at drag start (for undo)
     float fDragStartY = 0.0f;  // cursor y at drag start (pan knob = vertical)

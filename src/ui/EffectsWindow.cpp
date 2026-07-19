@@ -70,6 +70,29 @@ static const char* EffName(EffectType t) {
     }
 }
 
+// Public: the label the channel strip and the panel header both show.
+std::string EffectDisplayName(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin)
+        return d.pluginName.empty() ? "Plugin" : d.pluginName;
+#ifdef DAW_HAVE_LV2
+    if (d.type == EffectType::Lv2) {
+        // pluginName is the URI for LV2 -- unreadable as a label -- so ask the
+        // host for the display name it read from the bundle. An unresolved URI
+        // falls through to the bare type, which is what an uninstalled plugin
+        // shows.
+        if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
+            if (!pi->name.empty()) return pi->name;
+    }
+#endif
+    if (d.type == EffectType::Reverb) {
+        const int algo = (int)(d.p(2) + 0.5f);
+        if (algo == 1) return "Reverb - Plate";
+        if (algo == 2) return "Reverb - Hall";
+        if (algo == 3) return "Reverb - FDN";
+    }
+    return EffName(d.type);
+}
+
 // Knobs shown for each effect. EQ uses the graph for freq/gain; only the 5 Q
 // knobs are listed here.
 static std::vector<KnobDef> KnobsFor(EffectType t) {
@@ -485,24 +508,8 @@ void EffectsView::Draw(BRect) {
         SetHighColor(ColHeaderHi());
         FillRect(BRect(panel.left, panel.top, panel.right, panel.top + kTitleH));
         SetHighColor(ColText());
-        const char* title = EffName(d.type);
-        if (d.type == EffectType::Plugin) title = d.pluginName.c_str();
-#ifdef DAW_HAVE_LV2
-        // pluginName is the URI for LV2, which is unreadable in a title bar
-        // ("https://dusk-audio.github.io/plugins/4k-eq-2"). Show the display
-        // name the host read from the bundle; fall back to the bare type when
-        // the URI does not resolve, which is what an uninstalled plugin shows.
-        else if (d.type == EffectType::Lv2) {
-            if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
-                title = pi->name.c_str();
-        }
-#endif
-        else if (d.type == EffectType::Reverb) {
-            const int algo = (int)(d.p(2) + 0.5f);
-            title = algo == 1 ? "Reverb - Plate"
-                  : algo == 2 ? "Reverb - Hall"
-                  : algo == 3 ? "Reverb - FDN" : "Reverb";
-        }
+        const std::string titleStr = EffectDisplayName(d);
+        const char* title = titleStr.c_str();
         DrawString(title, BPoint(panel.left + 8, panel.top + 15));
 
         // Up / Down / Remove buttons in the title bar.
@@ -666,6 +673,24 @@ static EffectDesc MakeDefault(EffectType t) {
         case EffectType::Eq:
         default:                     return EqDesc();
     }
+}
+
+// Public: build a fresh insert for `type`. Shared by the effects editor and the
+// channel strip, because the defaults rule below is a trap worth encoding once.
+EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId) {
+    if (!EffectHasPluginName(type)) return MakeDefault(type);
+
+    EffectDesc d;
+    d.type       = type;
+    d.pluginName = pluginId;
+    // Seed the HOST's own port defaults, never zeros. LV2 plugins routinely
+    // expose an `Enabled` control defaulting to 1, so a zero-filled descriptor
+    // inserts a plugin that renders silence -- indistinguishable, to the user,
+    // from a broken host. Leaving params empty would also work (the factory then
+    // applies port defaults itself), but seeding them means the editor shows the
+    // real values immediately instead of zeros.
+    for (const HostParam& p : HostParamsFor(d)) d.params.push_back(p.def);
+    return d;
 }
 
 void EffectsView::MouseDown(BPoint where) {
@@ -947,20 +972,9 @@ void EffectsView::MessageReceived(BMessage* msg) {
         if (type < 0 || type > kMaxEffectTypeId) return;   // never trust a message
 
         const EffectType t = (EffectType)type;
-        EffectDesc d;
-        if (EffectHasPluginName(t)) {
-            d.type       = t;
-            d.pluginName = name ? name : "";
-            if (d.pluginName.empty()) return;
-            // Seed the host's own defaults, never zeros: an LV2 plugin typically
-            // has an `Enabled` port defaulting to 1, so a zero-filled descriptor
-            // would insert a plugin that renders silence.
-            for (const HostParam& p : HostParamsFor(d))
-                d.params.push_back(p.def);
-        } else {
-            d = MakeDefault(t);
-        }
-        fChain.push_back(d);
+        const std::string id = name ? name : "";
+        if (EffectHasPluginName(t) && id.empty()) return;
+        fChain.push_back(MakeInsertDesc(t, id));
         Apply(); Invalidate(); UpdateScrollRange();
         return;
     }

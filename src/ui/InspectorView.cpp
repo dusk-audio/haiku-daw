@@ -3,6 +3,7 @@
 #include "UiMetrics.h"
 #include "Widgets.h"
 #include "EffectsWindow.h"
+#include "PluginBrowser.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
 #include "../model/Commands.h"
@@ -37,6 +38,20 @@ void InspectorView::Refresh() {
     if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
 }
 
+// Insert-slot list metrics. Rows are compact because the strip is shared with
+// the fader and meter; kMaxFxRows caps the block so a long chain cannot squeeze
+// them out.
+static constexpr float  kFxRowH   = 17.0f;
+static constexpr size_t kMaxFxRows = 6;
+// The bypass dot sits at the right end of a row.
+static constexpr float  kFxDotW   = 14.0f;
+
+BRect InspectorView::FxRowRect(int i) const {
+    if (i < 0 || i >= fFxRows) return BRect();
+    const float top = fFxSlotsR.top + i * kFxRowH;
+    return BRect(fFxSlotsR.left, top, fFxSlotsR.right, top + kFxRowH - 2.0f);
+}
+
 void InspectorView::Layout() {
     const float w = Bounds().Width();
     const float pad = 10.0f;
@@ -52,8 +67,27 @@ void InspectorView::Layout() {
     fMonR   = BRect(pad, y, pad + bw, y + 20); y += 28;
     fOutR   = BRect(pad,           y, pad + hw,     y + 20);
     fSendsR = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
-    fFxR    = BRect(pad,           y, pad + hw,     y + 20);
-    fInstR  = BRect(pad + hw + 6,  y, pad + bw,     y + 20); y += 26;
+    // The instrument slot gets its own full-width row ABOVE the inserts, so the
+    // one-instrument-plus-N-inserts model is visible in the strip: a MIDI track
+    // has exactly one voice, and any number of inserts after it.
+    if (const Track* it = CurrentTrack())
+        if (it->type == TrackType::Midi) {
+            fInstR = BRect(pad, y, pad + bw, y + 20);
+            y += 26;
+        } else {
+            fInstR = BRect();
+        }
+    else fInstR = BRect();
+
+    // Insert slots: one row per effect plus a trailing empty one to add into.
+    // Capped so a long chain cannot push the fader off the bottom of the strip;
+    // the overflow row says how many are hidden and opens the full editor.
+    const size_t nfx = CurrentTrack() ? CurrentTrack()->fx.size() : 0;
+    fFxRows = (int)(nfx < kMaxFxRows ? nfx + 1 : kMaxFxRows);
+    fFxSlotsR = BRect(pad, y, pad + bw, y + fFxRows * kFxRowH);
+    y += fFxRows * kFxRowH + 6;
+    fFxR = BRect();             // the old single "FX n" button is gone
+
     fAutoR  = BRect(pad, y, pad + bw, y + 20);
     y += 20 + 20;               // button + a labelled gap ("Pan") before the knob
     // Pan knob (centered); its "Pan" label sits in the gap above it.
@@ -123,11 +157,68 @@ void InspectorView::Draw(BRect) {
     std::snprintf(sb, sizeof(sb), "Sends %zu", t->sends.size());
     DrawButton(this, fSendsR, sb, !t->sends.empty(), accent);
 
-    // Effects + instrument (MIDI).
-    char fb[16];
-    std::snprintf(fb, sizeof(fb), "FX %zu", t->fx.size());
-    DrawButton(this, fFxR, fb, !t->fx.empty(), accent);
-    if (midi) DrawButton(this, fInstR, "Instrument", true, ColMidiAccent());
+    // Instrument slot (MIDI only), visually distinct from the inserts below it.
+    if (midi && fInstR.IsValid())
+        DrawButton(this, fInstR, "Instrument", true, ColMidiAccent());
+
+    // --- Insert slots ------------------------------------------------------
+    const size_t nfx = t->fx.size();
+    for (int i = 0; i < fFxRows; i++) {
+        const BRect r = FxRowRect(i);
+        if (!r.IsValid()) continue;
+
+        // The last row is the overflow notice when the chain is longer than the
+        // strip can show, and the "add" row otherwise.
+        const bool overflow = nfx >= kMaxFxRows && i == (int)kMaxFxRows - 1;
+        const bool empty    = !overflow && (size_t)i >= nfx;
+
+        SetHighColor(ColHeaderHi());
+        FillRect(r);
+        SetHighColor(ColGrid());
+        StrokeRect(r);
+
+        if (overflow) {
+            char ob[32];
+            std::snprintf(ob, sizeof(ob), "+%zu more...",
+                          nfx - (kMaxFxRows - 1));
+            SetHighColor(ColTextDim());
+            DrawString(ob, BPoint(r.left + 6, r.bottom - 5));
+            continue;
+        }
+        if (empty) {
+            SetHighColor(ColTextDim());
+            DrawString("+ Add Effect", BPoint(r.left + 6, r.bottom - 5));
+            continue;
+        }
+
+        const EffectDesc& d = t->fx[(size_t)i];
+        // A bypassed insert keeps its slot but reads as inactive.
+        SetHighColor(d.bypassed ? ColTextDim() : ColText());
+        BString nm(EffectDisplayName(d).c_str());
+        TruncateString(&nm, B_TRUNCATE_END, r.Width() - kFxDotW - 12.0f);
+        DrawString(nm.String(), BPoint(r.left + 6, r.bottom - 5));
+
+        // Bypass dot: filled in the track accent when the insert is live,
+        // hollow when bypassed.
+        BRect dot(r.right - kFxDotW - 2, r.top + 3,
+                  r.right - 4, r.top + 3 + (kFxDotW - 6));
+        if (d.bypassed) {
+            SetHighColor(ColTextDim());
+            StrokeEllipse(dot);
+        } else {
+            SetHighColor(accent);
+            FillEllipse(dot);
+        }
+    }
+
+    // Drop indicator while a slot is being dragged to a new position.
+    if (fDrag == Drag::FxSlot && fDragFxTo >= 0 && fDragFxTo < fFxRows) {
+        const BRect r = FxRowRect(fDragFxTo);
+        if (r.IsValid()) {
+            SetHighColor(accent);
+            StrokeLine(BPoint(r.left, r.top - 1), BPoint(r.right, r.top - 1));
+        }
+    }
 
     DrawButton(this, fAutoR, "Automation", false);
 
@@ -239,10 +330,49 @@ void InspectorView::MouseDown(BPoint where) {
         (new SendsWindow(wr, t->sends, buses, id, BMessenger(Window())))->Show();
         return;
     }
-    if (fFxR.Contains(where)) {
-        BPoint p = ConvertToScreen(where);
-        BRect wr(p.x, p.y, p.x + 480, p.y + 620);
-        (new EffectsWindow(wr, t->fx, id, BMessenger(Window())))->Show();
+    // --- Insert slots ------------------------------------------------------
+    if (fFxSlotsR.Contains(where)) {
+        const size_t nfx = t->fx.size();
+        for (int i = 0; i < fFxRows; i++) {
+            const BRect r = FxRowRect(i);
+            if (!r.IsValid() || !r.Contains(where)) continue;
+
+            const bool overflow = nfx >= kMaxFxRows && i == (int)kMaxFxRows - 1;
+            const bool empty    = !overflow && (size_t)i >= nfx;
+
+            if (overflow) {              // the rest of the chain: open the editor
+                BPoint p = ConvertToScreen(where);
+                BRect wr(p.x, p.y, p.x + 480, p.y + 620);
+                (new EffectsWindow(wr, t->fx, id, BMessenger(Window())))->Show();
+                return;
+            }
+            if (empty) {                 // add into the free slot
+                BPoint p = ConvertToScreen(where);
+                BRect wr(p.x, p.y, p.x + 460, p.y + 400);
+                (new PluginBrowser(wr, id, BMessenger(this),
+                                   BMessenger(Window())))->Show();
+                return;
+            }
+
+            // The bypass dot is a discrete toggle, so it gets its own command
+            // rather than a whole-chain replace: the Edit menu then reads
+            // "Bypass Effect" instead of "Edit Effects".
+            if (where.x >= r.right - kFxDotW - 4) {
+                fStack->Execute(std::make_unique<SetFxBypassCommand>(
+                                    id, i, !t->fx[(size_t)i].bypassed),
+                                *fProject);
+                Refresh();
+                return;
+            }
+
+            // Anywhere else on the row: begin a possible reorder drag. A click
+            // that never moves opens the editor instead (see MouseUp).
+            fDrag = Drag::FxSlot;
+            fDragFxFrom = i;
+            fDragFxTo   = i;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            return;
+        }
         return;
     }
     if (t->type == TrackType::Midi && fInstR.Contains(where)) {
@@ -270,10 +400,43 @@ void InspectorView::MouseDown(BPoint where) {
     }
 }
 
+// The plugin browser's choice, when it was opened from an empty insert slot.
+// The inspector runs on the main window's thread and owns the command stack, so
+// it applies the edit directly -- unlike the aux windows, which must post.
+void InspectorView::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgPluginChosen) {
+        Track* t = CurrentTrackMut();
+        int32 type = 0;
+        const char* name = nullptr;
+        if (!t || msg->FindInt32("type", &type) != B_OK) return;
+        msg->FindString("name", &name);
+        if (type < 0 || type > kMaxEffectTypeId) return;   // never trust a message
+
+        std::vector<EffectDesc> chain = t->fx;
+        chain.push_back(MakeInsertDesc((EffectType)type, name ? name : ""));
+        fStack->Execute(std::make_unique<SetFxCommand>(t->id, false,
+                                                       std::move(chain)),
+                        *fProject);
+        Refresh();
+        return;
+    }
+    BView::MessageReceived(msg);
+}
+
 void InspectorView::MouseMoved(BPoint where, uint32, const BMessage*) {
     if (fDrag == Drag::None) return;
     Track* t = CurrentTrackMut();
     if (!t) return;
+    if (fDrag == Drag::FxSlot) {
+        // Which insert position the pointer is over. Clamped to the real
+        // inserts, so a drag onto the empty/overflow row lands at the end.
+        const int nfx = (int)t->fx.size();
+        int to = (int)((where.y - fFxSlotsR.top) / kFxRowH);
+        if (to < 0) to = 0;
+        if (to > nfx - 1) to = nfx - 1;
+        if (to != fDragFxTo) { fDragFxTo = to; Invalidate(); }
+        return;
+    }
     if (fDrag == Drag::Fader) {
         if (fFaderR.Height() <= 0) return;   // avoid div-by-zero -> NaN gain
         float frac = (fFaderR.bottom - where.y) / fFaderR.Height();
@@ -293,6 +456,30 @@ void InspectorView::MouseUp(BPoint) {
     const Drag mode = fDrag;
     fDrag = Drag::None;
     if (!t) return;
+    if (mode == Drag::FxSlot) {
+        const int from = fDragFxFrom, to = fDragFxTo;
+        fDragFxFrom = fDragFxTo = -1;
+        const int nfx = (int)t->fx.size();
+        if (from < 0 || from >= nfx) { Refresh(); return; }
+        if (to < 0 || to >= nfx || to == from) {
+            // Never moved: this was a click on the row, which opens the editor.
+            BRect wr(120, 120, 600, 740);
+            (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window())))->Show();
+            Refresh();
+            return;
+        }
+        // Reorder is just a permutation of the descriptor vector, so it goes
+        // through the ordinary chain-replace command and is one undo step.
+        std::vector<EffectDesc> chain = t->fx;
+        EffectDesc moved = chain[(size_t)from];
+        chain.erase(chain.begin() + from);
+        chain.insert(chain.begin() + to, moved);
+        fStack->Execute(std::make_unique<SetFxCommand>(t->id, false,
+                                                       std::move(chain)),
+                        *fProject);
+        Refresh();
+        return;
+    }
     // Restore the pre-drag value, then push ONE command (clean single undo).
     // Only when the value actually changed, so a bare click isn't a no-op undo.
     if (mode == Drag::Fader) {

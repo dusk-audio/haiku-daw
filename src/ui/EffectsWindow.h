@@ -15,11 +15,26 @@
 #include <View.h>
 #include <Window.h>
 
+#include <string>
 #include <vector>
 
 class BMessageRunner;
 
 namespace daw {
+
+// What to call an insert in the UI: the plugin's own name for plugin-backed
+// effects, the effect type otherwise. Shared so the channel strip's slot list
+// and the editor's panel headers cannot drift apart -- and because getting it
+// right for LV2 needs a host lookup (pluginName holds the URI, which is
+// unreadable as a label), which is not worth writing twice.
+std::string EffectDisplayName(const EffectDesc& d);
+
+// A fresh insert descriptor for `type` (`pluginId` is the add-on name or LV2 URI
+// for plugin-backed types, ignored otherwise). Shared with the channel strip so
+// there is ONE place that knows a plugin must be seeded with its host's port
+// defaults rather than zeros -- zeros switch off the `Enabled` port that LV2
+// plugins routinely expose, and the plugin renders silence.
+EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId);
 
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
 // float[] "ep" (all params concatenated).
