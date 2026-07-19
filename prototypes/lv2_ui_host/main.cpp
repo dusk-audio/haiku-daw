@@ -41,6 +41,7 @@
 #include <Window.h>
 
 #include <dlfcn.h>
+#include <cstdlib>   // setenv, for the Haiku bundle search path
 
 #include <cstdio>
 #include <cstring>
@@ -141,6 +142,18 @@ int main(int argc, char** argv) {
     }
 
     BApplication app("application/x-vnd.DuskAudio-Lv2UiHost");
+
+    // lilv's built-in default search path is POSIX-shaped (~/.lv2,
+    // /usr/local/lib/lv2, /usr/lib/lv2) and names NO directory that exists on
+    // Haiku, so a stock install finds zero plugins and reports no error. The DAW
+    // hit this too (see Lv2Host::ScanAll); overwrite=0 keeps an explicitly-set
+    // LV2_PATH winning.
+    setenv("LV2_PATH",
+           "/boot/home/config/non-packaged/lib/lv2:"
+           "/boot/home/config/lib/lv2:"
+           "/boot/system/non-packaged/lib/lv2:"
+           "/boot/system/lib/lv2",
+           0);
 
     LilvWorld* world = lilv_world_new();
     lilv_world_load_all(world);
