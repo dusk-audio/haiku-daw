@@ -1,0 +1,25 @@
+@prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# Test-only LV2 bundle built by this repo (see tests/lv2fixture/). Never
+# installed: the build points LV2_PATH at it for lv2_fixture_tests only.
+
+<urn:haiku-daw:test:mono-gain>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:stereo-latent>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:bad-topology>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:needs-feature>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .

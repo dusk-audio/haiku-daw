@@ -176,6 +176,61 @@ if(DAW_LV2_ENABLED)
     add_executable(lv2_host_tests tests/lv2_host_tests.cpp)
     target_link_libraries(lv2_host_tests PRIVATE daw_lv2)
     add_test(NAME lv2_host_tests COMMAND lv2_host_tests)
+
+    # --- A real LV2 bundle, built by us, purely as a test fixture ----------
+    # lv2_host_tests can only assert INVARIANTS, because it runs against
+    # whatever each machine happens to have installed — and the two dev machines
+    # have entirely different sets while CI would have neither. That left the
+    # MonoDual path, non-zero latency and the rejection paths all dependent on
+    # luck. These four plugins have exactly-known behaviour, so lv2_fixture_tests
+    # asserts on VALUES and gets the same answer everywhere.
+    #
+    # Never installed: LV2_PATH is pointed at the build tree for that one test.
+    set(DAW_LV2_FIXTURE_ROOT "${CMAKE_BINARY_DIR}/lv2fixture")
+    add_library(daw_test_plugins MODULE tests/lv2fixture/daw_test_plugins.cpp)
+    set_target_properties(daw_test_plugins PROPERTIES
+        PREFIX "" OUTPUT_NAME "daw_test_plugins" SUFFIX ".so"
+        LIBRARY_OUTPUT_DIRECTORY "${DAW_LV2_FIXTURE_ROOT}/daw_test.lv2")
+    target_include_directories(daw_test_plugins PRIVATE ${LILV_INCLUDE_DIRS})
+
+    # The .ttl files ARE the plugin as far as lilv is concerned; copy them in
+    # beside the binary so the bundle is complete.
+    add_custom_command(TARGET daw_test_plugins POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/manifest.ttl"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/lv2fixture/plugins.ttl"
+                "${DAW_LV2_FIXTURE_ROOT}/daw_test.lv2/"
+        COMMENT "Assembling LV2 test fixture bundle")
+
+    add_executable(lv2_fixture_tests tests/lv2_fixture_tests.cpp)
+    target_link_libraries(lv2_fixture_tests PRIVATE daw_lv2)
+    add_dependencies(lv2_fixture_tests daw_test_plugins)
+    add_test(NAME lv2_fixture_tests COMMAND lv2_fixture_tests)
+
+    # LV2_PATH = our fixture + the system SPEC bundles.
+    #
+    # The spec bundles are not optional decoration. With the fixture dir alone,
+    # lilv has no lv2core to resolve the plugin-class hierarchy against and takes
+    # a path that leaks a node inside lilv_world_load_plugin_classes (caught by
+    # ASan, reproducible, and absent as soon as the spec dir is on the path). It
+    # is also simply not a world any real host ever sees. pkg-config knows where
+    # the bundles live, which keeps this working across distros and on Haiku.
+    #
+    # The system dir also contains whatever plugins the machine has, so the test
+    # scopes every count to its OWN four URIs rather than to the world total —
+    # that keeps the assertions deterministic without faking the environment.
+    pkg_get_variable(DAW_LV2_BUNDLE_DIR lv2 lv2dir)
+    if(DAW_LV2_BUNDLE_DIR)
+        set(DAW_LV2_TEST_PATH "${DAW_LV2_FIXTURE_ROOT}:${DAW_LV2_BUNDLE_DIR}")
+    else()
+        message(STATUS "lv2 bundle dir not found via pkg-config - "
+                       "lv2_fixture_tests will run against the fixture alone")
+        set(DAW_LV2_TEST_PATH "${DAW_LV2_FIXTURE_ROOT}")
+    endif()
+    # The host's Haiku default path uses setenv(overwrite=0), so this wins there
+    # too and the test sees the same world on both platforms.
+    set_tests_properties(lv2_fixture_tests PROPERTIES
+        ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
 endif()
 
 add_executable(projectio_tests tests/projectio_tests.cpp)

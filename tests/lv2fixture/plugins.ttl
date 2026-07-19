@@ -1,0 +1,97 @@
+@prefix doap:  <http://usefulinc.com/ns/doap#> .
+@prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
+@prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix units: <http://lv2plug.in/ns/extensions/units#> .
+
+# Fixture plugins for the DAW's LV2 host tests. Trivial DSP with exactly-known
+# behaviour, so tests can assert on VALUES rather than on properties.
+
+# --- MonoDual: hosted as two instances, one per channel ---------------------
+<urn:haiku-daw:test:mono-gain>
+    a lv2:Plugin ;
+    doap:name "DAW Test Mono Gain" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "in" ; lv2:name "In"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 1 ; lv2:symbol "out" ; lv2:name "Out"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 2 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
+    ] .
+
+# --- Stereo, and the only plugin here that reports non-zero latency ---------
+# Declares BOTH latency mechanisms on the same port, exactly as every real
+# plugin encountered does, so the host's designation-over-property preference is
+# exercised against a real bundle and not only in the pure unit tests.
+<urn:haiku-daw:test:stereo-latent>
+    a lv2:Plugin ;
+    doap:name "DAW Test Stereo Latent" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "inL" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "inR" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "outL" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 5 ; lv2:symbol "extra" ; lv2:name "Extra" ;
+        lv2:default 0.25 ; lv2:minimum -1.0 ; lv2:maximum 1.0
+    ] , [
+        a lv2:ControlPort , lv2:OutputPort ;
+        lv2:index 6 ; lv2:symbol "latency" ; lv2:name "Latency" ;
+        lv2:designation lv2:latency ;
+        lv2:portProperty lv2:reportsLatency , lv2:integer ;
+        lv2:minimum 0 ; lv2:maximum 8192 ; units:unit units:frame
+    ] .
+
+# --- Must be REJECTED: 3 mandatory audio in, 1 out --------------------------
+<urn:haiku-daw:test:bad-topology>
+    a lv2:Plugin ;
+    doap:name "DAW Test Bad Topology" ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "in1" ; lv2:name "In 1"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "in2" ; lv2:name "In 2"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 2 ; lv2:symbol "in3" ; lv2:name "In 3"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "out" ; lv2:name "Out"
+    ] .
+
+# --- Must be REJECTED: hostable shape, unimplementable requirement ----------
+<urn:haiku-daw:test:needs-feature>
+    a lv2:Plugin ;
+    doap:name "DAW Test Needs Feature" ;
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/worker#schedule> ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "inL" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "inR" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "outL" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
+    ] .
