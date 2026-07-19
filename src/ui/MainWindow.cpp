@@ -744,11 +744,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 if (msg->FindInt32("eb", i, &byp) == B_OK)
                     d.bypassed = (byp != 0);
                 float mix = 1.0f;
-                if (msg->FindFloat("em", i, &mix) == B_OK) {
-                    if (!(mix >= 0.0f)) mix = 0.0f;   // also catches NaN
-                    if (mix > 1.0f)     mix = 1.0f;
-                    d.mix = mix;
-                }
+                if (msg->FindFloat("em", i, &mix) == B_OK)
+                    d.mix = ClampFxMix(mix);
                 int32 count = 0;
                 msg->FindInt32("ec", i, &count);
                 for (int32 j = 0; j < count; j++) {

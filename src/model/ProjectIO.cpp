@@ -87,15 +87,12 @@ constexpr int kMaxListCount = 100000;
 //   - a MIX outside [0,1] is clamped rather than rejected, because it is
 //     meaningless but harmless (unlike an `mev` field, where an out-of-range
 //     value means the record itself is garbage, so that one fails the load).
-// The `!(mix >= 0)` form also catches a NaN, which no ordinary comparison would.
 void ApplyFxInsert(std::vector<EffectDesc>& chain, int index, int bypassed,
                    float mix) {
     if (index < 0 || index >= (int)chain.size())
         return;
-    if (!(mix >= 0.0f)) mix = 0.0f;
-    if (mix > 1.0f)     mix = 1.0f;
     chain[(size_t)index].bypassed = (bypassed != 0);
-    chain[(size_t)index].mix      = mix;
+    chain[(size_t)index].mix      = ClampFxMix(mix);
 }
 
 } // namespace
@@ -137,7 +134,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     for (const EffectDesc& e : p.masterFx) {
         f << "masterfx " << (int)e.type << " " << e.params.size();
         for (float v : e.params) f << " " << v;
-        if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
+        if (EffectHasPluginName(e.type)) f << " " << Quote(e.pluginName);
         f << "\n";
     }
     // Per-insert bypass / wet-dry mix for the master chain, one optional line
@@ -204,7 +201,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         for (const EffectDesc& e : t.fx) {
             f << "fx " << (int)e.type << " " << e.params.size();
             for (float v : e.params) f << " " << v;
-            if (e.type == EffectType::Plugin) f << " " << Quote(e.pluginName);
+            if (EffectHasPluginName(e.type)) f << " " << Quote(e.pluginName);
             f << "\n";
         }
         // Per-insert bypass / wet-dry mix, after this track's `fx` lines (see
@@ -371,7 +368,7 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             for (int i = 0; i < count && i < kMaxListCount; i++) {
                 float v = 0.0f; if (!(iss >> v)) break; e.params.push_back(v);
             }
-            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
+            if (EffectHasPluginName(e.type)) e.pluginName = Unquote(line, escaped);
             p.masterFx.push_back(e);
         }
         else if (kw == "masterfxin") {
@@ -546,7 +543,7 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
                 if (!(iss >> v)) break;
                 e.params.push_back(v);
             }
-            if (e.type == EffectType::Plugin) e.pluginName = Unquote(line, escaped);
+            if (EffectHasPluginName(e.type)) e.pluginName = Unquote(line, escaped);
             cur.fx.push_back(e);
         }
         else if (kw == "fxin" && haveTrack) {

@@ -43,16 +43,6 @@ static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
     *outR = gain * std::sin(theta);
 }
 
-// An insert's wet/dry is meaningless outside [0,1]. ProjectIO clamps on load,
-// but a chain assembled in memory (the effects editor, a Command) can hold
-// anything, so clamp again at the engine boundary. Written as !(m >= 0) so a
-// NaN clamps to 0 instead of slipping through every ordinary comparison and
-// poisoning the mix.
-static inline float ClampMix(float m) {
-    if (!(m >= 0.0f)) return 0.0f;
-    return m > 1.0f ? 1.0f : m;
-}
-
 // --- TrackStream ------------------------------------------------------
 
 TrackStream::TrackStream(TrackId track, const std::string& path,
@@ -403,7 +393,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             b.fxDryDelay.assign(b.fx.size(), FrameDelay{});
             for (size_t i = 0; i < b.fx.size(); i++) {
                 b.fxBypass[i].store(t->fx[i].bypassed, std::memory_order_relaxed);
-                b.fxMix[i].store(ClampMix(t->fx[i].mix), std::memory_order_relaxed);
+                b.fxMix[i].store(ClampFxMix(t->fx[i].mix), std::memory_order_relaxed);
                 const int lat = b.fx[i] ? b.fx[i]->LatencySamples() : 0;
                 b.fxDryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);
             }
@@ -523,7 +513,7 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         fMasterFxDelay.emplace_back();
         fMasterFxDelay.back().Prepare(lat > 0 ? (size_t)lat : 0);
         masterBypass.push_back(d.bypassed ? 1 : 0);
-        masterMix.push_back(ClampMix(d.mix));
+        masterMix.push_back(ClampFxMix(d.mix));
         fMasterFx.push_back(std::move(fx));
         fMasterFxTypes.push_back(d.type);
     }
@@ -652,7 +642,7 @@ bool Engine::SyncFx(const Project& project) {
             // plugin) so the state is already right if the chain is rebuilt.
             if (bypass) bypass[i].store(descs[i].bypassed,
                                         std::memory_order_relaxed);
-            if (mix)    mix[i].store(ClampMix(descs[i].mix),
+            if (mix)    mix[i].store(ClampFxMix(descs[i].mix),
                                      std::memory_order_relaxed);
             if (!fx[i]) continue;
             for (size_t s = 0; s < descs[i].params.size(); s++)
@@ -687,7 +677,7 @@ void Engine::RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
     if (!e) return;   // unavailable plugin: an index-aligned hole in the chain
     const size_t nf    = frames * 2;   // interleaved floats
     const size_t bytes = nf * sizeof(float);
-    mix = ClampMix(mix);
+    mix = ClampFxMix(mix);
 
     if (bypassed) {
         // SOFT bypass: the insert stops processing but keeps reporting its
@@ -710,27 +700,24 @@ void Engine::RunInsert(IEffect* e, FrameDelay& dryDelay, bool bypassed,
         return;
     }
 
-    if (mix >= 1.0f && dryDelay.d == 0) {   // fully wet, zero latency: the
-        e->Process(buf, (int)frames);       // common path, untouched
+    if (mix >= 1.0f) {   // fully wet: the common path, a bare Process
+        // A LATENT insert additionally clocks its delay line with the dry input.
+        // The line contributes nothing here, but it must already hold the last
+        // N frames if the user toggles bypass on — otherwise the bypass path
+        // above would read a stale tail and emit it as a burst. Push() only
+        // writes the ring, so this cannot perturb `buf`.
+        if (dryDelay.d != 0) dryDelay.Push(buf, frames);
+        e->Process(buf, (int)frames);
         return;
     }
 
     // out = dry*(1-mix) + wet*mix, with the dry leg delayed by the effect's own
     // latency so the two legs stay phase-aligned rather than comb-filtering.
-    //
-    // A LATENT insert takes this path even at mix == 1, where the dry leg
-    // contributes nothing (level 0): ProcessAdd still clocks the delay line, so
-    // its ring keeps holding the current dry signal. Without that the ring
-    // would be stale the instant the user toggles bypass on, and the bypass
-    // path above would emit whatever audio was last written to it — a gap of
-    // silence, i.e. the click this whole design exists to avoid. The offline
-    // Exporter skips this clocking (its slot state is fixed for a whole render,
-    // so no toggle can happen) and the level-0 mix makes that unobservable in
-    // the output; see the matching note in Exporter's applyFx.
+    // (mix == 1 was handled above, so `mix` is strictly < 1 here and the dry leg
+    // always contributes.)
     std::memcpy(dry, buf, bytes);
     e->Process(buf, (int)frames);
-    if (mix != 1.0f)
-        for (size_t k = 0; k < nf; ++k) buf[k] *= mix;
+    for (size_t k = 0; k < nf; ++k) buf[k] *= mix;
     dryDelay.ProcessAdd(dry, buf, frames, 1.0f - mix);
 }
 

@@ -97,6 +97,14 @@ static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
                                pi->params[i].mn, pi->params[i].mx });
         return ks;
     }
+    // LV2 knobs come from the plugin's own port metadata, which this build has
+    // no way to read yet (the LV2 host is a separate change). Show NO knobs
+    // rather than falling through to the built-in table: that default is the
+    // Biquad row, whose knobs would write Hz-scale values into whatever LV2
+    // ports happen to sit at slots 1 and 2. An empty row is already a supported
+    // state — a Plugin whose add-on isn't loaded renders the same way.
+    if (d.type == EffectType::Lv2)
+        return {};
     return KnobsFor(d.type);
 }
 

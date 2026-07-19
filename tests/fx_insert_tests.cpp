@@ -284,14 +284,35 @@ int main() {
         lv2.params     = { 0.5f, 0.25f };
         lv2.mix        = 0.75f;
         Project b;
-        CHECK(SaveLoad({ lv2 }, {}, b));
+        CHECK(SaveLoad({ lv2 }, { lv2 }, b));
         CHECK(!b.Tracks().empty() && b.Tracks().front().fx.size() == 1);
         if (!b.Tracks().empty() && b.Tracks().front().fx.size() == 1) {
             const EffectDesc& g = b.Tracks().front().fx[0];
             CHECK(g.type == EffectType::Lv2);
             CHECK(g.params.size() == 2);
             CHECK(g.mix == 0.75f);
+            // The URI is the whole identity of an LV2 insert: drop it and the
+            // plugin can never be re-instantiated, so the chain silently loses
+            // an effect. Serialization gates on EffectHasPluginName, NOT on
+            // `type == Plugin` — this assertion is what pins that down.
+            CHECK(g.pluginName == "http://example.org/plugin");
         }
+        // ...and the same on the master chain, which has its own writer/reader.
+        CHECK(b.masterFx.size() == 1);
+        if (b.masterFx.size() == 1) {
+            CHECK(b.masterFx[0].type == EffectType::Lv2);
+            CHECK(b.masterFx[0].pluginName == "http://example.org/plugin");
+            CHECK(b.masterFx[0].mix == 0.75f);
+        }
+        // A native Plugin's add-on id must still round-trip unchanged.
+        EffectDesc plug;
+        plug.type       = EffectType::Plugin;
+        plug.pluginName = "SomeAddOn";
+        Project c;
+        CHECK(SaveLoad({ plug }, {}, c));
+        CHECK(!c.Tracks().empty() && c.Tracks().front().fx.size() == 1);
+        if (!c.Tracks().empty() && c.Tracks().front().fx.size() == 1)
+            CHECK(c.Tracks().front().fx[0].pluginName == "SomeAddOn");
     }
 
     // --- The Lv2 factory hook -------------------------------------------

@@ -348,22 +348,17 @@ bool ExportWav(const Project& project, const std::string& outPath,
         for (size_t i = 0; i < chain.size(); i++) {
             if (!chain[i]) continue;   // unavailable plugin: nothing to bypass
             const int lat = chain[i]->LatencySamples();
-            float m = fxDescs[i].mix;
-            if (!(m >= 0.0f)) m = 0.0f;   // also catches NaN
-            if (m > 1.0f)     m = 1.0f;
+            const float m = ClampFxMix(fxDescs[i].mix);
             mixes[i]    = m;
             bypassed[i] = fxDescs[i].bypassed ? 1 : 0;
             // A plain fully-wet insert needs no delay line here. The RT engine
-            // DOES keep one clocked for a latent fully-wet insert, so its ring
-            // isn't stale if the user toggles bypass mid-playback — a case that
-            // cannot arise offline, where the slot state is fixed for the whole
-            // render. That clocked line is mixed in at level 0, so for finite
-            // samples it contributes exactly nothing and the two paths agree.
-            // NOTE: this is the one live/offline difference in the insert path,
-            // and it is reasoned rather than tested — nothing on a non-Haiku
-            // host can render through the engine to diff it against a bounce.
-            // If a bounce ever diverges from playback on a latent insert, look
-            // here first.
+            // DOES keep one clocked for a latent fully-wet insert (via
+            // FrameDelay::Push), so its ring isn't stale if the user toggles
+            // bypass mid-playback — a case that cannot arise offline, where slot
+            // state is fixed for the whole render. Push() writes only the ring
+            // and never touches the output buffer, so that extra bookkeeping
+            // cannot alter a sample: the two paths render identically for ANY
+            // input, non-finite ones included.
             if (!bypassed[i] && m >= 1.0f) continue;   // plain wet insert
             anySlotState = true;
             dryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);

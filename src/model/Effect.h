@@ -67,6 +67,25 @@ struct EffectDesc {
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
 };
 
+// Does this type carry an identifier in `pluginName`? True for the native
+// add-ons (Plugin, whose name is the add-on id) and for LV2 (whose name is the
+// plugin URI). Everything else leaves the field empty. Serialization and any
+// name-driven lookup must gate on THIS, not on `== Plugin` — an LV2 insert whose
+// URI is dropped can never be re-instantiated.
+inline bool EffectHasPluginName(EffectType t) {
+    return t == EffectType::Plugin || t == EffectType::Lv2;
+}
+
+// Clamp an insert's wet/dry mix into [0,1]. Written as !(m >= 0) so a NaN lands
+// on 0 rather than slipping through every ordinary comparison — a NaN mix would
+// otherwise propagate into the mix buffer and silence the master. Shared by
+// ProjectIO (load), the engine and Exporter (chain build / RT push), and the
+// kMsgApplyFx handler, so all four agree on the policy.
+inline float ClampFxMix(float m) {
+    if (!(m >= 0.0f)) return 0.0f;
+    return m > 1.0f ? 1.0f : m;
+}
+
 // Convenience builders for the presets the UI drops in.
 inline EffectDesc BiquadDesc(float mode, float freq, float q = 0.707f,
                              float gainDb = 0.0f) {

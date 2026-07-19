@@ -37,6 +37,24 @@ struct FrameDelay {
         w = 0;
     }
 
+    // Clock `in` through the ring WITHOUT contributing to any output: the line
+    // keeps holding the most recent `d` frames, but nothing is summed anywhere.
+    // Used when a delayed signal isn't wanted this block yet the line must stay
+    // current, so that a later block which DOES want it doesn't read a stale
+    // tail (the engine does this for a latent insert that is fully wet: if the
+    // user then toggles bypass, the delay path must already be primed).
+    // Equivalent to ProcessAdd(..., level = 0) but without the multiply-add, so
+    // a non-finite sample in `in` cannot leak into `dst` as 0 * Inf = NaN.
+    // RT-safe. A delay of 0 holds no state, so this is a no-op.
+    void Push(const float* in, std::size_t frames) {
+        if (d == 0) return;
+        for (std::size_t i = 0; i < frames; ++i) {
+            buf[w * 2 + 0] = in[i * 2 + 0];
+            buf[w * 2 + 1] = in[i * 2 + 1];
+            if (++w >= d) w = 0;
+        }
+    }
+
     // Add `in` (interleaved stereo, `frames` frames) delayed by `d` frames into
     // `dst`, scaled by `level`. RT-safe. A read-then-write ring of length d
     // yields exactly d samples of delay; the tail carries into the next block.
