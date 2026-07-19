@@ -13,6 +13,7 @@
 #include <lv2/parameters/parameters.h>
 #include <lv2/urid/urid.h>
 
+#include <algorithm>
 #include <cstdlib>   // setenv, for the Haiku bundle search path
 #include <cstring>
 #include <mutex>
@@ -298,6 +299,16 @@ private:
         if (n <= 0) return false;
 
         BuildFeatures(rate);
+
+        // Clear the OUTPUT control values before the new instances are wired to
+        // them. Input controls deliberately survive — they hold the user's
+        // parameter values and re-instantiation (a sample-rate change) must not
+        // silently reset every knob — but outputs are the plugin's to publish.
+        // Carrying them over means a plugin that does not write its latency port
+        // at activate would leave us reporting the latency it had at the OLD
+        // sample rate, a number that was never true at the new one. Zero is both
+        // honest and what a plugin with no latency port already yields.
+        std::fill(fControlOut.begin(), fControlOut.end(), 0.0f);
 
         // Size every instance's buffers BEFORE instantiating any of them: the
         // connect_port calls below hand out interior pointers, and growing

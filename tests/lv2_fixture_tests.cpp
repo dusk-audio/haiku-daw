@@ -317,6 +317,71 @@ int main() {
         }
     }
 
+    // --- A sample-rate change must not reset the user's parameters ---------
+    // Prepare() at a new rate re-instantiates, because an LV2 instance is bound
+    // to the rate it was created at. The control VALUES live in the host, not the
+    // instance, and the new instance is reconnected to them — so every knob must
+    // survive. If it did not, changing the audio device would silently reset
+    // every LV2 plugin in the project to its defaults, which would look like data
+    // loss and would be nobody's idea of a device change.
+    {
+        std::unique_ptr<IEffect> fx = host.Create(kMonoGain, 44100.0);
+        CHECK(fx != nullptr);
+        if (fx) {
+            fx->Prepare(44100.0);
+            fx->SetParam(0, 3.0f);                 // gain = 3, not the default 1
+
+            std::vector<float> buf(2, 1.0f);
+            fx->Process(buf.data(), 1);
+            CHECK(Near(buf[0], 3.0f));
+
+            fx->Prepare(48000.0);                  // different rate -> re-instantiate
+            buf.assign(2, 1.0f);
+            fx->Process(buf.data(), 1);
+            CHECK(Near(buf[0], 3.0f));             // still 3, NOT back to 1.0
+            CHECK(Near(buf[1], 3.0f));
+
+            // And again, to a rate it has already used.
+            fx->Prepare(44100.0);
+            buf.assign(2, 1.0f);
+            fx->Process(buf.data(), 1);
+            CHECK(Near(buf[0], 3.0f));
+        }
+    }
+
+    // --- Reset() must actually clear the plugin's internal state -----------
+    // The engine calls Reset on a seek precisely so stale audio does not bleed
+    // across the jump (see IEffect). For a delay line that is directly
+    // observable: fill it, Reset, and the buffered signal must never emerge.
+    // Nothing previously tested that Reset does anything at all.
+    {
+        std::unique_ptr<IEffect> fx = host.Create(kStereoLatent, 48000.0);
+        CHECK(fx != nullptr);
+        if (fx) {
+            fx->Prepare(48000.0);
+
+            // Push an impulse in, but stop short of the latency so it is still
+            // sitting inside the plugin's delay line, unemitted.
+            const int kPartial = kLatentFrames / 2;
+            std::vector<float> buf((size_t)kPartial * 2, 0.0f);
+            buf[0] = 1.0f;
+            buf[1] = 1.0f;
+            fx->Process(buf.data(), kPartial);
+
+            fx->Reset();                           // the seek
+
+            // Now run well past the latency with silence. A working Reset means
+            // the buffered impulse is gone; without one it would surface here.
+            std::vector<float> quiet((size_t)(kLatentFrames * 3) * 2, 0.0f);
+            fx->Process(quiet.data(), kLatentFrames * 3);
+            bool clean = true;
+            for (float v : quiet) clean &= Near(v, 0.0f);
+            CHECK(clean);
+            if (!clean)
+                std::printf("    stale audio survived Reset()\n");
+        }
+    }
+
     // --- Through MakeEffect, the way the engine builds a chain -------------
     // Confirms the factory applies stored params AFTER the hook returns, using a
     // value whose effect is directly observable.
