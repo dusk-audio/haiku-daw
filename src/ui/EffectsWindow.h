@@ -60,8 +60,12 @@ constexpr uint32 kMsgFxMeter     = 'fxmt';
 
 class EffectsView : public BView {
 public:
+    // `focusSlot` >= 0 shows ONLY that insert (the channel strip opens the
+    // editor on the slot that was clicked). The view still holds the WHOLE
+    // chain: Apply() posts every descriptor, so filtering the data instead of
+    // the drawing would delete the other inserts on the first edit.
     EffectsView(BRect frame, std::vector<EffectDesc> chain, TrackId track,
-                BMessenger apply);
+                BMessenger apply, int focusSlot = -1);
     ~EffectsView() override;
 
     void Draw(BRect update) override;
@@ -110,6 +114,9 @@ private:
     std::vector<EffectDesc> fChain;
     TrackId    fTrack;
     BMessenger fApply;
+    // Show only this chain index, or -1 for the whole chain. The chain itself is
+    // always complete -- see the constructor comment.
+    int        fFocus = -1;
 
     // Rebuilt each Draw so hit-testing matches exactly what was drawn.
     mutable std::vector<Hit> fHits;
@@ -146,8 +153,9 @@ private:
 
 class EffectsWindow : public BWindow {
 public:
+    // focusSlot >= 0 opens on one insert alone; -1 shows the whole chain.
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
-                  BMessenger apply);
+                  BMessenger apply, int focusSlot = -1);
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
     bool QuitRequested() override;

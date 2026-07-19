@@ -478,9 +478,12 @@ void InspectorView::MouseUp(BPoint) {
         const int nfx = (int)t->fx.size();
         if (from < 0 || from >= nfx) { Refresh(); return; }
         if (to < 0 || to >= nfx || to == from) {
-            // Never moved: this was a click on the row, which opens the editor.
+            // Never moved: a click on the row, which opens THAT insert's editor
+            // alone. The window still receives the whole chain -- it applies
+            // every descriptor back -- but shows only the one clicked.
             BRect wr(120, 120, 600, 740);
-            (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window())))->Show();
+            (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window()),
+                               from))->Show();
             Refresh();
             return;
         }

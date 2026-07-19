@@ -219,9 +219,10 @@ static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
 }
 
 EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
-                         TrackId track, BMessenger apply)
+                         TrackId track, BMessenger apply, int focusSlot)
     : BView(frame, "fx", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
-      fChain(std::move(chain)), fTrack(track), fApply(apply) {
+      fChain(std::move(chain)), fTrack(track), fApply(apply),
+      fFocus(focusSlot >= 0 && focusSlot < (int)fChain.size() ? focusSlot : -1) {
     SetViewColor(ColBackground());
 }
 
@@ -271,6 +272,11 @@ float EffectsView::PanelHeight(const EffectDesc& d) const {
 }
 
 float EffectsView::PanelTop(size_t i) const {
+    // Focus mode draws exactly one panel, so only that index has a position.
+    // Anything else is off-screen rather than at 0, which would otherwise stack
+    // every hidden panel under the visible one.
+    if (fFocus >= 0)
+        return (i == (size_t)fFocus) ? kPanelPad : -100000.0f;
     float y = kPanelPad;
     for (size_t k = 0; k < i && k < fChain.size(); k++)
         y += PanelHeight(fChain[k]) + 6;
@@ -278,6 +284,8 @@ float EffectsView::PanelTop(size_t i) const {
 }
 
 float EffectsView::ContentHeight() const {
+    if (fFocus >= 0 && fFocus < (int)fChain.size())
+        return kPanelPad + PanelHeight(fChain[(size_t)fFocus]) + 6 + kPanelPad;
     float y = kPanelPad;
     for (const EffectDesc& d : fChain) y += PanelHeight(d) + 6;
     y += 26 + 12;   // the single "Add Effect..." button
@@ -499,6 +507,10 @@ void EffectsView::Draw(BRect) {
     const float w = Bounds().Width();
 
     for (size_t i = 0; i < fChain.size(); i++) {
+        // Focus mode: one insert only. Skipping here (rather than filtering
+        // fChain) keeps every hit and every Apply() addressing the real chain
+        // index, so editing this insert cannot disturb its neighbours.
+        if (fFocus >= 0 && (int)i != fFocus) continue;
         const EffectDesc& d = fChain[i];
         const float top = PanelTop(i);
         const float ph  = PanelHeight(d);
@@ -520,8 +532,10 @@ void EffectsView::Draw(BRect) {
             SetHighColor(ColText());      DrawString(lbl, BPoint(b.left + 6, b.bottom - 5));
             fHits.push_back({ (int)i, kind, 0, b, 0, 0 });
         };
-        btn(panel.right - 3 * kBtnW - 60, "^", 1);
-        btn(panel.right - 2 * kBtnW - 56, "v", 2);
+        if (fFocus < 0) {          // reordering needs the chain to be visible
+            btn(panel.right - 3 * kBtnW - 60, "^", 1);
+            btn(panel.right - 2 * kBtnW - 56, "v", 2);
+        }
         BRect rm(panel.right - 52, panel.top + 2, panel.right - 4, panel.top + kTitleH - 2);
         SetHighColor(Rgb(120, 60, 60)); FillRect(rm);
         SetHighColor(ColGrid());        StrokeRect(rm);
@@ -639,6 +653,8 @@ void EffectsView::Draw(BRect) {
             }
         }
     }
+
+    if (fFocus >= 0) return;   // a single-insert view has nothing to add to
 
     // ONE button, opening the searchable browser. It used to be a button per
     // available effect, which does not survive a real plugin collection: the
@@ -997,13 +1013,18 @@ void EffectsView::MessageReceived(BMessage* msg) {
 // --- window ---------------------------------------------------------------
 
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
-                             TrackId track, BMessenger apply)
+                             TrackId track, BMessenger apply, int focusSlot)
     : BWindow(frame, "Effects", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTrack(track), fApply(apply) {
+    // Name the window after the insert when it opens on one, so several open
+    // editors are told apart by their title bars.
+    if (focusSlot >= 0 && focusSlot < (int)chain.size())
+        SetTitle(EffectDisplayName(chain[(size_t)focusSlot]).c_str());
+
     BRect b = Bounds();
     BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
-    fView = new EffectsView(vr, std::move(chain), track, apply);
+    fView = new EffectsView(vr, std::move(chain), track, apply, focusSlot);
     BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);
     AddChild(sv);
