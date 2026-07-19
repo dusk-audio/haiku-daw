@@ -1,0 +1,44 @@
+# Agent Work Packages — Commercial-Parity Push
+
+Prompts for parallel Claude (Opus) agents. Each prompt file is self-contained: hand one file to one agent as its task prompt, in this repo, on its own branch.
+
+## Why these packages
+
+Gap analysis vs Logic Pro / Bitwig / Reaper (2026):
+
+| Area | haiku-daw today | Commercial baseline | Package |
+|---|---|---|---|
+| Insert FX | Per-track `vector<EffectDesc>` chain, 10 built-ins, native add-on ABI. No per-insert bypass, no wet/dry, no third-party standard | Ordered inserts, per-slot bypass + wet/dry, huge plugin ecosystems | 01, 02, 03 |
+| Third-party plugins | Custom Haiku add-on ABI only | VST3/AU/CLAP/LV2 | 02 (LV2 via lilv — the format actually available on Haiku) |
+| Plugin browser / slot UI | Floating EffectsWindow, add via menu | Channel-strip insert slots, searchable browser | 03 |
+| MIDI tools | Piano roll + CC lanes, no quantize/swing/humanize | All have full MIDI transform suites | 04 |
+| Sidechain | None | All three | 05 |
+| Time-stretch | None (only rate-match resampling) | Elastic Audio / Stretch markers / Warp | 06 |
+| Instruments | Built-in synth + SFZ/SF2 sampler behind `IInstrument` (WIP on master) | Instrument slot per track | Already done — keep |
+
+Already competitive (do not rebuild): buses/sends, tempo map with ramps, gain/pan/FX automation, PDC, comping/takes, loop/punch record, freeze, stems, BS.1770 loudness export, markers, SMF I/O, undo everywhere, autosave.
+
+Explicit backlog (not in this wave): clip launcher/session view, VCA + folder tracks, ripple/slip editing, track/project templates, FLAC/MP3 export, MTC/Link sync, control surfaces + MIDI-learn, pitch-shift, scrub. Video stays a non-goal.
+
+## Terminology decision (applies to all packages)
+
+Commercial model: each track has **one instrument slot** (source) plus **N insert FX slots** (processors). Soundfonts (SFZ/SF2) belong to the instrument slot — that work already exists on master as uncommitted WIP (`IInstrument`, `InstrumentFactory`, `Sampler`, `SoundfontCache`). Inserts are FX only: built-in suite, native Haiku add-ons, and LV2. "Choose multiple" = multiple inserts per track, which the model already supports (`Track.fx` is an ordered vector); what's missing is per-insert bypass/mix, LV2, and slot-based UI.
+
+## Pinned shared contract (agents must not diverge from this)
+
+- `EffectType::Lv2 = 10`, appended after `Limiter = 9` in `src/model/Effect.h`; `kMaxEffectTypeId = 10`. For Lv2, `EffectDesc.pluginName` holds the LV2 plugin URI.
+- `EffectDesc` gains `bool bypassed = false; float mix = 1.0f;` (wet/dry, 1 = full wet).
+- Serialization: new optional per-insert line `fxin <index> <bypassed 0|1> <mix>` (track scope) / `masterfxin ...` (master scope), written only when non-default. The `fx` line format itself does not change.
+- LV2 instantiation reaches the kit-free `EffectFactory` through a registered hook (`SetLv2Factory`), same pattern as the existing `SetPluginFactory` (`src/dsp/EffectFactory.h:18`).
+
+## Dispatch plan
+
+**Before wave 1:** commit the instrument-abstraction WIP currently sitting uncommitted on master (all of `src/synth/`, model/IO/engine/UI edits, new tests). Every agent branches from that commit.
+
+- **Wave 1 (parallel):** 01-fx-inserts-core, 04-midi-tools, 06-timestretch
+- **Wave 2 (parallel, after 01 merges):** 02-lv2-host, 05-sidechain
+- **Wave 3 (after 01 + 02 merge):** 03-inserts-ui
+
+Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Engine.cpp` regions — resolve trivially.
+
+Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.
