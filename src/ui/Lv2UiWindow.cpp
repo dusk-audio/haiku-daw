@@ -30,6 +30,9 @@ namespace {
 // other types but has no LV2_UI__BeUI macro, even though the extension has it.
 const char* kNativeUiType = "http://lv2plug.in/ns/extensions/ui#BeUI";
 
+// Self-addressed: "you are already showing this plugin, come to the front".
+constexpr uint32 kMsgLv2UiRaise = 'l2ur';
+
 constexpr int32_t kBlockLength = 1024;
 constexpr double  kSampleRate  = 48000.0;
 constexpr uint32_t kAtomBufBytes = 8192;
@@ -60,6 +63,11 @@ std::string FileUriToPath(const char* uri) {
     lilv_free(p);
     return out;
 }
+
+// lilv is not thread-safe, and this world is reached from several loopers: the
+// effects editor's while it draws, the inspector's when a row is clicked, and
+// whichever thread opens an editor. One lock around every world access.
+std::mutex gWorldMutex;
 
 // One lilv world for every UI window.
 //
@@ -126,25 +134,45 @@ const LilvUI* FindNativeUi(const LilvPlugin* plugin, LilvUIs** owned) {
 // believe they own the parameters, and each holds its own DSP instance -- so
 // they disagree, silently, and neither is authoritative. Re-opening therefore
 // raises the window that already exists.
+// Held as BMessengers, NOT BWindow*.
+//
+// A raw pointer here is a use-after-free waiting to happen: the window can quit
+// between the lookup and the Lock() that follows, and every failure path in
+// Open() posts B_QUIT_REQUESTED and returns while the window is still going
+// away. A BMessenger to a dead window simply reports !IsValid(), which is the
+// difference between a stale entry and a crash.
 std::mutex gOpenMutex;
-std::vector<std::pair<std::string, BWindow*>> gOpen;
+std::vector<std::pair<std::string, BMessenger>> gOpen;
 
-BWindow* AlreadyOpen(const std::string& uri) {
+// Raise the editor already showing `uri`, if there is a live one. Returns false
+// when there is none -- including when the entry is stale, which is then
+// dropped so the next open succeeds instead of being blocked by a ghost.
+bool RaiseIfOpen(const std::string& uri) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
-    for (const auto& e : gOpen)
-        if (e.first == uri) return e.second;
-    return nullptr;
+    for (size_t i = 0; i < gOpen.size(); i++) {
+        if (gOpen[i].first != uri) continue;
+        if (!gOpen[i].second.IsValid()) {     // window died without unregistering
+            gOpen.erase(gOpen.begin() + (long)i);
+            return false;
+        }
+        // Asking the window to raise ITSELF keeps the work on its own looper;
+        // locking someone else's window from here is what the pointer version
+        // did, and it is the part that could touch freed memory.
+        gOpen[i].second.SendMessage(kMsgLv2UiRaise);
+        return true;
+    }
+    return false;
 }
 
 void RegisterOpen(const std::string& uri, BWindow* w) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
-    gOpen.push_back({ uri, w });
+    gOpen.push_back({ uri, BMessenger(w) });
 }
 
-void ForgetOpen(BWindow* w) {
+void ForgetOpen(const std::string& uri) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
     for (size_t i = gOpen.size(); i > 0; --i)
-        if (gOpen[i - 1].second == w) gOpen.erase(gOpen.begin() + (long)(i - 1));
+        if (gOpen[i - 1].first == uri) gOpen.erase(gOpen.begin() + (long)(i - 1));
 }
 
 } // namespace
@@ -181,11 +209,29 @@ struct Lv2UiWindow::Impl {
 };
 
 bool Lv2UiWindow::HasNativeUi(const std::string& pluginUri) {
-    const LilvPlugin* p = FindPlugin(pluginUri);
-    if (!p) return false;
-    LilvUIs* owned = nullptr;
-    const bool ok = FindNativeUi(p, &owned) != nullptr;
-    if (owned) lilv_uis_free(owned);
+    // Cached because the effects editor asks this while DRAWING, for every LV2
+    // panel, on every repaint -- and answering it means walking the plugin's
+    // RDF and allocating a LilvUIs each time. The answer cannot change while
+    // the app runs: it is a property of what is installed on disk.
+    static std::mutex cacheMutex;
+    static std::vector<std::pair<std::string, bool>> cache;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        for (const auto& e : cache)
+            if (e.first == pluginUri) return e.second;
+    }
+
+    bool ok = false;
+    {
+        std::lock_guard<std::mutex> lock(gWorldMutex);
+        if (const LilvPlugin* p = FindPlugin(pluginUri)) {
+            LilvUIs* owned = nullptr;
+            ok = FindNativeUi(p, &owned) != nullptr;
+            if (owned) lilv_uis_free(owned);
+        }
+    }
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cache.push_back({ pluginUri, ok });
     return ok;
 }
 
@@ -197,13 +243,8 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
                                const std::vector<float>& params) {
     // Already showing this plugin? Bring it forward rather than opening a rival.
-    if (BWindow* existing = AlreadyOpen(pluginUri)) {
-        if (existing->Lock()) {
-            existing->Activate(true);
-            existing->Unlock();
-        }
+    if (RaiseIfOpen(pluginUri))
         return nullptr;      // nothing new was opened; the caller does nothing
-    }
 
     const LilvPlugin* plugin = FindPlugin(pluginUri);
     if (!plugin) return nullptr;
@@ -397,7 +438,7 @@ Lv2UiWindow::~Lv2UiWindow() {
     // the library went away, and ~BWindow then deleted a plugin-owned view.
     // Hosts commonly keep plugin binaries loaded for exactly this reason; one
     // handle per plugin type is a small, bounded cost.
-    ForgetOpen(this);
+    ForgetOpen(d->uri);
     if (d->dsp) { lilv_instance_deactivate(d->dsp); lilv_instance_free(d->dsp); }
     if (d->uis) lilv_uis_free(d->uis);
     delete d;
@@ -405,5 +446,12 @@ Lv2UiWindow::~Lv2UiWindow() {
 }
 
 bool Lv2UiWindow::QuitRequested() { return true; }
+
+// The registry asks the window to raise ITSELF, so the activation happens on
+// this window's own looper instead of another thread reaching in.
+void Lv2UiWindow::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgLv2UiRaise) { Activate(true); return; }
+    BWindow::MessageReceived(msg);
+}
 
 } // namespace daw

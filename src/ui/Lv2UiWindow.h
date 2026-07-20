@@ -48,6 +48,7 @@ public:
 
     ~Lv2UiWindow() override;
     bool QuitRequested() override;
+    void MessageReceived(BMessage* msg) override;   // "raise yourself"
 
 private:
     Lv2UiWindow(BRect frame, const char* title);
