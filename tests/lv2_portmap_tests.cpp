@@ -320,11 +320,49 @@ int main() {
         CHECK(ClampLv2Param(99.0f, 0.0f, 2.0f, true, true, true) == 2.0f);
         // NaN into an integer port still lands on a defined whole number.
         CHECK(ClampLv2Param(nan, 0.0f, 1.0f, true, true, true) == 0.0f);
-        // Rounding must not escape a FRACTIONAL bound: 0.5..3.5 is a legal
-        // integer port, and 0.6 rounds to 1 which is inside it, but 0.51 must
-        // not round to 1 and then be reported below the minimum.
+        // A FRACTIONAL bound must not leak into the result. 0.5..3.5 is a legal
+        // integer port; its integral range is [1, 3], so an out-of-range value
+        // lands on 3 -- NOT on 3.5, which is what re-clamping to the raw bound
+        // used to return and is a fractional value written to an integer port.
         CHECK(ClampLv2Param(0.51f, 0.5f, 3.5f, true, true, true) == 1.0f);
-        CHECK(ClampLv2Param(3.9f,  0.5f, 3.5f, true, true, true) == 3.5f);
+        CHECK(ClampLv2Param(3.9f,  0.5f, 3.5f, true, true, true) == 3.0f);
+        CHECK(ClampLv2Param(0.0f,  0.5f, 3.5f, true, true, true) == 1.0f);
+        // Whatever the bounds, an integer port never receives a fraction.
+        for (float in : { -9.0f, -0.6f, 0.4f, 1.5f, 2.7f, 99.0f }) {
+            const float out = ClampLv2Param(in, 0.5f, 3.5f, true, true, true);
+            CHECK(out == std::floor(out));
+        }
+        // Metadata can describe a range holding NO integer at all. Nothing can
+        // be both integral and in range; stay integral, since a fraction is the
+        // thing the plugin cannot use.
+        {
+            const float out = ClampLv2Param(0.5f, 0.2f, 0.8f, true, true, true);
+            CHECK(out == std::floor(out));
+        }
+
+        // --- toggles: two states, not "any whole number" ------------------
+        CHECK(ClampLv2Param(0.4f, 0.0f, 1.0f, true, true, true, true) == 0.0f);
+        CHECK(ClampLv2Param(0.6f, 0.0f, 1.0f, true, true, true, true) == 1.0f);
+        // A toggle with no declared range still has exactly two states, and a
+        // bare integer clamp would have let 5 through.
+        CHECK(ClampLv2Param(5.0f, 0.0f, 1.0f, false, false, true, true) == 1.0f);
+        CHECK(ClampLv2Param(-5.0f, 0.0f, 1.0f, false, false, true, true) == 0.0f);
+
+        // --- enumerations: only the declared values, even when sparse ------
+        // This is what the old integer-only handling got wrong: 1, 3 and 4 are
+        // whole numbers inside 0..5 that the plugin never defines.
+        {
+            const std::vector<float> pts = { 0.0f, 2.0f, 5.0f };
+            CHECK(ClampLv2Param(1.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 0.0f);
+            CHECK(ClampLv2Param(1.4f, 0.0f, 5.0f, true, true, true, false, &pts) == 2.0f);
+            CHECK(ClampLv2Param(3.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 2.0f);
+            CHECK(ClampLv2Param(4.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 5.0f);
+            CHECK(ClampLv2Param(99.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 5.0f);
+            // Non-integral scale points are legal too and must survive intact.
+            const std::vector<float> frac = { -1.5f, 0.25f, 3.75f };
+            CHECK(ClampLv2Param(0.3f, -1.5f, 3.75f, true, true, false, false, &frac) == 0.25f);
+            CHECK(ClampLv2Param(3.0f, -1.5f, 3.75f, true, true, false, false, &frac) == 3.75f);
+        }
         // The same values are left alone when the port is continuous.
         CHECK(ClampLv2Param(0.03f, 0.0f, 1.0f, true, true, false) == 0.03f);
 

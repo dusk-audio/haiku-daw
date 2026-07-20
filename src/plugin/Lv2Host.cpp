@@ -113,6 +113,8 @@ struct Lv2ControlMeta {
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
     bool  hasMin = false, hasMax = false;
     bool  isInteger = false;
+    bool  isToggled = false;
+    std::vector<float> scalePoints;
 };
 
 // ---------------------------------------------------------------------------
@@ -228,8 +230,11 @@ public:
     void SetParam(int slot, float value) override {
         if (slot < 0 || (size_t)slot >= fControlIn.size()) return;
         const Lv2ControlMeta& m = fCtrl[(size_t)slot];
+        // Enforced HERE, not only in the editor: automation lanes and project
+        // files reach this without passing through any slider.
         fControlIn[(size_t)slot] =
-            ClampLv2Param(value, m.mn, m.mx, m.hasMin, m.hasMax, m.isInteger);
+            ClampLv2Param(value, m.mn, m.mx, m.hasMin, m.hasMax, m.isInteger,
+                          m.isToggled, &m.scalePoints);
     }
 
     int LatencySamples() const override { return fLatency; }
@@ -618,11 +623,29 @@ void Lv2Host::ScanAll() {
                     lilv_node_free(pn);
                 }
 
-                // All three mean "whole numbers only" as far as a host is
-                // concerned, so they collapse to one flag.
-                s.isInteger = lilv_port_has_property(p, port, nInteger)
-                           || lilv_port_has_property(p, port, nToggled)
-                           || lilv_port_has_property(p, port, nEnum);
+                // Three distinct domains, kept distinct. isInteger stays true
+                // for all of them ("not continuous"), while isToggled and the
+                // scale points say what is actually accepted.
+                s.isToggled = lilv_port_has_property(p, port, nToggled);
+                const bool isEnum = lilv_port_has_property(p, port, nEnum);
+                s.isInteger = s.isToggled || isEnum
+                           || lilv_port_has_property(p, port, nInteger);
+
+                // An enumeration's legal values are its scale points, and they
+                // need not be contiguous -- without them "an integer in range"
+                // would accept values the plugin never defined.
+                if (isEnum) {
+                    if (LilvScalePoints* sp = lilv_port_get_scale_points(p, port)) {
+                        LILV_FOREACH(scale_points, si, sp) {
+                            const LilvScalePoint* pt = lilv_scale_points_get(sp, si);
+                            float f = 0.0f;
+                            if (pt && NodeAsFloat(lilv_scale_point_get_value(pt), &f))
+                                s.scalePoints.push_back(f);
+                        }
+                        lilv_scale_points_free(sp);
+                    }
+                    std::sort(s.scalePoints.begin(), s.scalePoints.end());
+                }
 
                 if (!isInput) {
                     // The two latency mechanisms, read SEPARATELY so the
@@ -642,7 +665,7 @@ void Lv2Host::ScanAll() {
 
             if (s.role == Lv2PortRole::ControlIn)
                 ctrl.push_back({ s.mn, s.mx, s.def, s.hasMin, s.hasMax,
-                                 s.isInteger });
+                                 s.isInteger, s.isToggled, s.scalePoints });
             specs.push_back(s);
         }
 
@@ -664,7 +687,8 @@ void Lv2Host::ScanAll() {
         info.monoDual = layout.topology == Lv2Topology::MonoDual;
         for (const Lv2PortSpec& s : specs)
             if (s.role == Lv2PortRole::ControlIn)
-                info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger });
+                info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger,
+                                        s.isToggled, s.scalePoints });
 
         fImpl->plugins.push_back(info);
         fImpl->entries.push_back({ p, layout, ctrl });

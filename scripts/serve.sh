@@ -29,10 +29,49 @@
 PORT="${1:-9090}"
 
 cd "$(dirname "$0")/.." || exit 1
-git update-server-info          # refresh dumb-HTTP metadata for pulls
 
-IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+# Dumb HTTP transport serves static files: without this metadata a clone gets a
+# 404 on the refs and fails in a way that reads like a network problem. If it
+# cannot be written there is nothing worth serving, so stop here.
+if ! git update-server-info; then
+    echo "ERROR: git update-server-info failed - refusing to serve stale metadata" >&2
+    exit 1
+fi
+
+# Which address to advertise.
+#
+# `hostname -I | awk '{print $1}'` was wrong: this host has several addresses
+# (LAN, libvirt bridge, tailscale) and their order is not fixed, so the first
+# one is frequently NOT the one the Haiku machine can reach. The VM reaches the
+# host on the libvirt bridge, real hardware on the LAN -- there is no single
+# right answer to guess, so allow an explicit choice and otherwise show every
+# candidate instead of silently picking one.
+#
+#   SERVE_ADDR=192.168.122.1 sh scripts/serve.sh
+if [ -n "$SERVE_ADDR" ]; then
+    IP="$SERVE_ADDR"
+else
+    # Drop loopback and link-local; they can never be the answer.
+    CANDIDATES=$(hostname -I 2>/dev/null | tr ' ' '\n' \
+                 | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' \
+                 | grep -vE '^(127\.|169\.254\.)' )
+    IP=$(printf '%s\n' "$CANDIDATES" | head -1)
+fi
+
+if [ -z "$IP" ]; then
+    echo "ERROR: no usable IPv4 address found." >&2
+    echo "  Set one explicitly:  SERVE_ADDR=<addr> sh scripts/serve.sh [port]" >&2
+    exit 1
+fi
+
 echo "Serving $(pwd)"
 echo "  clone with: git clone http://${IP}:${PORT}/.git haiku-daw"
+if [ -z "$SERVE_ADDR" ]; then
+    OTHERS=$(printf '%s\n' "$CANDIDATES" | tail -n +2)
+    if [ -n "$OTHERS" ]; then
+        echo "  other addresses on this host (use SERVE_ADDR if the clone hangs):"
+        printf '%s\n' "$OTHERS" | sed 's/^/    /'
+    fi
+fi
 echo "  (Ctrl-C to stop)"
 python3 -m http.server "$PORT" --bind 0.0.0.0

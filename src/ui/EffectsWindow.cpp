@@ -4,6 +4,7 @@
 #include "../dsp/Eq.h"
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../plugin/PluginHost.h"
+#include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
 
 // Only linked when CMake found lilv; DAW_HAVE_LV2 comes from the daw_lv2 target.
@@ -139,22 +140,27 @@ static constexpr size_t kMaxPluginKnobs = 5;
 // built once at startup and never mutated afterwards — the same lifetime the
 // add-on knob labels already relied on.
 struct HostParam { const char* name; float mn; float mx; float def;
-                   bool isInteger; };
+                   bool isInteger; bool isToggled;
+                   // Points into the host's listing, which is built once at
+                   // startup and never mutated; null for non-enumerations.
+                   const std::vector<float>* scalePoints; };
 
 static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
     std::vector<HostParam> out;
     if (d.type == EffectType::Plugin) {
         if (const PluginInfo* pi = FindPlugin(d.pluginName))
             for (const PluginParamInfo& p : pi->params)
-                // The add-on ABI does not describe integer/toggled ports, so a
-                // native plugin's params are always treated as continuous.
-                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, false });
+                // The add-on ABI does not describe integer/toggled/enum ports,
+                // so a native plugin's params are always treated as continuous.
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def,
+                                false, false, nullptr });
     }
 #ifdef DAW_HAVE_LV2
     else if (d.type == EffectType::Lv2) {
         if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
             for (const Lv2ParamInfo& p : pi->params)
-                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, p.isInteger });
+                out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, p.isInteger,
+                                p.isToggled, &p.scalePoints });
     }
 #endif
     return out;
@@ -757,10 +763,16 @@ void EffectsView::MouseDown(BPoint where) {
             fDragMin = h.min; fDragMax = h.max;
             fDragRect = h.rect;
             fDragInteger = false;
+            fDragToggled = false;
+            fDragScalePoints.clear();
             if (kind == 9 && h.effect >= 0 && h.effect < (int)fChain.size()) {
                 const std::vector<HostParam> hp = HostParamsFor(fChain[h.effect]);
-                if (h.slot >= 0 && h.slot < (int)hp.size())
-                    fDragInteger = hp[(size_t)h.slot].isInteger;
+                if (h.slot >= 0 && h.slot < (int)hp.size()) {
+                    const HostParam& p = hp[(size_t)h.slot];
+                    fDragInteger = p.isInteger;
+                    fDragToggled = p.isToggled;
+                    if (p.scalePoints) fDragScalePoints = *p.scalePoints;
+                }
             }
             fDragStart = where;
             fDragStartVal = (fDragEffect >= 0 && fDragEffect < (int)fChain.size())
@@ -869,13 +881,13 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
                   ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
         if (t < 0) t = 0; if (t > 1) t = 1;
         float v = fDragMin + t * (fDragMax - fDragMin);
-        // A toggle or enum port only accepts whole numbers; a continuous drag
-        // would otherwise write values like 0.03 into a two-state control.
-        if (fDragInteger) {
-            v = std::floor(v + 0.5f);
-            if (v < fDragMin) v = fDragMin;
-            if (v > fDragMax) v = fDragMax;
-        }
+        // Coerce through the SAME function the host uses, so the value shown and
+        // the value the plugin receives cannot disagree -- and so a toggle gets
+        // an endpoint and an enumeration gets one of its declared points rather
+        // than any whole number that happens to lie in range.
+        v = ClampLv2Param(v, fDragMin, fDragMax, true, true,
+                          fDragInteger, fDragToggled,
+                          fDragScalePoints.empty() ? nullptr : &fDragScalePoints);
         setP(fDragSlot, v);
     } else if (fDragKind == 5) {   // eq handle: x -> freq (log), y -> gain
         // Recover the graph rect for this effect to map coordinates.

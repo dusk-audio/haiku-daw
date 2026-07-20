@@ -134,9 +134,11 @@ private:
     // to be remembered rather than recomputed from a layout that has since
     // scrolled.
     BRect fDragRect;
-    // Set when the dragged parameter accepts whole numbers only (lv2:toggled and
-    // friends), so the drag snaps instead of writing fractions into a toggle.
+    // The dragged parameter's accepted domain, so the drag snaps to it instead
+    // of writing a value the plugin does not define.
     bool  fDragInteger = false;
+    bool  fDragToggled = false;
+    std::vector<float> fDragScalePoints;   // empty unless an enumeration
 
     // Pending debounced commit of a wheel gesture (null when idle).
     BMessageRunner* fCommit = nullptr;

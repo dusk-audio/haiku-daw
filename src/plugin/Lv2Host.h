@@ -27,11 +27,16 @@ namespace daw {
 struct Lv2ParamInfo {
     std::string name;
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
-    // Whole numbers only (lv2:integer / lv2:toggled / lv2:enumeration). The
-    // editor needs this to stop a continuous slider writing 0.03 into a toggle.
-    // PluginParamInfo has no equivalent -- the native add-on ABI does not
-    // describe it -- so a shared reader must default this to false.
+    // Non-continuous domains. isInteger covers all three so a caller that only
+    // knows about whole numbers still behaves sanely; the other two say WHICH
+    // discrete domain, which matters because they are not interchangeable:
+    // a toggle has two states, and an enumeration accepts only its listed
+    // values, which may be sparse. PluginParamInfo has no equivalent -- the
+    // native add-on ABI does not describe any of this -- so a shared reader
+    // must default them to false/empty.
     bool  isInteger = false;
+    bool  isToggled = false;
+    std::vector<float> scalePoints;   // lv2:enumeration values, if declared
 };
 
 struct Lv2PluginInfo {

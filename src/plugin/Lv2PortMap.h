@@ -75,13 +75,18 @@ struct Lv2PortSpec {
     float mn = 0.0f, mx = 1.0f, def = 0.0f;
     bool  hasMin = false, hasMax = false;
 
-    // The port only accepts whole numbers: lv2:integer, lv2:toggled (0 or 1) or
-    // lv2:enumeration (pick one of a set). All three are reported as one flag
-    // because the host does the same thing for each -- snap to whole numbers.
-    // Ignoring this lets a continuous control write 0.03 into a toggle, which is
-    // meaningless to the plugin and is what a generic slider UI will do unless
-    // told otherwise.
+    // What values the port actually accepts. These are three DIFFERENT domains
+    // and collapsing them to "whole numbers" is wrong for two of them:
+    //   isInteger     — lv2:integer: any whole number in range.
+    //   isToggled     — lv2:toggled: only the two endpoints, nothing between.
+    //   scalePoints   — lv2:enumeration: only the listed values, which may be
+    //                   SPARSE (0, 2, 5) so "an integer in range" would happily
+    //                   pass 1, 3 and 4, none of which the plugin defines.
+    // isInteger stays true for all three (they are all non-continuous), so
+    // existing callers keep working; the finer flags refine it.
     bool  isInteger = false;
+    bool  isToggled = false;
+    std::vector<float> scalePoints;   // lv2:enumeration values, if declared
 
     std::string name;
 };
@@ -226,18 +231,56 @@ inline int Lv2ChunkFrames(int remaining) {
 // a made-up bound. NaN is mapped to a defined value rather than passed through:
 // automation or a corrupt project file can produce one, and a NaN in a control
 // port propagates into the plugin's output and from there into the mix bus.
+// Snap to the nearest of `pts`. Ties go to the lower value, which only matters
+// for exact midpoints and keeps the result deterministic.
+inline float SnapToScalePoints(float v, const std::vector<float>& pts) {
+    if (pts.empty()) return v;
+    float best = pts[0];
+    float bestDist = std::fabs(v - pts[0]);
+    for (float p : pts) {
+        const float d = std::fabs(v - p);
+        if (d < bestDist) { bestDist = d; best = p; }
+    }
+    return best;
+}
+
 inline float ClampLv2Param(float v, float mn, float mx,
-                           bool hasMin, bool hasMax, bool isInteger = false) {
+                           bool hasMin, bool hasMax, bool isInteger = false,
+                           bool isToggled = false,
+                           const std::vector<float>* scalePoints = nullptr) {
     if (!(v == v)) v = hasMin ? mn : 0.0f;       // NaN
     if (hasMin && v < mn) v = mn;
     if (hasMax && v > mx) v = mx;
+
+    // An enumeration accepts ONLY its declared values. They can be sparse, so
+    // rounding to a whole number is not enough -- snap to the set itself.
+    if (scalePoints != nullptr && !scalePoints->empty())
+        return SnapToScalePoints(v, *scalePoints);
+
+    // A toggle has exactly two states: its endpoints. Anything between them is
+    // meaningless to the plugin, and 0/1 is the spec's default pair when the
+    // port declares no range of its own.
+    if (isToggled) {
+        const float lo = hasMin ? mn : 0.0f;
+        const float hi = hasMax ? mx : 1.0f;
+        return (v - lo) <= (hi - v) ? lo : hi;
+    }
+
     if (isInteger) {
-        v = std::floor(v + 0.5f);
-        // Rounding can step back outside a fractional bound (a 0.5..3.5 integer
-        // port is legal), so re-clamp rather than trusting the bounds to be
-        // whole numbers themselves.
-        if (hasMin && v < mn) v = mn;
-        if (hasMax && v > mx) v = mx;
+        v = std::floor(v + 0.5f);   // halfway goes up; -0.5 -> 0, -1.5 -> -1
+        // The declared bounds may themselves be fractional (a 0.5..3.5 integer
+        // port is legal), so the integral range is [ceil(mn), floor(mx)].
+        // Re-clamping to the RAW bounds was wrong: it could hand back 3.5 for a
+        // 0.5..3.5 port -- a fractional value written into an integer port,
+        // which is exactly what this branch exists to prevent.
+        const float lo = hasMin ? std::ceil(mn)  : 0.0f;
+        const float hi = hasMax ? std::floor(mx) : 0.0f;
+        // Metadata can describe a range containing no integer at all (0.2..0.8).
+        // Nothing can satisfy both "integral" and "in range" there; stay
+        // integral, since a fractional value is the thing the plugin cannot use.
+        if (hasMin && hasMax && lo > hi) return v;
+        if (hasMin && v < lo) v = lo;
+        if (hasMax && v > hi) v = hi;
     }
     return v;
 }

@@ -467,10 +467,17 @@ void InspectorView::MouseDown(BPoint where) {
 // it applies the edit directly -- unlike the aux windows, which must post.
 void InspectorView::MessageReceived(BMessage* msg) {
     if (msg->what == kMsgPluginChosen) {
-        Track* t = CurrentTrackMut();
+        // Resolve the track the BROWSER was opened for, not whatever happens to
+        // be selected now. The browser runs its own looper and can sit open
+        // while the user picks a different track, and the message carries the
+        // id precisely so the effect lands where it was asked for.
+        int64 tid = 0;
         int32 type = 0;
         const char* name = nullptr;
-        if (!t || msg->FindInt32("type", &type) != B_OK) return;
+        if (msg->FindInt64("track", &tid) != B_OK) return;
+        if (msg->FindInt32("type", &type) != B_OK) return;
+        Track* t = fProject ? fProject->FindTrack((TrackId)tid) : nullptr;
+        if (!t) return;                                    // track went away
         msg->FindString("name", &name);
         if (type < 0 || type > kMaxEffectTypeId) return;   // never trust a message
 
