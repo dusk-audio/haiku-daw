@@ -82,12 +82,48 @@ rebuild the engine at the playhead for edits unrelated to effects.
    PDC can be ~27 samples wrong when that plugin oversamples. The likeliest fix
    is in the plugin, not the host. See `02-lv2-host-PR.md`.
 
-## Open problem
+## The crash: found, diagnosed, fixed (unverified by clicking)
 
-**A click-time crash in the running DAW**, reported by the user and never
-reproduced against the fixed build. Several lilv races were fixed after it was
-seen and may have removed it — **that is unconfirmed**. Do not record it as
-fixed without a backtrace. Notes that cost time to learn:
+Two core files on the user's Desktop settled it. **It was not a lilv race.**
+Closing an LV2 editor aborted the team:
+
+```
+BLooper::Quit -> daw::Lv2UiWindow::~Lv2UiWindow + 0xb0   <- the cleanup() call
+  -> four_k_eq_2.so (six frames)
+    -> BView::~BView + 0x2a  ->  _kern_debugger
+```
+
+`BView::~BView` opens with an unconditional `debugger("Trying to delete a view
+that belongs to a window. Call RemoveSelf first.")`, and `+0x2a` is exactly that
+call. We handed the plugin our container as `LV2_UI__parent`, left it in the
+window, and then called `cleanup()` — inviting the plugin to delete attached
+views. The crash was inside the plugin; the cause was ours. Fixed by detaching
+the container *before* `cleanup()`, which clears `fOwner` across the whole
+subtree.
+
+**Both cores show the same abort**, so this is the long-standing click-time
+crash, not a new one. It has NOT been confirmed fixed by closing an editor —
+that needs someone at the machine.
+
+### How the cores were read, since it took a while to work out
+
+- `Debugger -s --core <file>` **cannot** save a report from a core ("Operation
+  not supported"). `Debugger -c --core <file>` works, but **needs a tty**: from a
+  plain pipe it blocks forever and prints nothing. Drive it through a pty —
+  `~/crashreports/drive.py` on the VM does this. Allow a long settle before
+  sending commands; a 34-thread core outruns even 150 s.
+- `sc` traces the *current* thread, which starts as the debug task and is empty.
+  Select the real one first: `thread <id>`, then `sc`.
+- **Check the binary before believing a symbol.** `build/daw` is relinked
+  constantly, and the debugger resolves against whatever is on disk *now*. The
+  newer core matched byte for byte; the older one differed in 1586178 of 1666209
+  `.text` bytes, so every `daw::` symbol it printed was fiction. Library frames
+  stayed valid in both. `~/crashreports/coremem.py` does the comparison.
+- Finding the abort string in a core proves nothing by itself — it is also a
+  plain constant in libbe's `.rodata` at `+0x2a9de0`, mapped into every process.
+  The *second* copy, on a thread stack, is the recorded abort.
+
+## Older notes on the crash, kept because they still apply
 
 - Haiku's `debug_server` holds a crashed team and its dialog until dismissed, so
   a stale dialog reads exactly like a fresh crash. `kill -9` does not clear it.

@@ -388,12 +388,47 @@ the checks were not vacuous:
   insert is either drawn or counted in the overflow label and that no row ever
   indexes past the chain (mutating the overflow predicate to `>` fails it).
 
-## Still open
+## The click-time crash, identified
 
-- **A click-time crash in the DAW** reported from the running app, not yet
-  reproduced against the fixed build. The lilv races above are plausible causes
-  and may have removed it; that is unconfirmed, and it should not be assumed
-  fixed without a backtrace.
+Two core files off the user's Desktop closed this out. It was **not** the lilv
+races. Closing an LV2 editor aborted the team, on the editor's own looper:
+
+```
+BLooper::_QuitRequested -> BLooper::Quit
+  -> daw::Lv2UiWindow::~Lv2UiWindow + 0xb0      <- the cleanup(d->ui) call
+    -> four_k_eq_2.so (six frames)
+      -> BView::~BView + 0x2a
+        -> _kern_debugger
+```
+
+`BView::~BView` opens with an unconditional `debugger("Trying to delete a view
+that belongs to a window. Call RemoveSelf first.")`; `+0x2a` is precisely that
+call instruction, guarded by a test of the member at `+0x60`. So the plugin
+deleted one of its own views while it was still attached to our window.
+
+The crash was inside the plugin. The cause was ours: we handed the plugin our
+container as `LV2_UI__parent`, left the container in the window, and then called
+`cleanup()`. Fixed by removing the container first, which clears `fOwner` across
+the whole subtree because the BeAPI propagates the owner down to every
+descendant, so the plugin's own delete takes the ordinary path.
+
+The detach-and-delete loop that used to follow `cleanup()` collapses to a single
+`delete d->container`. It was written for the *other* hazard — views the plugin
+forgot to remove, which `~BWindow` would delete after the destructor returns —
+and still covers it, since a view the plugin destroyed unlinked itself in
+`~BView`. It could never have helped with this crash: it ran after the call that
+caused it.
+
+Evidence discipline worth repeating: the newer core's `.text` matches the
+on-disk `daw` byte for byte (1666209 of 1666209), so its symbols are real. The
+older core differs in 1586178 of those bytes — a different build — so its
+`daw::` symbols are fiction and only its library frames were used. Both cores
+carry the abort message on a thread stack, *in addition* to libbe's own copy of
+the same string at `+0x2a9de0`, which is what makes the second copy meaningful.
+
+**Not confirmed fixed.** Nobody has closed an editor against the new build.
+
+## Still open
 - The native editor is view-only, and whether it may touch the live instance is
   the user's decision (see above).
 - Dynamic plugin latency (4K EQ 2 moves 0 -> 27 -> 0 at runtime) — also the
