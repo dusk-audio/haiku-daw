@@ -42,4 +42,14 @@ Commercial model: each track has **one instrument slot** (source) plus **N inser
 
 Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Engine.cpp` regions — resolve trivially.
 
+## Status (2026-07-20)
+
+| Package | State |
+|---|---|
+| 01 fx-inserts-core | Merged to master |
+| 02 lv2-host | Merged to master (see `02-lv2-host-PR.md`) |
+| 03 inserts-ui | Done, signed off; on `feature/inserts-ui` (38 commits), merge pending (see `03-inserts-ui-RESUME.md` / `-PR.md`) |
+| 07 lv2-live-editor | Next up — entry prompt `07-lv2-live-editor-HANDOFF.md`, task `07-lv2-live-editor.md` |
+| 04, 05, 06 | Unstarted, unblocked; runnable in parallel (05: coordinate engine-FX-loop edits with 07 merges) |
+
 Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.
