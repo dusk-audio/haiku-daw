@@ -48,8 +48,10 @@ Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Eng
 |---|---|
 | 01 fx-inserts-core | Merged to master |
 | 02 lv2-host | Merged to master (see `02-lv2-host-PR.md`) |
-| 03 inserts-ui | Done, signed off; on `feature/inserts-ui` (38 commits), merge pending (see `03-inserts-ui-RESUME.md` / `-PR.md`) |
-| 07 lv2-live-editor | Next up — entry prompt `07-lv2-live-editor-HANDOFF.md`, task `07-lv2-live-editor.md` |
-| 04, 05, 06 | Unstarted, unblocked; runnable in parallel (05: coordinate engine-FX-loop edits with 07 merges) |
+| 03 inserts-ui | Merged to master 2026-07-20 (`5a09823`, host suite 46/46; see `03-inserts-ui-PR.md`) |
+| 07 lv2-live-editor | Next on the VM — entry prompt `07-lv2-live-editor-HANDOFF.md`, task `07-lv2-live-editor.md` |
+| 04 midi-tools | Next host-side, parallel-safe with 07 — entry prompt `04-midi-tools-HANDOFF.md`, task `04-midi-tools.md` |
+| 05 sidechain | Unstarted; hold until 07 merges (shared engine FX-loop regions) |
+| 06 timestretch | Unstarted, unblocked; DSP/exporter half host-testable, engine half wants the VM after 07 |
 
 Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.

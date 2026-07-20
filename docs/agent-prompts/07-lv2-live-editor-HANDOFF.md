@@ -15,18 +15,11 @@ You are working in `/home/marc/haiku-daw`, a native Haiku OS DAW. This file is t
 - Package 07: spec'd in `07-lv2-live-editor.md` (committed as "close open decision #1"), unstarted. The user has already decided the headline question — the native LV2 editor SHOULD drive live playback; view-only was a stepping stone.
 - Known open defect, not yours to fix here: 4K EQ 2 reports runtime-varying latency (0→27→0) that the host's Prepare-time latch cannot represent; PDC can be ~27 samples wrong when it oversamples. Recorded in `02-lv2-host-PR.md`.
 
-## First task: land 03 on master
+## First task: reconcile the VM
 
-`git merge-base master feature/inserts-ui` == master HEAD, so master has not moved since the branch point and the merge is conflict-free:
+**The merge is already done** (2026-07-20): `feature/inserts-ui` fast-forwarded into master at `5a09823`, host suite re-verified green on master (46/46). Start by branching: `git checkout -b feature/lv2-live-editor` off master.
 
-```sh
-git checkout master
-git merge --ff-only feature/inserts-ui
-```
-
-Then branch for this package: `git checkout -b feature/lv2-live-editor`.
-
-VM note: the VM working copy (`ssh user@192.168.122.232`, `~/haiku-daw`) is **not a git remote**. It sits at `cf2e1df` with later changes applied as loose synced files, so its tree already approximates `242a633`. After merging, reconcile it properly: sync every file in `git diff --name-only cf2e1df..master` using the tar recipe in the RESUME doc, `touch` them on the VM (clock skew), rebuild all three VM configs, and confirm your files appear as `Building CXX object` lines.
+VM note: the VM working copy (`ssh user@192.168.122.232`, `~/haiku-daw`) is **not a git remote**. It sits at `cf2e1df` with later changes applied as loose synced files, so its tree only approximates master. Reconcile it before phase 0: sync every file in `git diff --name-only cf2e1df..master` using the tar recipe in the RESUME doc, `touch` them on the VM (clock skew), rebuild all three VM configs, and confirm your files appear as `Building CXX object` lines.
 
 ## Then: package 07, in phases
 
