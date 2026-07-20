@@ -11,6 +11,10 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
+#include "PluginBrowser.h"
+#ifdef DAW_HAVE_LV2
+#include "Lv2UiWindow.h"
+#endif
 #include "../storage/BfsAttr.h"
 #include "../app/AppSettings.h"
 #include "RenameWindow.h"
@@ -117,7 +121,11 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         s.armed = t.armed; s.inputMonitor = t.inputMonitor;
         s.colorIndex = t.colorIndex;
         s.type = t.type == TrackType::Midi ? 1 : t.type == TrackType::Bus ? 2 : 0;
-        s.fxCount = (int)t.fx.size();
+        // The strip draws a label and a bypass dot per insert. Naming an insert
+        // is done HERE, on the main thread, because EffectDisplayName resolves an
+        // LV2 URI through the host -- which the mixer's own looper must not do.
+        for (const EffectDesc& d : t.fx)
+            s.fx.push_back(MixerInsertInfo{ EffectDisplayName(d), d.bypassed });
         s.sendCount = (int)t.sends.size();
         s.hasInput = t.input.kind != InputSource::kNone;
         if (t.output == kInvalidTrackId) s.outLabel = "Mst";
@@ -357,7 +365,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
                     m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
                     m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
-                    m.AddInt32("fx", s.fxCount);    m.AddInt32("sn", s.sendCount);
+                    // Count first, then this strip's inserts appended to the one
+                    // flat run the mixer slices back apart in strip order.
+                    m.AddInt32("fx", (int32)s.fx.size());
+                    for (const MixerInsertInfo& ins : s.fx) {
+                        m.AddString("fxn", ins.name.c_str());
+                        m.AddBool("fxb", ins.bypassed);
+                    }
+                    m.AddInt32("sn", s.sendCount);
                     m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
                 }
                 m.AddFloat("mg", fProject->masterGain);
@@ -549,7 +564,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject);
             const float ww = 24 + (strips.size() + 1) * (96 + 4);   // + master
-            BRect wr(120, 90, 120 + ww, 90 + 560);   // tall enough for the strip
+            // Tall enough for the strip, including the insert block: four insert
+            // rows cost ~60 px that the old single "FX n" button did not.
+            BRect wr(120, 90, 120 + ww, 90 + 620);
             MixerWindow* mx = new MixerWindow(wr, strips, fProject->masterGain,
                                               BMessenger(this));
             fMixerMsgr = BMessenger(mx);
@@ -574,10 +591,89 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgMixFx: {
+            // "slot" is present when a strip row was clicked: the editor then
+            // opens on that insert alone. Absent (the overflow row, or an older
+            // sender) means the whole chain.
+            int64 tid = 0; int32 slot = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("slot", &slot);
+            Track* t = fProject->FindTrack((TrackId)tid);
+            if (!t) break;
+            // The mixer names the slot from a snapshot, so the chain may have
+            // shrunk since. Resolve that HERE, against the real chain: both
+            // consumers below happen to clamp an out-of-range focus to "whole
+            // chain" already, but relying on that leaves the decision in two
+            // distant places and neither of them can see the model.
+            if (slot >= (int32)t->fx.size()) slot = -1;
+#ifdef DAW_HAVE_LV2
+            // A plugin that ships its own editor opens THAT, exactly as the
+            // inspector's slot list does -- the two strips have to behave the
+            // same or the mixer looks broken by comparison. A null return means
+            // an editor for this plugin is already up and was raised.
+            if (slot >= 0) {                       // in range: clamped above
+                const EffectDesc& d = t->fx[(size_t)slot];
+                if (d.type == EffectType::Lv2
+                    && Lv2UiWindow::HasNativeUi(d.pluginName)) {
+                    BRect uw(160, 160, 160 + 960, 160 + 680);
+                    Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d),
+                                      d.params);
+                    break;
+                }
+            }
+#endif
+            (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
+                               (TrackId)tid, BMessenger(this),
+                               (int)slot))->Show();
+            break;
+        }
+        case kMsgMixFxBypass: {
+            // The mixer names an insert by index; the command is run here, where
+            // the descriptors live. A discrete toggle, so it gets the narrow
+            // command rather than a whole-chain replace -- the Edit menu then
+            // reads "Bypass Effect".
+            int64 tid = 0; int32 idx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &idx);
+            Track* t = fProject->FindTrack((TrackId)tid);
+            if (!t || idx < 0 || idx >= (int32)t->fx.size()) break;
+            fStack->Execute(std::make_unique<SetFxBypassCommand>(
+                (TrackId)tid, (int)idx, !t->fx[(size_t)idx].bypassed), *fProject);
+            SyncFxToEngine();
+            PostMessage(kMsgUiRefresh);   // inspector + the mixer's own snapshot
+            break;
+        }
+        case kMsgMixFxMove: {
+            int64 tid = 0; int32 from = -1, to = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("from", &from);
+            msg->FindInt32("to", &to);
+            Track* t = fProject->FindTrack((TrackId)tid);
+            if (!t) break;
+            const int32 n = (int32)t->fx.size();
+            if (from < 0 || from >= n || to < 0 || to >= n || from == to) break;
+            // A reorder is only a permutation of the descriptor vector, so it
+            // goes through the ordinary chain-replace command and is one undo
+            // step -- the same path the inspector's drag uses.
+            std::vector<EffectDesc> chain = t->fx;
+            EffectDesc moved = chain[(size_t)from];
+            chain.erase(chain.begin() + from);
+            chain.insert(chain.begin() + to, moved);
+            fStack->Execute(std::make_unique<SetFxCommand>(
+                (TrackId)tid, false, std::move(chain)), *fProject);
+            SyncFxToEngine();
+            PostMessage(kMsgUiRefresh);
+            break;
+        }
+        case kMsgMixFxAdd: {
+            // The browser posts its choice to the INSPECTOR, which already turns
+            // a chosen plugin into a SetFxCommand against whichever track the
+            // message names -- it reads the id from the message precisely so a
+            // browser can outlive the selection it was opened from. Routing it
+            // there beats a second copy of the same handler.
             int64 tid = 0; msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid))
-                (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                                   (TrackId)tid, BMessenger(this)))->Show();
+            if (!fInspector || !fProject->FindTrack((TrackId)tid)) break;
+            (new PluginBrowser(BRect(240, 190, 700, 590), (TrackId)tid,
+                               BMessenger(fInspector), BMessenger(this)))->Show();
             break;
         }
         case kMsgMixSends: {
