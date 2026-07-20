@@ -231,17 +231,31 @@ inline int Lv2ChunkFrames(int remaining) {
 // a made-up bound. NaN is mapped to a defined value rather than passed through:
 // automation or a corrupt project file can produce one, and a NaN in a control
 // port propagates into the plugin's output and from there into the mix bus.
-// Snap to the nearest of `pts`. Ties go to the lower value, which only matters
-// for exact midpoints and keeps the result deterministic.
-inline float SnapToScalePoints(float v, const std::vector<float>& pts) {
-    if (pts.empty()) return v;
-    float best = pts[0];
-    float bestDist = std::fabs(v - pts[0]);
+// Snap to the nearest of `pts`, considering only points the port's own bounds
+// allow. Ties go to the lower value, which only matters for exact midpoints and
+// keeps the result deterministic.
+//
+// `found` reports whether any candidate qualified. Metadata can contradict
+// itself -- an enumeration whose scale points lie outside its own
+// lv2:minimum/lv2:maximum -- and there the two rules cannot both hold. Snapping
+// regardless would hand the plugin a value its range forbids; re-clamping after
+// the snap would hand it a value that is not one of its enumerated states. So
+// out-of-range points are not candidates at all, and if that leaves none the
+// caller falls back to ordinary numeric handling rather than inventing a value.
+inline float SnapToScalePoints(float v, const std::vector<float>& pts,
+                               float mn, float mx, bool hasMin, bool hasMax,
+                               bool* found = nullptr) {
+    bool  any  = false;
+    float best = v;
+    float bestDist = 0.0f;
     for (float p : pts) {
+        if (hasMin && p < mn) continue;
+        if (hasMax && p > mx) continue;
         const float d = std::fabs(v - p);
-        if (d < bestDist) { bestDist = d; best = p; }
+        if (!any || d < bestDist) { any = true; bestDist = d; best = p; }
     }
-    return best;
+    if (found) *found = any;
+    return any ? best : v;
 }
 
 inline float ClampLv2Param(float v, float mn, float mx,
@@ -254,8 +268,15 @@ inline float ClampLv2Param(float v, float mn, float mx,
 
     // An enumeration accepts ONLY its declared values. They can be sparse, so
     // rounding to a whole number is not enough -- snap to the set itself.
-    if (scalePoints != nullptr && !scalePoints->empty())
-        return SnapToScalePoints(v, *scalePoints);
+    if (scalePoints != nullptr && !scalePoints->empty()) {
+        bool snapped = false;
+        const float e = SnapToScalePoints(v, *scalePoints, mn, mx,
+                                          hasMin, hasMax, &snapped);
+        if (snapped) return e;
+        // Every declared point sits outside the declared range: the metadata is
+        // self-contradictory, so treat the port as an ordinary numeric one
+        // rather than forcing a value neither rule permits.
+    }
 
     // A toggle has exactly two states: its endpoints. Anything between them is
     // meaningless to the plugin, and 0/1 is the spec's default pair when the

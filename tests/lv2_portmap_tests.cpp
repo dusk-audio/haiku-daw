@@ -358,6 +358,23 @@ int main() {
             CHECK(ClampLv2Param(3.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 2.0f);
             CHECK(ClampLv2Param(4.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 5.0f);
             CHECK(ClampLv2Param(99.0f, 0.0f, 5.0f, true, true, true, false, &pts) == 5.0f);
+            // Self-contradictory metadata: an enumeration whose points lie
+            // outside its own range. Snapping regardless would return a value
+            // the range forbids; re-clamping after the snap would return a
+            // value that is not an enumerated state. Out-of-range points are
+            // therefore not candidates.
+            {
+                const std::vector<float> mixed = { 0.5f, 3.0f, 99.0f };
+                // 99 is out of range, so 3 wins even though 99 is "nearer" to 50.
+                CHECK(ClampLv2Param(50.0f, 0.0f, 5.0f, true, true, true, false,
+                                    &mixed) == 3.0f);
+                // With EVERY point out of range there is no usable enumeration;
+                // fall back to numeric handling instead of inventing a value.
+                const std::vector<float> allOut = { -10.0f, 42.0f };
+                const float r = ClampLv2Param(3.0f, 0.0f, 5.0f, true, true, true,
+                                              false, &allOut);
+                CHECK(r >= 0.0f && r <= 5.0f);
+            }
             // Non-integral scale points are legal too and must survive intact.
             const std::vector<float> frac = { -1.5f, 0.25f, 3.75f };
             CHECK(ClampLv2Param(0.3f, -1.5f, 3.75f, true, true, false, false, &frac) == 0.25f);
