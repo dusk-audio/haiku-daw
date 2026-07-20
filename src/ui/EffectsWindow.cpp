@@ -12,6 +12,7 @@
 // no knobs, the same as an add-on that isn't installed.
 #ifdef DAW_HAVE_LV2
 #include "../plugin/Lv2Host.h"
+#include "Lv2UiWindow.h"
 #endif
 
 #include <MenuItem.h>
@@ -542,6 +543,20 @@ void EffectsView::Draw(BRect) {
             btn(panel.right - 3 * kBtnW - 60, "^", 1);
             btn(panel.right - 2 * kBtnW - 56, "v", 2);
         }
+#ifdef DAW_HAVE_LV2
+        // "UI" opens the plugin's OWN editor. Only offered when the plugin
+        // actually ships one this host can embed, so the button never appears
+        // and then does nothing.
+        if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName)) {
+            BRect ub(panel.right - 5 * kBtnW - 62, panel.top + 2,
+                     panel.right - 4 * kBtnW - 62 + kBtnW, panel.top + kTitleH - 2);
+            SetHighColor(ColHeaderHi()); FillRect(ub);
+            SetHighColor(ColGrid());     StrokeRect(ub);
+            SetHighColor(ColAccent());
+            DrawString("UI", BPoint(ub.left + 4, ub.bottom - 5));
+            fHits.push_back({ (int)i, 10, 0, ub, 0, 0 });   // kind 10 = native UI
+        }
+#endif
         BRect rm(panel.right - 52, panel.top + 2, panel.right - 4, panel.top + kTitleH - 2);
         SetHighColor(Rgb(120, 60, 60)); FillRect(rm);
         SetHighColor(ColGrid());        StrokeRect(rm);
@@ -850,6 +865,21 @@ void EffectsView::MouseDown(BPoint where) {
         case 4:   // "Add Effect..." -> open the browser; it posts the choice back
             OpenBrowser();
             break;
+#ifdef DAW_HAVE_LV2
+        case 10: {   // open the plugin's own editor
+            if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
+            const EffectDesc& d = fChain[(size_t)h.effect];
+            BRect wr(140, 140, 140 + 960, 140 + 680);
+            if (BWindow* w = Window()) {
+                BRect f = w->Frame();
+                wr.OffsetTo(f.left + 30, f.top + 30);
+            }
+            // Null return = the plugin has no embeddable UI or its editor
+            // refused to instantiate; the generic panel stays as it is.
+            Lv2UiWindow::Open(wr, d.pluginName, EffectDisplayName(d), d.params);
+            break;
+        }
+#endif
     }
 }
 

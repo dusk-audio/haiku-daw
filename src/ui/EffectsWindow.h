@@ -98,6 +98,7 @@ private:
     //   0 knob        1 move up      2 move down   3 remove     4 add
     //   5 eq handle   6 FFT toggle   7 reverb type 8 delay sync
     //   9 plugin parameter slider (vertical generic list)
+    //  10 open the plugin's own (native) editor
     struct Hit { int effect; int kind; int slot; BRect rect;
                  float min; float max; };
     void  DrawKnob(BRect r, const char* label, float value, float mn, float mx);

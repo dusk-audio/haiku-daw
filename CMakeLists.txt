@@ -444,7 +444,10 @@ if(HAIKU)
     target_link_libraries(daw PRIVATE daw_engine be tracker)
 
     # Brings in DAW_HAVE_LV2, which is what gates the registration in main.cpp.
+    # Lv2UiWindow hosts a plugin's own GUI, so it needs lilv AND the Interface
+    # Kit; it only exists in an LV2-enabled build.
     if(DAW_LV2_ENABLED)
+        target_sources(daw PRIVATE src/ui/Lv2UiWindow.cpp)
         target_link_libraries(daw PRIVATE daw_lv2)
     endif()
 
