@@ -507,19 +507,34 @@ Lv2UiWindow::~Lv2UiWindow() {
         status_t st = 0;
         wait_for_thread(d->idleThread, &st);
     }
+    // Detach the container -- and with it the plugin's whole view subtree --
+    // BEFORE calling the plugin's cleanup.
+    //
+    // cleanup() destroys the views the plugin created, and `BView::~BView()`
+    // opens with an unconditional
+    //     if (fOwner != NULL)
+    //         debugger("Trying to delete a view that belongs to a window. "
+    //                  "Call RemoveSelf first.");
+    // so a plugin deleting its own still-attached view aborts the team. That is
+    // exactly what killed the app whenever an LV2 editor was closed: the crash
+    // was inside the plugin, but the cause was ours -- we invited it to delete
+    // attached views. Removing the container clears fOwner across the whole
+    // subtree, because the BeAPI propagates the owner down to every descendant,
+    // so the plugin's own delete then takes the ordinary path.
+    //
+    // We are on the looper inside BLooper::Quit(), which asserts the window
+    // lock, so this is already the locked context RemoveChild requires.
+    if (d->container) RemoveChild(d->container);
+
     if (d->desc && d->ui && d->desc->cleanup) d->desc->cleanup(d->ui);
 
-    // Anything the plugin left attached is detached and destroyed HERE, while
-    // its code is still loaded. ~BWindow deletes surviving children after this
-    // destructor body returns, so a view the plugin forgot to remove would
-    // otherwise be deleted through a vtable in an unloaded library.
-    if (d->container && d->container->LockLooper()) {
-        while (BView* child = d->container->ChildAt(0)) {
-            d->container->RemoveChild(child);
-            delete child;
-        }
-        d->container->UnlockLooper();
-    }
+    // Whatever the plugin did NOT delete is still parented to the container: a
+    // view it destroyed unlinked itself, since ~BView calls RemoveSelf. So
+    // deleting the container takes the leftovers with it, HERE, while the
+    // plugin's code is still loaded -- otherwise ~BWindow would delete them
+    // after this destructor body returns, through a vtable we no longer own.
+    delete d->container;
+    d->container = nullptr;
 
     // Deliberately NOT dlclose()d.
     //
