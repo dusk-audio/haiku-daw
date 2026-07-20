@@ -246,6 +246,12 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     if (RaiseIfOpen(pluginUri))
         return nullptr;      // nothing new was opened; the caller does nothing
 
+    // Everything from here to the UI binary's paths touches the shared lilv
+    // world, which is NOT thread-safe and is also read by EffectsView::Draw on
+    // another looper. HasNativeUi already locked; this did not, which left a
+    // window where opening an editor raced a repaint.
+    std::unique_lock<std::mutex> worldLock(gWorldMutex);
+
     const LilvPlugin* plugin = FindPlugin(pluginUri);
     if (!plugin) return nullptr;
 
@@ -349,6 +355,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         FileUriToPath(lilv_node_as_uri(lilv_ui_get_bundle_uri(ui)));
     const std::string uiUri = lilv_node_as_uri(lilv_ui_get_uri(ui));
 
+    // The world is not needed past this point -- the paths are plain strings --
+    // and the rest of this function runs plugin code and starts a thread, which
+    // should not be done holding a lock other loopers are waiting on.
+    worldLock.unlock();
+
     d->lib = dlopen(binPath.c_str(), RTLD_NOW);
     if (!d->lib) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
     LV2UI_DescriptorFunction descFn =
@@ -439,8 +450,12 @@ Lv2UiWindow::~Lv2UiWindow() {
     // Hosts commonly keep plugin binaries loaded for exactly this reason; one
     // handle per plugin type is a small, bounded cost.
     ForgetOpen(d->uri);
-    if (d->dsp) { lilv_instance_deactivate(d->dsp); lilv_instance_free(d->dsp); }
-    if (d->uis) lilv_uis_free(d->uis);
+    // Freeing lilv objects is world access as much as creating them is.
+    {
+        std::lock_guard<std::mutex> worldLock(gWorldMutex);
+        if (d->dsp) { lilv_instance_deactivate(d->dsp); lilv_instance_free(d->dsp); }
+        if (d->uis) lilv_uis_free(d->uis);
+    }
     delete d;
     fImpl = nullptr;
 }
