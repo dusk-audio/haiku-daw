@@ -859,7 +859,20 @@ void EffectsView::MouseDown(BPoint where) {
         case 3:   // remove
             if (h.effect >= 0 && h.effect < (int)fChain.size()) {
                 fChain.erase(fChain.begin() + h.effect);
-                Apply(); Invalidate(); UpdateScrollRange();
+                Apply();
+                // fFocus is a chain INDEX, so erasing shifts what it names.
+                // Left alone it either points at a different insert or past the
+                // end, and Draw's `(int)i != fFocus` filter then matches nothing
+                // and renders an empty window.
+                if (fFocus >= 0) {
+                    if (h.effect == fFocus) {
+                        // The insert this window exists to edit is gone.
+                        if (BWindow* w = Window()) w->PostMessage(B_QUIT_REQUESTED);
+                        return;
+                    }
+                    if (h.effect < fFocus) fFocus--;
+                }
+                Invalidate(); UpdateScrollRange();
             }
             break;
         case 4:   // "Add Effect..." -> open the browser; it posts the choice back

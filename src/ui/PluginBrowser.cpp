@@ -113,8 +113,13 @@ void PluginBrowser::Rebuild() {
     if (!fShown.empty()) fList->Select(0);   // Enter works without a click
 }
 
-void PluginBrowser::PostChoice() {
-    const int32 sel = fList->CurrentSelection();
+void PluginBrowser::PostChoice(int32 index) {
+    // Prefer the index carried by the invocation itself. The list can be
+    // rebuilt between the double-click and this message arriving -- type a
+    // character straight after picking and MSG_FILTER runs first, re-selecting
+    // row 0 -- so reading the CURRENT selection here can insert a different
+    // plugin from the one that was clicked.
+    const int32 sel = index >= 0 ? index : fList->CurrentSelection();
     if (sel < 0 || sel >= (int32)fShown.size()) return;
     const Entry& e = fShown[(size_t)sel];
 
@@ -128,8 +133,14 @@ void PluginBrowser::PostChoice() {
 
 void PluginBrowser::MessageReceived(BMessage* msg) {
     switch (msg->what) {
-        case MSG_FILTER: Rebuild();    break;
-        case MSG_PICK:   PostChoice(); break;
+        case MSG_FILTER: Rebuild(); break;
+        case MSG_PICK: {
+            // BListView puts the invoked row in "index"; absent, fall back.
+            int32 idx = -1;
+            if (msg->FindInt32("index", &idx) != B_OK) idx = -1;
+            PostChoice(idx);
+            break;
+        }
         default: BWindow::MessageReceived(msg); break;
     }
 }

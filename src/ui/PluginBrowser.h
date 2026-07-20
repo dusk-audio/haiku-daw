@@ -58,7 +58,10 @@ private:
     };
 
     void Rebuild();             // (re)populate the list from the current filter
-    void PostChoice();
+    // `index` is the row the invocation named, or -1 to use the current
+    // selection. The list can be rebuilt between a double-click and the message
+    // arriving, which is why the invoked row is passed rather than re-read.
+    void PostChoice(int32 index);
 
     BMessenger         fTarget;   // -> effects editor (the chosen plugin)
     BMessenger         fMain;     // -> MainWindow (spacebar transport only)
