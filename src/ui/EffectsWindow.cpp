@@ -37,6 +37,10 @@ static constexpr bigtime_t kWheelCommitDelay = 400000;   // 400 ms
 
 static constexpr float kPanelPad = 8.0f;
 static constexpr float kTitleH   = 22.0f;
+// Per-insert header, under the title bar: bypass button + wet/dry slider.
+static constexpr float kHeaderH  = 22.0f;
+static constexpr float kBypassW  = 52.0f;
+static constexpr float kMixValW  = 40.0f;
 static constexpr float kKnobW    = 68.0f;
 static constexpr float kKnobH    = 86.0f;
 // Dial geometry inside a knob cell (see DrawKnob): centre offset from the cell
@@ -263,7 +267,7 @@ void EffectsView::SetMeters(const float* gr, int grN,
 }
 
 float EffectsView::PanelHeight(const EffectDesc& d) const {
-    float h = kTitleH + 6;
+    float h = kTitleH + kHeaderH + 6;
     if (UsesParamList(d)) {
         // One row per parameter, or a single row for the "no parameters" notice
         // an unresolved plugin id shows.
@@ -306,11 +310,10 @@ void EffectsView::Apply() {
         m.AddInt32("et", (int32)(int)d.type);
         m.AddInt32("ec", (int32)d.params.size());
         m.AddString("en", d.pluginName.c_str());   // empty for built-ins
-        // Insert-slot state travels with the descriptor. This editor doesn't
-        // expose it yet (the slot UI is separate), but the snapshot it was
-        // opened with may already carry it, and flattening without these would
-        // silently reset every insert to un-bypassed / fully wet on the next
-        // knob move.
+        // Insert-slot state travels with the descriptor: the per-insert header
+        // edits it here, the channel strip edits it through its own commands,
+        // and flattening without these would silently reset every insert to
+        // un-bypassed / fully wet on the next knob move.
         m.AddInt32("eb", d.bypassed ? 1 : 0);
         m.AddFloat("em", d.mix);
         for (float v : d.params) m.AddFloat("ep", v);
@@ -526,7 +529,9 @@ void EffectsView::Draw(BRect) {
         FillRect(panel);
         SetHighColor(ColHeaderHi());
         FillRect(BRect(panel.left, panel.top, panel.right, panel.top + kTitleH));
-        SetHighColor(ColText());
+        // A bypassed insert keeps its panel but reads as inactive, the same way
+        // the channel strip dims its row.
+        SetHighColor(d.bypassed ? ColTextDim() : ColText());
         const std::string titleStr = EffectDisplayName(d);
         const char* title = titleStr.c_str();
         DrawString(title, BPoint(panel.left + 8, panel.top + 15));
@@ -575,7 +580,50 @@ void EffectsView::Draw(BRect) {
             fHits.push_back({ (int)i, 6, 0, fb, 0, 0 });   // kind 6 = FFT toggle
         }
 
-        float knobTop = panel.top + kTitleH + 4;
+        // --- Per-insert header: bypass + wet/dry -----------------------------
+        // Neither has a live path. kMsgFxLive addresses a numbered PARAM slot,
+        // and package 01 models bypass/mix as separate per-insert atomics that
+        // SyncFx pushes, so there is no live setter to call for them; adding one
+        // would be an engine change this package does not make. Both therefore
+        // commit on release: the slider tracks the pointer, the audio steps once.
+        BRect hdr(panel.left, panel.top + kTitleH, panel.right,
+                  panel.top + kTitleH + kHeaderH);
+        SetHighColor(ColHeader());
+        FillRect(hdr);
+
+        BRect byp(panel.left + 6, hdr.top + 3, panel.left + 6 + kBypassW,
+                  hdr.bottom - 3);
+        SetHighColor(d.bypassed ? Rgb(150, 110, 50) : ColHeaderHi());
+        FillRect(byp);
+        SetHighColor(ColGrid());
+        StrokeRect(byp);
+        SetHighColor(d.bypassed ? ColBackground() : ColTextDim());
+        DrawString("Byp", BPoint(byp.left + 14, byp.bottom - 5));
+        fHits.push_back({ (int)i, 11, 0, byp, 0, 0 });   // kind 11 = bypass
+
+        SetHighColor(ColTextDim());
+        DrawString("Mix", BPoint(byp.right + 8, hdr.bottom - 6));
+        BRect mixR(byp.right + 8 + StringWidth("Mix") + 6, hdr.top + 5,
+                   panel.right - 8 - kMixValW, hdr.bottom - 5);
+        if (mixR.Width() > 8) {
+            SetHighColor(ColHeaderHi()); FillRect(mixR);
+            SetHighColor(ColGrid());     StrokeRect(mixR);
+            const float mt = ClampFxMix(d.mix);
+            BRect fill(mixR.left + 1, mixR.top + 1,
+                       mixR.left + 1 + (mixR.Width() - 2) * mt, mixR.bottom - 1);
+            if (fill.right > fill.left) {
+                SetHighColor(ColAccent()); FillRect(fill);
+            }
+            // kind 12: an absolute horizontal drag across THIS rect, so the rect
+            // is what the drag maps against (the same contract as kind 9).
+            fHits.push_back({ (int)i, 12, 0, mixR, 0.0f, 1.0f });
+        }
+        char mixb[16];
+        std::snprintf(mixb, sizeof mixb, "%.0f%%", ClampFxMix(d.mix) * 100.0f);
+        SetHighColor(ColTextDim());
+        DrawString(mixb, BPoint(panel.right - kMixValW - 2, hdr.bottom - 6));
+
+        float knobTop = panel.top + kTitleH + kHeaderH + 4;
         if (d.type == EffectType::Eq) {
             DrawEqGraph(BRect(panel.left + 6, knobTop, panel.right - 6,
                               knobTop + kGraphH - 6), d, (int)i);
@@ -757,6 +805,15 @@ void EffectsView::MouseDown(BPoint where) {
     int32 clicks = 0;
     if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
         m->FindInt32("clicks", &clicks);
+    // Double-clicking the wet/dry slider restores fully wet, the value every
+    // insert starts at -- the same "back to the default" gesture as a parameter.
+    if (kind == 12 && clicks > 1
+        && h.effect >= 0 && h.effect < (int)fChain.size()) {
+        fChain[h.effect].mix = 1.0f;
+        fDragEffect = -1;              // the dbl-click is not also a drag
+        Apply(); Invalidate();
+        return;
+    }
     if (kind == 9 && clicks > 1
         && h.effect >= 0 && h.effect < (int)fChain.size()) {
         EffectDesc& d = fChain[h.effect];
@@ -771,6 +828,14 @@ void EffectsView::MouseDown(BPoint where) {
     }
 
     switch (kind) {
+        case 11:  // bypass: a discrete toggle, committed on the click
+            if (h.effect >= 0 && h.effect < (int)fChain.size()) {
+                EffectDesc& d = fChain[h.effect];
+                d.bypassed = !d.bypassed;
+                Apply(); Invalidate();
+            }
+            break;
+        case 12:  // wet/dry: absolute drag across its track, committed on release
         case 0:   // knob: begin a vertical drag
         case 9:   // plugin parameter slider: horizontal drag across its track
         case 5: { // eq handle: 2D drag
@@ -914,6 +979,13 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         d.params[slot] = v;
         live(slot, v);
     };
+    if (fDragKind == 12) {   // wet/dry: x across the track, no live preview
+        float t = (fDragRect.Width() > 0)
+                  ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
+        d.mix = ClampFxMix(t);
+        Invalidate();        // the drawing follows the pointer; the audio waits
+        return;              // for MouseUp -- see the header comment in Draw
+    }
     if (fDragKind == 0) {   // knob: vertical drag over ~160 px = full range
         const float dv = (fDragStart.y - where.y) / 160.0f * (fDragMax - fDragMin);
         float v = fDragStartVal + dv;
@@ -933,8 +1005,9 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
                           fDragScalePoints.empty() ? nullptr : &fDragScalePoints);
         setP(fDragSlot, v);
     } else if (fDragKind == 5) {   // eq handle: x -> freq (log), y -> gain
-        // Recover the graph rect for this effect to map coordinates.
-        const float top = PanelTop((size_t)fDragEffect) + kTitleH + 4;
+        // Recover the graph rect for this effect to map coordinates. Must match
+        // the `knobTop` Draw computes, header included.
+        const float top = PanelTop((size_t)fDragEffect) + kTitleH + kHeaderH + 4;
         BRect r(kPanelPad + 6, top, Bounds().Width() - kPanelPad - 6, top + kGraphH - 6);
         const double lo = std::log10(20.0), hi = std::log10(20000.0);
         double tf = (where.x - r.left) / r.Width();
