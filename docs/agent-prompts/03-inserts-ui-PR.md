@@ -183,3 +183,83 @@ hardware (`vm_setup.sh` assumes the repo is already present and installs no buil
 dependencies). `scripts/serve.sh` now defaults to port 9090 — the host's firewalld
 drops 8000, so a clone from another machine *hangs* rather than being refused,
 which reads as a fault on the Haiku end. Both are documented in place.
+
+---
+
+# Addendum: work after the original PR description
+
+Everything above describes the package as first written. The branch has since
+grown three areas, all driven by using the app rather than reading it.
+
+## Native plugin editors
+
+An LV2 insert opens the plugin's OWN GUI (`src/ui/Lv2UiWindow`), not the generic
+parameter list. That list remains the fallback for built-ins, add-ons, and
+plugins shipping no embeddable editor.
+
+Getting there needed a port of DPF's Haiku pugl backend, which had never
+rendered a frame on the platform: no `BGLView` was ever created, no events were
+dispatched, and `puglUpdate` returned `PUGL_UNSUPPORTED`. The patch lives OUTSIDE
+this repo at `~/projects/dpf-haiku-gl-ui.patch` (~1000 lines) because it belongs
+to DPF, not the DAW. `prototypes/lv2_ui_host` is the standalone harness that
+proved the mechanism before any of it touched the app.
+
+Two rules that patch established, both of which cost real debugging time:
+- **Never render from `BView::Draw()`.** It runs on the window's looper thread,
+  which already holds the lock `BGLView::LockGL()` needs. The first expose
+  deadlocks: window appears, stays black, process alive but wedged.
+- **Input is queued on the looper and drained in `puglUpdate`.** Every other
+  pugl platform delivers input from the drawing thread, and toolkits rely on it
+  — Dear ImGui is explicitly not thread-safe.
+
+**The editor is VIEW-ONLY.** It holds its own plugin instance seeded with the
+insert's stored values, and says so in its title. Wiring it to the live instance
+means letting a GUI touch an object the audio thread is using every block — an
+RT-boundary decision left deliberately open rather than made silently.
+
+## Region editing
+
+- A MIDI region now GROWS to cover notes drawn past its end. It previously did
+  not, and since the engine renders within region bounds those notes were kept
+  in the model and never played — indistinguishable, from outside, from the note
+  vanishing. Growth is one-way: a region deliberately left longer than its notes
+  is not trimmed to fit.
+- Left-edge trimming exists at all now, and `kEdgeGrab` went 5 px → 9 px. Five
+  pixels was effectively unhittable, which made resizing look absent rather than
+  merely fiddly.
+- `TrimClipFrontCommand` carries start, length and source offset together. For
+  audio the offset MUST advance with the start, or a front-trim slides the audio
+  against the timeline instead of trimming it — which looks right and sounds
+  wrong.
+
+## Review pass
+
+A full review of the branch found six defects, all fixed and mutation-tested
+where behaviour allowed:
+
+| Defect | Why it mattered |
+| --- | --- |
+| UI registry held raw `BWindow*` | Use-after-free: every `Open()` failure path quits the window and returns while it is still dying |
+| `HasNativeUi()` called from `Draw()` | Unsynchronised lilv access from two loopers, every repaint |
+| `Open()` held no world lock at all | Opening an editor raced a repaint across ~100 lines of lilv calls |
+| Enum snapping ignored declared bounds | A scale point outside min/max was handed to the plugin |
+| `fFocus` not adjusted on remove | Deleting the focused insert left a blank editor window |
+| Browser read the current selection | Typing after a double-click inserted a different plugin |
+
+The timeline trim, `TrimClipFrontCommand` and the note-growth logic reviewed
+clean.
+
+One defect found during this work is NOT ours: `imgui_impl_opengl2.cpp` in
+DPF-Widgets guards its `glPushMatrix()` calls behind `#ifndef IMGUI_DPF_BACKEND`
+but leaves the matching pops unguarded, so every frame pops twice against zero
+pushes. Platform-independent; visible on Haiku only because Mesa's software
+rasteriser reports what desktop drivers ignore. Belongs upstream.
+
+## Still open
+
+- **A click-time crash in the DAW** reported from the running app, not yet
+  reproduced against the fixed build. The lilv races above are plausible causes
+  and may have removed it; that is unconfirmed, and it should not be assumed
+  fixed without a backtrace.
+- The native editor is view-only (see above).
+- Mixer-strip slot list and the editor's bypass/wet-dry header remain unbuilt.
