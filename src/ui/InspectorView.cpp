@@ -4,6 +4,9 @@
 #include "Widgets.h"
 #include "EffectsWindow.h"
 #include "PluginBrowser.h"
+#ifdef DAW_HAVE_LV2
+#include "Lv2UiWindow.h"
+#endif
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
 #include "../model/Commands.h"
@@ -536,9 +539,24 @@ void InspectorView::MouseUp(BPoint) {
         const int nfx = (int)t->fx.size();
         if (from < 0 || from >= nfx) { Refresh(); return; }
         if (to < 0 || to >= nfx || to == from) {
-            // Never moved: a click on the row, which opens THAT insert's editor
-            // alone. The window still receives the whole chain -- it applies
-            // every descriptor back -- but shows only the one clicked.
+            // Never moved: a click on the row opens that insert's editor.
+            const EffectDesc& d = t->fx[(size_t)from];
+#ifdef DAW_HAVE_LV2
+            // A plugin that ships its own editor opens THAT, because it is the
+            // interface its author designed and the generic parameter list is
+            // the fallback for plugins without one -- not the other way round.
+            // HasNativeUi decides; a null return from Open means an editor for
+            // this plugin is already up and was raised instead, which is also
+            // "done", so neither case falls through to the generic panel.
+            if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName)) {
+                BRect uw(160, 160, 160 + 960, 160 + 680);
+                Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d), d.params);
+                Refresh();
+                return;
+            }
+#endif
+            // The generic panel: built-ins, add-ons, and plugins with no
+            // embeddable editor. Shows only the insert that was clicked.
             BRect wr(120, 120, 600, 740);
             (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window()),
                                from))->Show();

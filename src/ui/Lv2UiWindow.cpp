@@ -120,11 +120,39 @@ const LilvUI* FindNativeUi(const LilvPlugin* plugin, LilvUIs** owned) {
     return found;
 }
 
+// One editor per plugin.
+//
+// Opening a second window for the same plugin gives two editors that each
+// believe they own the parameters, and each holds its own DSP instance -- so
+// they disagree, silently, and neither is authoritative. Re-opening therefore
+// raises the window that already exists.
+std::mutex gOpenMutex;
+std::vector<std::pair<std::string, BWindow*>> gOpen;
+
+BWindow* AlreadyOpen(const std::string& uri) {
+    std::lock_guard<std::mutex> lock(gOpenMutex);
+    for (const auto& e : gOpen)
+        if (e.first == uri) return e.second;
+    return nullptr;
+}
+
+void RegisterOpen(const std::string& uri, BWindow* w) {
+    std::lock_guard<std::mutex> lock(gOpenMutex);
+    gOpen.push_back({ uri, w });
+}
+
+void ForgetOpen(BWindow* w) {
+    std::lock_guard<std::mutex> lock(gOpenMutex);
+    for (size_t i = gOpen.size(); i > 0; --i)
+        if (gOpen[i - 1].second == w) gOpen.erase(gOpen.begin() + (long)(i - 1));
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
 
 struct Lv2UiWindow::Impl {
+    std::string uri;          // registry key
     BView*        container = nullptr;
     LilvInstance* dsp       = nullptr;
     void*         lib       = nullptr;
@@ -168,6 +196,15 @@ Lv2UiWindow::Lv2UiWindow(BRect frame, const char* title)
 Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
                                const std::vector<float>& params) {
+    // Already showing this plugin? Bring it forward rather than opening a rival.
+    if (BWindow* existing = AlreadyOpen(pluginUri)) {
+        if (existing->Lock()) {
+            existing->Activate(true);
+            existing->Unlock();
+        }
+        return nullptr;      // nothing new was opened; the caller does nothing
+    }
+
     const LilvPlugin* plugin = FindPlugin(pluginUri);
     if (!plugin) return nullptr;
 
@@ -184,6 +221,8 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     Impl* d = new Impl();
     win->fImpl = d;
     d->uis = uis;
+    d->uri = pluginUri;
+    RegisterOpen(pluginUri, win);
 
     d->container = new BView(win->Bounds(), "container", B_FOLLOW_ALL_SIDES,
                              B_WILL_DRAW);
@@ -336,7 +375,29 @@ Lv2UiWindow::~Lv2UiWindow() {
         wait_for_thread(d->idleThread, &st);
     }
     if (d->desc && d->ui && d->desc->cleanup) d->desc->cleanup(d->ui);
-    if (d->lib) dlclose(d->lib);
+
+    // Anything the plugin left attached is detached and destroyed HERE, while
+    // its code is still loaded. ~BWindow deletes surviving children after this
+    // destructor body returns, so a view the plugin forgot to remove would
+    // otherwise be deleted through a vtable in an unloaded library.
+    if (d->container && d->container->LockLooper()) {
+        while (BView* child = d->container->ChildAt(0)) {
+            d->container->RemoveChild(child);
+            delete child;
+        }
+        d->container->UnlockLooper();
+    }
+
+    // Deliberately NOT dlclose()d.
+    //
+    // The plugin's UI code owns objects whose lifetime we do not fully control
+    // -- views, GL contexts, DPF/pugl statics -- and unloading the library while
+    // any of them survive turns an ordinary destructor into a jump into
+    // unmapped memory. That is what crashed the app here: the editor closed,
+    // the library went away, and ~BWindow then deleted a plugin-owned view.
+    // Hosts commonly keep plugin binaries loaded for exactly this reason; one
+    // handle per plugin type is a small, bounded cost.
+    ForgetOpen(this);
     if (d->dsp) { lilv_instance_deactivate(d->dsp); lilv_instance_free(d->dsp); }
     if (d->uis) lilv_uis_free(d->uis);
     delete d;

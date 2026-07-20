@@ -35,9 +35,13 @@ public:
     static bool HasNativeUi(const std::string& pluginUri);
 
     // Opens the plugin's editor, seeded with `params` (the insert's stored
-    // values, slot order). Returns nullptr when the plugin has no embeddable
-    // UI or its editor refuses to instantiate — the caller then keeps using the
-    // generic panel.
+    // values, slot order).
+    //
+    // Returns nullptr when the plugin has no embeddable UI, when its editor
+    // refuses to instantiate, OR when an editor for this plugin is already open
+    // (that one is raised instead). A null return means "nothing new appeared",
+    // not "this failed" -- callers that want the generic panel as a fallback
+    // must ask HasNativeUi() first rather than treating null as absence.
     static Lv2UiWindow* Open(BRect frame, const std::string& pluginUri,
                              const std::string& displayName,
                              const std::vector<float>& params);
