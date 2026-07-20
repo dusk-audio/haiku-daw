@@ -92,6 +92,35 @@ public:
 
     BView* Container() const { return fContainer; }
 
+    // Log every mouse message the WINDOW sees, and which handler it is routed
+    // to. This is the decisive diagnostic for "the UI draws but does not
+    // respond": it separates "the click never reached the window" from "it
+    // reached the window but went to the wrong view" from "it reached the right
+    // view and the plugin ignored it".
+    void DispatchMessage(BMessage* msg, BHandler* handler) override {
+        if (msg != nullptr) {
+            const char* what = nullptr;
+            switch (msg->what) {
+                case B_MOUSE_DOWN:   what = "B_MOUSE_DOWN";   break;
+                case B_MOUSE_UP:     what = "B_MOUSE_UP";     break;
+                case B_MOUSE_WHEEL_CHANGED: what = "B_MOUSE_WHEEL"; break;
+                case B_KEY_DOWN:     what = "B_KEY_DOWN";     break;
+                default: break;
+            }
+            if (what != nullptr) {
+                BView* const v = dynamic_cast<BView*>(handler);
+                BPoint where(-1.0f, -1.0f);
+                msg->FindPoint("where", &where);
+                std::printf("[win] %s -> handler=%s at %.0f,%.0f\n", what,
+                            v != nullptr ? (v->Name() ? v->Name() : "(unnamed view)")
+                                         : "(not a view)",
+                            where.x, where.y);
+                std::fflush(stdout);
+            }
+        }
+        BWindow::DispatchMessage(msg, handler);
+    }
+
     bool QuitRequested() override {
         be_app->PostMessage(B_QUIT_REQUESTED);
         return true;
