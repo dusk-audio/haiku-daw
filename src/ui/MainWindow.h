@@ -72,6 +72,7 @@ private:
     void StopMidiMonitor();          // tear down the idle monitor engine + input
     void ReloadActiveEngine();       // rebuild the running engine at the playhead
                                      // (structural fx / tempo change, keep going)
+    void SyncFxToEngine();           // a committed chain edit -> the running engine
     bool AudioMonitorOn() const;     // global flag OR an armed audio track's I btn
     bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording

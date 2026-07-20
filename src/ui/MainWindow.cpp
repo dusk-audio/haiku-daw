@@ -757,16 +757,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             fStack->Execute(std::make_unique<SetFxCommand>(
                 (TrackId)tid, master, std::move(chain)), *fProject);
-            // Apply the edit to the running engine so it takes effect live.
-            // Param tweaks sync in place; a structural change (add/remove/
-            // reorder/replace) rebuilds the engine at the playhead.
-            // Param tweaks sync into the live effects in place (no seam); only a
-            // STRUCTURAL change (add/remove/reorder/replace) needs a rebuild.
-            if (fEngine && !fEngine->SyncFx(*fProject))
-                ReloadActiveEngine();
+            SyncFxToEngine();
             fTimeline->Invalidate();
             break;
         }
+        case kMsgFxChanged:      // a channel strip committed a chain edit
+            SyncFxToEngine();
+            break;
         case kMsgReloadEngine:   // clip/fade edit: rebuild so it takes effect live
             ReloadActiveEngine();
             break;
@@ -1488,6 +1485,22 @@ void MainWindow::ReloadActiveEngine() {
         UpdateMidiMonitor();      // rebuilds the idle monitor engine
     }
     // Stopped / recording: the change applies on the next Play / take.
+}
+
+// Push a committed effect-chain edit into the running engine.
+//
+// Parameter tweaks sync into the live effects in place, with no seam. A
+// STRUCTURAL change (add, remove, reorder, replace) cannot be done in place, so
+// SyncFx reports the mismatch and the engine is rebuilt at the playhead.
+//
+// Every path that mutates a chain has to come through here. The channel strip's
+// edits used to reach the model and the drawing but not the audio: they run
+// their command directly and then only asked for a repaint, so adding,
+// reordering or bypassing an insert from the strip did nothing audible until
+// something else happened to rebuild the engine.
+void MainWindow::SyncFxToEngine() {
+    if (fEngine && !fEngine->SyncFx(*fProject))
+        ReloadActiveEngine();
 }
 
 void MainWindow::StopMidiMonitor() {

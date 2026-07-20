@@ -55,6 +55,17 @@ constexpr uint32 kMsgTrackSelected = 'tsel';
 // and the inspector so they stay consistent.
 constexpr uint32 kMsgUiRefresh = 'uref';
 
+// A channel strip -> MainWindow: an insert chain changed (added, reordered,
+// bypassed) and the command has ALREADY run. This is what pushes the edit into
+// the RUNNING engine.
+//
+// Not folded into kMsgUiRefresh, which is only a repaint: the timeline posts it
+// for clip moves, gain writes and selection changes, and syncing the effect
+// graph on each of those would rebuild the engine at the playhead for edits
+// that have nothing to do with effects. The editor window does not need it
+// either -- kMsgApplyFx carries a chain and syncs on the way past.
+constexpr uint32 kMsgFxChanged = 'fxch';
+
 // Left inspector column width (Logic-style track inspector).
 constexpr float kInspectorWidth = 190.0f;
 

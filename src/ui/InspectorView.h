@@ -35,6 +35,7 @@ private:
     Track*       CurrentTrackMut() const;
     void Layout();                    // recompute control rects for the width
     void Refresh();                   // repaint + tell the window to refresh
+    void RefreshFx();                 // ... and push the chain into the engine
     void MessageReceived(BMessage* msg) override;   // plugin browser's choice
 
     Project*      fProject;

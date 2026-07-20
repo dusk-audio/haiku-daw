@@ -41,6 +41,15 @@ void InspectorView::Refresh() {
     if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
 }
 
+// Same, plus the engine. An insert edit made HERE runs its command directly, so
+// nothing else pushes it into a running engine -- kMsgUiRefresh is a repaint.
+// Without this, adding, reordering or bypassing an insert from the strip changes
+// the model and the drawing while the audio carries on unaltered.
+void InspectorView::RefreshFx() {
+    Refresh();
+    if (BWindow* w = Window()) w->PostMessage(kMsgFxChanged);
+}
+
 // Insert-slot list metrics. Rows are compact because the strip is shared with
 // the fader and meter; kMaxFxRows caps the block so a long chain cannot squeeze
 // them out.
@@ -425,7 +434,7 @@ void InspectorView::MouseDown(BPoint where) {
                 fStack->Execute(std::make_unique<SetFxBypassCommand>(
                                     id, i, !t->fx[(size_t)i].bypassed),
                                 *fProject);
-                Refresh();
+                RefreshFx();
                 return;
             }
 
@@ -489,7 +498,7 @@ void InspectorView::MessageReceived(BMessage* msg) {
         fStack->Execute(std::make_unique<SetFxCommand>(t->id, false,
                                                        std::move(chain)),
                         *fProject);
-        Refresh();
+        RefreshFx();
         return;
     }
     BView::MessageReceived(msg);
@@ -572,7 +581,7 @@ void InspectorView::MouseUp(BPoint) {
         fStack->Execute(std::make_unique<SetFxCommand>(t->id, false,
                                                        std::move(chain)),
                         *fProject);
-        Refresh();
+        RefreshFx();
         return;
     }
     // Restore the pre-drag value, then push ONE command (clean single undo).
