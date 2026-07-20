@@ -271,11 +271,136 @@ but leaves the matching pops unguarded, so every frame pops twice against zero
 pushes. Platform-independent; visible on Haiku only because Mesa's software
 rasteriser reports what desktop drivers ignore. Belongs upstream.
 
+---
+
+# Addendum 2: the last two work items
+
+This closes work item 1 (the mixer half) and work item 3 (bypass + wet/dry).
+Building them surfaced a defect in the half of item 1 that had already shipped.
+
+## The bug the strip had all along
+
+**Every effect edit made from the channel strip reached the model and the
+drawing but never the audio.** Adding a plugin from the strip's empty row,
+dragging to reorder, and the bypass dot itself all ran their command directly
+and then asked for `kMsgUiRefresh` — which repaints the inspector, the timeline
+and the mixer, and touches no engine. The one call to `Engine::SyncFx` in the
+whole app sat in the `kMsgApplyFx` handler, which only the effects *editor*
+posts. So while the transport was rolling, clicking the bypass dot dimmed the
+row and changed nothing you could hear, until something unrelated happened to
+rebuild the engine.
+
+It was invisible when stopped, because Play rebuilds the engine from the project
+anyway; it needed the transport rolling to show.
+
+Fixed with `kMsgFxChanged`, posted by any strip that has just committed a chain
+edit, handled by a new `MainWindow::SyncFxToEngine` that both it and
+`kMsgApplyFx` now share. Deliberately NOT folded into `kMsgUiRefresh`: the
+timeline posts that for clip moves and gain writes, and syncing the effect graph
+on each would rebuild the engine at the playhead for edits that have nothing to
+do with effects.
+
+## Mixer-strip insert slots (item 1, the remaining half)
+
+The strip's single "FX n" button is now the same slot list the inspector grew,
+narrowed to a 96 px strip: a row per insert with its name and a bypass dot, a
+trailing `+ Add` row, and a `+N more` overflow row. Capped at four rows rather
+than the inspector's six, because a mixer strip shares its height with five
+other sections, a pan knob, a fader and four buttons.
+
+Every strip reserves the *same* block — the largest any strip needs — so the pan
+knobs, faders and meters stay on one line across the rack the way a console
+reads. The master strip reserves it and draws nothing into it.
+
+The mixer is a separate looper editing a snapshot, so unlike the inspector it
+cannot execute anything, and it does not hold descriptors to post back either:
+its snapshot carries a label and a bypass flag per insert (`MixerInsertInfo`),
+not an `EffectDesc`. Naming an insert needs a host lookup for LV2, which is main
+-thread work. So each edit posts an **intent** and the main window turns it into
+a command against the real chain:
+
+| Gesture | Message | Command |
+| --- | --- | --- |
+| Bypass dot | `kMsgMixFxBypass` (+ `int32 "fx"`) | `SetFxBypassCommand` |
+| Drag a row | `kMsgMixFxMove` (+ `"from"`, `"to"`) | `SetFxCommand` (permutation) |
+| Click a row | `kMsgMixFx` (+ `int32 "slot"`) | — opens the editor on that insert |
+| `+ Add` row | `kMsgMixFxAdd` | — opens the plugin browser |
+
+The bypass message says *toggle this index*, not *set it to true*, so a click is
+correct however stale the mixer's snapshot is: the main window reads the current
+model value and inverts it, and two fast clicks are two toggles rather than two
+writes of the same value.
+
+Clicking a row prefers the plugin's own editor when it has one, exactly as the
+inspector does — the two strips have to behave the same or the mixer reads as
+broken by comparison.
+
+`kMsgMixFxAdd` opens the browser pointed at `InspectorView`, which already turns
+a chosen plugin into a `SetFxCommand` against whichever track the message names
+— it reads the id from the message precisely so a browser can outlive the
+selection it was opened from. That beat a second copy of the same handler.
+
+The insert chains ride the `kMsgMixStrips` refresh as one flat run of `"fxn"` /
+`"fxb"` sliced by each strip's `"fx"` count, because a `BMessage` has no
+per-strip array to nest them in. Same shape `kMsgApplyFx` already uses for
+parameters.
+
+## Per-insert bypass + wet/dry (item 3)
+
+A header row under each panel's title bar: a `Byp` button and a wet/dry slider
+reading out in percent. Bypassed panels dim their title, matching how the strip
+dims a bypassed row.
+
+**Both commit on release, and the task doc's reasoning for that still holds.**
+`kMsgFxLive` addresses a numbered param *slot*; package 01 models `bypassed` and
+`mix` as separate per-insert atomics that `SyncFx` pushes, so there is no live
+setter to call for either. Adding one is an engine change this package does not
+make. The consequence is the specified one, not a bug: the slider tracks the
+pointer continuously and the audio steps once, on mouse-up.
+
+Drawn as a slider rather than the "small knob" the task doc asks for. The knob
+widget's dial geometry is fixed by constants sized for the 68x86 knob cell, so a
+knob here would have meant either a knob-sized header row or parameterising the
+dial; the slider matches the generic parameter rows directly below it. Double-
+clicking it restores fully wet, the same "back to the default" gesture the
+parameter rows use.
+
+## Verification
+
+| Environment | Result |
+| --- | --- |
+| Haiku VM, LV2 enabled | **46/46**, 0 errors, **0 warnings** |
+| Haiku VM, `-DDAW_LV2=OFF` | **43/43**, 0 errors, 0 warnings |
+| Linux host | 46/46 |
+
+None of it has been seen running — see "What is NOT verified" above, which still
+applies in full. What *was* checked directly is the arithmetic that would fail
+silently, lifted out and simulated on the host, then mutation-tested to confirm
+the checks were not vacuous:
+
+- the reorder permutation over every from/to pair for chains of 1..8, asserting
+  the dragged item lands **on** the row it was dropped on and nothing is lost or
+  duplicated (mutating it to insert-before fails 84 checks);
+- the flat insert run encoded and decoded across strips of mixed length,
+  asserting it round-trips and consumes exactly (mutating the running index to
+  reset per strip fails it);
+- row counting for chains of 0..9 against the 4-row block, asserting every
+  insert is either drawn or counted in the overflow label and that no row ever
+  indexes past the chain (mutating the overflow predicate to `>` fails it).
+
 ## Still open
 
 - **A click-time crash in the DAW** reported from the running app, not yet
   reproduced against the fixed build. The lilv races above are plausible causes
   and may have removed it; that is unconfirmed, and it should not be assumed
   fixed without a backtrace.
-- The native editor is view-only (see above).
-- Mixer-strip slot list and the editor's bypass/wet-dry header remain unbuilt.
+- The native editor is view-only, and whether it may touch the live instance is
+  the user's decision (see above).
+- Dynamic plugin latency (4K EQ 2 moves 0 -> 27 -> 0 at runtime) — also the
+  user's decision.
+- The wheel does not adjust the wet/dry slider; it scrolls the panel list past
+  it, as it does over any control the wheel handler does not claim.
+- A strip index posted by the mixer is resolved against the chain as it is when
+  the message *arrives*. It is bounds-checked, so a shrunken chain is safe, but
+  a chain edited from elsewhere in that window could in principle land the
+  toggle on a neighbouring insert. The inspector has the same property.

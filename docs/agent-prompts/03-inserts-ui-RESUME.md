@@ -1,29 +1,42 @@
 # Resuming Package 03 (inserts UI) — read BEFORE picking up any remaining item
 
-Package 03 is **largely built and reviewed twice**, but not finished and not
-merged. This file is the state of the branch as of `d892bf1`. It is a *resume*
-handoff, not the entry handoff — `03-inserts-ui-HANDOFF.md` is the one that was
-written going *into* the package, and its API notes and warnings all still hold.
+All four work items are **built and reviewed three times**, but almost none of it
+has been seen running, and none of it is merged. This file is the state of the
+branch as of `d2f8618`. It is a *resume* handoff, not the entry handoff —
+`03-inserts-ui-HANDOFF.md` is the one that was written going *into* the package,
+and its API notes and warnings all still hold.
 
 Read in this order:
 1. This file (current state, what is left, what is unverified).
-2. `03-inserts-ui-PR.md` — the full record, including the addendum covering
-   native plugin editors, region editing, and both review passes.
+2. `03-inserts-ui-PR.md` — the full record, including both addenda covering
+   native plugin editors, region editing, the mixer strips, and the review passes.
 3. `03-inserts-ui.md` — the original task doc. Stale in places; where it and the
    two files above disagree, they win.
 
 ## Branch state
 
-- Branch `feature/inserts-ui`, **30 commits** ahead of `master`, HEAD `d892bf1`.
+- Branch `feature/inserts-ui`, **34 commits** ahead of `master`, HEAD `d2f8618`.
 - Working tree clean. Nothing merged yet.
 - Green everywhere it can be run: Linux host 46/46, `-DDAW_SANITIZE=ON` 46/46
-  leak-clean, `-DDAW_LV2=OFF` 43/43, Haiku VM 46/46 in both LV2 configurations
-  with **0 warnings**. Real Haiku hardware was also green, but is powered off.
+  leak-clean, `-DDAW_LV2=OFF` 43/43, Haiku VM 46/46 and 43/43 in the two LV2
+  configurations with **0 warnings**. Real Haiku hardware was green as of
+  `d892bf1`, but is powered off and has not seen the last three commits.
+
+## What to do next
+
+The code is done; **what it needs now is a person clicking it.** The manual test
+script in the task doc's "Definition of done" has never been run. The mixer slot
+list, the bypass dot on both strips, the reorder drag, the plugin browser and
+the new bypass/wet-dry header have all been compiled and reasoned about, never
+observed. Bypass and wet/dry in particular are worth *listening* to: they are
+the two controls with no live preview, so the audio is meant to step once on
+mouse-up, and the only way to tell that from "it did nothing" is to hear it.
 
 ## What is DONE
 
-Work items 1 (inspector only), 2, 4 and the generic parameter panel from item 3.
-Beyond the task doc, the branch also grew:
+**All four work items.** Items 1, 2 and 4 in full; item 3 including the
+per-insert bypass and wet/dry header, which commit on release for the reason the
+task doc gives. Beyond the task doc, the branch also grew:
 
 - **Native LV2 plugin editors** (`src/ui/Lv2UiWindow`). An LV2 insert opens the
   plugin's own GUI; the generic list is the fallback. This required porting DPF's
@@ -42,10 +55,20 @@ Beyond the task doc, the branch also grew:
 
 | Item | Note |
 | --- | --- |
-| Mixer-strip slot list (item 1) | Inspector only. The mixer is a separate looper editing a snapshot, so bypass must **post** rather than execute — not the inspector's pattern. This is the biggest remaining piece. |
-| Per-effect bypass + wet/dry header in the editor (item 3) | The strip can bypass; the editor cannot, and wet/dry has no UI anywhere. The task doc's analysis of why both must be commit-only still stands and is still correct. |
-| Click-a-row scrolls the editor to that slot | `EffectsWindow` has no API for it. |
-| Six-plus inserts leave no empty row on the strip | Adding must go via the editor; the overflow row opens it. |
+| Click-a-row scrolls the editor to that slot | `EffectsWindow` has no API for it. In practice a row click opens the editor on that insert *alone* (focus mode), so there is nothing to scroll past. |
+| A full strip leaves no empty row | Six-plus on the inspector, four-plus on a mixer strip. Adding then goes via the editor; the overflow row opens it. |
+| The wheel does not adjust wet/dry | It scrolls the panel list past that slider, like any control the wheel handler does not claim. |
+
+## The defect the mixer work uncovered
+
+Effect edits made from the **channel strip** — add, reorder, bypass — reached
+the model and the drawing but never the running engine. `kMsgUiRefresh` is a
+repaint; the only `Engine::SyncFx` call sat in the `kMsgApplyFx` handler, which
+only the effects *editor* posts. Invisible when stopped (Play rebuilds anyway),
+audible-as-nothing while rolling. Fixed with `kMsgFxChanged` →
+`MainWindow::SyncFxToEngine`, now shared by both paths. Do not fold it back into
+`kMsgUiRefresh`: the timeline posts that for clip moves, and syncing there would
+rebuild the engine at the playhead for edits unrelated to effects.
 
 ## Open decisions that are the USER'S to make — do not decide these alone
 
@@ -124,6 +147,13 @@ fixed without a backtrace. Notes that cost time to learn:
   silently routes events into the wrong handler.
 - **Guard every LV2 reference** with `#ifdef DAW_HAVE_LV2`; `-DDAW_LV2=OFF` is a
   required configuration.
+- **A UI edit is not applied until something tells the engine.** Executing the
+  command and repainting is only two thirds of it; see the defect above.
+- **The mixer holds a snapshot and must not read the model.** Anything it needs
+  drawn — including an insert's *name*, which for LV2 is a host lookup — is
+  computed on the main thread and pushed to it. Its edits post an intent
+  ("toggle index 2"), not a value, so a stale snapshot cannot write the wrong
+  state.
 
 ## Verification discipline expected here
 
