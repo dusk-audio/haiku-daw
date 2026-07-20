@@ -11,6 +11,7 @@ Gap analysis vs Logic Pro / Bitwig / Reaper (2026):
 | Insert FX | Per-track `vector<EffectDesc>` chain, 10 built-ins, native add-on ABI. No per-insert bypass, no wet/dry, no third-party standard | Ordered inserts, per-slot bypass + wet/dry, huge plugin ecosystems | 01, 02, 03 |
 | Third-party plugins | Custom Haiku add-on ABI only | VST3/AU/CLAP/LV2 | 02 (LV2 via lilv — the format actually available on Haiku) |
 | Plugin browser / slot UI | Floating EffectsWindow, add via menu | Channel-strip insert slots, searchable browser | 03 |
+| LV2 plugin editors | Plugin's own GUI opens, but view-only (its own instance, not the playing one) | Editor drives the live insert | 07 |
 | MIDI tools | Piano roll + CC lanes, no quantize/swing/humanize | All have full MIDI transform suites | 04 |
 | Sidechain | None | All three | 05 |
 | Time-stretch | None (only rate-match resampling) | Elastic Audio / Stretch markers / Warp | 06 |

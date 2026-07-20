@@ -72,11 +72,13 @@ rebuild the engine at the playhead for edits unrelated to effects.
 
 ## Open decisions that are the USER'S to make — do not decide these alone
 
-1. **May the plugin GUI touch the live instance?** The native editor is
-   deliberately view-only: it holds its own instance seeded with the insert's
-   stored values, and says so in its window title. Wiring it to the playing
-   instance means letting a GUI touch an object the audio thread uses every
-   block. That is an RT-boundary decision, left open rather than made silently.
+1. **May the plugin GUI touch the live instance?** — **DECIDED: yes, in a
+   follow-up.** The user confirmed view-only was a stepping stone. The native
+   editor is still view-only on this branch (it holds its own instance seeded
+   with the insert's stored values, and says so in its title); linking it to the
+   playing instance is spec'd as its own package in `07-lv2-live-editor.md`,
+   because the DIRECT_ACCESS half of it is a real RT-boundary decision that
+   package 03 would not make silently.
 2. **Dynamic plugin latency.** 4K EQ 2 reports latency that moves at runtime
    (0 → 27 → 0). The host latches once at `Prepare`, as `IEffect` requires, so
    PDC can be ~27 samples wrong when that plugin oversamples. The likeliest fix

@@ -429,8 +429,9 @@ the same string at `+0x2a9de0`, which is what makes the second copy meaningful.
 **Not confirmed fixed.** Nobody has closed an editor against the new build.
 
 ## Still open
-- The native editor is view-only, and whether it may touch the live instance is
-  the user's decision (see above).
+- The native editor is view-only. Whether it may touch the live instance was
+  the user's decision, now made: yes, in a follow-up — spec'd as
+  `07-lv2-live-editor.md`. Still view-only on this branch.
 - Dynamic plugin latency (4K EQ 2 moves 0 -> 27 -> 0 at runtime) — also the
   user's decision.
 - The wheel does not adjust the wet/dry slider; it scrolls the panel list past
