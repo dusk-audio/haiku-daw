@@ -158,7 +158,8 @@ private:
     // Live fader/pan drag. During a drag we preview by writing the model
     // directly; on release we restore the original and push ONE command, so
     // the whole gesture is a single clean undo step.
-    enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipFadeIn, ClipFadeOut,
+    enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
+                      ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
                       RulerPunch };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
@@ -173,6 +174,10 @@ private:
     ClipId  fDragClip        = kInvalidClipId;
     bool    fDragIsMidiClip  = false;  // dragging a MIDI region (vs audio clip)
     Frame   fDragClipOrig    = 0;      // clip startFrame at drag start
+    // An audio clip's read offset at drag start. Trimming the FRONT has to
+    // advance it by the same delta, or the audio slides against the timeline
+    // instead of being trimmed.
+    Frame   fDragClipSrcOrig = 0;
     Frame   fDragClipOrigLen = 0;      // clip lengthFrames at drag start
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
     Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)

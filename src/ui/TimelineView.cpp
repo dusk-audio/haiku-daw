@@ -45,7 +45,12 @@ static constexpr int kMidiLow   = 36;
 static constexpr int kMidiRange = 48;
 
 // How close (px) to a block's right edge counts as a resize grab.
-static constexpr float kEdgeGrab = 5.0f;
+// How close to a region's edge counts as "grab the edge to resize".
+//
+// 5 px was almost impossible to hit deliberately, which made resizing look like
+// it did not exist. 9 is still narrow enough that grabbing the middle of a short
+// region moves it rather than resizing it.
+static constexpr float kEdgeGrab = 9.0f;
 
 // Edits snap to this grid resolution (16th notes) unless Shift is held.
 static constexpr int kSnapDivision = 4;
@@ -956,6 +961,7 @@ void TimelineView::MouseDown(BPoint where) {
             fDragClip        = c.id;
             fDragClipOrig    = c.startFrame;
             fDragClipOrigLen = c.lengthFrames;
+            fDragClipSrcOrig = 0;              // MIDI regions have no source
             fDragFadeInOrig  = c.fadeInFrames;
             fDragFadeOutOrig = c.fadeOutFrames;
             fDragIsMidiClip  = true;
@@ -971,6 +977,8 @@ void TimelineView::MouseDown(BPoint where) {
                 fDrag = Drag::ClipFadeOut;   // top-right grip = fade out
             } else if (wide && where.x >= xEnd - kEdgeGrab) {
                 fDrag = Drag::ClipResize;
+            } else if (wide && where.x <= xStart + kEdgeGrab) {
+                fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
                 fDragGrabOffset = XToFrame(where.x) - c.startFrame;
@@ -1070,6 +1078,7 @@ void TimelineView::MouseDown(BPoint where) {
             fDragClip        = c.id;
             fDragClipOrig    = c.startFrame;
             fDragClipOrigLen = c.lengthFrames;
+            fDragClipSrcOrig = c.sourceOffset;
             fDragFadeInOrig  = c.fadeInFrames;
             fDragFadeOutOrig = c.fadeOutFrames;
             const float xStart = FrameToX(c.startFrame);
@@ -1085,6 +1094,8 @@ void TimelineView::MouseDown(BPoint where) {
                 fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
             } else if (wide && where.x >= xEnd - kEdgeGrab) {
                 fDrag = Drag::ClipResize;
+            } else if (wide && where.x <= xStart + kEdgeGrab) {
+                fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
                 fDragGrabOffset = at - c.startFrame;
@@ -1247,6 +1258,30 @@ void TimelineView::PreviewDrag(BPoint where) {
             fDragCurLane = dstIdx;   // cross-track move only for a single clip
         Invalidate();
         return;   // ghost is drawn in Draw(); no per-lane model change
+    } else if (fDrag == Drag::ClipResizeLeft) {
+        // Dragging the LEFT edge moves the start and shortens/lengthens by the
+        // same amount, so the region's right edge stays put -- which is what
+        // makes it a trim rather than a move. Clamped at 0 and at one frame
+        // before the end, so the region can never invert or vanish.
+        const Frame endFrame = fDragClipOrig + fDragClipOrigLen;
+        Frame start = Snapped(XToFrame(where.x));
+        if (start < 0) start = 0;
+        if (start > endFrame - 1) start = endFrame - 1;
+        if (fDragIsMidiClip) {
+            if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                c->startFrame   = start;
+                c->lengthFrames = endFrame - start;
+            }
+        } else if (Clip* c = t->FindClip(fDragClip)) {
+            // An audio clip also carries its read offset into the source, so
+            // trimming the front must advance it by the same delta -- otherwise
+            // the audio slides against the timeline instead of being trimmed.
+            const Frame delta = start - fDragClipOrig;
+            c->startFrame   = start;
+            c->lengthFrames = endFrame - start;
+            const Frame off = fDragClipSrcOrig + delta;
+            c->sourceOffset = off > 0 ? off : 0;
+        }
     } else if (fDrag == Drag::ClipResize && fDragIsMidiClip) {
         MidiClip* c = t->FindMidiClip(fDragClip);
         if (c) {
@@ -1475,6 +1510,26 @@ void TimelineView::MouseUp(BPoint where) {
                     fDragTrack, fDragClip, dstId, v);
             else if (v != fDragClipOrig)
                 cmd = std::make_unique<MoveClipCommand>(fDragTrack, fDragClip, v);
+        } else if (fDrag == Drag::ClipResizeLeft) {
+            // Restore the pre-drag geometry, then push ONE command carrying the
+            // dragged result, the same shape every other drag here commits in.
+            if (fDragIsMidiClip) {
+                if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                    const Frame st = c->startFrame, len = c->lengthFrames;
+                    c->startFrame = fDragClipOrig; c->lengthFrames = fDragClipOrigLen;
+                    if (st != fDragClipOrig || len != fDragClipOrigLen)
+                        cmd = std::make_unique<TrimClipFrontCommand>(
+                                fDragTrack, fDragClip, true, st, len, 0);
+                }
+            } else if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame st = c->startFrame, len = c->lengthFrames;
+                const Frame src = c->sourceOffset;
+                c->startFrame = fDragClipOrig; c->lengthFrames = fDragClipOrigLen;
+                c->sourceOffset = fDragClipSrcOrig;
+                if (st != fDragClipOrig || len != fDragClipOrigLen)
+                    cmd = std::make_unique<TrimClipFrontCommand>(
+                            fDragTrack, fDragClip, false, st, len, src);
+            }
         } else if (fDrag == Drag::ClipResize && fDragIsMidiClip) {
             if (MidiClip* c = t->FindMidiClip(fDragClip)) {
                 const Frame v = c->lengthFrames;

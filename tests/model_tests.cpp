@@ -292,6 +292,89 @@ static void test_undo_unification() {
     stack.Undo(p);
     CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->notes.empty());
 
+    // A region GROWS to cover notes drawn past its end.
+    //
+    // The engine renders within region bounds, so a note beyond the end is not
+    // played: leaving the length alone silently discards what was just drawn,
+    // which is what "I added notes and the region did not grow" looks like from
+    // the outside. Undo must put BOTH the notes and the length back.
+    {
+        const Frame origLen =
+            p.FindTrack(tid)->FindMidiClip(mcId)->lengthFrames;   // 1000
+        MidiNote past;                       // ends at 2500, well past the end
+        past.pitch = 64; past.startFrame = 2000; past.lengthFrames = 500;
+        stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+            tid, mcId, std::vector<MidiNote>{ past }), p);
+        const MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->lengthFrames == 2500);      // grew to cover the note
+        stack.Undo(p);
+        c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->lengthFrames == origLen);   // and undo restored the length
+        CHECK(c->notes.empty());
+    }
+
+    // Growing is one-way. A region deliberately left longer than its notes
+    // (trailing space before the next one, a held tail) must NOT be trimmed to
+    // fit -- its length is the user's to set by dragging the edge.
+    {
+        MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
+        c->lengthFrames = 8000;
+        MidiNote shortOne;
+        shortOne.pitch = 60; shortOne.startFrame = 0; shortOne.lengthFrames = 10;
+        stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+            tid, mcId, std::vector<MidiNote>{ shortOne }), p);
+        CHECK(p.FindTrack(tid)->FindMidiClip(mcId)->lengthFrames == 8000);
+        stack.Undo(p);
+        // Restore the fixture for the tests that follow.
+        p.FindTrack(tid)->FindMidiClip(mcId)->lengthFrames = 1000;
+    }
+
+    // TrimClipFrontCommand: dragging a region's LEFT edge.
+    //
+    // The right edge must stay put -- that is what makes it a trim and not a
+    // move -- and for an AUDIO clip the read offset has to advance by the same
+    // delta, or the audio slides against the timeline instead of being trimmed.
+    {
+        MidiClip* mcp = p.FindTrack(tid)->FindMidiClip(mcId);
+        mcp->startFrame = 1000; mcp->lengthFrames = 1000;   // ends at 2000
+        stack.Execute(std::make_unique<TrimClipFrontCommand>(
+            tid, mcId, /*midi=*/true, 1400, 600, 0), p);
+        const MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->startFrame == 1400);
+        CHECK(c->startFrame + c->lengthFrames == 2000);     // right edge held
+        stack.Undo(p);
+        c = p.FindTrack(tid)->FindMidiClip(mcId);
+        CHECK(c->startFrame == 1000 && c->lengthFrames == 1000);
+    }
+
+    // The audio half, where the source offset matters.
+    {
+        Clip ac; ac.startFrame = 500; ac.lengthFrames = 1000; ac.sourceOffset = 200;
+        auto addAc = std::make_unique<AddClipCommand>(tid, ac);
+        AddClipCommand* addAcPtr = addAc.get();
+        stack.Execute(std::move(addAc), p);
+        const ClipId acId = addAcPtr->CreatedId();
+
+        // Trim 300 frames off the front: start 500 -> 800, so the source must
+        // advance 200 -> 500 or the same audio would play from a later point.
+        stack.Execute(std::make_unique<TrimClipFrontCommand>(
+            tid, acId, /*midi=*/false, 800, 700, 500), p);
+        const Clip* c = p.FindTrack(tid)->FindClip(acId);
+        CHECK(c->startFrame == 800);
+        CHECK(c->startFrame + c->lengthFrames == 1500);     // right edge held
+        CHECK(c->sourceOffset == 500);                      // trimmed, not slid
+        stack.Undo(p);
+        c = p.FindTrack(tid)->FindClip(acId);
+        CHECK(c->startFrame == 500 && c->lengthFrames == 1000);
+        CHECK(c->sourceOffset == 200);                      // and offset restored
+
+        // Leave the undo stack as we found it: the assertions further down
+        // unwind a known number of steps, so a stray command here would make
+        // them undo the wrong thing.
+        stack.Undo(p);                                      // undo the clip add
+        CHECK(p.FindTrack(tid)->FindClip(acId) == nullptr);
+    }
+
     // SetMidiClipEventsCommand (the piano roll's CC lane) writes controllers
     // WITHOUT disturbing notes, and undo restores the previous controller list.
     // The two commands must stay disjoint: a controller edit that dropped notes

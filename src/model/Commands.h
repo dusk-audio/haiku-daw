@@ -488,6 +488,34 @@ private:
 
 // Resize a MIDI region's window length (non-destructive: notes outside are kept
 // but silent). Stores the old length for Undo(). Coalesces during a drag.
+// Trim a region's FRONT: dragging its left edge moves the start and adjusts the
+// length so the right edge stays put. One command rather than a move plus a
+// resize, so the gesture is a single undo step and the region can never be
+// caught mid-trim in a half-applied state.
+//
+// For an AUDIO clip the read offset into the source moves by the same delta --
+// that is what makes it a trim rather than a slide, and forgetting it is how a
+// front-trim ends up shifting the audio against the timeline. MIDI regions have
+// no source offset and pass 0.
+class TrimClipFrontCommand : public Command {
+public:
+    TrimClipFrontCommand(TrackId track, ClipId clip, bool midi,
+                         Frame newStart, Frame newLength, Frame newSourceOffset)
+        : fTrack(track), fClip(clip), fMidi(midi), fNewStart(newStart),
+          fNewLen(newLength), fNewSrc(newSourceOffset) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Trim Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    bool    fMidi;
+    Frame   fNewStart, fNewLen, fNewSrc;
+    Frame   fOldStart = 0, fOldLen = 0, fOldSrc = 0;
+};
+
 class ResizeMidiClipCommand : public Command {
 public:
     ResizeMidiClipCommand(TrackId track, ClipId clip, Frame newLength)
@@ -699,6 +727,12 @@ private:
     TrackId               fTrack;
     ClipId                fClip;
     std::vector<MidiNote> fNew, fOld;
+    // The region GROWS to cover notes drawn past its end. A note outside the
+    // region is not played (the engine renders within region bounds), so
+    // leaving the length alone silently discards what the user just drew. The
+    // SMF importer already does exactly this; the interactive path did not.
+    // Saved so Undo restores the old length as well as the old notes.
+    Frame                 fOldLen = 0;
 };
 
 // Replace a MIDI region's controller events (CC / pitch-bend / program /

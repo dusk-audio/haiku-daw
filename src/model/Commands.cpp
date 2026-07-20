@@ -768,19 +768,72 @@ void SetInstrumentCommand::Undo(Project& p) {
 
 // --- SetMidiClipNotesCommand ------------------------------------------
 
+bool TrimClipFrontCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    if (fMidi) {
+        MidiClip* c = t->FindMidiClip(fClip);
+        if (!c) return false;
+        fOldStart = c->startFrame;
+        fOldLen   = c->lengthFrames;
+        c->startFrame   = fNewStart;
+        c->lengthFrames = fNewLen;
+        return true;
+    }
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldStart = c->startFrame;
+    fOldLen   = c->lengthFrames;
+    fOldSrc   = c->sourceOffset;
+    c->startFrame   = fNewStart;
+    c->lengthFrames = fNewLen;
+    c->sourceOffset = fNewSrc;
+    return true;
+}
+void TrimClipFrontCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (fMidi) {
+        if (MidiClip* c = t->FindMidiClip(fClip)) {
+            c->startFrame   = fOldStart;
+            c->lengthFrames = fOldLen;
+        }
+        return;
+    }
+    if (Clip* c = t->FindClip(fClip)) {
+        c->startFrame   = fOldStart;
+        c->lengthFrames = fOldLen;
+        c->sourceOffset = fOldSrc;
+    }
+}
+
 bool SetMidiClipNotesCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
     MidiClip* c = t->FindMidiClip(fClip);
     if (!c) return false;
-    fOld = c->notes;
+    fOld    = c->notes;
+    fOldLen = c->lengthFrames;
     c->notes = fNew;
+
+    // Grow to cover anything drawn past the end. Only ever GROW: shrinking to
+    // fit would silently trim a region the user had deliberately made longer
+    // than its notes (trailing space before the next region, a held tail), and
+    // the length is theirs to set by dragging the edge.
+    Frame end = 0;
+    for (const MidiNote& n : c->notes) {
+        const Frame e = n.startFrame + (n.lengthFrames > 0 ? n.lengthFrames : 1);
+        if (e > end) end = e;
+    }
+    if (end > c->lengthFrames) c->lengthFrames = end;
     return true;
 }
 void SetMidiClipNotesCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack))
-        if (MidiClip* c = t->FindMidiClip(fClip))
-            c->notes = fOld;
+        if (MidiClip* c = t->FindMidiClip(fClip)) {
+            c->notes        = fOld;
+            c->lengthFrames = fOldLen;
+        }
 }
 
 bool SetMidiClipEventsCommand::Do(Project& p) {
