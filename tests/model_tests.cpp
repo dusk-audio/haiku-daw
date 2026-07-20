@@ -334,17 +334,71 @@ static void test_undo_unification() {
     // The right edge must stay put -- that is what makes it a trim and not a
     // move -- and for an AUDIO clip the read offset has to advance by the same
     // delta, or the audio slides against the timeline instead of being trimmed.
+    //
+    // A MIDI region's notes and controllers are CLIP-relative, so the trim must
+    // also rebase them: without that, dragging the left edge 400 frames right
+    // moves every note 400 frames later, which is a transposition in time, not
+    // a trim. Content pushed out of the window keeps its negative offset (the
+    // window is non-destructive), so re-widening brings it back.
     {
         MidiClip* mcp = p.FindTrack(tid)->FindMidiClip(mcId);
         mcp->startFrame = 1000; mcp->lengthFrames = 1000;   // ends at 2000
+        MidiNote a; a.pitch = 60; a.startFrame = 0;   a.lengthFrames = 100;
+        MidiNote b; b.pitch = 62; b.startFrame = 500; b.lengthFrames = 100;
+        mcp->notes = { a, b };                              // abs 1000 and 1500
+        MidiClipEvent ev; ev.type = MidiClipEvent::CC; ev.data = 7;
+        ev.value = 90; ev.startFrame = 500;                 // abs 1500
+        mcp->events = { ev };
+
         stack.Execute(std::make_unique<TrimClipFrontCommand>(
             tid, mcId, /*midi=*/true, 1400, 600, 0), p);
         const MidiClip* c = p.FindTrack(tid)->FindMidiClip(mcId);
         CHECK(c->startFrame == 1400);
         CHECK(c->startFrame + c->lengthFrames == 2000);     // right edge held
+        // Absolute positions unchanged: 1400 + (-400) == 1000, 1400 + 100 == 1500.
+        CHECK(c->notes.size() == 2);
+        CHECK(c->notes[0].startFrame == -400);
+        CHECK(c->notes[1].startFrame == 100);
+        CHECK(c->events.size() == 1 && c->events[0].startFrame == 100);
+        // The trimmed-off note is out of the window, so it no longer sounds --
+        // and the one still inside kept its place on the timeline.
+        std::vector<MidiNote> live = p.FindTrack(tid)->CollectNotes();
+        CHECK(live.size() == 1 && live[0].startFrame == 1500);
+
         stack.Undo(p);
         c = p.FindTrack(tid)->FindMidiClip(mcId);
         CHECK(c->startFrame == 1000 && c->lengthFrames == 1000);
+        CHECK(c->notes.size() == 2);
+        CHECK(c->notes[0].startFrame == 0 && c->notes[1].startFrame == 500);
+        CHECK(c->events.size() == 1 && c->events[0].startFrame == 500);
+        CHECK(p.FindTrack(tid)->CollectNotes().size() == 2);
+        p.FindTrack(tid)->FindMidiClip(mcId)->notes.clear();
+        p.FindTrack(tid)->FindMidiClip(mcId)->events.clear();
+    }
+
+    // startFrame is the sort key for both clip lists, and a front trim writes it
+    // in place rather than going through the Project mutators. Trimming a region
+    // past a neighbour's start must leave the list sorted, or the engine walks
+    // the timeline out of order.
+    {
+        MidiClip* mcp = p.FindTrack(tid)->FindMidiClip(mcId);
+        mcp->startFrame = 1000; mcp->lengthFrames = 2000;   // ends at 3000
+        MidiClip other; other.startFrame = 1500; other.lengthFrames = 100;
+        other.id = p.NextClipId();
+        CHECK(p.AddMidiClip(tid, other));
+        CHECK(p.FindTrack(tid)->midiClips[0].id == mcId);   // 1000 before 1500
+
+        stack.Execute(std::make_unique<TrimClipFrontCommand>(
+            tid, mcId, /*midi=*/true, 2000, 1000, 0), p);   // now starts AFTER
+        const std::vector<MidiClip>& mcs = p.FindTrack(tid)->midiClips;
+        CHECK(mcs.size() == 2);
+        CHECK(mcs[0].startFrame <= mcs[1].startFrame);
+        CHECK(mcs[0].id == other.id);                       // re-sorted
+
+        stack.Undo(p);
+        CHECK(p.FindTrack(tid)->midiClips[0].id == mcId);   // and sorted back
+        CHECK(p.RemoveMidiClip(tid, other.id));
+        p.FindTrack(tid)->FindMidiClip(mcId)->lengthFrames = 1000;
     }
 
     // The audio half, where the source offset matters.

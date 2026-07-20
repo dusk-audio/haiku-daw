@@ -496,7 +496,8 @@ private:
 // For an AUDIO clip the read offset into the source moves by the same delta --
 // that is what makes it a trim rather than a slide, and forgetting it is how a
 // front-trim ends up shifting the audio against the timeline. MIDI regions have
-// no source offset and pass 0.
+// no source offset and pass 0; their equivalent is the note/controller rebase
+// below, since MIDI content is stored clip-relative.
 class TrimClipFrontCommand : public Command {
 public:
     TrimClipFrontCommand(TrackId track, ClipId clip, bool midi,
@@ -514,6 +515,15 @@ private:
     bool    fMidi;
     Frame   fNewStart, fNewLen, fNewSrc;
     Frame   fOldStart = 0, fOldLen = 0, fOldSrc = 0;
+    // MIDI only. Do() rebases every note/controller by the inverse of the
+    // start delta so the music keeps its absolute timeline position; content
+    // pushed outside the window keeps its (possibly negative) offset, because
+    // the region is a non-destructive window and widening it must bring the
+    // content back. Rebasing is not reversible by arithmetic alone once the
+    // content can leave the window, so Undo restores these snapshots verbatim
+    // (same pattern as SplitMidiClipCommand::fOldNotes).
+    std::vector<MidiNote>      fOldNotes;
+    std::vector<MidiClipEvent> fOldEvents;
 };
 
 class ResizeMidiClipCommand : public Command {

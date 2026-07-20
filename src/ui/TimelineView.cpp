@@ -1269,6 +1269,11 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (start > endFrame - 1) start = endFrame - 1;
         if (fDragIsMidiClip) {
             if (MidiClip* c = t->FindMidiClip(fDragClip)) {
+                // Rebase exactly as TrimClipFrontCommand::Do will, so the notes
+                // stay anchored to the timeline THROUGHOUT the drag. Previewing
+                // without it and rebasing only at the commit makes the notes
+                // slide under the cursor and then snap back on mouse-up.
+                RebaseMidiContent(*c, start - c->startFrame);
                 c->startFrame   = start;
                 c->lengthFrames = endFrame - start;
             }
@@ -1516,6 +1521,10 @@ void TimelineView::MouseUp(BPoint where) {
             if (fDragIsMidiClip) {
                 if (MidiClip* c = t->FindMidiClip(fDragClip)) {
                     const Frame st = c->startFrame, len = c->lengthFrames;
+                    // Undo the preview's rebase along with its geometry: the
+                    // command re-applies it from the pre-drag state, and
+                    // snapshots the notes for its own Undo while doing so.
+                    RebaseMidiContent(*c, fDragClipOrig - st);
                     c->startFrame = fDragClipOrig; c->lengthFrames = fDragClipOrigLen;
                     if (st != fDragClipOrig || len != fDragClipOrigLen)
                         cmd = std::make_unique<TrimClipFrontCommand>(

@@ -230,7 +230,9 @@ RT-boundary decision left deliberately open rather than made silently.
 - `TrimClipFrontCommand` carries start, length and source offset together. For
   audio the offset MUST advance with the start, or a front-trim slides the audio
   against the timeline instead of trimming it — which looks right and sounds
-  wrong.
+  wrong. The MIDI equivalent is `RebaseMidiContent`: notes and controllers are
+  stored clip-relative, so the same trim has to shift them by the inverse delta
+  or the music moves with the edge.
 
 ## Review pass
 
@@ -246,8 +248,22 @@ where behaviour allowed:
 | `fFocus` not adjusted on remove | Deleting the focused insert left a blank editor window |
 | Browser read the current selection | Typing after a double-click inserted a different plugin |
 
-The timeline trim, `TrimClipFrontCommand` and the note-growth logic reviewed
-clean.
+The note-growth logic reviewed clean. `TrimClipFrontCommand` did not: a second
+pass found three more defects in it, plus one in the setup script.
+
+| Defect | Why it mattered |
+| --- | --- |
+| MIDI front trim did not rebase notes | Notes are clip-relative, so trimming the left edge moved every note later by the trim amount — a trim that transposed the music in time |
+| Front trim wrote `startFrame` in place | It is the sort key both clip lists are kept ordered by; trimming past a neighbour left the track unsorted |
+| The drag preview rebased nothing | Notes slid under the cursor for the whole drag and snapped back at the commit |
+| `hw_setup.sh` ignored two `chmod` results | A failure left the key unusable by sshd while the script exited 0 reporting it added |
+
+Fixing the first also closed a hole the fix itself opened: moving all lilv work
+in `Lv2UiWindow::Open` ahead of the window (required, because `~Lv2UiWindow`
+takes the world lock while holding the window lock — the opposite order to
+`Open`, and therefore a deadlock) widened the gap between "is an editor already
+open?" and registering the new one. The check is now a claim held across the
+whole build, so the single-instance guarantee covers the slow part too.
 
 One defect found during this work is NOT ours: `imgui_impl_opengl2.cpp` in
 DPF-Widgets guards its `glPushMatrix()` calls behind `#ifndef IMGUI_DPF_BACKEND`

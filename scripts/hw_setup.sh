@@ -74,8 +74,20 @@ done
 # bits: `chmod 755` would satisfy StrictModes while also handing every local
 # user read and traverse access to the home directory, which is a wider grant
 # than the problem needs.
-chmod go-w "$HOME"
-chmod 700 "$HOME/.ssh" "$HOME/config/settings/ssh" 2>/dev/null
+#
+# Fatal on failure, same as the authorized_keys chmod above and for the same
+# reason: if the permissions do not stick, sshd silently ignores the key that
+# was just reported as added, and the script exits 0 having produced a machine
+# that cannot be logged into. Both directories were created by the loop above,
+# so a failure here is a real error and not a missing path.
+if ! chmod go-w "$HOME"; then
+    echo "  ERROR: cannot chmod go-w $HOME (sshd StrictModes will refuse the key)" >&2
+    exit 1
+fi
+if ! chmod 700 "$HOME/.ssh" "$HOME/config/settings/ssh"; then
+    echo "  ERROR: cannot chmod 700 the ssh directories" >&2
+    exit 1
+fi
 
 echo
 echo "== host keys =="

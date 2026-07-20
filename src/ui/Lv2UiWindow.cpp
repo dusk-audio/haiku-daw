@@ -143,31 +143,80 @@ const LilvUI* FindNativeUi(const LilvPlugin* plugin, LilvUIs** owned) {
 // difference between a stale entry and a crash.
 std::mutex gOpenMutex;
 std::vector<std::pair<std::string, BMessenger>> gOpen;
+// Claimed, but the window does not exist yet. Building an editor takes long
+// enough (it instantiates the plugin) that "is one already open?" answered only
+// against gOpen would let two clicks on two loopers both get a yes.
+std::vector<std::string> gOpening;
 
-// Raise the editor already showing `uri`, if there is a live one. Returns false
-// when there is none -- including when the entry is stale, which is then
-// dropped so the next open succeeds instead of being blocked by a ghost.
-bool RaiseIfOpen(const std::string& uri) {
+// Claim `uri` for a new editor.
+//
+// False means there is already one -- open, or being built right now on another
+// thread -- and the existing one has been raised if it exists. A stale entry (a
+// window that died without unregistering) is dropped rather than blocking the
+// open forever. The claim is held until RegisterOpen or ReleaseClaim.
+bool ClaimOpen(const std::string& uri) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
     for (size_t i = 0; i < gOpen.size(); i++) {
         if (gOpen[i].first != uri) continue;
         if (!gOpen[i].second.IsValid()) {     // window died without unregistering
             gOpen.erase(gOpen.begin() + (long)i);
-            return false;
+            break;
         }
         // Asking the window to raise ITSELF keeps the work on its own looper;
         // locking someone else's window from here is what the pointer version
         // did, and it is the part that could touch freed memory.
         gOpen[i].second.SendMessage(kMsgLv2UiRaise);
-        return true;
+        return false;
     }
-    return false;
+    for (const std::string& u : gOpening)
+        if (u == uri) return false;           // another thread is mid-open
+    gOpening.push_back(uri);
+    return true;
 }
 
+void ReleaseClaim(const std::string& uri) {
+    std::lock_guard<std::mutex> lock(gOpenMutex);
+    for (size_t i = gOpening.size(); i > 0; --i)
+        if (gOpening[i - 1] == uri) {
+            gOpening.erase(gOpening.begin() + (long)(i - 1));
+            return;
+        }
+}
+
+// Turn the claim into a registration, without ever leaving the URI unclaimed.
 void RegisterOpen(const std::string& uri, BWindow* w) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
+    for (size_t i = gOpening.size(); i > 0; --i)
+        if (gOpening[i - 1] == uri) gOpening.erase(gOpening.begin() + (long)(i - 1));
     gOpen.push_back({ uri, BMessenger(w) });
 }
+
+// Holds a claim for the length of an Open() attempt and drops it on every exit
+// that did not produce a window. Handoff() is the success path: RegisterOpen
+// has taken over.
+struct OpenClaim {
+    std::string uri;
+    bool        held;
+    explicit OpenClaim(const std::string& u) : uri(u), held(ClaimOpen(u)) {}
+    ~OpenClaim() { if (held) ReleaseClaim(uri); }
+    void Handoff() { held = false; }
+    OpenClaim(const OpenClaim&) = delete;
+    OpenClaim& operator=(const OpenClaim&) = delete;
+};
+
+// Window lock as RAII, with an explicit early release for the paths that hand
+// the window back (or hand it to B_QUIT_REQUESTED). BWindow::Lock() is
+// recursive for the calling thread, so plugin code that adds child views while
+// this is held still works.
+struct WindowLock {
+    BWindow* win;
+    bool     held;
+    explicit WindowLock(BWindow* w) : win(w), held(w->Lock()) {}
+    ~WindowLock() { Unlock(); }
+    void Unlock() { if (held) { win->Unlock(); held = false; } }
+    WindowLock(const WindowLock&) = delete;
+    WindowLock& operator=(const WindowLock&) = delete;
+};
 
 void ForgetOpen(const std::string& uri) {
     std::lock_guard<std::mutex> lock(gOpenMutex);
@@ -242,22 +291,116 @@ Lv2UiWindow::Lv2UiWindow(BRect frame, const char* title)
 Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
                                const std::vector<float>& params) {
-    // Already showing this plugin? Bring it forward rather than opening a rival.
-    if (RaiseIfOpen(pluginUri))
+    // Already showing this plugin -- or already building one? Bring the existing
+    // editor forward rather than opening a rival. The claim is what makes that
+    // check hold for the whole build below, which is long enough (it
+    // instantiates the plugin) to matter.
+    OpenClaim claim(pluginUri);
+    if (!claim.held)
         return nullptr;      // nothing new was opened; the caller does nothing
 
-    // Everything from here to the UI binary's paths touches the shared lilv
-    // world, which is NOT thread-safe and is also read by EffectsView::Draw on
-    // another looper. HasNativeUi already locked; this did not, which left a
-    // window where opening an editor raced a repaint.
-    std::unique_lock<std::mutex> worldLock(gWorldMutex);
+    Impl* d = new Impl();
+    d->uri = pluginUri;
 
-    const LilvPlugin* plugin = FindPlugin(pluginUri);
-    if (!plugin) return nullptr;
+    // --- everything that touches lilv, BEFORE any window exists -----------
+    //
+    // The world is NOT thread-safe and is also read by EffectsView::Draw on
+    // another looper, so it needs the lock. It is taken AND DROPPED before the
+    // window is created on purpose. Once the window is shown, its looper can be
+    // running ~Lv2UiWindow, which holds the WINDOW lock and then takes
+    // gWorldMutex to free its lilv objects; taking the two in the opposite
+    // order here -- world, then window -- is a deadlock. Keeping the two halves
+    // disjoint is what makes the window lock below safe to hold.
+    std::string binPath, bundlePath, uiUri;
+    {
+        std::lock_guard<std::mutex> worldLock(gWorldMutex);
 
-    LilvUIs* uis = nullptr;
-    const LilvUI* ui = FindNativeUi(plugin, &uis);
-    if (!ui) return nullptr;
+        const LilvPlugin* plugin = FindPlugin(pluginUri);
+        if (!plugin) { delete d; return nullptr; }
+
+        const LilvUI* ui = FindNativeUi(plugin, &d->uis);
+        if (!ui) { delete d; return nullptr; }
+
+        // --- features -----------------------------------------------------
+        d->map   = { nullptr, UridMap };
+        d->unmap = { nullptr, UridUnmap };
+        d->fMap   = { LV2_URID__map,   &d->map };
+        d->fUnmap = { LV2_URID__unmap, &d->unmap };
+        d->opts[0] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_PARAMETERS__sampleRate),
+                       sizeof(float), UridMap(nullptr, LV2_ATOM__Float), &d->optRate };
+        d->opts[1] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__minBlockLength),
+                       sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optMin };
+        d->opts[2] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__maxBlockLength),
+                       sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optMax };
+        d->opts[3] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__sequenceSize),
+                       sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optSeq };
+        d->opts[4] = { LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr };
+        d->fOpts = { LV2_OPTIONS__options, d->opts };
+
+        const LV2_Feature bounded = { LV2_BUF_SIZE__boundedBlockLength, nullptr };
+        const LV2_Feature* dspFeatures[] = { &d->fMap, &d->fUnmap, &d->fOpts,
+                                             &bounded, nullptr };
+
+        // --- our own DSP instance, purely to satisfy instance-access -------
+        d->dsp = lilv_plugin_instantiate(plugin, kSampleRate, dspFeatures);
+        if (!d->dsp) { lilv_uis_free(d->uis); delete d; return nullptr; }
+
+        LilvWorld* w = UiWorld();
+        LilvNode* nAudio   = lilv_new_uri(w, LV2_CORE__AudioPort);
+        LilvNode* nControl = lilv_new_uri(w, LV2_CORE__ControlPort);
+        LilvNode* nInput   = lilv_new_uri(w, LV2_CORE__InputPort);
+        LilvNode* nAtom    = lilv_new_uri(w, LV2_ATOM__AtomPort);
+
+        const uint32_t nPorts = lilv_plugin_get_num_ports(plugin);
+        d->audio.resize(nPorts);
+        d->atom.resize(nPorts);
+        d->ctl.assign(nPorts, 0.0f);
+        size_t ctlInSlot = 0;
+        for (uint32_t i = 0; i < nPorts; i++) {
+            const LilvPort* port = lilv_plugin_get_port_by_index(plugin, i);
+            if (!port) continue;
+            const bool isIn = lilv_port_is_a(plugin, port, nInput);
+            if (lilv_port_is_a(plugin, port, nAudio)) {
+                d->audio[i].assign(kBlockLength, 0.0f);
+                lilv_instance_connect_port(d->dsp, i, d->audio[i].data());
+            } else if (lilv_port_is_a(plugin, port, nControl)) {
+                LilvNode *dn = nullptr, *mn = nullptr, *mx = nullptr;
+                lilv_port_get_range(plugin, port, &dn, &mn, &mx);
+                if (dn && lilv_node_is_float(dn)) d->ctl[i] = lilv_node_as_float(dn);
+                else if (dn && lilv_node_is_int(dn)) d->ctl[i] = (float)lilv_node_as_int(dn);
+                lilv_node_free(dn); lilv_node_free(mn); lilv_node_free(mx);
+                // Seed the insert's STORED value so the editor opens showing
+                // what the user actually set, not the plugin's factory default.
+                // Input control ports are in the same slot order
+                // EffectDesc.params uses.
+                if (isIn) {
+                    if (ctlInSlot < params.size()) d->ctl[i] = params[ctlInSlot];
+                    ctlInSlot++;
+                }
+                lilv_instance_connect_port(d->dsp, i, &d->ctl[i]);
+            } else if (lilv_port_is_a(plugin, port, nAtom)) {
+                d->atom[i].assign(kAtomBufBytes / sizeof(uint64_t), 0);
+                LV2_Atom_Sequence* seq = (LV2_Atom_Sequence*)d->atom[i].data();
+                seq->atom.type = UridMap(nullptr, LV2_ATOM__Sequence);
+                seq->atom.size = isIn ? sizeof(LV2_Atom_Sequence_Body)
+                                      : kAtomBufBytes - sizeof(LV2_Atom);
+                lilv_instance_connect_port(d->dsp, i, d->atom[i].data());
+            } else {
+                lilv_instance_connect_port(d->dsp, i, nullptr);
+            }
+        }
+        lilv_node_free(nAudio); lilv_node_free(nControl);
+        lilv_node_free(nInput); lilv_node_free(nAtom);
+        lilv_instance_activate(d->dsp);
+
+        // The UI binary's location. Plain strings, so nothing past this point
+        // needs the world.
+        binPath    = FileUriToPath(lilv_node_as_uri(lilv_ui_get_binary_uri(ui)));
+        bundlePath = FileUriToPath(lilv_node_as_uri(lilv_ui_get_bundle_uri(ui)));
+        uiUri      = lilv_node_as_uri(lilv_ui_get_uri(ui));
+    }
+
+    // --- the window -------------------------------------------------------
 
     // Say in the title that this editor is not driving the audio, so the
     // limitation is visible at the moment it matters rather than surprising.
@@ -265,11 +408,9 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     title += "  (view only - not linked to playback)";
 
     Lv2UiWindow* win = new Lv2UiWindow(frame, title.c_str());
-    Impl* d = new Impl();
     win->fImpl = d;
-    d->uis = uis;
-    d->uri = pluginUri;
-    RegisterOpen(pluginUri, win);
+    RegisterOpen(pluginUri, win);   // the window's ForgetOpen releases it now
+    claim.Handoff();
 
     d->container = new BView(win->Bounds(), "container", B_FOLLOW_ALL_SIDES,
                              B_WILL_DRAW);
@@ -277,100 +418,37 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     win->AddChild(d->container);
     win->Show();          // the parent must be attached and visible first
 
-    // --- features ---------------------------------------------------------
-    d->map   = { nullptr, UridMap };
-    d->unmap = { nullptr, UridUnmap };
-    d->fMap   = { LV2_URID__map,   &d->map };
-    d->fUnmap = { LV2_URID__unmap, &d->unmap };
-    d->opts[0] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_PARAMETERS__sampleRate),
-                   sizeof(float), UridMap(nullptr, LV2_ATOM__Float), &d->optRate };
-    d->opts[1] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__minBlockLength),
-                   sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optMin };
-    d->opts[2] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__maxBlockLength),
-                   sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optMax };
-    d->opts[3] = { LV2_OPTIONS_INSTANCE, 0, UridMap(nullptr, LV2_BUF_SIZE__sequenceSize),
-                   sizeof(int32_t), UridMap(nullptr, LV2_ATOM__Int), &d->optSeq };
-    d->opts[4] = { LV2_OPTIONS_INSTANCE, 0, 0, 0, 0, nullptr };
-    d->fOpts = { LV2_OPTIONS__options, d->opts };
-
-    const LV2_Feature bounded = { LV2_BUF_SIZE__boundedBlockLength, nullptr };
-    const LV2_Feature* dspFeatures[] = { &d->fMap, &d->fUnmap, &d->fOpts,
-                                         &bounded, nullptr };
-
-    // --- our own DSP instance, purely to satisfy instance-access -----------
-    d->dsp = lilv_plugin_instantiate(plugin, kSampleRate, dspFeatures);
-    if (!d->dsp) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
-
-    LilvWorld* w = UiWorld();
-    LilvNode* nAudio   = lilv_new_uri(w, LV2_CORE__AudioPort);
-    LilvNode* nControl = lilv_new_uri(w, LV2_CORE__ControlPort);
-    LilvNode* nInput   = lilv_new_uri(w, LV2_CORE__InputPort);
-    LilvNode* nAtom    = lilv_new_uri(w, LV2_ATOM__AtomPort);
-
-    const uint32_t nPorts = lilv_plugin_get_num_ports(plugin);
-    d->audio.resize(nPorts);
-    d->atom.resize(nPorts);
-    d->ctl.assign(nPorts, 0.0f);
-    size_t ctlInSlot = 0;
-    for (uint32_t i = 0; i < nPorts; i++) {
-        const LilvPort* port = lilv_plugin_get_port_by_index(plugin, i);
-        if (!port) continue;
-        const bool isIn = lilv_port_is_a(plugin, port, nInput);
-        if (lilv_port_is_a(plugin, port, nAudio)) {
-            d->audio[i].assign(kBlockLength, 0.0f);
-            lilv_instance_connect_port(d->dsp, i, d->audio[i].data());
-        } else if (lilv_port_is_a(plugin, port, nControl)) {
-            LilvNode *dn = nullptr, *mn = nullptr, *mx = nullptr;
-            lilv_port_get_range(plugin, port, &dn, &mn, &mx);
-            if (dn && lilv_node_is_float(dn)) d->ctl[i] = lilv_node_as_float(dn);
-            else if (dn && lilv_node_is_int(dn)) d->ctl[i] = (float)lilv_node_as_int(dn);
-            lilv_node_free(dn); lilv_node_free(mn); lilv_node_free(mx);
-            // Seed the insert's STORED value so the editor opens showing what
-            // the user actually set, not the plugin's factory default. Input
-            // control ports are in the same slot order EffectDesc.params uses.
-            if (isIn) {
-                if (ctlInSlot < params.size()) d->ctl[i] = params[ctlInSlot];
-                ctlInSlot++;
-            }
-            lilv_instance_connect_port(d->dsp, i, &d->ctl[i]);
-        } else if (lilv_port_is_a(plugin, port, nAtom)) {
-            d->atom[i].assign(kAtomBufBytes / sizeof(uint64_t), 0);
-            LV2_Atom_Sequence* seq = (LV2_Atom_Sequence*)d->atom[i].data();
-            seq->atom.type = UridMap(nullptr, LV2_ATOM__Sequence);
-            seq->atom.size = isIn ? sizeof(LV2_Atom_Sequence_Body)
-                                  : kAtomBufBytes - sizeof(LV2_Atom);
-            lilv_instance_connect_port(d->dsp, i, d->atom[i].data());
-        } else {
-            lilv_instance_connect_port(d->dsp, i, nullptr);
-        }
+    // The window is on screen now, so its looper is running and the user can
+    // close it -- which runs ~Lv2UiWindow and DELETES `d` -- while this function
+    // is still building the UI on top of it. Hold the window lock for the rest:
+    // the looper needs that same lock to dispatch B_QUIT_REQUESTED, so teardown
+    // cannot begin until this returns. The lock is recursive for this thread,
+    // so the child views the plugin adds inside instantiate() still work, and
+    // the idle thread spawned at the end simply waits the few microseconds
+    // until the release below.
+    WindowLock winLock(win);
+    if (!winLock.held) {                // already quitting: nothing to build on
+        win->PostMessage(B_QUIT_REQUESTED);
+        return nullptr;
     }
-    lilv_node_free(nAudio); lilv_node_free(nControl);
-    lilv_node_free(nInput); lilv_node_free(nAtom);
-    lilv_instance_activate(d->dsp);
-
-    // --- the UI binary ----------------------------------------------------
-    const std::string binPath =
-        FileUriToPath(lilv_node_as_uri(lilv_ui_get_binary_uri(ui)));
-    const std::string bundlePath =
-        FileUriToPath(lilv_node_as_uri(lilv_ui_get_bundle_uri(ui)));
-    const std::string uiUri = lilv_node_as_uri(lilv_ui_get_uri(ui));
-
-    // The world is not needed past this point -- the paths are plain strings --
-    // and the rest of this function runs plugin code and starts a thread, which
-    // should not be done holding a lock other loopers are waiting on.
-    worldLock.unlock();
 
     d->lib = dlopen(binPath.c_str(), RTLD_NOW);
-    if (!d->lib) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
+    if (!d->lib) {
+        winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
+    }
     LV2UI_DescriptorFunction descFn =
         (LV2UI_DescriptorFunction)dlsym(d->lib, "lv2ui_descriptor");
-    if (!descFn) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
+    if (!descFn) {
+        winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
+    }
     for (uint32_t i = 0;; i++) {
         const LV2UI_Descriptor* c = descFn(i);
         if (!c) break;
         if (uiUri == c->URI) { d->desc = c; break; }
     }
-    if (!d->desc) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
+    if (!d->desc) {
+        winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
+    }
 
     // instance-access AND data-access: DPF plugins built with
     // DISTRHO_PLUGIN_WANT_DIRECT_ACCESS refuse to instantiate without BOTH, and
@@ -390,7 +468,9 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                  [](LV2UI_Controller, uint32_t, uint32_t,
                                     uint32_t, const void*) {},
                                  nullptr, &widget, d->features.data());
-    if (!d->ui) { win->PostMessage(B_QUIT_REQUESTED); return nullptr; }
+    if (!d->ui) {
+        winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
+    }
 
     if (d->desc->extension_data)
         d->idle = (const LV2UI_Idle_Interface*)
@@ -413,6 +493,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
             "lv2 ui idle", B_NORMAL_PRIORITY, d);
         resume_thread(d->idleThread);
     }
+    winLock.Unlock();
     return win;
 }
 

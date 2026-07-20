@@ -81,6 +81,20 @@ struct MidiClip {
     bool                  takeActive    = true;
 };
 
+// Shift a region's clip-relative content by `delta` frames, so it keeps its
+// ABSOLUTE timeline position when the region's start moves by `delta`. Every
+// edit that moves a region's start WITHOUT moving the region (a front trim) has
+// to do this, or the music slides along with the edge.
+//
+// Content pushed outside [0, lengthFrames) keeps its (possibly negative)
+// offset rather than being clamped or dropped: the region is a non-destructive
+// window, so widening it again must bring the content back, and
+// CollectNotes/CollectEvents already skip whatever falls outside.
+inline void RebaseMidiContent(MidiClip& c, Frame delta) {
+    for (MidiNote& n : c.notes)       n.startFrame -= delta;
+    for (MidiClipEvent& e : c.events) e.startFrame -= delta;
+}
+
 // The input a track records from. A MIDI track records from a MIDI endpoint,
 // matched by *name* (e.g. "/dev/midi/usb/0-0") so the assignment survives the
 // endpoint-id reassignment that happens across sessions/reboots. An audio track

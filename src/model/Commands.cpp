@@ -1,6 +1,30 @@
 #include "Commands.h"
 
+#include <algorithm>
+
 namespace daw {
+namespace {
+
+// Both clip lists are kept sorted by startFrame -- the engine walks them in
+// timeline order without re-sorting each playback pass, and Project::AddClip /
+// AddMidiClip maintain that by inserting at the right place. A command that
+// writes startFrame IN PLACE bypasses those mutators and so has to restore the
+// invariant itself. MoveClipCommand does it by remove/re-add; sorting is the
+// same thing without churning the vector twice. Stable, so regions sharing a
+// start keep their relative order.
+void ResortClips(Track& t) {
+    std::stable_sort(t.clips.begin(), t.clips.end(),
+                     [](const Clip& a, const Clip& b) {
+                         return a.startFrame < b.startFrame; });
+}
+
+void ResortMidiClips(Track& t) {
+    std::stable_sort(t.midiClips.begin(), t.midiClips.end(),
+                     [](const MidiClip& a, const MidiClip& b) {
+                         return a.startFrame < b.startFrame; });
+}
+
+} // namespace
 
 // --- AddTrackCommand --------------------------------------------------
 
@@ -774,10 +798,18 @@ bool TrimClipFrontCommand::Do(Project& p) {
     if (fMidi) {
         MidiClip* c = t->FindMidiClip(fClip);
         if (!c) return false;
-        fOldStart = c->startFrame;
-        fOldLen   = c->lengthFrames;
+        fOldStart  = c->startFrame;
+        fOldLen    = c->lengthFrames;
+        fOldNotes  = c->notes;
+        fOldEvents = c->events;
+        // A MIDI region's notes and controllers are CLIP-relative, so moving
+        // the start without rebasing them drags the music along with the edge:
+        // trimming 100 ms off the front would move every note 100 ms later. The
+        // audio equivalent is sourceOffset below, and this is the same bug.
+        RebaseMidiContent(*c, fNewStart - fOldStart);
         c->startFrame   = fNewStart;
         c->lengthFrames = fNewLen;
+        ResortMidiClips(*t);   // startFrame is the sort key; c dangles now
         return true;
     }
     Clip* c = t->FindClip(fClip);
@@ -788,6 +820,7 @@ bool TrimClipFrontCommand::Do(Project& p) {
     c->startFrame   = fNewStart;
     c->lengthFrames = fNewLen;
     c->sourceOffset = fNewSrc;
+    ResortClips(*t);           // startFrame is the sort key; c dangles now
     return true;
 }
 void TrimClipFrontCommand::Undo(Project& p) {
@@ -797,6 +830,9 @@ void TrimClipFrontCommand::Undo(Project& p) {
         if (MidiClip* c = t->FindMidiClip(fClip)) {
             c->startFrame   = fOldStart;
             c->lengthFrames = fOldLen;
+            c->notes        = fOldNotes;    // exact, not a reverse rebase
+            c->events       = fOldEvents;
+            ResortMidiClips(*t);
         }
         return;
     }
@@ -804,6 +840,7 @@ void TrimClipFrontCommand::Undo(Project& p) {
         c->startFrame   = fOldStart;
         c->lengthFrames = fOldLen;
         c->sourceOffset = fOldSrc;
+        ResortClips(*t);
     }
 }
 
