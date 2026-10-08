@@ -12,7 +12,7 @@
 # (host is authoritative; the VM never commits).
 set -e
 KEY=~/.ssh/haiku_vm
-VM=${HAIKU_VM_IP:-192.168.122.232}   # override with HAIKU_VM_IP if it changes
+VM=${HAIKU_VM_IP:-192.168.122.48}   # override with HAIKU_VM_IP if it changes
 OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10"
 SSH="ssh -i $KEY $OPTS user@$VM"
 SCP="scp -i $KEY $OPTS"
