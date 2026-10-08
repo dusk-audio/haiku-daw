@@ -3,23 +3,24 @@
 // The DAW hosts LV2 DSP and draws a generic parameter list for it. This is the
 // other half: the editor a plugin ships, embedded in a Haiku window.
 //
-// TWO MODES, decided per plugin by what its UI asks the host for:
+// TWO MODES, decided per plugin by what its UI asks the host for. BOTH are
+// live; what differs is how a knob move is noticed.
 //
 //  - A CONTROL-PORT UI writes through the LV2UI_Write_Function. Those writes go
 //    straight out as kMsgFxLive, the same single live channel the generic
-//    parameter panel uses, and are committed to the model on a debounce. The
-//    editor is then live: a knob move is audible as it happens.
+//    parameter panel uses.
 //
-//  - A DIRECT_ACCESS UI does not use that function at all. It is handed the DSP
-//    instance through instance-access / data-access and pokes it directly, so
-//    linking it means handing a GUI thread a pointer the audio thread runs
-//    every block, with no lock the plugin knows to take. That crosses the
-//    real-time boundary deliberately and is NOT done here: such a UI keeps its
-//    OWN instance, seeded with the insert's stored values, and changes nothing.
+//  - A DIRECT_ACCESS UI does not use that function at all: it is handed the DSP
+//    instance through instance-access / data-access and pokes it directly. It
+//    is given an instance OF OURS -- never the engine's, which the audio thread
+//    runs every block with no lock the plugin knows to take -- and the host
+//    watches that instance's port buffers for changes. That is the mediated
+//    instance: both sides keep their own object and only values cross.
 //
-// The window title says which mode it is in, because the difference is audible
-// and a plugin editor that silently did nothing would be worse than one that
-// says so.
+// Either way the change is committed to the model on a debounce, so an engine
+// rebuild (any structural edit, and every play) cannot silently revert what the
+// user just heard. The title says which mode the editor is in, because a plugin
+// editor that silently did nothing would be worse than one that says so.
 //
 // Haiku-only (Interface Kit), and needs lilv.
 #pragma once

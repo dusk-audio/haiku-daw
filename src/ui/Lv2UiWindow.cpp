@@ -251,6 +251,15 @@ struct UiLiveLink {
     BMessenger apply;      // MainWindow: owns the model, and the engine with it
     BMessenger window;     // this window: the commit timer targets it
 
+    // A DIRECT_ACCESS UI: it never calls the write function, so the host has to
+    // watch its port buffers instead (see the poll in Open). Both kinds are
+    // linked; only the way the value is noticed differs.
+    bool direct = false;
+    // The value last sent for each port, so the poll reports changes and not
+    // the whole board every tick. Seeded from the values the editor opened
+    // with, so opening an editor is not itself an edit.
+    std::vector<float> lastSeen;
+
     // Port index -> the insert's parameter slot for that port, -1 for every
     // port that is not one of its control inputs. EffectDesc.params -- and so
     // kMsgFxLive's "slot" -- counts control INPUT ports in port order, the same
@@ -270,6 +279,36 @@ struct UiLiveLink {
     ~UiLiveLink() { delete runner; }
 };
 
+// One parameter the user just moved in the editor: send it to the audio now,
+// and arrange for the model to hear about it once the gesture stops. Both editor
+// kinds funnel through here -- a control-port UI from its write_function, a
+// direct-access one from the poll that watches its port buffers -- so the two
+// cannot drift apart in what they commit or when.
+void LinkNoteValue(UiLiveLink* link, int slot, float value) {
+    if (!link || slot < 0) return;
+
+    // Live first: the same channel the generic parameter panel uses, and what
+    // makes a knob move audible as it happens rather than on a mouse-up.
+    BMessage live(kMsgFxLive);
+    live.AddInt64("track", (int64)link->track);
+    live.AddInt32("fx", link->fxIndex);
+    live.AddInt32("slot", slot);
+    live.AddFloat("val", value);
+    link->apply.SendMessage(&live);
+
+    // Then the debounce. Restarting the runner on every change means only the
+    // last value of a gesture reaches the model -- which is also the only one
+    // worth an undo step.
+    std::lock_guard<std::mutex> lock(link->mutex);
+    link->pending[slot] = value;
+    BMessage m(kMsgLv2UiCommit);
+    // Constructed before the old one is destroyed, so a throwing allocation
+    // cannot leave `runner` dangling for the destructor to delete twice.
+    BMessageRunner* next = new BMessageRunner(link->window, &m, kCommitDelay, 1);
+    delete link->runner;                   // restart: only the last change commits
+    link->runner = next;
+}
+
 // The LV2UI_Write_Function. An LV2 UI calls this for a control change unless it
 // took the direct-access route, in which case it never arrives at all.
 void UiWrite(LV2UI_Controller controller, uint32_t port, uint32_t size,
@@ -283,30 +322,10 @@ void UiWrite(LV2UI_Controller controller, uint32_t port, uint32_t size,
     if (port >= link->slotOfPort.size()) return;
     const int slot = link->slotOfPort[port];
     if (slot < 0) return;                  // an output port, or not a control
-    const float value = *(const float*)buffer;
 
-    // Live first: the same channel the generic parameter panel uses, and what
-    // makes a knob move audible as it happens rather than on a mouse-up.
-    BMessage live(kMsgFxLive);
-    live.AddInt64("track", (int64)link->track);
-    live.AddInt32("fx", link->fxIndex);
-    live.AddInt32("slot", slot);
-    live.AddFloat("val", value);
-    link->apply.SendMessage(&live);
-
-    if (link->ctl && port < link->ctl->size()) (*link->ctl)[port] = value;
-
-    // Then the debounce. Restarting the runner on every write means only the
-    // last value of a gesture reaches the model -- which is also the only one
-    // worth an undo step.
-    std::lock_guard<std::mutex> lock(link->mutex);
-    link->pending[slot] = value;
-    BMessage m(kMsgLv2UiCommit);
-    // Constructed before the old one is destroyed, so a throwing allocation
-    // cannot leave `runner` dangling for the destructor to delete twice.
-    BMessageRunner* next = new BMessageRunner(link->window, &m, kCommitDelay, 1);
-    delete link->runner;                   // restart: only the last write commits
-    link->runner = next;
+    if (link->ctl && port < link->ctl->size()) (*link->ctl)[port] = *(const float*)buffer;
+    if (port < link->lastSeen.size()) link->lastSeen[port] = *(const float*)buffer;
+    LinkNoteValue(link, slot, *(const float*)buffer);
 }
 
 // For a UI this window is NOT linked to -- a direct-access one. Writes are
@@ -360,6 +379,10 @@ struct Lv2UiWindow::Impl {
     LilvUIs*      uis       = nullptr;
     thread_id     idleThread = -1;
     volatile bool idleRun   = false;
+    // Watches a direct-access UI's port buffers (see the poll in Open). One
+    // thread per window, running only for that kind of editor.
+    thread_id     pollThread = -1;
+    volatile bool pollRun    = false;
 
     // Non-null only for a control-port UI: the one this window is linked to the
     // playing insert through. Never a pointer to the engine's instance, and
@@ -487,16 +510,16 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         d->audio.resize(nPorts);
         d->atom.resize(nPorts);
         d->ctl.assign(nPorts, 0.0f);
-        // A control-port UI gets the live link; a direct-access one gets
-        // nothing to write through, by design (see the header).
-        if (!directAccess) {
-            d->link.reset(new UiLiveLink());
-            d->link->track   = track;
-            d->link->fxIndex = fxIndex;
-            d->link->apply   = apply;
-            d->link->slotOfPort.assign(nPorts, -1);
-            d->link->ctl     = &d->ctl;
-        }
+        // Both kinds of UI get a link; they differ in how a change is noticed
+        // (write_function vs. watching the port buffers), not in what happens
+        // to it afterwards.
+        d->link.reset(new UiLiveLink());
+        d->link->track   = track;
+        d->link->fxIndex = fxIndex;
+        d->link->apply   = apply;
+        d->link->direct  = directAccess;
+        d->link->slotOfPort.assign(nPorts, -1);
+        d->link->ctl     = &d->ctl;
         size_t ctlInSlot = 0;
         for (uint32_t i = 0; i < nPorts; i++) {
             const LilvPort* port = lilv_plugin_get_port_by_index(plugin, i);
@@ -517,10 +540,10 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                 // EffectDesc.params uses.
                 if (isIn) {
                     if (ctlInSlot < params.size()) d->ctl[i] = params[ctlInSlot];
-                    // A live link needs to translate the UI's port numbers back
-                    // into this same slot order, or a knob would move the wrong
-                    // parameter -- silently, since both are just ints.
-                    if (d->link) d->link->slotOfPort[i] = (int)ctlInSlot;
+                    // The link translates the UI's port numbers back into this
+                    // same slot order, or a knob would move the wrong parameter
+                    // -- silently, since both are just ints.
+                    d->link->slotOfPort[i] = (int)ctlInSlot;
                     ctlInSlot++;
                 }
                 lilv_instance_connect_port(d->dsp, i, &d->ctl[i]);
@@ -539,6 +562,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         lilv_node_free(nInput); lilv_node_free(nAtom);
         lilv_instance_activate(d->dsp);
 
+        // What the editor is about to open with is not an edit: seed the poll's
+        // "last seen" from the port buffers, so a direct-access editor is quiet
+        // until the user actually moves something.
+        d->link->lastSeen = d->ctl;
+
         // The UI binary's location. Plain strings, so nothing past this point
         // needs the world.
         binPath    = FileUriToPath(lilv_node_as_uri(lilv_ui_get_binary_uri(ui)));
@@ -548,11 +576,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
     // --- the window -------------------------------------------------------
 
-    // Say in the title which mode this editor is in. For a direct-access UI
-    // that is a limitation the user would otherwise discover by listening; for
-    // a live one it is a promise the same user can check by moving a knob.
+    // Say which mode this editor is in. Both are live now, but they are not
+    // the same promise: a direct-access editor's values are mirrored through
+    // the host, which is worth naming rather than glossing as "live".
     std::string title = displayName.empty() ? "Plugin UI" : displayName;
-    title += directAccess ? "  (view only - not linked to playback)"
+    title += directAccess ? "  (live - mirrored through the host)"
                           : "  (live - drives the playing insert)";
 
     Lv2UiWindow* win = new Lv2UiWindow(frame, title.c_str());
@@ -647,6 +675,37 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
             "lv2 ui idle", B_NORMAL_PRIORITY, d);
         resume_thread(d->idleThread);
     }
+
+    // A direct-access UI writes into ITS instance's port buffers and never calls
+    // the write function, so the host has to watch those buffers to hear it.
+    // They are ours (`Impl::ctl`, connected to the instance we instantiated), so
+    // this reads memory we own while the plugin's UI thread writes it -- a
+    // word-sized float load, the same access the plugin itself makes.
+    //
+    // Independent of the plugin's idle interface on purpose: a UI that renders
+    // on its own timer would otherwise leave this poll with nothing to hang it
+    // on, and the editor would silently go back to being a display.
+    if (d->link && d->link->direct) {
+        d->pollRun = true;
+        d->pollThread = spawn_thread(
+            [](void* p) -> status_t {
+                Impl* im = (Impl*)p;
+                UiLiveLink* link = im->link.get();
+                while (im->pollRun) {
+                    for (size_t i = 0; i < link->lastSeen.size(); i++) {
+                        if (link->slotOfPort[i] < 0) continue;   // not a parameter
+                        const float v = im->ctl[i];
+                        if (v == link->lastSeen[i]) continue;
+                        link->lastSeen[i] = v;
+                        LinkNoteValue(link, link->slotOfPort[i], v);
+                    }
+                    snooze(16000);   // ~60 Hz, matching the idle thread
+                }
+                return B_OK;
+            },
+            "lv2 ui poll", B_NORMAL_PRIORITY, d);
+        resume_thread(d->pollThread);
+    }
     winLock.Unlock();
     return win;
 }
@@ -660,6 +719,14 @@ Lv2UiWindow::~Lv2UiWindow() {
         d->idleRun = false;
         status_t st = 0;
         wait_for_thread(d->idleThread, &st);
+    }
+    // The poll thread too, and for the same reason: it is the last thing that
+    // can post a live value, and it must not still be reading this window's
+    // buffers (or posting through a dead messenger) while teardown runs.
+    if (d->pollThread >= 0) {
+        d->pollRun = false;
+        status_t st = 0;
+        wait_for_thread(d->pollThread, &st);
     }
     // Fifth teardown rule: tell the model about anything the editor wrote and
     // did not get to commit, BEFORE the plugin's handles go away. A knob turned
