@@ -559,7 +559,11 @@ void InspectorView::MouseUp(BPoint) {
             // "done", so neither case falls through to the generic panel.
             if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName)) {
                 BRect uw(160, 160, 160 + 960, 160 + 680);
-                Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d), d.params);
+                // The insert's own address: the editor posts live and committed
+                // parameter edits back through this view's window, which is the
+                // MainWindow, exactly as the generic panel does.
+                Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d), d.params,
+                                  (TrackId)t->id, from, BMessenger(Window()));
                 Refresh();
                 return;
             }

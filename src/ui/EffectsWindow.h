@@ -45,6 +45,12 @@ constexpr uint32 kMsgApplyFx = 'fxap';
 // the effect responds while you drag; the undoable commit is kMsgApplyFx on
 // mouse-up.
 constexpr uint32 kMsgFxLive = 'fxlv';
+// A native plugin editor's COMMITTED parameter writes: what kMsgFxLive previewed
+// while the control moved, made permanent in the model once the gesture goes
+// quiet (one undo step per gesture). Sent by Lv2UiWindow on a debounce; fields
+// are int64 "track", int32 "fx", then one int32 "slot" and one float "val" per
+// changed parameter, in matching order.
+constexpr uint32 kMsgFxParamCommit = 'fxpc';
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';

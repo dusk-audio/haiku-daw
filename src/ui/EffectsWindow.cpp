@@ -954,7 +954,13 @@ void EffectsView::MouseDown(BPoint where) {
             }
             // Null return = the plugin has no embeddable UI or its editor
             // refused to instantiate; the generic panel stays as it is.
-            Lv2UiWindow::Open(wr, d.pluginName, EffectDisplayName(d), d.params);
+            //
+            // The insert's address travels with the open: a control-port UI
+            // writes through fApply (MainWindow) by (track, fx, slot), the same
+            // channel this view's own knobs use, so an editor opened from the
+            // generic panel is exactly as live as one opened from the strip.
+            Lv2UiWindow::Open(wr, d.pluginName, EffectDisplayName(d), d.params,
+                              fTrack, h.effect, fApply);
             break;
         }
 #endif

@@ -1,5 +1,6 @@
 #include "Lv2UiWindow.h"
 
+#include "EffectsWindow.h"   // kMsgFxLive / kMsgFxParamCommit: the editor->model channel
 #include "UiMetrics.h"
 
 #include <lilv/lilv.h>
@@ -14,12 +15,14 @@
 #include <lv2/ui/ui.h>
 #include <lv2/urid/urid.h>
 
+#include <MessageRunner.h>
 #include <View.h>
 
 #include <dlfcn.h>
 
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 namespace daw {
@@ -32,6 +35,14 @@ const char* kNativeUiType = "http://lv2plug.in/ns/extensions/ui#BeUI";
 
 // Self-addressed: "you are already showing this plugin, come to the front".
 constexpr uint32 kMsgLv2UiRaise = 'l2ur';
+// Self-addressed, from the debounce runner: a gesture has gone quiet, commit it.
+constexpr uint32 kMsgLv2UiCommit = 'l2uc';
+
+// How long a control must sit still before its live value becomes one undo
+// step. Same reasoning (and the same delay) as EffectsView's wheel commit: a
+// knob drag arrives as a burst of writes, and one undo entry per write would
+// both flood the stack and make Ctrl-Z take a hundred presses to undo a turn.
+constexpr bigtime_t kCommitDelay = 400000;   // 400 ms
 
 constexpr int32_t kBlockLength = 1024;
 constexpr double  kSampleRate  = 48000.0;
@@ -224,6 +235,116 @@ void ForgetOpen(const std::string& uri) {
         if (gOpen[i - 1].first == uri) gOpen.erase(gOpen.begin() + (long)(i - 1));
 }
 
+// --- the live link --------------------------------------------------------
+
+// Everything the UI's write_function needs, and nothing that outlives the
+// window: the insert's address in the graph, the messenger to MainWindow, the
+// port-to-slot map, and the debounce that turns a gesture into one undo step.
+//
+// The address is (track, fxIndex, slot), never an instance pointer. The engine
+// rebuilds its chain on any structural edit and again on every play, so an
+// instance cached here would be freed under a running editor; addressing the
+// insert lets the engine resolve it on each write instead.
+struct UiLiveLink {
+    TrackId    track   = kInvalidTrackId;
+    int        fxIndex = -1;
+    BMessenger apply;      // MainWindow: owns the model, and the engine with it
+    BMessenger window;     // this window: the commit timer targets it
+
+    // Port index -> the insert's parameter slot for that port, -1 for every
+    // port that is not one of its control inputs. EffectDesc.params -- and so
+    // kMsgFxLive's "slot" -- counts control INPUT ports in port order, the same
+    // numbering Lv2Host builds the insert with.
+    std::vector<int> slotOfPort;
+    // The throwaway instance's control buffer, kept in step with what the UI
+    // sends so a plugin reading its own port state back sees the same value.
+    std::vector<float>* ctl = nullptr;
+
+    // Guards pending and runner: taken by the UI's idle thread (a write) and by
+    // the window's looper (the commit). The only lock in the write path, and it
+    // is never held across a messenger call.
+    std::mutex           mutex;
+    std::map<int, float> pending;          // slot -> latest value, uncommitted
+    BMessageRunner*      runner = nullptr; // restarted by every write
+
+    ~UiLiveLink() { delete runner; }
+};
+
+// The LV2UI_Write_Function. An LV2 UI calls this for a control change unless it
+// took the direct-access route, in which case it never arrives at all.
+void UiWrite(LV2UI_Controller controller, uint32_t port, uint32_t size,
+             uint32_t format, const void* buffer) {
+    UiLiveLink* link = (UiLiveLink*)controller;
+    if (!link || !buffer) return;
+    // Format 0 is LV2's plain-float control-port protocol. Anything else is a
+    // protocol this host never advertised and a write we cannot interpret;
+    // dropping it is the honest answer rather than guessing at the bytes.
+    if (format != 0 || size != sizeof(float)) return;
+    if (port >= link->slotOfPort.size()) return;
+    const int slot = link->slotOfPort[port];
+    if (slot < 0) return;                  // an output port, or not a control
+    const float value = *(const float*)buffer;
+
+    // Live first: the same channel the generic parameter panel uses, and what
+    // makes a knob move audible as it happens rather than on a mouse-up.
+    BMessage live(kMsgFxLive);
+    live.AddInt64("track", (int64)link->track);
+    live.AddInt32("fx", link->fxIndex);
+    live.AddInt32("slot", slot);
+    live.AddFloat("val", value);
+    link->apply.SendMessage(&live);
+
+    if (link->ctl && port < link->ctl->size()) (*link->ctl)[port] = value;
+
+    // Then the debounce. Restarting the runner on every write means only the
+    // last value of a gesture reaches the model -- which is also the only one
+    // worth an undo step.
+    std::lock_guard<std::mutex> lock(link->mutex);
+    link->pending[slot] = value;
+    BMessage m(kMsgLv2UiCommit);
+    // Constructed before the old one is destroyed, so a throwing allocation
+    // cannot leave `runner` dangling for the destructor to delete twice.
+    BMessageRunner* next = new BMessageRunner(link->window, &m, kCommitDelay, 1);
+    delete link->runner;                   // restart: only the last write commits
+    link->runner = next;
+}
+
+// For a UI this window is NOT linked to -- a direct-access one. Writes are
+// accepted and dropped: this window's instance is not the one making sound, and
+// pretending otherwise would be worse than saying so.
+void UiWriteDropped(LV2UI_Controller, uint32_t, uint32_t, uint32_t,
+                    const void*) {}
+
+// Does this UI read the DSP instance directly rather than going through the
+// write_function? DPF/DAF plugins built WANT_DIRECT_ACCESS declare that as a
+// required feature (instance-access), which is what this reads -- the whole
+// difference between an editor that can be linked live and one that cannot.
+//
+// Conservative on every failure path: a UI whose RDF cannot be read is treated
+// as direct-access, because leaving an editor unlinked is the safe mistake and
+// poking a live instance by accident is not.
+bool UiWantsInstanceAccess(const LilvUI* ui) {
+    LilvWorld* w = UiWorld();
+    if (!w || !ui) return true;
+    LilvNode* pred = lilv_new_uri(w, LV2_CORE__requiredFeature);
+    LilvNode* want = lilv_new_uri(w, LV2_INSTANCE_ACCESS_URI);
+    bool wants = false;
+    if (pred && want) {
+        if (LilvNodes* found = lilv_world_find_nodes(
+                w, lilv_ui_get_uri(ui), pred, nullptr)) {
+            LILV_FOREACH(nodes, i, found)
+                if (lilv_node_equals(lilv_nodes_get(found, i), want)) {
+                    wants = true;
+                    break;
+                }
+            lilv_nodes_free(found);
+        }
+    }
+    lilv_node_free(pred);
+    lilv_node_free(want);
+    return wants;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -239,6 +360,11 @@ struct Lv2UiWindow::Impl {
     LilvUIs*      uis       = nullptr;
     thread_id     idleThread = -1;
     volatile bool idleRun   = false;
+
+    // Non-null only for a control-port UI: the one this window is linked to the
+    // playing insert through. Never a pointer to the engine's instance, and
+    // owned here so it dies with the window whichever way Open() exits.
+    std::unique_ptr<UiLiveLink> link;
 
     // Port buffers the DSP instance is connected to. Every port must be
     // connected before activate, even though this instance never processes.
@@ -290,7 +416,8 @@ Lv2UiWindow::Lv2UiWindow(BRect frame, const char* title)
 
 Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
-                               const std::vector<float>& params) {
+                               const std::vector<float>& params,
+                               TrackId track, int fxIndex, BMessenger apply) {
     // Already showing this plugin -- or already building one? Bring the existing
     // editor forward rather than opening a rival. The claim is what makes that
     // check hold for the whole build below, which is long enough (it
@@ -312,6 +439,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     // order here -- world, then window -- is a deadlock. Keeping the two halves
     // disjoint is what makes the window lock below safe to hold.
     std::string binPath, bundlePath, uiUri;
+    bool directAccess = true;    // "unlinked" until the RDF says otherwise
     {
         std::lock_guard<std::mutex> worldLock(gWorldMutex);
 
@@ -320,6 +448,10 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
         const LilvUI* ui = FindNativeUi(plugin, &d->uis);
         if (!ui) { delete d; return nullptr; }
+
+        // Which of the two modes this editor gets, decided BEFORE the window
+        // exists so the title can say so from its first frame.
+        directAccess = UiWantsInstanceAccess(ui);
 
         // --- features -----------------------------------------------------
         d->map   = { nullptr, UridMap };
@@ -355,6 +487,16 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         d->audio.resize(nPorts);
         d->atom.resize(nPorts);
         d->ctl.assign(nPorts, 0.0f);
+        // A control-port UI gets the live link; a direct-access one gets
+        // nothing to write through, by design (see the header).
+        if (!directAccess) {
+            d->link.reset(new UiLiveLink());
+            d->link->track   = track;
+            d->link->fxIndex = fxIndex;
+            d->link->apply   = apply;
+            d->link->slotOfPort.assign(nPorts, -1);
+            d->link->ctl     = &d->ctl;
+        }
         size_t ctlInSlot = 0;
         for (uint32_t i = 0; i < nPorts; i++) {
             const LilvPort* port = lilv_plugin_get_port_by_index(plugin, i);
@@ -375,6 +517,10 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                 // EffectDesc.params uses.
                 if (isIn) {
                     if (ctlInSlot < params.size()) d->ctl[i] = params[ctlInSlot];
+                    // A live link needs to translate the UI's port numbers back
+                    // into this same slot order, or a knob would move the wrong
+                    // parameter -- silently, since both are just ints.
+                    if (d->link) d->link->slotOfPort[i] = (int)ctlInSlot;
                     ctlInSlot++;
                 }
                 lilv_instance_connect_port(d->dsp, i, &d->ctl[i]);
@@ -402,10 +548,12 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
     // --- the window -------------------------------------------------------
 
-    // Say in the title that this editor is not driving the audio, so the
-    // limitation is visible at the moment it matters rather than surprising.
+    // Say in the title which mode this editor is in. For a direct-access UI
+    // that is a limitation the user would otherwise discover by listening; for
+    // a live one it is a promise the same user can check by moving a knob.
     std::string title = displayName.empty() ? "Plugin UI" : displayName;
-    title += "  (view only - not linked to playback)";
+    title += directAccess ? "  (view only - not linked to playback)"
+                          : "  (live - drives the playing insert)";
 
     Lv2UiWindow* win = new Lv2UiWindow(frame, title.c_str());
     win->fImpl = d;
@@ -460,14 +608,20 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     d->features = { &d->fMap, &d->fUnmap, &d->fOpts, &d->fParent,
                     &d->fInst, &d->fData, nullptr };
 
+    // A live editor commits through the window, so the debounce timer needs the
+    // messenger now -- the plugin can write from its very first frame.
+    if (d->link) d->link->window = BMessenger(win);
+
     LV2UI_Widget widget = nullptr;
     d->ui = d->desc->instantiate(d->desc, pluginUri.c_str(), bundlePath.c_str(),
-                                 // Writes are accepted and dropped: this
-                                 // instance is not the one making sound, and
-                                 // pretending otherwise would be worse.
-                                 [](LV2UI_Controller, uint32_t, uint32_t,
-                                    uint32_t, const void*) {},
-                                 nullptr, &widget, d->features.data());
+                                 // A control-port UI writes through UiWrite and
+                                 // drives the playing insert; a direct-access UI
+                                 // never calls this at all, and gets the no-op.
+                                 d->link ? (LV2UI_Write_Function)UiWrite
+                                         : (LV2UI_Write_Function)UiWriteDropped,
+                                 d->link ? (LV2UI_Controller)d->link.get()
+                                         : nullptr,
+                                 &widget, d->features.data());
     if (!d->ui) {
         winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
     }
@@ -507,6 +661,13 @@ Lv2UiWindow::~Lv2UiWindow() {
         status_t st = 0;
         wait_for_thread(d->idleThread, &st);
     }
+    // Fifth teardown rule: tell the model about anything the editor wrote and
+    // did not get to commit, BEFORE the plugin's handles go away. A knob turned
+    // and the window closed inside the debounce window would otherwise be live
+    // in the audio and absent from the model -- which the next engine rebuild
+    // (any structural edit, and every play) would resolve in favour of the
+    // stale value, undoing the gesture the user just heard.
+    CommitPending();
     // Detach the container -- and with it the plugin's whole view subtree --
     // BEFORE calling the plugin's cleanup.
     //
@@ -560,9 +721,38 @@ bool Lv2UiWindow::QuitRequested() { return true; }
 
 // The registry asks the window to raise ITSELF, so the activation happens on
 // this window's own looper instead of another thread reaching in.
+//
+// kMsgLv2UiCommit is the other self-addressed message: the debounce runner
+// firing, which means the gesture is over and its value belongs in the model.
 void Lv2UiWindow::MessageReceived(BMessage* msg) {
     if (msg->what == kMsgLv2UiRaise) { Activate(true); return; }
+    if (msg->what == kMsgLv2UiCommit) { CommitPending(); return; }
     BWindow::MessageReceived(msg);
+}
+
+// Turn the values the UI has written since the last commit into one undoable
+// model edit, through MainWindow -- this window never touches the model.
+void Lv2UiWindow::CommitPending() {
+    Impl* d = fImpl;
+    if (!d || !d->link) return;
+    std::map<int, float> pending;
+    {
+        // Copy and clear under the lock: the UI's idle thread may be writing
+        // the next gesture's values into the same map right now, and those
+        // belong to the NEXT commit, not this one.
+        std::lock_guard<std::mutex> lock(d->link->mutex);
+        pending.swap(d->link->pending);
+    }
+    if (pending.empty()) return;
+
+    BMessage m(kMsgFxParamCommit);
+    m.AddInt64("track", (int64)d->link->track);
+    m.AddInt32("fx", d->link->fxIndex);
+    for (const auto& e : pending) {
+        m.AddInt32("slot", e.first);
+        m.AddFloat("val", e.second);
+    }
+    d->link->apply.SendMessage(&m);
 }
 
 } // namespace daw

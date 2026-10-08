@@ -615,8 +615,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 if (d.type == EffectType::Lv2
                     && Lv2UiWindow::HasNativeUi(d.pluginName)) {
                     BRect uw(160, 160, 160 + 960, 160 + 680);
+                    // The editor is told which insert it belongs to, so a
+                    // control-port UI can drive it live through fStack's model
+                    // and this window's engine -- the same (track, fx, slot)
+                    // address every other live edit uses.
                     Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d),
-                                      d.params);
+                                      d.params, (TrackId)tid, (int)slot,
+                                      BMessenger(this));
                     break;
                 }
             }
@@ -863,6 +868,33 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgReloadEngine:   // clip/fade edit: rebuild so it takes effect live
             ReloadActiveEngine();
             break;
+        case kMsgFxParamCommit: {
+            // A native plugin editor's committed gesture: the values it already
+            // played through kMsgFxLive, made permanent in the model so an
+            // engine rebuild (and the saved project) keeps them.
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            if (fx < 0) break;
+            std::vector<SetFxParamCommand::SlotValue> vals;
+            for (int32 i = 0;; i++) {
+                int32 slot = 0; float v = 0.0f;
+                if (msg->FindInt32("slot", i, &slot) != B_OK) break;
+                if (msg->FindFloat("val", i, &v) != B_OK) break;
+                vals.push_back({ slot, v });
+            }
+            if (vals.empty()) break;
+            const bool master = ((TrackId)tid == kMasterFxTarget);
+            if (fStack->Execute(std::make_unique<SetFxParamCommand>(
+                    (TrackId)tid, master, fx, std::move(vals)), *fProject)) {
+                // Deliberately no engine sync here. The audio already has these
+                // values -- they arrived live before this message did -- and
+                // SyncFxToEngine rebuilds the chain, which would cut reverb
+                // tails and restart the insert to re-apply what it is playing.
+                fTimeline->Invalidate();
+            }
+            break;
+        }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
             int64 tid = 0; int32 fx = 0, slot = 0; float v = 0.0f;
             msg->FindInt64("track", &tid);
