@@ -697,6 +697,41 @@ private:
     bool    fOld = false;
 };
 
+// Set parameter values on ONE insert of a track chain, or of the master chain
+// (master == true).
+//
+// A native LV2 editor commits through this: its control-port writes go live to
+// the audio through kMsgFxLive while the knob moves, and one of these lands
+// once the gesture goes quiet so the model keeps what is already audible --
+// without it the next engine rebuild (any structural edit, and every play)
+// would restore the stale value and the GUI's edit would silently undo itself.
+//
+// Narrow on purpose: SetFxCommand replaces the whole chain, so routing a knob
+// through it would make every gesture an "Edit Effects" undo step carrying a
+// full-chain payload. One command can carry several slots, because a plugin's
+// own preset load writes many at once.
+class SetFxParamCommand : public Command {
+public:
+    struct SlotValue {
+        int   slot  = 0;
+        float value = 0.0f;
+    };
+
+    SetFxParamCommand(TrackId track, bool master, int fxIndex,
+                      std::vector<SlotValue> values)
+        : fTrack(track), fMaster(master), fIndex(fxIndex),
+          fNew(std::move(values)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Edit Effect Parameter"; }
+private:
+    TrackId                fTrack;
+    bool                   fMaster;
+    int                    fIndex;
+    std::vector<SlotValue> fNew;
+    std::vector<SlotValue> fOld;   // only the slots fNew actually touched
+};
+
 // Set a MIDI track's voice. Coalesces (its editor's native sliders post
 // continuously) so a slider drag is one undo step.
 class SetInstrumentCommand : public Command {

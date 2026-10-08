@@ -779,6 +779,40 @@ void SetTrackInputCommand::Undo(Project& p) {
 
 // --- SetInstrumentCommand ---------------------------------------------
 
+// The chain a command addresses, or null when the target is gone. Both halves
+// of SetFxParamCommand go through here so Do and Undo cannot disagree about
+// which chain was meant.
+static std::vector<EffectDesc>* FxChainFor(Project& p, TrackId track, bool master) {
+    if (master) return &p.masterFx;
+    Track* t = p.FindTrack(track);
+    return t ? &t->fx : nullptr;
+}
+
+bool SetFxParamCommand::Do(Project& p) {
+    std::vector<EffectDesc>* chain = FxChainFor(p, fTrack, fMaster);
+    if (!chain || fIndex < 0 || fIndex >= (int)chain->size()) return false;
+    EffectDesc& d = (*chain)[(size_t)fIndex];
+    fOld.clear();
+    for (const SlotValue& sv : fNew) {
+        // A slot past the end of this descriptor is a plugin whose port count
+        // changed under a saved project, not an edit worth recording.
+        if (sv.slot < 0 || (size_t)sv.slot >= d.params.size()) continue;
+        fOld.push_back({ sv.slot, d.params[(size_t)sv.slot] });
+        d.params[(size_t)sv.slot] = sv.value;
+    }
+    // Nothing landed: report failure so the stack does not push an empty step
+    // (CommandStack skips a command whose Do returns false).
+    return !fOld.empty();
+}
+void SetFxParamCommand::Undo(Project& p) {
+    std::vector<EffectDesc>* chain = FxChainFor(p, fTrack, fMaster);
+    if (!chain || fIndex < 0 || fIndex >= (int)chain->size()) return;
+    EffectDesc& d = (*chain)[(size_t)fIndex];
+    for (const SlotValue& sv : fOld)
+        if (sv.slot >= 0 && (size_t)sv.slot < d.params.size())
+            d.params[(size_t)sv.slot] = sv.value;
+}
+
 bool SetInstrumentCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
