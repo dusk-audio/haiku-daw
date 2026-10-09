@@ -888,36 +888,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // master sentinel.
             const bool master = ((TrackId)tid == kMasterFxTarget);
             if (!master && !fProject->FindTrack((TrackId)tid)) break;
-            std::vector<EffectDesc> chain;
-            int32 type = 0, epIdx = 0;
-            for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
-                EffectDesc d;
-                d.type = (type >= 0 && type <= kMaxEffectTypeId) ? (EffectType)type
-                                                  : EffectType::Biquad;
-                BString pn;
-                if (msg->FindString("en", i, &pn) == B_OK)
-                    d.pluginName = pn.String();
-                // Insert-slot state. Absent fields keep EffectDesc's defaults
-                // (not bypassed, fully wet); mix is clamped here the same way
-                // ProjectIO clamps it on load, since this message crosses a
-                // thread boundary from an editor that may not have a slot UI.
-                int32 byp = 0;
-                if (msg->FindInt32("eb", i, &byp) == B_OK)
-                    d.bypassed = (byp != 0);
-                float mix = 1.0f;
-                if (msg->FindFloat("em", i, &mix) == B_OK)
-                    d.mix = ClampFxMix(mix);
-                int32 count = 0;
-                msg->FindInt32("ec", i, &count);
-                for (int32 j = 0; j < count; j++) {
-                    float v = 0.0f;
-                    msg->FindFloat("ep", epIdx++, &v);
-                    d.params.push_back(v);
-                }
-                chain.push_back(d);
-            }
+            // One decoder for this layout, shared with the push in the other
+            // direction (kMsgFxChain), so the two cannot drift field by field.
             fStack->Execute(std::make_unique<SetFxCommand>(
-                (TrackId)tid, master, std::move(chain)), *fProject);
+                (TrackId)tid, master, DecodeFxChain(*msg)), *fProject);
             SyncFxToEngine();
             fTimeline->Invalidate();
             break;
@@ -1866,8 +1840,30 @@ void MainWindow::ReloadActiveEngine() {
 // their command directly and then only asked for a repaint, so adding,
 // reordering or bypassing an insert from the strip did nothing audible until
 // something else happened to rebuild the engine.
+// Hand an open effects panel the chain as the MODEL now has it.
+//
+// The panel holds the copy it was constructed with and commits by sending that
+// whole copy back, so any edit made elsewhere -- another view's reorder, or a
+// native plugin editor committing a parameter -- would be rewritten from the
+// panel's stale snapshot on its next knob move. The panel is the only window
+// with that shape; the strips edit through narrow commands.
+void MainWindow::PushChainToFxWindow(TrackId tid) {
+    if (!fFxMsgr.IsValid() || fFxTrack != tid) return;
+    const bool master = (tid == kMasterFxTarget);
+    const std::vector<EffectDesc>* chain = master ? &fProject->masterFx : nullptr;
+    if (!chain) {
+        if (Track* t = fProject->FindTrack(tid)) chain = &t->fx;
+    }
+    if (!chain) return;
+    BMessage m(kMsgFxChain);
+    EncodeFxChain(m, *chain);
+    fFxMsgr.SendMessage(&m);
+}
+
 void MainWindow::SyncFxToEngine() {
     ValidateFxWatch();
+    // An open panel's copy of the chain is now out of date; give it the model's.
+    PushChainToFxWindow(fFxTrack);
     if (fEngine && !fEngine->SyncFx(*fProject))
         ReloadActiveEngine();
     // Publish AFTER the engine has been brought up to date, not before. With

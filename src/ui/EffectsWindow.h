@@ -62,6 +62,13 @@ constexpr uint32 kMsgToggleFxAuto = 'fxat';
 // focus and pushes kMsgFxMeter here while playing.
 constexpr uint32 kMsgFxWinOpen   = 'fxwo';
 constexpr uint32 kMsgFxWinClosed = 'fxwc';
+// MainWindow -> EffectsWindow: the track's chain as the MODEL now has it. A
+// panel holds a copy taken when it opened, and it commits by sending that whole
+// copy back (see EffectsView::Apply), so without this its next knob move
+// rewrites every OTHER insert from a stale snapshot -- reverting, for instance,
+// what a native plugin editor committed in the meantime. Fields are the same
+// ones kMsgApplyFx carries, encoded by EncodeFxChain.
+constexpr uint32 kMsgFxChain = 'fxch';
 // MainWindow -> EffectsWindow: live effect meters. Fields: float[] "gr" (per-fx
 // gain reduction dB), float[] "spec" (EQ spectrum dB), int32 "specfx" (which fx
 // the spectrum belongs to), int32 "specn" (bin count).
@@ -90,6 +97,12 @@ constexpr uint32 kMsgFxWatch     = 'fxpw';
 // actually moved.
 constexpr uint32 kMsgFxParams    = 'fxpv';
 
+// Serialize / parse a chain of insert descriptors into a message: the same
+// layout kMsgApplyFx and kMsgFxChain carry, in ONE place so the two ends of
+// that conversation cannot drift apart.
+void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain);
+std::vector<EffectDesc> DecodeFxChain(const BMessage& m);
+
 class EffectsView : public BView {
 public:
     // `focusSlot` >= 0 shows ONLY that insert (the channel strip opens the
@@ -112,6 +125,11 @@ public:
     // Live meters from the engine (per-fx gain reduction + one EQ spectrum).
     void SetMeters(const float* gr, int grN,
                    const float* spec, int specN, int specFx);
+
+    // Replace the copy of the chain taken when this view opened with the model's
+    // current one. Ignored while a drag is in flight: the indices the drag holds
+    // would move under it, and its own mouse-up commit is the edit in progress.
+    void SetChain(std::vector<EffectDesc> chain);
 
     // Commit a wheel edit whose debounce timer has not fired yet. The window
     // calls this on close: the engine already heard the change (kMsgFxLive), so

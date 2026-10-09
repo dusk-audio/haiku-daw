@@ -87,6 +87,7 @@ private:
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
+    void PushChainToFxWindow(TrackId tid);   // model's chain -> open panel
     void PushFxParams();             // engine insert values -> native editor
     void LayoutTransportBar();       // fit the bar's controls to its width
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
