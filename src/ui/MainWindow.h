@@ -55,6 +55,9 @@ constexpr uint32 MSG_ABOUT            = 'abot';   // Help > About
 constexpr uint32 MSG_PULSE            = 'puls';   // the 60 Hz BMessageRunner
 constexpr uint32 MSG_NEW_AUDIO        = 'naud';
 constexpr uint32 MSG_NEW_MIDI         = 'nmid';
+constexpr uint32 MSG_NEW_PROJECT      = 'nprj';   // File > New
+constexpr uint32 MSG_SAVE             = 'save';   // File > Save (silent once pathed)
+constexpr uint32 MSG_SAVE_AS          = 'svas';   // File > Save As (always a panel)
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
 constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
 constexpr uint32 MSG_EXPORT           = 'expt';
@@ -114,6 +117,11 @@ private:
     void FlushFxEditors();           // before a save: commit what they wrote
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path);
+    // File > New: ask, then a fresh empty project at the session's rate.
+    void NewProject();
+    void RememberProject(const std::string& path);  // recent list + menu
+    void ForgetRecent(const std::string& path);     // ... a file that vanished
+    void RebuildRecentMenu();
     // Ask about unsaved changes before an action that would drop them (Quit,
     // Open, New). True = the caller may proceed. Save flushes the editors
     // first; with no path yet the save panel opens and the caller is refused.
@@ -264,6 +272,8 @@ private:
     Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
     std::string               fProjectPath;  // the project's file ("" until saved)
+    std::vector<std::string>  fRecentProjects;  // File > Open Recent, newest first
+    BMenu*                    fRecentMenu = nullptr;
     std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take
