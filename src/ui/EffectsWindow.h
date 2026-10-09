@@ -63,6 +63,12 @@ constexpr uint32 kMsgFxWinClosed = 'fxwc';
 // gain reduction dB), float[] "spec" (EQ spectrum dB), int32 "specfx" (which fx
 // the spectrum belongs to), int32 "specn" (bin count).
 constexpr uint32 kMsgFxMeter     = 'fxmt';
+// An editor view -> MainWindow: "open the plugin's own editor for the insert at
+// this address". Fields: int64 "track", int32 "fx". It is a request rather than
+// a direct call because the view's copy of the chain can be stale, and a live
+// editor addresses its insert by INDEX -- only MainWindow sees the model, so
+// only it can say what is at that index now.
+constexpr uint32 kMsgOpenFxEditor = 'fxoe';
 // Lv2UiWindow -> MainWindow: "this native editor is open on this insert, publish
 // its control values to me". Fields: int64 "track", int32 "fx", messenger
 // "msgr". The SAME message with no messenger means the editor closed and the

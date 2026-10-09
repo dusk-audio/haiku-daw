@@ -610,21 +610,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // inspector's slot list does -- the two strips have to behave the
             // same or the mixer looks broken by comparison. A null return means
             // an editor for this plugin is already up and was raised.
-            if (slot >= 0) {                       // in range: clamped above
-                const EffectDesc& d = t->fx[(size_t)slot];
-                if (d.type == EffectType::Lv2
-                    && Lv2UiWindow::HasNativeUi(d.pluginName)) {
-                    BRect uw(160, 160, 160 + 960, 160 + 680);
-                    // The editor is told which insert it belongs to, so a
-                    // control-port UI can drive it live through fStack's model
-                    // and this window's engine -- the same (track, fx, slot)
-                    // address every other live edit uses.
-                    Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d),
-                                      d.params, (TrackId)tid, (int)slot,
-                                      BMessenger(this));
-                    break;
-                }
-            }
+            // The editor is told which insert it belongs to, so it can drive it
+            // live through fStack's model and this window's engine -- the same
+            // (track, fx, slot) address every other live edit uses.
+            if (slot >= 0 && OpenNativeEditor((TrackId)tid, (int)slot))
+                break;
 #endif
             (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
                                (TrackId)tid, BMessenger(this),
@@ -896,33 +886,60 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgFxWatch: {
-            // A native editor opened on an insert (messenger present) or closed
-            // (no messenger). While registered, the engine publishes that
-            // insert's live values and the pulse forwards them, so automation
-            // and the generic panel both show up in the plugin's own GUI.
+            // A native editor registering the insert it is showing, or (no
+            // messenger) saying it is closing. The registration is identified
+            // by (uri, track, fx) -- the editor's own address -- so one
+            // editor's close can never clear another's watch.
             int64 tid = 0; int32 fx = -1;
             msg->FindInt64("track", &tid);
             msg->FindInt32("fx", &fx);
+            BString uri;
+            msg->FindString("uri", &uri);
             BMessenger msgr;
             msg->FindMessenger("msgr", &msgr);
+
+            for (size_t i = fFxWatches.size(); i > 0; --i) {
+                const FxWatch& w = fFxWatches[i - 1];
+                const bool same = w.uri == uri.String()
+                               && w.track == (TrackId)tid && w.fx == fx;
+                // Drop this editor's entry on close, and any entry whose window
+                // died (closed without saying so, or crashed).
+                if ((same && !msgr.IsValid()) || !w.msgr.IsValid()) {
+                    if (fEngine && w.slot >= 0)
+                        fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+                    fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
+                    continue;
+                }
+                if (same) fFxWatches[i - 1].msgr = msgr;   // re-open same insert
+            }
             if (msgr.IsValid() && fx >= 0) {
-                fFxParamMsgr = msgr;
-                fFxParamGen  = 0;      // nothing pushed to THIS editor yet
-                fFxWatchTrack = (TrackId)tid;
-                fFxWatchFx    = fx;
-                BString uri;
-                msg->FindString("uri", &uri);
-                fFxWatchUri = uri.String();
-                if (fEngine)
-                    fEngine->SetFxWatch((TrackId)tid,
-                                        (TrackId)tid == kMasterFxTarget, fx);
-            } else {
-                fFxParamMsgr = BMessenger();
-                fFxWatchUri.clear();
-                fFxWatchFx = -1;
-                if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
+                const int slot = AllocFxWatchSlot();
+                FxWatch w;
+                w.msgr  = msgr;
+                w.uri   = uri.String();
+                w.track = (TrackId)tid;
+                w.fx    = fx;
+                w.slot  = slot;
+                w.gen   = 0xFFFFFFFFu;   // impossible generation: forces a push
+                fFxWatches.push_back(w);
+                if (slot >= 0) ApplyFxWatchToEngine(fFxWatches.back());
+                else std::fprintf(stderr,
+                    "daw: more than %d native editors open; '%s' will not "
+                    "follow automation\n", Engine::kWatchSlots, w.uri.c_str());
             }
             UpdatePulse();
+            break;
+        }
+        case kMsgOpenFxEditor: {
+            // An editor view asking for the plugin's own GUI. It posts rather
+            // than opening the window itself because the view's copy of the
+            // chain can be stale: the insert at index N there may not be the
+            // insert at index N in the model, and a live editor addresses its
+            // insert by index. Only this window sees the model.
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            OpenNativeEditor((TrackId)tid, fx);
             break;
         }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
@@ -1129,14 +1146,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_UNDO:
             if (fStack->CanUndo()) {
                 fStack->Undo(*fProject);
+                // An undo can move or remove the insert an open native editor is
+                // showing, and with the transport stopped ReloadActiveEngine
+                // does nothing at all -- so this cannot wait for a rebuild.
+                ValidateFxWatch();
                 ReloadActiveEngine();
+                PublishFxParamsNow();
                 fTimeline->Invalidate();
             }
             break;
         case MSG_REDO:
             if (fStack->CanRedo()) {
                 fStack->Redo(*fProject);
+                ValidateFxWatch();
                 ReloadActiveEngine();
+                PublishFxParamsNow();
                 fTimeline->Invalidate();
             }
             break;
@@ -1390,6 +1414,8 @@ void MainWindow::StartPlayback() {
     // Re-apply the effect-meter focus onto the fresh engine (else an open FX
     // editor's GR/FFT meters die on every play / loop-wrap / seek rebuild).
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
+    // Same reason, same rebuild: the watches live in the Engine object too.
+    ReapplyFxWatches();
     fEngine->SetMidiRoutes(fMidiRoutes);   // survives the rebuild, as above
     fPlaying = true;
     if (fTransport) fTransport->SetPlaying(true);
@@ -1439,6 +1465,7 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
     // track would start hearing every keyboard.
     fEngine->SetMidiRoutes(fMidiRoutes);
     if (fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fFxTrack);
+    ReapplyFxWatches();   // the watches live in the Engine object too
     return true;
 }
 
@@ -1670,6 +1697,10 @@ void MainWindow::ReloadActiveEngine() {
 // something else happened to rebuild the engine.
 void MainWindow::SyncFxToEngine() {
     ValidateFxWatch();
+    // Any chain change is also a republish point: with the transport stopped no
+    // audio block is coming, and a rebuilt chain reads its parameters from the
+    // model, so an editor should be shown what the engine now holds.
+    PublishFxParamsNow();
     if (fEngine && !fEngine->SyncFx(*fProject))
         ReloadActiveEngine();
 }
@@ -1682,47 +1713,72 @@ void MainWindow::SyncFxToEngine() {
 // insert is gone (the same thing the generic panel does when its insert
 // disappears).
 void MainWindow::ValidateFxWatch() {
-    if (fFxWatchUri.empty() || fFxWatchFx < 0) return;
-    if (!fFxParamMsgr.IsValid()) {
-        fFxWatchUri.clear();
-        if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
-        return;
+    for (size_t i = fFxWatches.size(); i > 0; --i) {
+        FxWatch& w = fFxWatches[i - 1];
+        const bool master = (w.track == kMasterFxTarget);
+        Track* t = master ? nullptr : fProject->FindTrack(w.track);
+        std::vector<EffectDesc>* chain = master ? &fProject->masterFx
+                                                : (t ? &t->fx : nullptr);
+        // The track (or an insert) is gone, or the window died. Either way this
+        // editor can no longer be pointed at anything: close it, as the generic
+        // panel does when its focused insert disappears. Closing rather than
+        // silently leaving it is the only honest option -- its every control
+        // would otherwise edit an insert that no longer exists.
+        bool keep = w.msgr.IsValid() && chain != nullptr;
+        if (keep && w.fx >= (int)chain->size()) keep = false;
+        if (keep) {
+            // Two inserts of the SAME plugin cannot be told apart by URI, and
+            // following the index after a reorder would as likely drive the
+            // other one as the right one. Say so by closing instead of
+            // guessing; a stable per-insert id in the model is the real fix.
+            int copies = 0;
+            for (const EffectDesc& d : *chain)
+                if (d.pluginName == w.uri) copies++;
+            if (copies > 1) {
+                std::fprintf(stderr, "daw: '%s' appears %d times in this chain; "
+                             "closing its editor rather than guessing which "
+                             "insert it was showing\n", w.uri.c_str(), copies);
+                keep = false;
+            }
+        }
+        if (keep && (*chain)[(size_t)w.fx].pluginName == w.uri) continue;
+
+        // Moved within the chain: follow it, and tell the editor where it is
+        // now, or its next write would address the index it used to have.
+        int found = -1;
+        if (keep)
+            for (size_t k = 0; k < chain->size(); k++)
+                if ((*chain)[k].pluginName == w.uri) { found = (int)k; break; }
+        if (found >= 0) {
+            w.fx = found;
+            w.gen = 0xFFFFFFFFu;    // the change may be the only one it gets
+            ApplyFxWatchToEngine(w);
+            BMessage rebind(kMsgFxWatch);
+            rebind.AddInt64("track", (int64)w.track);
+            rebind.AddInt32("fx", found);
+            w.msgr.SendMessage(&rebind);
+            continue;
+        }
+
+        // Gone: stop publishing and close the editor.
+        if (fEngine && w.slot >= 0)
+            fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+        w.msgr.SendMessage(B_QUIT_REQUESTED);
+        fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
     }
+    UpdatePulse();
+}
 
-    const bool master = (fFxWatchTrack == kMasterFxTarget);
-    std::vector<EffectDesc>* chain = master ? &fProject->masterFx : nullptr;
-    if (!chain) {
-        if (Track* t = fProject->FindTrack(fFxWatchTrack)) chain = &t->fx;
+// Close every native editor and forget every watch: their insert addresses
+// (track id, index) belong to the project that is going away, and the loaded
+// project can reuse the same ids for entirely different effects.
+void MainWindow::CloseFxEditors() {
+    for (FxWatch& w : fFxWatches) {
+        if (fEngine && w.slot >= 0)
+            fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+        if (w.msgr.IsValid()) w.msgr.SendMessage(B_QUIT_REQUESTED);
     }
-    if (!chain) return;   // the track itself is gone; the editor's own resolve
-                          // fails the same way and it will show nothing useful
-
-    // Still the same insert? Nothing to do -- the common case.
-    if (fFxWatchFx < (int)chain->size()
-        && (*chain)[(size_t)fFxWatchFx].pluginName == fFxWatchUri)
-        return;
-
-    // Moved within the chain: follow it, and tell the editor where it is now,
-    // or its next write would address the index it used to have.
-    for (size_t i = 0; i < chain->size(); i++) {
-        if ((*chain)[i].pluginName != fFxWatchUri) continue;
-        fFxWatchFx = (int)i;
-        if (fEngine) fEngine->SetFxWatch(fFxWatchTrack, master, fFxWatchFx);
-        BMessage rebind(kMsgFxWatch);
-        rebind.AddInt64("track", (int64)fFxWatchTrack);
-        rebind.AddInt32("fx", fFxWatchFx);
-        fFxParamMsgr.SendMessage(&rebind);
-        return;
-    }
-
-    // Gone: stop publishing, and close the editor. Leaving it open would give
-    // the user a window whose every control edits an insert that no longer
-    // exists.
-    fFxWatchUri.clear();
-    fFxWatchFx = -1;
-    if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
-    fFxParamMsgr.SendMessage(B_QUIT_REQUESTED);
-    fFxParamMsgr = BMessenger();
+    fFxWatches.clear();
     UpdatePulse();
 }
 
@@ -1785,6 +1841,7 @@ void MainWindow::UpdateMidiMonitor() {
     while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
     fEngine->SetLiveMidi(fMidiIn->MonitorInput());
     fEngine->Start();
+    ReapplyFxWatches();   // brand-new engine: the watches live in the old one
     fMonitoring = true;
     UpdatePulse();   // poll the meters while monitoring
 }
@@ -2019,6 +2076,11 @@ void MainWindow::PrimeSoundfonts() {
 void MainWindow::LoadFrom(const char* path) {
     StopPlayback();
     StopRecording();
+    // The editors that are open belong to the project being replaced: their
+    // (track id, insert index) addresses are reused by whatever loads, so an
+    // editor left open would quietly write its old insert's values into a
+    // different plugin's descriptor -- an undoable edit, saved to disk.
+    CloseFxEditors();
     if (!ProjectIO::Load(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: load failed: %s\n", path);
         return;
@@ -2513,28 +2575,106 @@ void MainWindow::PushTrackPeaks() {
     }
 }
 
-// Hand the watched insert's live parameter values to the native editor that
-// asked for them. The engine only bumps its generation when a value actually
-// changed, so an idle insert costs one atomic load per pulse.
-void MainWindow::PushFxParams() {
-    if (!fEngine) return;
-    if (!fFxParamMsgr.IsValid()) {
-        // The editor is gone (closed between pulses, or crashed). Stop the
-        // engine publishing rather than leaving a watch on for the session.
-        if (fFxParamMsgr != BMessenger()) {
-            fFxParamMsgr = BMessenger();
-            fEngine->SetFxWatch(kInvalidTrackId, false, -1);
-        }
-        return;
+// --- native editor watches -------------------------------------------------
+
+// A free engine watch slot, or -1 when every one is taken. Four is already more
+// editors than anyone keeps open at once; past it the editor still works, it
+// just stops following automation (and says so on stderr once).
+int MainWindow::AllocFxWatchSlot() const {
+    for (int s = 0; s < Engine::kWatchSlots; s++) {
+        bool used = false;
+        for (const FxWatch& w : fFxWatches)
+            if (w.slot == s) { used = true; break; }
+        if (!used) return s;
     }
-    float vals[Engine::kWatchMax];
-    uint32_t gen = 0;
-    const int n = fEngine->WatchedFxParams(vals, Engine::kWatchMax, &gen);
-    if (n <= 0 || gen == fFxParamGen) return;    // nothing new since last push
-    fFxParamGen = gen;
-    BMessage m(kMsgFxParams);
-    for (int i = 0; i < n; i++) m.AddFloat("v", vals[i]);
-    fFxParamMsgr.SendMessage(&m);
+    return -1;
+}
+
+void MainWindow::ApplyFxWatchToEngine(const FxWatch& w) {
+    if (!fEngine || w.slot < 0) return;
+    fEngine->SetFxWatch(w.slot, w.track, w.track == kMasterFxTarget, w.fx);
+}
+
+// After the engine object itself is replaced (play, record, loop wrap, and
+// every monitor rebuild): the watches lived in the old one. Without this an
+// open editor silently stops hearing about automation the first time the user
+// presses play -- which is exactly when it matters.
+void MainWindow::ReapplyFxWatches() {
+    for (size_t i = fFxWatches.size(); i > 0; --i) {
+        FxWatch& w = fFxWatches[i - 1];
+        if (!w.msgr.IsValid()) {
+            if (fEngine && w.slot >= 0)
+                fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+            fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
+            continue;
+        }
+        w.gen = 0xFFFFFFFFu;    // a fresh engine's counter must not collide
+        ApplyFxWatchToEngine(w);
+    }
+}
+
+// Hand each editor its insert's live values. The engine only bumps a slot's
+// generation when a value actually changed, so a still insert costs one atomic
+// load per pulse.
+void MainWindow::PushFxParams() {
+    for (size_t i = fFxWatches.size(); i > 0; --i) {
+        FxWatch& w = fFxWatches[i - 1];
+        if (!w.msgr.IsValid()) {
+            if (fEngine && w.slot >= 0)
+                fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+            fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
+            continue;
+        }
+        if (!fEngine || w.slot < 0) continue;
+        float vals[Engine::kWatchMax];
+        uint32_t gen = 0;
+        const int n = fEngine->WatchedFxParams(w.slot, vals, Engine::kWatchMax,
+                                               &gen);
+        if (n <= 0 || gen == w.gen) continue;    // nothing new since last push
+        w.gen = gen;
+        BMessage m(kMsgFxParams);
+        for (int k = 0; k < n; k++) m.AddFloat("v", vals[k]);
+        w.msgr.SendMessage(&m);
+    }
+}
+
+// Publish and push once, right now, for the stopped transport: no audio block
+// is coming, so nothing else would tell the editors what a panel drag did.
+void MainWindow::PublishFxParamsNow() {
+    if (!fEngine) return;
+    fEngine->PublishFxWatchNow();
+    PushFxParams();
+}
+
+// Open the plugin's own editor for the insert at `fx` of `tid` (master sentinel
+// allowed). Everything is resolved against the MODEL, because the caller may be
+// an editor view holding a stale snapshot of the chain -- and resolves by URI,
+// so what opens is the plugin actually at that index now, not the one the
+// caller thought was there.
+bool MainWindow::OpenNativeEditor(TrackId tid, int fx) {
+#ifdef DAW_HAVE_LV2
+    const bool master = (tid == kMasterFxTarget);
+    Track* t = master ? nullptr : fProject->FindTrack(tid);
+    std::vector<EffectDesc>* chain = master ? &fProject->masterFx
+                                            : (t ? &t->fx : nullptr);
+    if (!chain || fx < 0 || fx >= (int)chain->size()) return false;
+    const EffectDesc& d = (*chain)[(size_t)fx];
+    if (d.type != EffectType::Lv2 || !Lv2UiWindow::HasNativeUi(d.pluginName))
+        return false;
+
+    // The title names the track: two tracks can hold the same plugin, and with
+    // both editors open the plugin's name alone would not say which is which.
+    std::string title = EffectDisplayName(d);
+    title += master ? "  -  Master" : ("  -  " + t->name);
+
+    BRect uw(160, 160, 160 + 960, 160 + 680);
+    Lv2UiWindow::Open(uw, d.pluginName, title, d.params, tid, fx,
+                      BMessenger(this));
+    return true;
+#else
+    (void)tid; (void)fx;
+    return false;
+#endif
 }
 
 void MainWindow::PushFxMeters() {

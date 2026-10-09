@@ -246,10 +246,20 @@ void ForgetOpen(const std::string& uri) {
 // instance cached here would be freed under a running editor; addressing the
 // insert lets the engine resolve it on each write instead.
 struct UiLiveLink {
-    TrackId    track   = kInvalidTrackId;
-    int        fxIndex = -1;
+    // The insert's address. Written on the window's looper (a chain edit can
+    // re-point the editor), read on the editor's thread and, for a control-port
+    // UI, on whichever thread the plugin writes from -- so they are atomic
+    // rather than three fields that could be read half-updated.
+    std::atomic<int64_t> track{kInvalidTrackId};
+    std::atomic<int>     fxIndex{-1};
     BMessenger apply;      // MainWindow: owns the model, and the engine with it
     BMessenger window;     // this window: the commit timer targets it
+
+    // False until the editor has rendered its first frame. A UI that pushes its
+    // own defaults through the write function while it is being built would
+    // otherwise be recorded as a live edit -- and committed as one -- the moment
+    // the window opens.
+    std::atomic<bool> armed{false};
 
     // A DIRECT_ACCESS UI: it never calls the write function, so the host has to
     // watch its port buffers instead (see the poll in Open). Both kinds are
@@ -302,8 +312,8 @@ void LinkNoteValue(UiLiveLink* link, int slot, float value) {
     // Live first: the same channel the generic parameter panel uses, and what
     // makes a knob move audible as it happens rather than on a mouse-up.
     BMessage live(kMsgFxLive);
-    live.AddInt64("track", (int64)link->track);
-    live.AddInt32("fx", link->fxIndex);
+    live.AddInt64("track", (int64)link->track.load(std::memory_order_relaxed));
+    live.AddInt32("fx", link->fxIndex.load(std::memory_order_relaxed));
     live.AddInt32("slot", slot);
     live.AddFloat("val", value);
     link->apply.SendMessage(&live);
@@ -334,6 +344,9 @@ void UiWrite(LV2UI_Controller controller, uint32_t port, uint32_t size,
     if (port >= link->slotOfPort.size()) return;
     const int slot = link->slotOfPort[port];
     if (slot < 0) return;                  // an output port, or not a control
+    // Still opening: the UI is establishing its own state, not being moved by
+    // the user. See `armed`.
+    if (!link->armed.load(std::memory_order_acquire)) return;
 
     if (link->ctl && port < link->ctl->size()) (*link->ctl)[port] = *(const float*)buffer;
     if (port < link->lastSeen.size()) link->lastSeen[port] = *(const float*)buffer;
@@ -366,6 +379,13 @@ void UiApplyInbound(UiLiveLink* link, const LV2UI_Descriptor* desc,
         if (slot < 0 || (size_t)slot >= link->portOfSlot.size()) continue;
         const int port = link->portOfSlot[(size_t)slot];
         if (port < 0) continue;
+        // A gesture on this parameter is still in flight: the user owns it, and
+        // the engine's frame is at best the value they have already moved past.
+        // Applying it here would snap their knob back mid-drag.
+        {
+            std::lock_guard<std::mutex> lock(link->mutex);
+            if (link->pending.count(slot)) continue;
+        }
         const float v = e.second;
         if ((size_t)slot < link->applied.size()) {
             if (link->applied[(size_t)slot] == v) continue;   // already showing it
@@ -415,7 +435,8 @@ bool UiWantsInstanceAccess(const LilvUI* ui) {
 // ---------------------------------------------------------------------------
 
 struct Lv2UiWindow::Impl {
-    std::string uri;          // registry key
+    std::string uri;          // the plugin URI (what the editor is showing)
+    std::string claimKey;     // uri + insert address: the one-editor-per-INSERT key
     BView*        container = nullptr;
     LilvInstance* dsp       = nullptr;
     void*         lib       = nullptr;
@@ -485,16 +506,26 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
                                const std::vector<float>& params,
                                TrackId track, int fxIndex, BMessenger apply) {
-    // Already showing this plugin -- or already building one? Bring the existing
+    // One editor per INSERT, not per plugin. Two tracks -- or two slots -- can
+    // hold the same plugin, and each now wants its own window: an editor is
+    // live and addresses its insert by index, so this is what tells them apart.
+    // Two windows for the SAME insert would still be two editors claiming one
+    // address, which is what this refuses.
+    const std::string claimKey =
+        pluginUri + "|" + std::to_string((unsigned long long)track)
+                  + "|" + std::to_string(fxIndex);
+
+    // Already showing this insert -- or already building one? Bring the existing
     // editor forward rather than opening a rival. The claim is what makes that
     // check hold for the whole build below, which is long enough (it
     // instantiates the plugin) to matter.
-    OpenClaim claim(pluginUri);
+    OpenClaim claim(claimKey);
     if (!claim.held)
         return nullptr;      // nothing new was opened; the caller does nothing
 
     Impl* d = new Impl();
     d->uri = pluginUri;
+    d->claimKey = claimKey;
 
     // --- everything that touches lilv, BEFORE any window exists -----------
     //
@@ -558,8 +589,8 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         // (write_function vs. watching the port buffers), not in what happens
         // to it afterwards.
         d->link.reset(new UiLiveLink());
-        d->link->track   = track;
-        d->link->fxIndex = fxIndex;
+        d->link->track.store((int64_t)track, std::memory_order_relaxed);
+        d->link->fxIndex.store(fxIndex, std::memory_order_relaxed);
         d->link->apply   = apply;
         d->link->direct  = directAccess;
         d->link->slotOfPort.assign(nPorts, -1);
@@ -641,7 +672,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
     Lv2UiWindow* win = new Lv2UiWindow(frame, title.c_str());
     win->fImpl = d;
-    RegisterOpen(pluginUri, win);   // the window's ForgetOpen releases it now
+    RegisterOpen(claimKey, win);   // the window's ForgetOpen releases it now
     claim.Handoff();
 
     d->container = new BView(win->Bounds(), "container", B_FOLLOW_ALL_SIDES,
@@ -730,9 +761,15 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
     // The editor's thread -- ONE thread, doing three jobs in a fixed order:
     //
-    //   idle()            render a frame of the plugin's own GUI
     //   apply inbound     port_event() for values the engine published
+    //   idle()            render a frame of the plugin's own GUI
     //   poll own buffers  (direct-access only) notice the user's edits
+    //
+    // Inbound goes FIRST on purpose. A direct-access UI writes into its port
+    // buffers from inside idle(); applying a (stale) engine frame after that
+    // would overwrite the value the user just set, and the poll -- which runs
+    // after both -- would then see no change and never send it. Engine frame
+    // first, then the plugin's own frame, then look for what changed.
     //
     // It is not the window's looper: the UI renders from inside idle(), and a
     // BGLView's LockGL() deadlocks on the looper thread, which already holds the
@@ -744,8 +781,24 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
             Impl* im = (Impl*)p;
             UiLiveLink* link = im->link.get();
             while (im->uiRun) {
-                if (im->idle && im->idle->idle) im->idle->idle(im->ui);
                 UiApplyInbound(link, im->desc, im->ui);
+                if (im->idle && im->idle->idle) im->idle->idle(im->ui);
+
+                if (!link->armed.load(std::memory_order_acquire)) {
+                    // End of the editor's first frame. Whatever the plugin
+                    // wrote while building itself is its OWN starting state,
+                    // not an edit: take it as the baseline for both directions,
+                    // then start listening.
+                    link->lastSeen = im->ctl;
+                    for (size_t i = 0; i < link->slotOfPort.size(); i++) {
+                        const int slot = link->slotOfPort[i];
+                        if (slot >= 0 && (size_t)slot < link->applied.size())
+                            link->applied[(size_t)slot] = im->ctl[i];
+                    }
+                    link->armed.store(true, std::memory_order_release);
+                    snooze(16000);
+                    continue;
+                }
 
                 // A direct-access UI writes into ITS instance's port buffers and
                 // never calls the write function, so the host watches those
@@ -791,9 +844,10 @@ Lv2UiWindow::~Lv2UiWindow() {
     // into nothing.
     if (d->link) {
         BMessage watch(kMsgFxWatch);
-        watch.AddInt64("track", (int64)d->link->track);
-        watch.AddInt32("fx", d->link->fxIndex);
-        d->link->apply.SendMessage(&watch);      // no messenger = stop watching
+        watch.AddInt64("track", (int64)d->link->track.load(std::memory_order_relaxed));
+        watch.AddInt32("fx", d->link->fxIndex.load(std::memory_order_relaxed));
+        watch.AddString("uri", d->uri.c_str());   // which registration this is
+        d->link->apply.SendMessage(&watch);       // no messenger = stop watching
     }
     // Fifth teardown rule: tell the model about anything the editor wrote and
     // did not get to commit, BEFORE the plugin's handles go away. A knob turned
@@ -840,7 +894,7 @@ Lv2UiWindow::~Lv2UiWindow() {
     // the library went away, and ~BWindow then deleted a plugin-owned view.
     // Hosts commonly keep plugin binaries loaded for exactly this reason; one
     // handle per plugin type is a small, bounded cost.
-    ForgetOpen(d->uri);
+    ForgetOpen(d->claimKey);
     // Freeing lilv objects is world access as much as creating them is.
     {
         std::lock_guard<std::mutex> worldLock(gWorldMutex);
@@ -871,8 +925,8 @@ void Lv2UiWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             msg->FindInt32("fx", &fx);
             if (fx >= 0) {
-                d->link->track   = (TrackId)tid;
-                d->link->fxIndex = fx;
+                d->link->track.store((int64_t)tid, std::memory_order_relaxed);
+                d->link->fxIndex.store(fx, std::memory_order_relaxed);
             }
         }
         return;
@@ -912,8 +966,8 @@ void Lv2UiWindow::CommitPending() {
     if (pending.empty()) return;
 
     BMessage m(kMsgFxParamCommit);
-    m.AddInt64("track", (int64)d->link->track);
-    m.AddInt32("fx", d->link->fxIndex);
+    m.AddInt64("track", (int64)d->link->track.load(std::memory_order_relaxed));
+    m.AddInt32("fx", d->link->fxIndex.load(std::memory_order_relaxed));
     for (const auto& e : pending) {
         m.AddInt32("slot", e.first);
         m.AddFloat("val", e.second);

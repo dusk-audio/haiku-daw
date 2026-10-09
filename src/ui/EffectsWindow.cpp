@@ -946,21 +946,16 @@ void EffectsView::MouseDown(BPoint where) {
 #ifdef DAW_HAVE_LV2
         case 10: {   // open the plugin's own editor
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
-            const EffectDesc& d = fChain[(size_t)h.effect];
-            BRect wr(140, 140, 140 + 960, 140 + 680);
-            if (BWindow* w = Window()) {
-                BRect f = w->Frame();
-                wr.OffsetTo(f.left + 30, f.top + 30);
-            }
-            // Null return = the plugin has no embeddable UI or its editor
-            // refused to instantiate; the generic panel stays as it is.
-            //
-            // The insert's address travels with the open: a control-port UI
-            // writes through fApply (MainWindow) by (track, fx, slot), the same
-            // channel this view's own knobs use, so an editor opened from the
-            // generic panel is exactly as live as one opened from the strip.
-            Lv2UiWindow::Open(wr, d.pluginName, EffectDisplayName(d), d.params,
-                              fTrack, h.effect, fApply);
+            // Asked for by INDEX, and opened by MainWindow: this view's fChain
+            // is a snapshot taken when it opened, so the insert at this index
+            // here need not be the one at this index in the model -- and a live
+            // editor writes to its insert by index. MainWindow resolves it
+            // against the model, which also decides whether there is a native
+            // editor at all. If not, this panel simply stays as it is.
+            BMessage open(kMsgOpenFxEditor);
+            open.AddInt64("track", (int64)fTrack);
+            open.AddInt32("fx", h.effect);
+            fApply.SendMessage(&open);
             break;
         }
 #endif

@@ -83,6 +83,7 @@ private:
     void PushFxMeters();             // engine fx meters -> effects window
     void PushFxParams();             // engine insert values -> native editor
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
+    void CloseFxEditors();           // project is going away: close them all
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     // Decode the loaded project's soundfonts into the SoundfontCache before
@@ -153,14 +154,29 @@ private:
     // An open native LV2 editor watching one insert (engine -> editor values).
     // The watch lives in the engine, addressed by (track, master, fx), and is
     // cleared both by the editor saying so and by its messenger dying.
-    BMessenger                fFxParamMsgr;
-    uint32_t                  fFxParamGen = 0;   // last frame pushed to it
-    // Which insert that editor is showing, so a chain edit can be checked
-    // against it: the editor addresses its insert by INDEX, and an index that
-    // now means a different insert would have it driving the wrong effect.
-    std::string               fFxWatchUri;
-    TrackId                   fFxWatchTrack = kInvalidTrackId;
-    int                       fFxWatchFx = -1;
+    // One open native editor and the insert it is showing. The engine publishes
+    // a watched insert's live values into a slot; each editor owns one slot and
+    // is fed on the 60 Hz pulse. They are tracked (rather than a single watch)
+    // because several editors can be open at once, and because an editor
+    // addresses its insert by INDEX: a chain edit has to be checked against
+    // every one of them or an editor ends up driving a different effect.
+    struct FxWatch {
+        BMessenger  msgr;                     // the editor window
+        std::string uri;                      // the plugin it is showing
+        TrackId     track = kInvalidTrackId;  // chain address (master sentinel ok)
+        int         fx = -1;
+        int         slot = -1;                // engine watch slot
+        uint32_t    gen = 0;                  // last frame pushed to it
+    };
+    std::vector<FxWatch> fFxWatches;
+
+    int  AllocFxWatchSlot() const;               // -1 when every slot is in use
+    void ApplyFxWatchToEngine(const FxWatch& w); // program the engine for one
+    void ReapplyFxWatches();                     // after an engine rebuild
+    void PublishFxParamsNow();                   // stopped transport: publish
+    // Open a plugin's own editor for an insert, resolving it against the MODEL
+    // (callers may hold a stale chain snapshot). False if it has no editor.
+    bool OpenNativeEditor(TrackId tid, int fx);
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
