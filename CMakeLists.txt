@@ -28,6 +28,7 @@ add_library(daw_model
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
+    src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
@@ -317,6 +318,12 @@ add_test(NAME framedelay_tests COMMAND framedelay_tests)
 add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)
+
+# The MIDI transform math (package 04): quantize strength/swing/triplets and
+# tempo changes, humanize determinism, legato, and the region-window rules.
+add_executable(midiops_tests tests/midiops_tests.cpp)
+target_link_libraries(midiops_tests PRIVATE daw_model)
+add_test(NAME midiops_tests COMMAND midiops_tests)
 
 add_executable(crossfade_tests tests/crossfade_tests.cpp)
 target_link_libraries(crossfade_tests PRIVATE daw_model)
