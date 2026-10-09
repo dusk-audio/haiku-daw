@@ -1151,7 +1151,31 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     HideOtherWindows(win);
     CHECK(WaitQuiet());
     std::printf("test_keyboard_focus\n");
-    CHECK(!project.Tracks().empty());
+
+    // Something the engine can actually PLAY: the previous test's fixture
+    // points at a file it removes on the way out, and a project whose only clip
+    // is gone makes StartPlayback fail (correctly) -- which the first version
+    // of this test read as "the key did nothing".
+    {
+        const char* wav = "/tmp/haiku_daw_ui_key.wav";
+        std::remove(wav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 4000, -4000 };
+        CHECK(w.Open(wav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "keys-track";
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000;
+        c.sourcePath = wav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+    }
 
     auto playing = [&] {
         bool p = false;
@@ -1205,13 +1229,22 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
 
     // Clicking the timeline again takes the focus back from the field.
     win->PostMessage(&down);
-    CHECK(WaitFor([&] {
+    bool focused = WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus())
                             != nullptr;
         win->Unlock();
         return ok;
-    }));
+    });
+    if (!focused && win->LockWithTimeout(1000000) == B_OK) {
+        BView* f = win->CurrentFocus();
+        BView* tl = win->FindView("timeline");
+        std::printf("  focus after click: '%s' (timeline '%s' at %p)\n",
+                    f && f->Name() ? f->Name() : "(null)",
+                    tl && tl->Name() ? tl->Name() : "(null)", (void*)tl);
+        win->Unlock();
+    }
+    CHECK(focused);
     sendKey(" ");
     CHECK(WaitFor([&] { return playing(); }, 15000));
     sendKey(" ");                              // leave the transport stopped
@@ -1235,12 +1268,21 @@ static void PerfSituationIfFixturePresent(MainWindow* win) {
     openBig.AddRef("refs", &ref);
     win->PostMessage(&openBig);
     snooze(4000000);                 // the load + its full draw
-    BMessage key(B_KEY_DOWN);
-    key.AddString("bytes", " ");
-    key.AddInt32("modifiers", 0);
-    win->PostMessage(&key);          // playing: a redraw per playhead step
-    snooze(8000000);
-    win->PostMessage(&key);          // stop again
+
+    // Redraws are forced by hand rather than by playing: the engine builds one
+    // disk thread per clip, and 96 of them take longer to start than a test
+    // should wait (that is M4.3's subject, not M0.7's). Every invalidate that
+    // lands alone in a loop pass is one full draw of the whole project.
+    BView* view = win->FindView("timeline");
+    if (view) {
+        for (int i = 0; i < 90; i++) {
+            if (win->LockWithTimeout(1000000) != B_OK)
+                break;
+            view->Invalidate();
+            win->Unlock();
+            snooze(15000);
+        }
+    }
     snooze(500000);
 }
 
