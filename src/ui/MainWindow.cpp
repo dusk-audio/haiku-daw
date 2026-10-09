@@ -2746,9 +2746,6 @@ void MainWindow::PushTrackPeaks() {
 
 // --- native editor watches -------------------------------------------------
 
-// A free engine watch slot, or -1 when every one is taken. Four is already more
-// editors than anyone keeps open at once; past it the editor still works, it
-// just stops following automation (and says so on stderr once).
 void MainWindow::ApplyFxWatchToEngine(const FxEntry& w) {
     if (!fEngine || w.slot < 0) return;
     fEngine->SetFxWatch(w.slot, w.track, w.track == kMasterFxTarget, w.fx);
@@ -2784,7 +2781,14 @@ void MainWindow::PushFxParams() {
             fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
             continue;
         }
-        if (!fEngine) continue;
+        if (!fEngine) {
+            // Nothing has played yet, so there is no engine to publish from --
+            // but the MODEL still changes (the generic parameter panel commits
+            // on mouse-up), and an editor left out of step with it would show
+            // one value while the project says another. Publish the model.
+            PushFxParamsFromModel(w);
+            continue;
+        }
         if (w.slot < 0) {
             // Registered while every slot was taken. Now that one may have
             // freed, take it: the alternative is an editor that never follows
@@ -2804,6 +2808,23 @@ void MainWindow::PushFxParams() {
         w.gen = gen;
         w.editor->SendFrame(vals, n);
     }
+}
+
+// Push the model's values for one watched insert, for when there is no engine
+// at all (nothing has played yet). Only what actually changed is sent, so a
+// still editor costs one vector compare per pulse.
+void MainWindow::PushFxParamsFromModel(FxEntry& w) {
+    const std::vector<EffectDesc>* chain = nullptr;
+    if (w.track == kMasterFxTarget) {
+        chain = &fProject->masterFx;
+    } else if (const Track* t = fProject->FindTrack(w.track)) {
+        chain = &t->fx;
+    }
+    if (!chain || w.fx < 0 || w.fx >= (int)chain->size()) return;
+    const std::vector<float>& params = (*chain)[(size_t)w.fx].params;
+    if (params == w.pushed) return;          // nothing has moved
+    w.pushed = params;
+    w.editor->SendFrame(params.data(), (int)params.size());
 }
 
 // Publish and push once, right now, for the stopped transport: no audio block

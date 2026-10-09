@@ -153,7 +153,7 @@ std::string InsertKey(const std::string& uri, TrackId track, int fxIndex) {
                + "|" + std::to_string(fxIndex);
 }
 
-// One editor per plugin.
+// One editor per INSERT (see InsertKey), not per plugin.
 //
 // Opening a second window for the same plugin gives two editors that each
 // believe they own the parameters, and each holds its own DSP instance -- so

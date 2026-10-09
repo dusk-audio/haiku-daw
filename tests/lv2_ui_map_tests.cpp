@@ -114,7 +114,9 @@ int main() {
         CHECK(ev.size() == 1);
         if (!ev.empty()) CHECK(ev[0].port == 4);         // slot 1 only
         CHECK(ctl[2] == 0.0f);                           // slot 0 left alone
+        CHECK(lastSeen[2] == 0.0f);                      // ... in every buffer
         CHECK(ctl[4] == 0.25f);
+        CHECK(lastSeen[4] == 0.25f);
         CHECK(applied[0] == 0.0f);                       // and not marked applied
     }
 

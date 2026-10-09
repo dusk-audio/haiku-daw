@@ -88,6 +88,7 @@ private:
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void PushFxParams();             // engine insert values -> native editor
+    void PushFxParamsFromModel(FxEntry& w);   // ... or the model, with no engine
     void LayoutTransportBar();       // fit the bar's controls to its width
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
@@ -177,6 +178,9 @@ private:
         int         fx = -1;
         int         slot = -1;                // engine watch slot
         uint32_t    gen = 0;                  // last frame pushed to it
+        // Last frame pushed from the MODEL, for the case with no engine at all
+        // (nothing played yet): then the model is the only source of truth.
+        std::vector<float> pushed;
     };
     std::vector<FxEntry> fFxWatches;
     std::vector<FxWatch> FxWatchSnapshot() const;   // for the kit-free rules
