@@ -137,8 +137,8 @@ BEFORE the written count — a cancel is a cancel, not "exported 2 stem(s)".
 
 | Claim | State |
 | --- | --- |
-| The dialog, the progress bar, the Cancel button, the panel ordering | **Compiles (cross-compiler); never clicked.** The click list below is the only way to know. |
-| Anything audible | The export renders offline; "it sounds like playback" is unchanged from before this branch and is R5's business. |
+| The dialog, the progress bar, the Cancel button, the panel ordering | **CLICK-TESTED 2026-10-09** — Marc ran the nine-step list on the VM and reported everything working as expected. |
+| The audible result | Unchanged from before this branch (the exporter is the same renderer); "it sounds like playback" stays R5's business on the real hardware. |
 
 ### Click list
 
