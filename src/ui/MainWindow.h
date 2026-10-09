@@ -82,6 +82,7 @@ private:
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void PushFxParams();             // engine insert values -> native editor
+    void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     // Decode the loaded project's soundfonts into the SoundfontCache before
@@ -154,6 +155,12 @@ private:
     // cleared both by the editor saying so and by its messenger dying.
     BMessenger                fFxParamMsgr;
     uint32_t                  fFxParamGen = 0;   // last frame pushed to it
+    // Which insert that editor is showing, so a chain edit can be checked
+    // against it: the editor addresses its insert by INDEX, and an index that
+    // now means a different insert would have it driving the wrong effect.
+    std::string               fFxWatchUri;
+    TrackId                   fFxWatchTrack = kInvalidTrackId;
+    int                       fFxWatchFx = -1;
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;

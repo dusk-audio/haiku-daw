@@ -721,6 +721,9 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         BMessage watch(kMsgFxWatch);
         watch.AddInt64("track", (int64)track);
         watch.AddInt32("fx", fxIndex);
+        // The URI is how MainWindow tells, on a later chain edit, whether the
+        // insert at this index is still the one this editor is showing.
+        watch.AddString("uri", pluginUri.c_str());
         watch.AddMessenger("msgr", BMessenger(win));
         apply.SendMessage(&watch);
     }
@@ -858,6 +861,22 @@ bool Lv2UiWindow::QuitRequested() { return true; }
 void Lv2UiWindow::MessageReceived(BMessage* msg) {
     if (msg->what == kMsgLv2UiRaise) { Activate(true); return; }
     if (msg->what == kMsgLv2UiCommit) { CommitPending(); return; }
+    if (msg->what == kMsgFxWatch) {
+        // MainWindow telling this editor that its insert MOVED within the
+        // chain (a reorder). Without this the editor would keep writing to the
+        // index it used to have -- a different effect than the one it shows.
+        Impl* d = fImpl;
+        if (d && d->link) {
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            if (fx >= 0) {
+                d->link->track   = (TrackId)tid;
+                d->link->fxIndex = fx;
+            }
+        }
+        return;
+    }
     if (msg->what == kMsgFxParams) {
         // Values the engine published for this insert (int32 "gen", then one
         // float "v" per parameter in slot order). Queued for the editor's own

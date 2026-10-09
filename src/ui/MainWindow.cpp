@@ -908,11 +908,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (msgr.IsValid() && fx >= 0) {
                 fFxParamMsgr = msgr;
                 fFxParamGen  = 0;      // nothing pushed to THIS editor yet
+                fFxWatchTrack = (TrackId)tid;
+                fFxWatchFx    = fx;
+                BString uri;
+                msg->FindString("uri", &uri);
+                fFxWatchUri = uri.String();
                 if (fEngine)
                     fEngine->SetFxWatch((TrackId)tid,
                                         (TrackId)tid == kMasterFxTarget, fx);
             } else {
                 fFxParamMsgr = BMessenger();
+                fFxWatchUri.clear();
+                fFxWatchFx = -1;
                 if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
             }
             UpdatePulse();
@@ -1662,8 +1669,61 @@ void MainWindow::ReloadActiveEngine() {
 // reordering or bypassing an insert from the strip did nothing audible until
 // something else happened to rebuild the engine.
 void MainWindow::SyncFxToEngine() {
+    ValidateFxWatch();
     if (fEngine && !fEngine->SyncFx(*fProject))
         ReloadActiveEngine();
+}
+
+// A native editor addresses its insert by INDEX (track, fx, slot) -- that is
+// what makes it survive an engine rebuild -- so a chain edit that moves or
+// removes inserts can leave it pointing at a different effect, and every knob
+// it touches would then drive the wrong one. Called wherever the chain changes:
+// the editor follows its insert if it moved within the chain, and closes if its
+// insert is gone (the same thing the generic panel does when its insert
+// disappears).
+void MainWindow::ValidateFxWatch() {
+    if (fFxWatchUri.empty() || fFxWatchFx < 0) return;
+    if (!fFxParamMsgr.IsValid()) {
+        fFxWatchUri.clear();
+        if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
+        return;
+    }
+
+    const bool master = (fFxWatchTrack == kMasterFxTarget);
+    std::vector<EffectDesc>* chain = master ? &fProject->masterFx : nullptr;
+    if (!chain) {
+        if (Track* t = fProject->FindTrack(fFxWatchTrack)) chain = &t->fx;
+    }
+    if (!chain) return;   // the track itself is gone; the editor's own resolve
+                          // fails the same way and it will show nothing useful
+
+    // Still the same insert? Nothing to do -- the common case.
+    if (fFxWatchFx < (int)chain->size()
+        && (*chain)[(size_t)fFxWatchFx].pluginName == fFxWatchUri)
+        return;
+
+    // Moved within the chain: follow it, and tell the editor where it is now,
+    // or its next write would address the index it used to have.
+    for (size_t i = 0; i < chain->size(); i++) {
+        if ((*chain)[i].pluginName != fFxWatchUri) continue;
+        fFxWatchFx = (int)i;
+        if (fEngine) fEngine->SetFxWatch(fFxWatchTrack, master, fFxWatchFx);
+        BMessage rebind(kMsgFxWatch);
+        rebind.AddInt64("track", (int64)fFxWatchTrack);
+        rebind.AddInt32("fx", fFxWatchFx);
+        fFxParamMsgr.SendMessage(&rebind);
+        return;
+    }
+
+    // Gone: stop publishing, and close the editor. Leaving it open would give
+    // the user a window whose every control edits an insert that no longer
+    // exists.
+    fFxWatchUri.clear();
+    fFxWatchFx = -1;
+    if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
+    fFxParamMsgr.SendMessage(B_QUIT_REQUESTED);
+    fFxParamMsgr = BMessenger();
+    UpdatePulse();
 }
 
 void MainWindow::StopMidiMonitor() {
