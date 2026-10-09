@@ -182,6 +182,69 @@ Teardown order, in the destructor, on the way out:
 4. detach the container, then `cleanup()`, then delete the container;
 5. never `dlclose`.
 
+## The adversarial review, and what it changed
+
+A second reviewer read the whole branch diff (finding 9 bugs, 7 risks, 2
+questions). The seven that were fixed, all committed:
+
+1. **Every engine rebuild dropped the watch.** `StartPlayback`,
+   `StartRecordEngine`, the loop-record seam and the idle monitor each build a
+   NEW `Engine`; the watches lived in the old one, so an open editor stopped
+   following automation the first time the user pressed play. Re-applied now
+   wherever `SetMeterFocus` already was, and the monitor-only block — the one
+   branch that returned without capturing — publishes too.
+2. **One watch slot, and a stop message with no identity.** Opening a second
+   editor stole the first one's watch, and ANY editor closing cleared it. Now a
+   table of watches keyed by `(uri, track, fx)`, pruned when a window dies, and
+   closed wholesale on `File > Open` — a loaded project reuses the same track
+   ids and indices for different effects.
+3. **Undo/redo did not re-check the watched insert.** With the transport
+   stopped nothing else would have; an undone reorder left the editor on its old
+   index, driving whatever moved there.
+4. **The inspector and the effects panel opened the editor from their own copy
+   of the chain.** The panel's copy can be stale, so the window could be seeded
+   from one insert and aim its writes at another. Both now ask MainWindow, which
+   resolves against the model and decides whether there is a native editor at
+   all. The title also carries the track name, so two editors for the same
+   plugin are tellable apart.
+5. **Two copies of one plugin in a chain.** URI alone cannot say which insert an
+   editor was showing after a reorder, so it closes rather than guess.
+6. **Direct-access editors lost their own writes.** Applying the engine's frame
+   after `idle()` overwrote the value the plugin had just written into its port
+   buffer, and the poll then saw no change and never sent it. Inbound now
+   applies BEFORE idle; a slot with a gesture in flight is left alone; and
+   writes are ignored until the editor has drawn its first frame, so a UI
+   pushing its own defaults is not recorded as an edit.
+7. **A save inside the 400 ms debounce wrote the pre-gesture value.** MainWindow
+   now asks each open editor for its pending values on the save path and applies
+   them before `ProjectIO::Save`.
+
+Also from the review: the seqlock read takes the acquire fence it needs before
+trusting the generation check (the same missing fence is in the pre-existing
+`MeterSpectrum`, left alone here), the editor's insert address became atomic
+(the window's looper can re-point it while the editor's thread reads it), and
+the claim that keeps one editor per insert now keys on the insert, not the
+plugin.
+
+**Known, not fixed** (each judged smaller than its fix, and stated rather than
+buried):
+
+- The list is capped at `Engine::kWatchSlots` (4) editors following automation;
+  past that an editor still works and still writes, it just stops following, and
+  says so once on stderr. `kWatchMax` (64 parameters) truncates the same way for
+  a plugin with more control inputs than that.
+- `~Lv2UiWindow` joins the editor thread while the looper holds the window lock.
+  A plugin whose `idle()` or `port_event()` blocks on that lock would hang the
+  close. Inherited from the idle thread package 03 shipped (which Phase 0
+  click-tested clean); port_event now shares the thread, so the exposure is
+  slightly wider than before.
+- A UI that declares `instance-access` as an *optional* feature but writes its
+  ports directly anyway is treated as a control-port UI and gets no poll. The
+  spec says a UI that writes DSP state directly must require it; no plugin here
+  does otherwise.
+- A control-port UI that pushes widget defaults through the write function after
+  its first frame is indistinguishable from the user moving a control.
+
 ## What is verified, and how
 
 | Claim | Evidence |
