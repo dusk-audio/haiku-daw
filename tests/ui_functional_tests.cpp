@@ -458,10 +458,15 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     roll->Lock();
     rv->RunMidiOp(MidiOp::Humanize);
     roll->Unlock();
+    std::vector<MidiNote> before;
+    CHECK(notes(&before));
     std::vector<MidiNote> h;
+    // Against the state before it, not against one note: humanize draws for
+    // each note, and a clamped timing draw plus a zero velocity draw can leave
+    // any single note exactly as it was.
     CHECK(WaitFor([&] {
-        if (!notes(&h) || h.size() != 2) return false;
-        return h[0].startFrame != 0 || h[0].velocity != 100;
+        if (!notes(&h) || h.size() != before.size()) return false;
+        return !NotesEqual(h, before);
     }));
     CHECK(stack.UndoName() == "Humanize");
 
@@ -563,6 +568,8 @@ static void TestAboutBox(MainWindow* win) {
 static void TestLv2EditorWiring(MainWindow* win, Project& project,
                                 CommandStack& stack) {
     std::printf("test_lv2_editor_wiring\n");
+    // main() does this at startup; a test binary is its own application.
+    Lv2Host::Instance().ScanAll();
     const std::vector<Lv2PluginInfo>& plugins = Lv2Host::Instance().Plugins();
     const Lv2PluginInfo* chosen = nullptr;
     for (const Lv2PluginInfo& p : plugins)
