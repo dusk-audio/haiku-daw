@@ -141,7 +141,6 @@ private:
     // Quantize settings, remembered for the session ("last used"): the MIDI
     // menu's plain Quantize and the 'q' key both run these.
     QuantizeOpts fQuant;
-    uint64_t     fHumanSeed = 0;  // varies per humanize, so two runs differ
 
     double fFramesPerPixel = 128.0;
     Frame  fScrollFrame    = 0;

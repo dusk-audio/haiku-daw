@@ -79,6 +79,15 @@ run (so a second humanize is a fresh take, not a no-op). The function itself is
 deterministic from its seed — same seed and input, same output — which is what
 the tests pin; a groove-template feature would want that seed to be saveable.
 
+**The settings dialog only applies on its button.** Two of its controls are
+settings, not edits, so they carry no message at all — a `BPopUpMenu` is
+radio-mode by default, which means choosing a grid marks the item *and* invokes
+it, so with a message attached picking a grid would quantize on the spot with
+the strength and swing the user had not set yet (same for ticking the checkbox).
+Reading Haiku's `MenuItem.cpp` is what settled it: `SetMarked` happens in
+`Invoke` under `IsRadioMode`, before the message is sent, so dropping the
+message keeps the radio mark and the menu field's label while sending nothing.
+
 **Shortcut** — `q` runs the last-used quantize. The roll's `KeyDown` handler was
 enumerated first: it claims arrows, `+`/`=`, `-`/`_`, Delete/Backspace, `1`-`7`,
 Command-A and byte 1; the window claims space (transport). Letters other than
@@ -175,6 +184,20 @@ from a correct one. The test now asserts both halves (the edit path grows to
    notes fall outside), then quantize the whole region.
    -> Expected: the notes outside stay outside (the region does not grow back,
    and nothing that was silent starts sounding).
+
+## Known, not fixed
+
+- The transform clamps to the region window **as the roll saw it when it
+  opened** (`fClipLen`, alongside the pre-existing `fClipStart` and `fTempo`
+  copies). Resize the region on the timeline while its piano roll is open, and a
+  transform will still use the old length. This is the snapshot editor the roll
+  already is — a note drawn in it lands by the same stale origin — and the fix
+  is a "region changed" push the roll does not have. Stated rather than buried;
+  it is not a new class of staleness.
+- Humanize's seed comes from `system_time()`, so reproducing a specific take
+  means calling `Humanize` directly (the function is deterministic from its
+  seed; the UI just does not keep the seed). A groove/save-the-seed feature
+  would change that.
 
 ## Not done (and why)
 

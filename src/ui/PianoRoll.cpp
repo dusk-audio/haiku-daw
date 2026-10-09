@@ -4,6 +4,7 @@
 #include "UiMetrics.h"
 #include "Widgets.h"
 
+#include <OS.h>   // system_time(): the humanize seed
 #include <PopUpMenu.h>
 #include <MenuItem.h>
 #include <Window.h>
@@ -331,10 +332,13 @@ void PianoRollView::RunMidiOp(MidiOp op, int param) {
         case MidiOp::Humanize: {
             // 8 ms of timing and +-10 of velocity: enough movement to read as
             // "played" rather than "programmed", not enough to read as
-            // "mistimed". The seed is fresh per run, so humanizing twice is two
-            // takes instead of the same one twice.
+            // "mistimed". The seed is the clock, so humanizing twice is two
+            // takes rather than the same one again -- and the same again next
+            // session. (The function is deterministic from its seed; the UI
+            // just does not keep it.)
             const Frame jitter = (Frame)(0.008 * fSampleRate);
-            out = Humanize(fNotes, sel, fClipLen, jitter, 10, ++fHumanSeed);
+            out = Humanize(fNotes, sel, fClipLen, jitter, 10,
+                           (uint64_t)system_time());
             break;
         }
         case MidiOp::Legato:
