@@ -79,19 +79,28 @@ void TransportController::StartPlayback() {
 }
 
 void TransportController::StopPlayback(bool resumeMonitor) {
+    std::fprintf(stderr, "sp: engine\n");
     if (fEngine)
         fEngine->Stop();
     fPlaying = false;
+    std::fprintf(stderr, "sp: bar\n");
     if (fWin->fTransport) fWin->fTransport->SetPlaying(false);
+    std::fprintf(stderr, "sp: pulse\n");
     fWin->UpdatePulse();
+    std::fprintf(stderr, "sp: roll\n");
     fWin->PushRollPlayhead(-1);   // hide the roll playhead when stopped
+    std::fprintf(stderr, "sp: meter\n");
     fWin->fMeter->SetLevels(0.0f, 0.0f);
+    std::fprintf(stderr, "sp: peaks\n");
     fWin->fTimeline->ClearTrackPeaks();
+    std::fprintf(stderr, "sp: loud\n");
     fWin->UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
                           Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
+    std::fprintf(stderr, "sp: monitor\n");
     if (resumeMonitor)
         fWin->fRecCtl.UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
+    std::fprintf(stderr, "sp: done\n");
 }
 
 void TransportController::ReloadActiveEngine() {
