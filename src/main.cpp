@@ -154,12 +154,30 @@ public:
     }
 
     // `daw project.dawproj` from a Terminal -- including the FIRST launch,
-    // which receives its own argv here after Run(). Anything that is not a
-    // project is ignored: the old "each argv WAV becomes a track" seed is
-    // gone, because File > Import Audio is the way a file gets in.
-    void ArgvReceived(int32 argc, char** argv) override {
-        for (int32 i = 1; i < argc; i++)
-            OpenPath(argv[i]);
+    // which receives its own argv as a message after Run(). Handled as the
+    // MESSAGE, not through ArgvReceived(int32, char**): with B_SINGLE_LAUNCH a
+    // second launch hands its argv to the running instance, and a relative
+    // path must be resolved against the SENDER's directory ("cwd"), not this
+    // instance's -- that field is what only the message carries (`daw
+    // song.dawproj` from another directory used to look in the wrong place).
+    // Anything that is not a project is ignored: the old "each argv WAV
+    // becomes a track" seed is gone; File > Import Audio is the way in.
+    void MessageReceived(BMessage* message) override {
+        if (message->what == B_ARGV_RECEIVED) {
+            const char* cwd = nullptr;
+            message->FindString("cwd", &cwd);
+            const char* arg = nullptr;
+            for (int32 i = 1; message->FindString("argv", i, &arg) == B_OK; i++) {
+                if (!arg)
+                    continue;
+                if (arg[0] != '/' && cwd)
+                    OpenPath(BPath(cwd, arg).Path());
+                else
+                    OpenPath(arg);
+            }
+            return;   // consumed: the default handler would only re-parse it
+        }
+        BApplication::MessageReceived(message);
     }
 
 private:

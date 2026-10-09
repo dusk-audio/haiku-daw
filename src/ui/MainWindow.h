@@ -125,7 +125,7 @@ private:
     void CloseFxEditors();           // project is going away: close them all
     void FlushFxEditors();           // before a save: commit what they wrote
     bool SaveTo(const char* path);   // false = the file was not written
-    void LoadFrom(const char* path);
+    void LoadFrom(const char* path, bool asRecovery = false);
     // File > New: ask, then a fresh empty project at the session's rate.
     void NewProject();
     void RememberProject(const std::string& path);  // recent list + menu

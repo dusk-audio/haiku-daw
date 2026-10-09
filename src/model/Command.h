@@ -126,6 +126,12 @@ public:
     // Record the current state as the one on disk (a save, a load).
     void MarkSaved() { fSavedSerial = CurrentSerial(); }
 
+    // Mark the state as "nowhere on disk" (a recovered session: it came from
+    // the recovery file, but that file is not the project -- saving must ask
+    // for a path, and quitting must offer to save). Never-assigned serial, so
+    // no position can ever read as saved.
+    void MarkUnsaved() { fSavedSerial = ~Serial{0}; }
+
     bool IsDirty() const { return CurrentSerial() != fSavedSerial; }
 
 private:
