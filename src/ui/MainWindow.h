@@ -19,6 +19,7 @@
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
+#include "TransportController.h"      // the engine + transport state
 
 #include <Messenger.h>
 #include <Window.h>
@@ -91,7 +92,7 @@ public:
     void DispatchMessage(BMessage* message, BHandler* handler) override;
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
-    bool IsPlaying() const { return fPlaying; }
+    bool IsPlaying() const { return fTransportCtl.fPlaying; }
 
 private:
     void StartPlayback();
@@ -198,7 +199,7 @@ private:
     // its monitor source) is destroyed FIRST — members die in reverse order, so
     // the RT thread is stopped before the recorder it may read is freed.
     std::unique_ptr<Recorder> fRecorder;  // active while recording
-    std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
+    TransportController       fTransportCtl;  // the engine + transport state (M1.1)
     // MIDI capture: a consumer connected to the armed MIDI tracks' input
     // endpoints, feeding a note-pairing recorder. Independent of the audio path.
     std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
@@ -212,7 +213,6 @@ private:
     // track's endpoint NAME when the input is opened (see ResolveMidiRoutes).
     std::vector<MidiInputRoute> fMidiRoutes;
     bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
-    bool                      fMonitoring = false;  // idle live-monitor engine up
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     // The dirty marker has to follow edits made anywhere (the timeline and the
@@ -266,14 +266,8 @@ private:
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
     BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
-    size_t                    fBufferFrames = 512;  // output buffer frames/channel
-    bool                      fMetronome = false;
-    bool                      fMonDim = false;
-    bool                      fMonMono = false;
-    bool                      fPlaying = false;
     bool                      fRecMode = false;      // engine running for a take
     bool                      fCapturePending = false; // in count-in, not yet capturing
-    bool                      fMonitorInput = false; // hear live input while armed
     bool                      fLoopRecord = false;   // capturing stacked takes over a loop
     int                       fTakeGroup = 0;        // running take-group id
     int                       fCountInBars = 0;      // metronome bars before capture
