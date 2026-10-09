@@ -50,9 +50,9 @@ Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Eng
 | 02 lv2-host | Merged to master (see `02-lv2-host-PR.md`) |
 | 03 inserts-ui | Merged to master 2026-07-20 (`5a09823`, host suite 46/46; see `03-inserts-ui-PR.md`) |
 | 07 lv2-live-editor | **Merged to master 2026-10-09** (branch tip `4c9b2b6`) — all four phases green on the VM (`build` 49/49, `build-off` 45/45, host 48/48) and **click-tested by the user: every step of the R0 list passed**. See `07-lv2-live-editor-PR.md` |
-| 04 midi-tools | Next host-side, parallel-safe with 07 — entry prompt `04-midi-tools-HANDOFF.md`, task `04-midi-tools.md` |
-| 05 sidechain | Unstarted; hold until 07 merges (shared engine FX-loop regions) |
-| 06 timestretch | Unstarted, unblocked; DSP/exporter half host-testable, engine half wants the VM after 07 |
+| 04 midi-tools | **Merged to master 2026-10-09** — quantize (strength/swing/triplets), humanize, legato, transpose, velocity, in the piano roll's MIDI menu and on `q`; host 49/49, ASan+UBSan clean, VM `build` 52/52 and `build-off` 48/48, and the transform paths are driven by `ui_functional_tests` on the VM. Record `04-midi-tools-PR.md` |
+| 05 sidechain | Unstarted; **unblocked** — 07 merged 2026-10-09, so the shared engine FX-loop regions are in master |
+| 06 timestretch | Unstarted; DSP/exporter half host-testable, engine half can use the VM now that 07 has merged |
 | R1 export dialog | **Merged to master 2026-10-09** — the bounce options dialog (format / rate / dither / loudness / true-peak / range / stems), the render moved off the UI looper with progress + Cancel, and the generic panel's wheel edit finally flushed before a save or a render. Record `08-export-dialog-PR.md` |
 
 Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.

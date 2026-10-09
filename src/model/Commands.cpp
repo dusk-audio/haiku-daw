@@ -914,6 +914,21 @@ void SetMidiClipNotesCommand::Undo(Project& p) {
         }
 }
 
+bool ApplyMidiOpCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    MidiClip* c = t->FindMidiClip(fClip);
+    if (!c) return false;
+    fOld = c->notes;
+    c->notes = fNew;
+    return true;   // length untouched: a transform must not resize the region
+}
+void ApplyMidiOpCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        if (MidiClip* c = t->FindMidiClip(fClip))
+            c->notes = fOld;
+}
+
 bool SetMidiClipEventsCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;

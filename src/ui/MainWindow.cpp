@@ -30,6 +30,7 @@
 #include "../model/Commands.h"
 #include "../model/RegionOps.h"
 #include "../model/SmfIO.h"
+#include "../model/MidiOps.h"
 #include "../model/RecordPlan.h"
 
 #include <Alert.h>
@@ -129,6 +130,25 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         strips.push_back(std::move(s));
     }
     return strips;
+}
+
+// Decode a posted note list (PianoRoll -> here). kMsgApplyNotes and
+// kMsgApplyMidiOp carry the same np/nv/ns/nl shape; missing fields fall back to
+// the defaults the roll always writes, and the frames stay clip-relative.
+static std::vector<MidiNote> ParseNoteList(const BMessage* msg) {
+    std::vector<MidiNote> notes;
+    int32 pitch = 0;
+    for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
+        MidiNote n;
+        int32 vel = 100; int64 st = 0, len = 1;
+        msg->FindInt32("nv", i, &vel);
+        msg->FindInt64("ns", i, &st);
+        msg->FindInt64("nl", i, &len);
+        n.pitch = pitch; n.velocity = vel;
+        n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
+        notes.push_back(n);
+    }
+    return notes;
 }
 
 static constexpr float kTransportH = 36.0f;
@@ -794,20 +814,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("clip", &cid);
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                std::vector<MidiNote> notes;
-                int32 pitch = 0;
-                for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
-                    MidiNote n;
-                    int32 vel = 100; int64 st = 0, len = 1;
-                    msg->FindInt32("nv", i, &vel);
-                    msg->FindInt64("ns", i, &st);
-                    msg->FindInt64("nl", i, &len);
-                    n.pitch = pitch; n.velocity = vel;
-                    n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
-                    notes.push_back(n);
-                }
                 fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
-                    (TrackId)tid, (ClipId)cid, std::move(notes)), *fProject);
+                    (TrackId)tid, (ClipId)cid, ParseNoteList(msg)), *fProject);
+                fTimeline->Invalidate();
+            }
+            break;
+        }
+        case kMsgApplyMidiOp: {
+            // A PianoRoll ran a named transform (quantize / humanize / legato /
+            // transpose / velocity) on its snapshot and posted the result. The
+            // command only records it -- see MidiOps.h for why the parameters
+            // do not travel -- and names the undo step after the transform.
+            int64 tid = 0, cid = 0; int32 op = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("clip", &cid);
+            msg->FindInt32("op", &op);
+            Track* tr = fProject->FindTrack((TrackId)tid);
+            if (tr && tr->FindMidiClip((ClipId)cid)) {
+                fStack->Execute(std::make_unique<ApplyMidiOpCommand>(
+                    (TrackId)tid, (ClipId)cid, ParseNoteList(msg),
+                    MidiOpName((MidiOp)op)), *fProject);
                 fTimeline->Invalidate();
             }
             break;

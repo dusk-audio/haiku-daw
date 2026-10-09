@@ -1,8 +1,10 @@
 #include "PianoRoll.h"
 
+#include "QuantizeWindow.h"
 #include "UiMetrics.h"
 #include "Widgets.h"
 
+#include <OS.h>   // system_time(): the humanize seed
 #include <PopUpMenu.h>
 #include <MenuItem.h>
 #include <Window.h>
@@ -10,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 namespace daw {
 
@@ -24,6 +27,18 @@ static const char* kToolNames[7] = { "Ptr", "Pen", "Brush", "Erase",
                                      "Split", "Glue", "Vel" };
 static BRect ZoomOutRectR() { return BRect(360, 5, 384, 23); }
 static BRect ZoomInRectR()  { return BRect(388, 5, 412, 23); }
+static BRect MidiMenuRectR() { return BRect(420, 5, 476, 23); }
+
+// The note-list half of the roll's edit messages. kMsgApplyNotes and
+// kMsgApplyMidiOp carry the same shape, so MainWindow decodes them once.
+static void AddNoteList(BMessage* m, const std::vector<MidiNote>& notes) {
+    for (const MidiNote& n : notes) {
+        m->AddInt32("np", n.pitch);
+        m->AddInt32("nv", n.velocity);
+        m->AddInt64("ns", (int64)n.startFrame);
+        m->AddInt64("nl", (int64)n.lengthFrames);
+    }
+}
 
 // Note fill color by velocity: cool (blue) when soft, hot (red) when loud.
 static rgb_color VelHeat(int vel) {
@@ -69,7 +84,7 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
     : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
       fNotes(std::move(notes)), fEvents(std::move(events)),
       fTrack(track), fClip(clip),
-      fClipStart(clipStart), fTempo(tempo),
+      fClipStart(clipStart), fClipLen(clipLength), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
     SetViewColor(ColBackground());
     fTempo.sampleRate = sampleRate;
@@ -276,6 +291,7 @@ void PianoRollView::Draw(BRect) {
         DrawButton(this, ToolRect(i), kToolNames[i], i == (int)fTool, ColAccent());
     DrawButton(this, ZoomOutRectR(), "\xE2\x88\x92", false);   // minus
     DrawButton(this, ZoomInRectR(),  "+", false);
+    DrawButton(this, MidiMenuRectR(), "MIDI", false);
 }
 
 int PianoRollView::NoteAt(BPoint where) const {
@@ -291,16 +307,129 @@ int PianoRollView::NoteAt(BPoint where) const {
 }
 
 void PianoRollView::Apply() {
+    // The model grows the region to cover a note drawn past its end
+    // (SetMidiClipNotesCommand only ever grows), so the window a later
+    // transform clamps to has to grow with it: otherwise the note the user just
+    // drew past the end is the one a quantize skips, and a note near the old
+    // edge loses the tail the region now has room for.
+    for (const MidiNote& n : fNotes) {
+        const Frame e = n.startFrame + (n.lengthFrames > 0 ? n.lengthFrames : 1);
+        if (e > fClipLen) fClipLen = e;
+    }
     BMessage m(kMsgApplyNotes);
     m.AddInt64("track", (int64)fTrack);
     m.AddInt64("clip", (int64)fClip);
-    for (const MidiNote& n : fNotes) {
-        m.AddInt32("np", n.pitch);
-        m.AddInt32("nv", n.velocity);
-        m.AddInt64("ns", (int64)n.startFrame);
-        m.AddInt64("nl", (int64)n.lengthFrames);
-    }
+    AddNoteList(&m, fNotes);
     fApply.SendMessage(&m);
+}
+
+// --- MIDI transforms -------------------------------------------------------
+
+// Run a transform over the selection -- or over the whole region when nothing
+// is selected, which is what a menu item has to do on its own (an edit tool can
+// demand a selection; a command cannot). The transform runs HERE, on the view's
+// snapshot, and only the result travels: the model command then has no
+// selection indices to re-resolve against a note list that may have moved under
+// it, and a transform that changed nothing never reaches the undo stack.
+void PianoRollView::RunMidiOp(MidiOp op, int param) {
+    // Never mid-gesture: a drag holds a pre-transform snapshot (fDragOrig) that
+    // the next MouseMoved replays, so a transform landing inside one would be
+    // silently undone for the dragged notes and kept for the rest -- a state no
+    // single action produced.
+    if (fDrag != Drag::None) return;
+    const NoteSel sel = SelectedCount() > 0 ? NoteSel(fSel) : NoteSel();
+    std::vector<MidiNote> out = fNotes;
+    switch (op) {
+        case MidiOp::Quantize:
+            out = Quantize(fNotes, sel, fTempo, fClipStart, fClipLen, fQuant);
+            break;
+        case MidiOp::Humanize: {
+            // 8 ms of timing and +-10 of velocity: enough movement to read as
+            // "played" rather than "programmed", not enough to read as
+            // "mistimed". The seed is the clock, so humanizing twice is two
+            // takes rather than the same one again -- and the same again next
+            // session. (The function is deterministic from its seed; the UI
+            // just does not keep it.)
+            const Frame jitter = (Frame)(0.008 * fSampleRate);
+            out = Humanize(fNotes, sel, fClipLen, jitter, 10,
+                           (uint64_t)system_time());
+            break;
+        }
+        case MidiOp::Legato:
+            out = Legato(fNotes, sel, fClipLen);
+            break;
+        case MidiOp::Transpose:
+            out = TransposeSemitones(fNotes, sel, param);
+            break;
+        case MidiOp::Velocity:
+            out = ScaleVelocity(fNotes, sel, 1.0f, (float)param);
+            break;
+    }
+    if (NotesEqual(out, fNotes)) return;
+    fNotes = std::move(out);
+    ApplyMidiOp(op);
+    Invalidate();
+}
+
+void PianoRollView::ApplyMidiOp(MidiOp op) {
+    BMessage m(kMsgApplyMidiOp);
+    m.AddInt64("track", (int64)fTrack);
+    m.AddInt64("clip", (int64)fClip);
+    m.AddInt32("op", (int32)op);
+    AddNoteList(&m, fNotes);
+    fApply.SendMessage(&m);
+}
+
+// This window has no menu bar (it is all drawn), so one toolbar button with a
+// popup underneath is the whole discoverable surface for the transforms; 'q' is
+// the fast path for the one that gets used constantly.
+void PianoRollView::MidiMenu() {
+    BPopUpMenu* m = new BPopUpMenu("midi", false, false);
+    m->AddItem(new BMenuItem("Quantize" B_UTF8_ELLIPSIS, NULL));
+    m->AddItem(new BMenuItem("Quantize (last settings)   q", NULL));
+    m->AddSeparatorItem();
+    m->AddItem(new BMenuItem("Humanize", NULL));
+    m->AddItem(new BMenuItem("Legato", NULL));
+    m->AddSeparatorItem();
+    m->AddItem(new BMenuItem("Transpose +1", NULL));
+    m->AddItem(new BMenuItem("Transpose -1", NULL));
+    m->AddItem(new BMenuItem("Transpose +12", NULL));
+    m->AddItem(new BMenuItem("Transpose -12", NULL));
+    m->AddSeparatorItem();
+    m->AddItem(new BMenuItem("Velocity +10", NULL));
+    m->AddItem(new BMenuItem("Velocity -10", NULL));
+
+    const BRect r = MidiMenuRectR();
+    BMenuItem* sel = m->Go(ConvertToScreen(BPoint(r.left, r.bottom)), false, true);
+    const std::string label = sel ? std::string(sel->Label()) : std::string();
+    delete m;
+    if (label.empty()) return;
+
+    if (label.rfind("Quantize", 0) == 0) {
+        if (label.find("last settings") != std::string::npos)
+            RunMidiOp(MidiOp::Quantize);
+        else
+            OpenQuantizeWindow();
+    } else if (label == "Humanize") {
+        RunMidiOp(MidiOp::Humanize);
+    } else if (label == "Legato") {
+        RunMidiOp(MidiOp::Legato);
+    } else if (label.rfind("Transpose", 0) == 0) {
+        int semis = 0;
+        std::sscanf(label.c_str(), "Transpose %d", &semis);
+        RunMidiOp(MidiOp::Transpose, semis);
+    } else if (label.rfind("Velocity", 0) == 0) {
+        int delta = 0;
+        std::sscanf(label.c_str(), "Velocity %d", &delta);
+        RunMidiOp(MidiOp::Velocity, delta);
+    }
+}
+
+void PianoRollView::OpenQuantizeWindow() {
+    const BRect r = MidiMenuRectR();
+    const BPoint p = ConvertToScreen(BPoint(r.left, r.bottom));
+    (new QuantizeWindow(BRect(p.x, p.y, p.x + 300, p.y + 232), fQuant,
+                        BMessenger(this)))->Show();
 }
 
 // Snapshot every note's geometry so a group move/resize applies one delta.
@@ -568,6 +697,7 @@ void PianoRollView::MouseDown(BPoint where) {
         if (t >= 0)                              { fTool = (Tool)t; Invalidate(); }
         else if (ZoomOutRectR().Contains(where)) ZoomBy(2.0);
         else if (ZoomInRectR().Contains(where))  ZoomBy(0.5);
+        else if (MidiMenuRectR().Contains(where)) MidiMenu();
         return;
     }
 
@@ -794,6 +924,24 @@ void PianoRollView::MouseUp(BPoint) {
 }
 
 void PianoRollView::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgRollQuantize) {
+        // The settings dialog. They are remembered here, so both it and 'q'
+        // quantize with the same numbers.
+        int32 grid = 0, strength = 100, swing = 0;
+        bool lengths = false;
+        msg->FindInt32("grid", &grid);
+        msg->FindInt32("strength", &strength);
+        msg->FindInt32("swing", &swing);
+        msg->FindBool("lengths", &lengths);
+        if (grid < 0 || grid > (int32)QuantGrid::SixteenthTriplet) grid = 0;
+        fQuant.grid = (QuantGrid)grid;
+        fQuant.strength = (float)std::clamp(strength, (int32)0, (int32)100)
+                          / 100.0f;
+        fQuant.swingPct = (float)std::clamp(swing, (int32)0, (int32)100);
+        fQuant.quantizeLengths = lengths;
+        RunMidiOp(MidiOp::Quantize);
+        return;
+    }
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         float dy = 0.0f;
         if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
@@ -830,6 +978,20 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
         case '5': fTool = Tool::Scissors; Invalidate(); break;
         case '6': fTool = Tool::Glue;     Invalidate(); break;
         case '7': fTool = Tool::Velocity; Invalidate(); break;
+        case 'q': case 'Q': {
+            // Plain q runs the last-used quantize; an auto-repeat is ignored, or
+            // holding the key would stack one undo step per repeat (at strength
+            // < 1 each one moves the notes further, so nothing collapses them).
+            // Command-Q falls through as before -- the roll has no menu bar, so
+            // quitting from here has never worked and this does not change it.
+            int32 repeat = 0;
+            if (BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr)
+                cur->FindInt32("be:key_repeat", &repeat);
+            if ((modifiers() & B_COMMAND_KEY) || repeat > 1)
+                BView::KeyDown(bytes, numBytes);
+            else RunMidiOp(MidiOp::Quantize);
+            break;
+        }
         case 1: case 'a': case 'A':   // Command-A: select all
             if (modifiers() & B_COMMAND_KEY) {
                 fSel.assign(fNotes.size(), 1); Invalidate();
