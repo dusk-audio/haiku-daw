@@ -1,0 +1,12 @@
+// Generated from CMakeLists.txt (project(... VERSION ...)) by CMake. Do not
+// edit: change the version there and it lands here, in the About box, in
+// --version, and in whatever the packaging recipe reads.
+#pragma once
+
+#define DAW_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define DAW_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define DAW_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define DAW_VERSION_STRING "@PROJECT_VERSION@"
+
+// The app's signature, which the .rdef and the Deskbar both use.
+#define DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW"

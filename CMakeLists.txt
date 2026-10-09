@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
-project(haiku_daw CXX)
+project(haiku_daw VERSION 1.0.0 LANGUAGES CXX)
+
+# The version lives in one place (here) and reaches the code through a
+# generated header: the About box, --version and the packaging recipe all read
+# the same numbers, so they cannot drift.
+configure_file(cmake/Version.h.in ${CMAKE_BINARY_DIR}/generated/Version.h @ONLY)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +66,7 @@ add_library(daw_model
     src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
 )
 target_include_directories(daw_model PUBLIC src)
+target_include_directories(daw_model PUBLIC ${CMAKE_BINARY_DIR}/generated)
 
 # --- LV2 plugin hosting (lilv) ----------------------------------------
 # On by default, but it DEGRADES rather than fails: with lilv absent no LV2 code

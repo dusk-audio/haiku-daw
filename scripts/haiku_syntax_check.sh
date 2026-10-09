@@ -5,6 +5,11 @@
 XG=~/haiku-cross/haiku/generated/cross-tools-x86_64/bin/x86_64-unknown-haiku-g++
 H=/home/marc/haiku-cross/haiku/headers
 INCS="-idirafter $H -idirafter $H/posix"
+# CMake-generated headers (Version.h) live in the build tree; take whichever
+# build dir exists so the check sees what a real build would.
+for g in build/generated build-off/generated build-host/generated; do
+  [ -d "$g" ] && INCS="$INCS -I$g"
+done
 for d in "$H"/os "$H"/os/*/; do INCS="$INCS -I$d"; done
 FILES="$*"
 [ -z "$FILES" ] && FILES="src/main.cpp src/ui/TimelineView.cpp src/ui/MainWindow.cpp \

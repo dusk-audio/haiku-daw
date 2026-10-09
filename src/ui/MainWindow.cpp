@@ -14,6 +14,7 @@
 #include "PluginBrowser.h"
 #include "ExportWindow.h"
 #include "ExportProgressWindow.h"
+#include "Version.h"   // DAW_VERSION_STRING (generated from CMake)
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
 #endif
@@ -246,6 +247,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     trackMenu->AddItem(new BMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
     trackMenu->AddItem(new BMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
     menuBar->AddItem(trackMenu);
+    BMenu* helpMenu = new BMenu("Help");
+    helpMenu->AddItem(new BMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
+                                    new BMessage(MSG_ABOUT)));
+    menuBar->AddItem(helpMenu);
+
     BMenu* viewMenu = new BMenu("View");
     viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
     fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
@@ -1156,6 +1162,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_ZOOMFIT:
             fTimeline->ZoomToFit();
             break;
+        case MSG_ABOUT: {
+            // A BAlert is the whole About box: name, version, what it is built
+            // on. The version comes from the generated header, so there is
+            // nothing here to keep in step with CMakeLists.
+            char text[256];
+            std::snprintf(text, sizeof(text),
+                          "Haiku DAW %s\n\nA native digital audio workstation "
+                          "for Haiku:\nmultitrack audio and MIDI, mixing, "
+                          "automation,\nLV2 plugins, and offline export.",
+                          DAW_VERSION_STRING);
+            BAlert* a = new BAlert("About Haiku DAW", text, "OK", nullptr,
+                                   nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
+            a->Go(nullptr);   // async, like the other alerts
+            break;
+        }
         case MSG_AUTOSAVE: {
             // Save a recovery copy while there's content and we're not mid-take.
             if (!fRecMode && !fProject->Tracks().empty()) {

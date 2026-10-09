@@ -14,6 +14,7 @@
 #include "engine/WavSource.h"
 #include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
+#include "Version.h"   // DAW_VERSION_STRING, DAW_APP_SIGNATURE (generated)
 
 // Defined by the daw_lv2 target, which exists only when CMake found lilv. With
 // it absent nothing below is compiled, the LV2 factory hook is never installed,
@@ -30,6 +31,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -135,9 +137,20 @@ static void InstallLv2() {
 }
 
 int main(int argc, char** argv) {
-    BApplication app("application/x-vnd.DuskAudio-HaikuDAW");
+    // --version answers without a window (and without an app_server, so a
+    // package manager or a bug report can ask): the same string the About box
+    // shows, from the one place CMake defines it.
+    for (int i = 1; i < argc; i++) {
+        if (std::strcmp(argv[i], "--version") == 0) {
+            std::printf("Haiku DAW %s\n", DAW_VERSION_STRING);
+            return 0;
+        }
+    }
+
+    BApplication app(DAW_APP_SIGNATURE);
     InstallPlugins();
     InstallLv2();
+    std::fprintf(stderr, "Haiku DAW %s\n", DAW_VERSION_STRING);
 
     std::vector<std::string> wavs;
     for (int i = 1; i < argc; i++)
