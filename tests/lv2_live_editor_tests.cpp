@@ -161,8 +161,8 @@ int main() {
         // the change survives clamping -- a port whose default sits on its own
         // maximum would clamp a nudge straight back and publish nothing, which
         // is correct behaviour and a useless thing to assert on.
-        const Lv2ParamInfo& pi = pick->params[(size_t)(moveSlot > 0 ? moveSlot : 0)];
-        if (moveSlot > 0) {
+        const Lv2ParamInfo& pi = pick->params[(size_t)(moveSlot >= 0 ? moveSlot : 0)];
+        if (moveSlot >= 0) {
             const float want = 0.5f * (pi.mn + pi.mx);
             e.SetFxParamLive(tid, false, 0, moveSlot, want);
             e.PublishFxWatchNow();
