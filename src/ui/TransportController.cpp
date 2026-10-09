@@ -12,7 +12,7 @@
 namespace daw {
 
 void TransportController::StartPlayback() {
-    if (fWin->fRecMode)
+    if (fWin->fRecCtl.fRecMode)
         return;   // recording runs its own engine (overdub)
     fWin->StopMidiMonitor();   // playback owns the engine + MIDI input
     // Rebuild the engine from the current model each time (RT-safe: no live
@@ -72,7 +72,7 @@ void TransportController::StartPlayback() {
     if (fWin->fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fWin->fFxTrack);
     // Same reason, same rebuild: the watches live in the Engine object too.
     fWin->ReapplyFxWatches();
-    fEngine->SetMidiRoutes(fWin->fMidiRoutes);   // survives the rebuild, as above
+    fEngine->SetMidiRoutes(fWin->fRecCtl.fMidiRoutes);   // survives the rebuild, as above
     fPlaying = true;
     if (fWin->fTransport) fWin->fTransport->SetPlaying(true);
     fWin->UpdatePulse();
@@ -126,19 +126,19 @@ bool TransportController::StartRecordEngine(Frame engineStart) {
     }
     fEngine->Start();
     // Count-in needs the click; force it on during record if a count-in is set.
-    fEngine->SetMetronome(fMetronome || fWin->fCountInBars > 0);
+    fEngine->SetMetronome(fMetronome || fWin->fRecCtl.fCountInBars > 0);
     fEngine->SetMonitorDim(fMonDim);
     fEngine->SetMonitorMono(fMonMono);
     // Re-attach input monitoring across an engine restart (loop-record seam).
-    if (fWin->fRecorder) {
-        fEngine->SetMonitorSource(fWin->fRecorder.get());
+    if (fWin->fRecCtl.fRecorder) {
+        fEngine->SetMonitorSource(fWin->fRecCtl.fRecorder.get());
         fEngine->SetInputMonitor(fWin->AudioMonitorOn());
     }
-    if (fWin->fMidiIn) fEngine->SetLiveMidi(fWin->fMidiIn->MonitorInput());
+    if (fWin->fRecCtl.fMidiIn) fEngine->SetLiveMidi(fWin->fRecCtl.fMidiIn->MonitorInput());
     // Routes live on the Engine, and this is a BRAND NEW one — without this the
     // loop-record seam would quietly drop the demux mid-take and every armed
     // track would start hearing every keyboard.
-    fEngine->SetMidiRoutes(fWin->fMidiRoutes);
+    fEngine->SetMidiRoutes(fWin->fRecCtl.fMidiRoutes);
     if (fWin->fFxTrack != kInvalidTrackId) fEngine->SetMeterFocus(fWin->fFxTrack);
     fWin->ReapplyFxWatches();   // the watches live in the Engine object too
     return true;

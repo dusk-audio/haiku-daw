@@ -315,7 +315,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         BMessage* m = new BMessage(MSG_COUNTIN);
         m->AddInt32("bars", n);
         BMenuItem* it = new BMenuItem(lbl, m);
-        if (n == fCountInBars) it->SetMarked(true);
+        if (n == fRecCtl.fCountInBars) it->SetMarked(true);
         fCountInMenu->AddItem(it);
     }
     audioMenu->AddItem(fCountInMenu);
@@ -438,7 +438,7 @@ MainWindow::~MainWindow() {
     delete fImportPanel;
     delete fMidiImportPanel;
     delete fMidiExportPanel;
-    // fTransportCtl.fEngine / fRecorder destructors stop their threads.
+    // fTransportCtl.fEngine / fRecCtl.fRecorder destructors stop their threads.
 }
 
 void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
@@ -470,7 +470,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case MSG_REC:
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
-            if (fRecMode) StopRecording();
+            if (fRecCtl.fRecMode) StopRecording();
             else          StartRecording();
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
@@ -540,7 +540,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_COUNTIN: {
             int32 bars = 0;
             msg->FindInt32("bars", &bars);
-            fCountInBars = bars;
+            fRecCtl.fCountInBars = bars;
             if (fCountInMenu)
                 for (int32 i = 0; i < fCountInMenu->CountItems(); i++)
                     if (BMenuItem* it = fCountInMenu->ItemAt(i))
@@ -553,7 +553,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
             if (fTimeline)  fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);  // lane "I" lamp
             // Live toggle while a take is running.
-            if (fRecorder) fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
+            if (fRecCtl.fRecorder) fRecCtl.fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
             if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
             break;
         case MSG_METRONOME:
@@ -568,7 +568,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgTransportToggle:   // spacebar
-            if (fTransportCtl.fPlaying || fRecMode) { fTransportCtl.StopPlayback(); StopRecording(); }
+            if (fTransportCtl.fPlaying || fRecCtl.fRecMode) { fTransportCtl.StopPlayback(); StopRecording(); }
             else                        fTransportCtl.StartPlayback();
             break;
         case MSG_EXPORT:
@@ -1245,7 +1245,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_AUTOSAVE: {
             // Save a recovery copy while there's content and we're not mid-take.
-            if (!fRecMode && !fProject->Tracks().empty()) {
+            if (!fRecCtl.fRecMode && !fProject->Tracks().empty()) {
                 // A knob moved in a native editor is audible at once but reaches
                 // the model only when its debounce goes quiet, so recover from
                 // what is PLAYING, not from a value the user has already moved
@@ -1514,7 +1514,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Before any branch: an open native editor is fed on every pulse,
             // including while stopped (see PushFxParams).
             PushFxParams();
-            if (fTransportCtl.fEngine && fTransportCtl.fMonitoring && !fTransportCtl.fPlaying && !fRecMode) {
+            if (fTransportCtl.fEngine && fTransportCtl.fMonitoring && !fTransportCtl.fPlaying && !fRecCtl.fRecMode) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
                 fTransportCtl.fEngine->UpdateMix(*fProject);
@@ -1522,18 +1522,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 PushTrackPeaks();
                 break;
             }
-            if (fTransportCtl.fEngine && (fTransportCtl.fPlaying || fRecMode)) {
+            if (fTransportCtl.fEngine && (fTransportCtl.fPlaying || fRecCtl.fRecMode)) {
                 fTransportCtl.fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
                 const Frame ph = fTransportCtl.fEngine->Playhead();
                 const Transport& tr = fProject->transport;
 
-                if (fRecMode) {
+                if (fRecCtl.fRecMode) {
                     // The disk thread's failure, seen here (the pulse is the
                     // only place that may touch the UI): report once and stop
                     // the take -- FramesWritten lands what was written, so a
                     // full disk costs the take's tail, not the take.
-                    if (fRecorder && fRecorder->ErrorCode() != 0) {
-                        const int code = fRecorder->ErrorCode();
+                    if (fRecCtl.fRecorder && fRecCtl.fRecorder->ErrorCode() != 0) {
+                        const int code = fRecCtl.fRecorder->ErrorCode();
                         StopRecording();
                         ReportError("Recording",
                             code == 1
@@ -1546,25 +1546,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         break;
                     }
                     // Count-in over: begin capture once we reach the record point.
-                    if (fCapturePending && ph >= fRecPoint)
+                    if (fRecCtl.fCapturePending && ph >= fRecCtl.fRecPoint)
                         StartCapture();
                     // Drain live MIDI into the take (stamped by kit timestamp,
                     // independent of this ~60 Hz poll's granularity).
-                    if (fMidiIn && !fCapturePending) {
+                    if (fRecCtl.fMidiIn && !fRecCtl.fCapturePending) {
                         MidiEvent ev[64];
                         std::size_t n;
-                        while ((n = fMidiIn->ReadEvents(ev, 64)) > 0)
+                        while ((n = fRecCtl.fMidiIn->ReadEvents(ev, 64)) > 0)
                             for (std::size_t i = 0; i < n; i++) {
-                                Frame mf = fRecStart
-                                    + (Frame)((double)(ev[i].timeUs - fMidiT0)
+                                Frame mf = fRecCtl.fRecStart
+                                    + (Frame)((double)(ev[i].timeUs - fRecCtl.fMidiT0)
                                               * 1e-6 * fProject->sampleRate);
-                                if (mf < fRecStart) mf = fRecStart;
+                                if (mf < fRecCtl.fRecStart) mf = fRecCtl.fRecStart;
                                 FeedMidiEvent(ev[i], mf);
                             }
                     }
                     // Loop-record: at the loop end, rewind the engine to the
                     // loop start (the recorder keeps capturing across the seam).
-                    if (fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
+                    if (fRecCtl.fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
                         fProject->transport.playhead = tr.loopStart;
                         if (!fTransportCtl.StartRecordEngine(tr.loopStart)) {
                             std::fprintf(stderr, "MainWindow: loop-record engine "
@@ -1573,25 +1573,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         }
                         break;
                     }
-                    const bool capturing = fRecorder && fRecorder->IsRecording();
-                    const bool midiCap   = fMidiIn && !fCapturePending;
+                    const bool capturing = fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording();
+                    const bool midiCap   = fRecCtl.fMidiIn && !fRecCtl.fCapturePending;
                     fTimeline->SetPlayhead(ph);
                     PushRollPlayhead(ph);
                     UpdateTimeReadout(ph);
                     if (capturing || midiCap) {
                         // Growing recording region + its live content.
-                        fTimeline->SetRecording(true, fRecStart, ph - fRecStart);
+                        fTimeline->SetRecording(true, fRecCtl.fRecStart, ph - fRecCtl.fRecStart);
                         if (capturing)
-                            fTimeline->SetLiveAudio(fRecorder.get(), fProject->sampleRate);
+                            fTimeline->SetLiveAudio(fRecCtl.fRecorder.get(), fProject->sampleRate);
                         if (midiCap) {
                             std::map<TrackId, std::vector<MidiNote>> live;
-                            for (TrackId id : fMidiRecTracks)
-                                live[id] = fMidiRecs[id].SnapshotNotes(ph);
+                            for (TrackId id : fRecCtl.fMidiRecTracks)
+                                live[id] = fRecCtl.fMidiRecs[id].SnapshotNotes(ph);
                             fTimeline->SetLiveMidiNotes(std::move(live));
                         }
                     }
-                    fMeter->SetLevels(capturing ? fRecorder->PeakL() : fTransportCtl.fEngine->PeakL(),
-                                      capturing ? fRecorder->PeakR() : fTransportCtl.fEngine->PeakR());
+                    fMeter->SetLevels(capturing ? fRecCtl.fRecorder->PeakL() : fTransportCtl.fEngine->PeakL(),
+                                      capturing ? fRecCtl.fRecorder->PeakR() : fTransportCtl.fEngine->PeakR());
                     PushTrackPeaks();
                     PushFxMeters();
                     break;
@@ -1705,8 +1705,8 @@ void MainWindow::UpdatePulse() {
     bool watching = false;
     for (const FxEntry& w : fFxWatches)
         if (w.editor && w.editor->Alive()) { watching = true; break; }
-    const bool need = fTransportCtl.fPlaying || fRecMode || fTransportCtl.fMonitoring || watching
-                   || (fRecorder && fRecorder->IsRecording())
+    const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
+                   || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
                    || !fExportHandled;   // an export's progress + completion
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -1740,40 +1740,40 @@ Frame ProjectEndFrame(const Project& p) {
 
 bool MainWindow::AudioMonitorOn() const {
     if (fTransportCtl.fMonitorInput) return true;
-    for (TrackId id : fRecTracks)
+    for (TrackId id : fRecCtl.fRecTracks)
         if (const Track* t = fProject->FindTrack(id))
             if (t->inputMonitor) return true;
     return false;
 }
 
 void MainWindow::StartCapture() {
-    fRecStart = fRecPoint;      // clip origin = record point
-    fCapturePending = false;
+    fRecCtl.fRecStart = fRecCtl.fRecPoint;      // clip origin = record point
+    fRecCtl.fCapturePending = false;
 
     // Audio capture: only when an audio track is armed (a MIDI-only take opens
     // no input device and writes no WAV).
-    if (!fRecTracks.empty()) {
+    if (!fRecCtl.fRecTracks.empty()) {
         // Write takes into the project's directory (a self-contained bundle)
         // when the project has been saved; otherwise the working directory.
         // The name is the first free take-N.wav THERE -- not a session counter,
         // which restarts at 0 after reopening a project and would overwrite the
         // takes that project still uses (the Recorder refuses to clobber, but
         // scanning means the take lands instead of failing).
-        fTakePath = NextFreeWavPath(fTakeDir, "take");
-        fRecorder.reset(new Recorder());
-        if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
+        fRecCtl.fTakePath = NextFreeWavPath(fRecCtl.fTakeDir, "take");
+        fRecCtl.fRecorder.reset(new Recorder());
+        if (fRecCtl.fRecorder->Start(fRecCtl.fTakePath.c_str()) != B_OK) {
             std::fprintf(stderr, "MainWindow: recording failed to start\n");
             ReportError("Recording",
                         std::string("The take could not be started:\n") +
-                        fTakePath);
-            fRecorder.reset();
+                        fRecCtl.fTakePath);
+            fRecCtl.fRecorder.reset();
         } else {
             // Wire input monitoring: the engine mixes the recorder's live input
             // (only if the input rate matches the output rate).
             const bool audMon = AudioMonitorOn();
-            fRecorder->SetMonitor(audMon);
+            fRecCtl.fRecorder->SetMonitor(audMon);
             if (fTransportCtl.fEngine) {
-                fTransportCtl.fEngine->SetMonitorSource(fRecorder.get());
+                fTransportCtl.fEngine->SetMonitorSource(fRecCtl.fRecorder.get());
                 fTransportCtl.fEngine->SetInputMonitor(audMon);
             }
         }
@@ -1789,26 +1789,26 @@ void MainWindow::StartCapture() {
 // present right now gets no route and stays permissive — it hears whatever is
 // connected instead of going silent because a device was unplugged.
 void MainWindow::ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps) {
-    fMidiRoutes.clear();
+    fRecCtl.fMidiRoutes.clear();
     for (const Track& t : fProject->Tracks()) {
         if (t.type != TrackType::Midi || t.input.kind != InputSource::kMidi)
             continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t.input.name) {
-                fMidiRoutes.push_back(MidiInputRoute{ t.id, e.id,
+                fRecCtl.fMidiRoutes.push_back(MidiInputRoute{ t.id, e.id,
                                                       t.input.channel });
                 break;
             }
     }
-    if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMidiRoutes(fMidiRoutes);
+    if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMidiRoutes(fRecCtl.fMidiRoutes);
 }
 
 // Hand one live event to each armed track that accepts it. This is where record
 // demux happens: two keyboards on two armed tracks fill two separate takes.
 void MainWindow::FeedMidiEvent(const MidiEvent& e, Frame at) {
-    for (TrackId id : fMidiRecTracks) {
-        if (!RouteAccepts(RouteFor(fMidiRoutes, id), e)) continue;
-        fMidiRecs[id].OnEvent(e, at);
+    for (TrackId id : fRecCtl.fMidiRecTracks) {
+        if (!RouteAccepts(RouteFor(fRecCtl.fMidiRoutes, id), e)) continue;
+        fRecCtl.fMidiRecs[id].OnEvent(e, at);
     }
 }
 
@@ -1822,10 +1822,10 @@ void MainWindow::StartMidiCapture() {
             && t.input.kind == InputSource::kMidi)
             monitor.push_back(t.id);
     if (monitor.empty()) return;
-    fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
-    if (fMidiIn->Register() != B_OK) {
+    fRecCtl.fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
+    if (fRecCtl.fMidiIn->Register() != B_OK) {
         std::fprintf(stderr, "MainWindow: MIDI input register failed\n");
-        fMidiIn.reset();
+        fRecCtl.fMidiIn.reset();
         return;
     }
     const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
@@ -1835,7 +1835,7 @@ void MainWindow::StartMidiCapture() {
         if (!t) continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t->input.name) {
-                if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
+                if (connected.insert(e.id).second) fRecCtl.fMidiIn->ConnectFrom(e.id);
                 break;
             }
     }
@@ -1843,35 +1843,35 @@ void MainWindow::StartMidiCapture() {
     // Discard events queued before this take (both the record and monitor
     // rings) so stale pre-connect notes don't record or sound, then start.
     MidiEvent tmp[64];
-    while (fMidiIn->ReadEvents(tmp, 64) > 0) {}
-    while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
-    fMidiRecs.clear();
-    for (TrackId id : fMidiRecTracks) fMidiRecs[id].Begin(fRecStart);
-    fMidiT0 = system_time();
+    while (fRecCtl.fMidiIn->ReadEvents(tmp, 64) > 0) {}
+    while (fRecCtl.fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
+    fRecCtl.fMidiRecs.clear();
+    for (TrackId id : fRecCtl.fMidiRecTracks) fRecCtl.fMidiRecs[id].Begin(fRecCtl.fRecStart);
+    fRecCtl.fMidiT0 = system_time();
     // Route live events to the engine so armed MIDI tracks sound as you play.
-    if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetLiveMidi(fMidiIn->MonitorInput());
+    if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetLiveMidi(fRecCtl.fMidiIn->MonitorInput());
 }
 
 // End the MIDI take at `endFrame` and drop the resulting region onto each armed
 // MIDI track (one fresh clip id per track). Tears down the input consumer.
 void MainWindow::StopMidiCapture(Frame endFrame) {
-    if (!fMidiIn) return;
+    if (!fRecCtl.fMidiIn) return;
     // Drain any events still queued, stamping each by wall-clock frame.
     MidiEvent ev[64];
     std::size_t n;
-    while ((n = fMidiIn->ReadEvents(ev, 64)) > 0)
+    while ((n = fRecCtl.fMidiIn->ReadEvents(ev, 64)) > 0)
         for (std::size_t i = 0; i < n; i++) {
-            Frame mf = fRecStart + (Frame)((double)(ev[i].timeUs - fMidiT0)
+            Frame mf = fRecCtl.fRecStart + (Frame)((double)(ev[i].timeUs - fRecCtl.fMidiT0)
                                            * 1e-6 * fProject->sampleRate);
-            if (mf < fRecStart) mf = fRecStart;
+            if (mf < fRecCtl.fRecStart) mf = fRecCtl.fRecStart;
             FeedMidiEvent(ev[i], mf);
         }
     // Close every armed track's take. Each holds only the events its own route
     // accepted, so two keyboards produce two different regions.
     std::map<TrackId, MidiClip> takes;
-    for (TrackId id : fMidiRecTracks)
-        takes[id] = fMidiRecs[id].End(endFrame);
-    fMidiRecs.clear();
+    for (TrackId id : fRecCtl.fMidiRecTracks)
+        takes[id] = fRecCtl.fMidiRecs[id].End(endFrame);
+    fRecCtl.fMidiRecs.clear();
     if (fTransportCtl.fEngine) {
         fTransportCtl.fEngine->SetLiveMidi(nullptr);            // stop monitoring this source
         // Wait out any in-flight RT deref. If quiescence can't be confirmed,
@@ -1879,17 +1879,17 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
         if (!fTransportCtl.fEngine->QuiesceMonitorInput())
             fTransportCtl.fEngine->Stop();
     }
-    fMidiIn.reset();   // disconnect + unregister the consumer (now UAF-safe)
+    fRecCtl.fMidiIn.reset();   // disconnect + unregister the consumer (now UAF-safe)
 
     std::vector<TrackId> targets;
-    targets.swap(fMidiRecTracks);
+    targets.swap(fRecCtl.fMidiRecTracks);
 
     // Each target drops only what IT captured. A track whose keyboard stayed
     // silent gets no clip, even while another track was recording.
     bool any = false;
     const Transport& tr = fProject->transport;
     const bool loopTakes =
-        fLoopRecord && tr.loopEnabled && tr.loopEnd > tr.loopStart;
+        fRecCtl.fLoopRecord && tr.loopEnabled && tr.loopEnd > tr.loopStart;
 
     for (TrackId target : targets) {
         const auto it = takes.find(target);
@@ -1901,7 +1901,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
 
         // Loop-record: split this track's linear take into one region per pass
         // and stack them as a take group (last non-empty pass active), the MIDI
-        // mirror of the audio LoopTakes path. fLoopRecord is still set here —
+        // mirror of the audio LoopTakes path. fRecCtl.fLoopRecord is still set here —
         // StopRecording resets it only after this returns.
         if (loopTakes) {
             const Frame loopLen = tr.loopEnd - tr.loopStart;
@@ -1915,7 +1915,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
             // passes, each seeded with the value in force when it began.
             const std::vector<std::vector<MidiClipEvent>> evPasses =
                 SplitMidiLoopEvents(take.events, loopLen, (int)passes.size());
-            const int group = ++fTakeGroup;
+            const int group = ++fRecCtl.fTakeGroup;
             auto macro = std::make_unique<MacroCommand>("Loop MIDI Takes");
             for (size_t k = 0; k < passes.size(); k++) {
                 if (passes[k].empty()) continue;   // no silent stacked take
@@ -2116,7 +2116,7 @@ void MainWindow::StopMidiMonitor() {
         fTransportCtl.fEngine->Stop();
         fTransportCtl.fEngine.reset();
     }
-    fMidiIn.reset();
+    fRecCtl.fMidiIn.reset();
     fTransportCtl.fMonitoring = false;
     UpdatePulse();
 }
@@ -2127,7 +2127,7 @@ void MainWindow::StopMidiMonitor() {
 // record. Rebuilt on every change (cheap) to pick up new arming / inputs.
 void MainWindow::UpdateMidiMonitor() {
     StopMidiMonitor();
-    if (fTransportCtl.fPlaying || fRecMode) return;   // playback / record own the engine + input
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode) return;   // playback / record own the engine + input
 
     std::vector<TrackId> armed;   // MIDI tracks to monitor: armed OR input-monitor
     for (const Track& t : fProject->Tracks())
@@ -2137,8 +2137,8 @@ void MainWindow::UpdateMidiMonitor() {
     if (armed.empty()) return;
 
     // Open a consumer and connect each armed track's endpoint by name.
-    fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
-    if (fMidiIn->Register() != B_OK) { fMidiIn.reset(); return; }
+    fRecCtl.fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
+    if (fRecCtl.fMidiIn->Register() != B_OK) { fRecCtl.fMidiIn.reset(); return; }
     const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
     std::set<int32> connected;   // dedupe: two armed tracks may share an endpoint
     for (TrackId id : armed) {
@@ -2146,7 +2146,7 @@ void MainWindow::UpdateMidiMonitor() {
         if (!t) continue;
         for (const MidiEndpointInfo& e : eps)
             if (e.isProducer && e.name == t->input.name) {
-                if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
+                if (connected.insert(e.id).second) fRecCtl.fMidiIn->ConnectFrom(e.id);
                 break;
             }
     }
@@ -2167,13 +2167,13 @@ void MainWindow::UpdateMidiMonitor() {
                         "The audio device could not be opened, so input "
                         "monitoring is off.");
         fTransportCtl.fEngine.reset();
-        fMidiIn.reset();
+        fRecCtl.fMidiIn.reset();
         return;
     }
     ResolveMidiRoutes(eps);   // demux: each track hears only its own endpoint
     MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
-    while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
-    fTransportCtl.fEngine->SetLiveMidi(fMidiIn->MonitorInput());
+    while (fRecCtl.fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
+    fTransportCtl.fEngine->SetLiveMidi(fRecCtl.fMidiIn->MonitorInput());
     fTransportCtl.fEngine->Start();
     ReapplyFxWatches();   // brand-new engine: the watches live in the old one
     fTransportCtl.fMonitoring = true;
@@ -2181,23 +2181,23 @@ void MainWindow::UpdateMidiMonitor() {
 }
 
 void MainWindow::StartRecording() {
-    if (fRecMode || (fRecorder && fRecorder->IsRecording()))
+    if (fRecCtl.fRecMode || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording()))
         return;
     if (fTransportCtl.fPlaying) fTransportCtl.StopPlayback(false);   // don't spin up a monitor we replace
     StopMidiMonitor();   // the record engine takes over monitoring
 
     // Record onto every armed audio track (one input take, dropped on each),
     // and capture live MIDI onto every armed MIDI track that has a MIDI input.
-    fRecTracks.clear();
-    fMidiRecTracks.clear();
+    fRecCtl.fRecTracks.clear();
+    fRecCtl.fMidiRecTracks.clear();
     for (const Track& t : fProject->Tracks()) {
         if (!t.armed) continue;
         if (t.type == TrackType::Audio)
-            fRecTracks.push_back(t.id);
+            fRecCtl.fRecTracks.push_back(t.id);
         else if (t.type == TrackType::Midi && t.input.kind == InputSource::kMidi)
-            fMidiRecTracks.push_back(t.id);
+            fRecCtl.fMidiRecTracks.push_back(t.id);
     }
-    if (fRecTracks.empty() && fMidiRecTracks.empty()) {
+    if (fRecCtl.fRecTracks.empty() && fRecCtl.fMidiRecTracks.empty()) {
         std::fprintf(stderr, "MainWindow: arm a track (R) before recording "
                              "(MIDI tracks also need an input: right-click Arm)\n");
         return;
@@ -2206,51 +2206,51 @@ void MainWindow::StartRecording() {
     // Loop-record when a loop range is set: capture aligns to the loop start
     // and each pass becomes a stacked take.
     const Transport& tr = fProject->transport;
-    fLoopRecord = tr.loopEnabled && tr.loopEnd > tr.loopStart;
+    fRecCtl.fLoopRecord = tr.loopEnabled && tr.loopEnd > tr.loopStart;
     // What the device costs, in frames: the capture arrives this many frames
     // after the timeline frame it belongs to, and every take path below slides
     // it back by that much. Asked here, once per take, because the device (and
     // so the number) can change between them; 0 when the roster cannot answer,
     // which degrades to no compensation rather than to a wrong slide.
-    fRoundTripFrames = DeviceRoundTripFrames(fProject->sampleRate);
+    fRecCtl.fRoundTripFrames = DeviceRoundTripFrames(fProject->sampleRate);
 
     // Record point = loop start (loop-record) or the playhead. A count-in plays
     // the engine (existing tracks + click) for N bars leading up to it.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
-    fRecPoint = fLoopRecord ? tr.loopStart : fProject->transport.playhead;
-    const Frame countIn = CountInFrames(fProject->tempoMap, fRecPoint,
-                                        fCountInBars);
-    const Frame engineStart = (fRecPoint > countIn) ? fRecPoint - countIn : 0;
+    fRecCtl.fRecPoint = fRecCtl.fLoopRecord ? tr.loopStart : fProject->transport.playhead;
+    const Frame countIn = CountInFrames(fProject->tempoMap, fRecCtl.fRecPoint,
+                                        fRecCtl.fCountInBars);
+    const Frame engineStart = (fRecCtl.fRecPoint > countIn) ? fRecCtl.fRecPoint - countIn : 0;
 
     if (!fTransportCtl.StartRecordEngine(engineStart)) {
         std::fprintf(stderr, "MainWindow: record engine failed to start\n");
         return;
     }
-    fRecMode = true;
+    fRecCtl.fRecMode = true;
     if (fTransport) fTransport->SetRecording(true);
-    fCapturePending = (countIn > 0);
-    if (!fCapturePending)
+    fRecCtl.fCapturePending = (countIn > 0);
+    if (!fRecCtl.fCapturePending)
         StartCapture();         // no count-in: capture immediately
     UpdatePulse();
 }
 
 void MainWindow::StopRecording() {
-    if (!fRecMode)
+    if (!fRecCtl.fRecMode)
         return;
 
     // Take end = the playhead now, before the engine stops (MIDI needs it to
     // close held notes at the take boundary).
-    const Frame endPh = fTransportCtl.fEngine ? fTransportCtl.fEngine->Playhead() : fRecStart;
-    const bool captured = fRecorder && fRecorder->IsRecording();
+    const Frame endPh = fTransportCtl.fEngine ? fTransportCtl.fEngine->Playhead() : fRecCtl.fRecStart;
+    const bool captured = fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording();
     int64_t frames = 0;
     double  recRate = fProject->sampleRate;
     if (captured) {
-        fRecorder->Stop();
-        frames  = fRecorder->FramesWritten();
-        recRate = fRecorder->SampleRate();
+        fRecCtl.fRecorder->Stop();
+        frames  = fRecCtl.fRecorder->FramesWritten();
+        recRate = fRecCtl.fRecorder->SampleRate();
     }
-    const std::string path = fTakePath;   // the file StartCapture opened
-    std::vector<TrackId> targets = fRecTracks;
+    const std::string path = fRecCtl.fTakePath;   // the file StartCapture opened
+    std::vector<TrackId> targets = fRecCtl.fRecTracks;
 
     // Stop the overdub engine + live REC region, end the poll. Detach the
     // monitor source before the recorder is freed so the RT callback (already
@@ -2260,11 +2260,11 @@ void MainWindow::StopRecording() {
         fTransportCtl.fEngine->SetMonitorSource(nullptr);
         fTransportCtl.fEngine->Stop();
     }
-    fRecMode = false;
+    fRecCtl.fRecMode = false;
     if (fTransport) fTransport->SetRecording(false);
-    fCapturePending = false;
+    fRecCtl.fCapturePending = false;
     fTimeline->SetRecording(false, 0, 0);
-    fRecTracks.clear();
+    fRecCtl.fRecTracks.clear();
     UpdatePulse();
     fMeter->SetLevels(0.0f, 0.0f);
 
@@ -2277,8 +2277,8 @@ void MainWindow::StopRecording() {
     UpdateMidiMonitor();
 
     if (!captured || frames <= 0 || targets.empty()) {
-        if (fRecorder) std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
-        fRecorder.reset();
+        if (fRecCtl.fRecorder) std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
+        fRecCtl.fRecorder.reset();
         return;
     }
 
@@ -2301,16 +2301,16 @@ void MainWindow::StopRecording() {
 
     // Loop-record: split the linear capture into one take per loop pass and
     // stack them as a take group on each armed track (last pass active).
-    if (fLoopRecord) {
-        // The capture's first `fRoundTripFrames` frames belong to the pass
+    if (fRecCtl.fLoopRecord) {
+        // The capture's first `fRecCtl.fRoundTripFrames` frames belong to the pass
         // BEFORE the loop; dropping them is what makes each take start where
         // the loop does.
         const std::vector<TakeRegion> takes =
-            LoopTakes(tr.loopStart, tr.loopEnd, captureLen, fRoundTripFrames);
-        fLoopRecord = false;
-        if (takes.empty()) { fRecorder.reset(); return; }
+            LoopTakes(tr.loopStart, tr.loopEnd, captureLen, fRecCtl.fRoundTripFrames);
+        fRecCtl.fLoopRecord = false;
+        if (takes.empty()) { fRecCtl.fRecorder.reset(); return; }
         for (TrackId target : targets) {
-            const int group = ++fTakeGroup;
+            const int group = ++fRecCtl.fTakeGroup;
             auto macro = std::make_unique<MacroCommand>("Loop Takes");
             for (size_t k = 0; k < takes.size(); k++) {
                 Clip clip;
@@ -2324,7 +2324,7 @@ void MainWindow::StopRecording() {
             }
             fStack->Execute(std::move(macro), *fProject);
         }
-        fRecorder.reset();
+        fRecCtl.fRecorder.reset();
         fTimeline->ZoomToFit();   // show the whole take after recording
         return;
     }
@@ -2335,20 +2335,20 @@ void MainWindow::StopRecording() {
     // as before (its compensation is a follow-up alongside loop-record).
     TakeRegion region;
     if (tr.punchEnabled) {
-        region.startFrame = fRecStart;
+        region.startFrame = fRecCtl.fRecStart;
         region.sourceOffset = 0;
         region.lengthFrames = captureLen;
         // The capture's own origin is the record start slid earlier by the
-        // round trip: frame i of the file IS timeline frame (fRecStart -
+        // round trip: frame i of the file IS timeline frame (fRecCtl.fRecStart -
         // rtFrames) + i, so the punch is intersected against that.
-        if (!PunchedTake(fRecStart - fRoundTripFrames, captureLen,
+        if (!PunchedTake(fRecCtl.fRecStart - fRecCtl.fRoundTripFrames, captureLen,
                          tr.punchIn, tr.punchOut, &region)) {
             std::fprintf(stderr, "MainWindow: take outside punch range, discarded\n");
-            fRecorder.reset();
+            fRecCtl.fRecorder.reset();
             return;
         }
     } else {
-        region = CompensateRoundTrip(fRecStart, captureLen, fRoundTripFrames);
+        region = CompensateRoundTrip(fRecCtl.fRecStart, captureLen, fRecCtl.fRoundTripFrames);
     }
 
     for (TrackId target : targets) {
@@ -2360,7 +2360,7 @@ void MainWindow::StopRecording() {
         fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fProject);
     }
 
-    fRecorder.reset();
+    fRecCtl.fRecorder.reset();
     fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
@@ -2386,8 +2386,8 @@ bool MainWindow::SaveTo(const char* path) {
                     "still here.");
         return false;
     }
-    fTakeDir = DirOfPath(path);   // new takes land beside the project
-    fLastDir = fTakeDir;
+    fRecCtl.fTakeDir = DirOfPath(path);   // new takes land beside the project
+    fLastDir = fRecCtl.fTakeDir;
     // The document records it: path, clean, recovery copy done, recent list.
     fDoc.NoteSaved(path);
     RebuildRecentMenu();
@@ -2460,11 +2460,11 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     fStack->Clear();          // history from the previous project is invalid
     if (asRecovery) {
         fDoc.NoteRecovered(); // unsaved, nameless work (see ProjectDocument)
-        fTakeDir.clear();
+        fRecCtl.fTakeDir.clear();
     } else {
         fDoc.NoteLoaded(path);
-        fTakeDir = DirOfPath(path);
-        fLastDir = fTakeDir;
+        fRecCtl.fTakeDir = DirOfPath(path);
+        fLastDir = fRecCtl.fTakeDir;
         RebuildRecentMenu();
     }
     UpdateTitle();
@@ -2588,8 +2588,8 @@ void MainWindow::NewProject() {
     fProject->tempoMap.sampleRate = rate;
     fStack->Clear();
     fDoc.NoteNew();               // no path, and nothing to lose
-    fTakeDir.clear();
-    fRecTracks.clear();           // arms addressed the old project's tracks
+    fRecCtl.fTakeDir.clear();
+    fRecCtl.fRecTracks.clear();           // arms addressed the old project's tracks
     UpdateTitle();
     RebuildPeaks();
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
@@ -2823,7 +2823,7 @@ void MainWindow::RebuildPeaks() {
 std::string MainWindow::RenderPath(const std::string& tag) const {
     // First free <dir>/<tag>-N.wav: a render must not overwrite one a clip of
     // the reopened project still references (same hazard as the takes).
-    return NextFreeWavPath(fTakeDir.empty() ? std::string(".") : fTakeDir, tag);
+    return NextFreeWavPath(fRecCtl.fTakeDir.empty() ? std::string(".") : fRecCtl.fTakeDir, tag);
 }
 
 int64_t MainWindow::DecodeClipRegion(const Clip& c, std::vector<float>& out,
@@ -3153,7 +3153,7 @@ void MainWindow::LoadSettings() {
 
     AppSettings s;
     s.bufferFrames = (int)fTransportCtl.fBufferFrames;
-    s.countInBars  = fCountInBars;
+    s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
     s.exportBitDepth  = fExportChoices.bitDepth;
@@ -3168,7 +3168,7 @@ void MainWindow::LoadSettings() {
     if (!s.Deserialize(text)) return;
 
     fTransportCtl.fBufferFrames = (size_t)s.bufferFrames;
-    fCountInBars  = s.countInBars;
+    fRecCtl.fCountInBars  = s.countInBars;
     fTransportCtl.fMetronome    = s.metronome;
     fTransportCtl.fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
@@ -3186,7 +3186,7 @@ void MainWindow::LoadSettings() {
     fExportChoices.range      = s.exportRange;
     fExportChoices.stems      = s.exportStems != 0;
     MarkRadio(fBufMenu, "frames", (int32)fTransportCtl.fBufferFrames);
-    MarkRadio(fCountInMenu, "bars", fCountInBars);
+    MarkRadio(fCountInMenu, "bars", fRecCtl.fCountInBars);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
     if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
     // Restore the window frame (clamped to something sane).
@@ -3199,7 +3199,7 @@ void MainWindow::LoadSettings() {
 void MainWindow::SaveSettings() {
     AppSettings s;
     s.bufferFrames = (int)fTransportCtl.fBufferFrames;
-    s.countInBars  = fCountInBars;
+    s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
     s.lastDir      = fLastDir;

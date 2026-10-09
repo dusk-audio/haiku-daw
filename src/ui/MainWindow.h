@@ -19,6 +19,7 @@
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
+#include "RecordController.h"         // the record state + the recorder
 #include "TransportController.h"      // the engine + transport state
 
 #include <Messenger.h>
@@ -193,24 +194,18 @@ private:
     BSlider*        fMaster;
     BTextControl*   fTempo;
 
-    // Declared recorder-first so the engine (which RT-references the recorder as
-    // its monitor source) is destroyed FIRST — members die in reverse order, so
-    // the RT thread is stopped before the recorder it may read is freed.
-    std::unique_ptr<Recorder> fRecorder;  // active while recording
+    // The record state (and the recorder) lives in RecordController, declared
+    // BEFORE the transport controller: the engine must be destroyed first.
+    RecordController           fRecCtl;
     TransportController       fTransportCtl;  // the engine + transport state (M1.1)
     // MIDI capture: a consumer connected to the armed MIDI tracks' input
     // endpoints, feeding a note-pairing recorder. Independent of the audio path.
-    std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
     // One recorder per armed MIDI track, not one shared: inputs are demuxed, so
     // each track pairs only the events its own route accepts. With a single
     // keyboard every track's route is permissive and they all capture the same
     // stream, exactly as before.
-    std::map<TrackId, MidiRecorder> fMidiRecs;
-    std::vector<TrackId>      fMidiRecTracks; // armed MIDI targets for the take
     // Endpoint id + channel each MIDI track listens to, resolved from the
     // track's endpoint NAME when the input is opened (see ResolveMidiRoutes).
-    std::vector<MidiInputRoute> fMidiRoutes;
-    bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     // The dirty marker has to follow edits made anywhere (the timeline and the
@@ -264,30 +259,15 @@ private:
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
     BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
-    bool                      fRecMode = false;      // engine running for a take
-    bool                      fCapturePending = false; // in count-in, not yet capturing
-    bool                      fLoopRecord = false;   // capturing stacked takes over a loop
-    int                       fTakeGroup = 0;        // running take-group id
-    int                       fCountInBars = 0;      // metronome bars before capture
     BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
     BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
     BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
-    std::vector<TrackId>      fRecTracks;   // all armed targets for the take
-    Frame                     fRecStart = 0; // frame the capture (clip) begins at
-    Frame                     fRecPoint = 0; // record start (== fRecStart)
-    // Record round-trip latency (output + input path), in project-rate frames.
-    // A captured take is this many frames late vs the timeline; the take is slid
-    // earlier by it (RecordPlan::CompensateRoundTrip). 0 = no compensation until
-    // the device latency is queried (Media Kit, on the target) into this field.
-    Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
     ProjectDocument           fDoc;          // the file, recovery copy, recent list
     std::vector<RelinkEntry>  fRelinkQueue;     // Locate… walk (newPath filled as picked)
     BFilePanel*               fRelinkPanel = nullptr;
     BMenu*                    fRecentMenu = nullptr;
     std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
-    std::string               fTakeDir;      // where recorded takes are written
-    std::string               fTakePath;     // full path of the current take
 
     // Off-looper export (R1): the model is snapshotted on the looper — after
     // StopPlayback and the editor flush, in that order — and the worker renders
