@@ -1,0 +1,19 @@
+/* The app's resource: what Deskbar, Tracker and the package manager read off
+ * the binary. Generated from CMakeLists.txt, so the signature and the version
+ * here cannot drift from the ones the code uses (Version.h) or the recipe
+ * packages.
+ *
+ * No icon yet: a vector_icon block belongs here once there is one, and until
+ * then the app shows the generic one.
+ */
+resource app_signature "@DAW_APP_SIGNATURE@";
+
+resource app_version {
+	major = @PROJECT_VERSION_MAJOR@,
+	middle = @PROJECT_VERSION_MINOR@,
+	minor = @PROJECT_VERSION_PATCH@,
+	variety = B_APPV_FINAL,
+	internal = 0,
+	short_info = "@PROJECT_NAME@ @PROJECT_VERSION@",
+	long_info  = "Haiku DAW @PROJECT_VERSION@ - a native digital audio workstation for Haiku"
+};

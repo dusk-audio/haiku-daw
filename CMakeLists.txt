@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
-project(haiku_daw CXX)
+project(haiku_daw VERSION 1.0.0 LANGUAGES CXX)
+
+# The version lives in one place (here) and reaches the code through a
+# generated header: the About box, --version and the packaging recipe all read
+# the same numbers, so they cannot drift.
+configure_file(cmake/Version.h.in ${CMAKE_BINARY_DIR}/generated/Version.h @ONLY)
+# The same signature, for the resource the binary carries.
+set(DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW")
+configure_file(haiku-daw.rdef.in ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef @ONLY)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +69,7 @@ add_library(daw_model
     src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
 )
 target_include_directories(daw_model PUBLIC src)
+target_include_directories(daw_model PUBLIC ${CMAKE_BINARY_DIR}/generated)
 
 # --- LV2 plugin hosting (lilv) ----------------------------------------
 # On by default, but it DEGRADES rather than fails: with lilv absent no LV2 code
@@ -506,6 +515,23 @@ if(HAIKU)
 
     add_executable(daw src/main.cpp)
     target_link_libraries(daw PRIVATE daw_ui)
+
+    # Attach the app's resource (signature + version) to the binary: Deskbar
+    # and the package manager read the version off the executable, and Tracker
+    # uses the signature to know it is an application. rc/xres ship with the
+    # system; a build without them is left alone rather than broken.
+    find_program(DAW_RC rc)
+    find_program(DAW_XRES xres)
+    if(DAW_RC AND DAW_XRES)
+        add_custom_command(TARGET daw POST_BUILD
+            COMMAND ${DAW_RC} -o ${CMAKE_BINARY_DIR}/generated/daw.rsrc
+                    ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef
+            COMMAND ${DAW_XRES} -o $<TARGET_FILE:daw>
+                    ${CMAKE_BINARY_DIR}/generated/daw.rsrc
+            COMMENT "Attaching the app resource (signature, version)")
+    else()
+        message(STATUS "rc/xres not found - the binary gets no app resource")
+    endif()
 
     # Functional tests for the UI: a BApplication, the real windows, and
     # messages posted the way the widgets post them. Needs a reachable

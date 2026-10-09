@@ -51,6 +51,7 @@ class MeterView;
 // do the functional tests (tests/ui_functional_tests.cpp), which drive the real
 // window by posting exactly what a widget posts. The rest of the ids stay
 // private to MainWindow.cpp.
+constexpr uint32 MSG_ABOUT            = 'abot';   // Help > About
 constexpr uint32 MSG_PULSE            = 'puls';   // the 60 Hz BMessageRunner
 constexpr uint32 MSG_NEW_AUDIO        = 'naud';
 constexpr uint32 MSG_NEW_MIDI         = 'nmid';

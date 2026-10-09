@@ -17,6 +17,7 @@
 #include "../src/model/Project.h"
 #include "../src/model/Command.h"
 #include "../src/engine/WavSource.h"   // reading a bounce back
+#include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
 
@@ -527,6 +528,22 @@ static void TestDeviceLatency() {
     }
 }
 
+// --- 6. R4: the About box knows the version --------------------------------
+
+// Help > About opens a window, and it is the app's own version (the generated
+// header), not a hand-typed string that can drift from CMakeLists.
+static void TestAboutBox(MainWindow* win) {
+    std::printf("test_about_box\n");
+    CHECK(WaitQuiet());
+    const int32 before = VisibleWindows();
+    win->PostMessage(MSG_ABOUT);
+    CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    HideOtherWindows(win);   // the alert, as its OK button does
+    std::printf("  version: %s\n", DAW_VERSION_STRING);
+    CHECK(std::strlen(DAW_VERSION_STRING) > 0);
+    CHECK(std::strcmp(DAW_VERSION_STRING, "1.0.0") == 0);
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -552,6 +569,7 @@ static int32 TestThread(void*) {
     TestExportCancel(win, project);
     TestExportStems(win, project);
     TestExportLoopRange(win, project);
+    TestAboutBox(win);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);

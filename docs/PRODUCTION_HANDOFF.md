@@ -17,12 +17,19 @@ trailer, conventional subjects); the VM checkout tracks it via the `git bundle`
 sync. Future commits still land on `master` only when Marc asks.
 
 ### Verification (all green)
+
+The counts below are from the time this document was written; the live ones are
+in each package's PR record (`docs/agent-prompts/0N-*-PR.md`) and in the
+status table (`docs/agent-prompts/README.md`). The commands are still the
+commands:
 ```
-cmake --build build && (cd build && ctest)          # 29/29 pass
-cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # ASan/UBSan clean
+cmake -S . -B build-host && cmake --build build-host && ctest --test-dir build-host
+cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # ASan/UBSan
 sh scripts/haiku_syntax_check.sh                    # 0 FAIL (engine/UI cross-compile)
-sh scripts/vm.sh test                               # VM on-target: 29/29 pass
+sh scripts/vm.sh test                               # builds + ctest on the VM
 ```
+The VM suite includes `ui_functional_tests`, which drives the real windows over
+SSH (see `docs/agent-prompts/09-ui-functional-tests.md`).
 Host + on-target tests cover the kit-free changes; the engine/UI changes are
 cross-compile-clean and build+test green on the VM, but the **audio-listening
 checks still need Marc at the VM** (see "What's next" item 1).
@@ -212,8 +219,10 @@ checks still need Marc at the VM** (see "What's next" item 1).
   our own WAV I/O. Compressed formats need a bundled/own decoder.
 - Kit-free code is host-tested (`ctest`); engine/UI needs `haiku_syntax_check.sh`
   then VM runtime. **Every P0/P1 fix ships a regression test.**
-- Commits: `marc@duskaudio.com`, conventional-commit subjects, **no AI trailer**,
-  no GitHub remote (git-pull loop to the VM).
+- Commits: `marc@duskaudio.com`, conventional-commit subjects, **no AI trailer**.
+  There IS a GitHub remote now (`dusk-audio/haiku-daw`, public since
+  2026-10-09); push branches, never force-push, and `scripts/vm.sh` moves a
+  branch to the VM (GitHub when pushed, a bundle when not).
 
 ## Adversarial tests — DONE
 Fuzz corpora for `WavSource` + `ProjectIO` (truncated/oversized/garbage → no

@@ -88,11 +88,11 @@ names and ranges. Do not conclude the mapping is broken.
 - **"cannot be compiled on this Linux host"** still true for `src/ui/`, but the
   Haiku VM now has `lilv`, `lilv_devel` and `lv2` installed, so it builds the LV2
   path too — you can verify the real thing there, not just the stubbed build.
-  `scripts/vm.sh` hardcodes `master` in its `git bundle create`, so to test a
-  branch bundle the ref explicitly:
-  `git bundle create /tmp/b.bundle <branch>` → `scp` → on the VM
-  `git fetch /tmp/b.bundle <branch> && git checkout --detach FETCH_HEAD`.
-  VM is `ssh -i ~/.ssh/haiku_vm user@192.168.122.232`, repo at `~/haiku-daw`.
+  **Superseded**: `scripts/vm.sh` now syncs the host's CURRENT branch (or
+  `VM_REF=<ref>`) by itself — a pushed commit is fetched by the VM from GitHub,
+  an unpushed one goes over in a bundle — so the manual bundle/scp recipe below
+  the line is in the git history, not needed. VM is
+  `ssh -i ~/.ssh/haiku_vm user@192.168.122.48`, repo at `~/haiku-daw`.
 - `KnobsForDesc` in `EffectsWindow.cpp` currently returns **no knobs** for
   `EffectType::Lv2` on purpose (falling through would draw the Biquad row and
   write Hz-scale values into whatever ports sit at slots 1 and 2). Replacing that
