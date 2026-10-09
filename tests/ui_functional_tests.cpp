@@ -788,16 +788,16 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 0));       // Cancel
     CHECK(WaitFor([&] { return !AlertUp("Unsaved Changes"); }));
     CHECK(WaitFor([&] { return VisibleWindows() == 1; }));
-    {
-        bool dirty = false, starred = false;
-        if (lockWin()) {
-            dirty   = stack.IsDirty();
-            starred = WindowTitle(win)[0] == '*';
-            win->Unlock();
-        }
-        CHECK(dirty);
-        CHECK(starred);
-    }
+    bool dirty = false, starred = false;
+    CHECK(WaitFor([&] {                          // retried: see the lock note above
+        if (!lockWin()) return false;
+        dirty   = stack.IsDirty();
+        starred = WindowTitle(win)[0] == '*';
+        win->Unlock();
+        return true;
+    }));
+    CHECK(dirty);
+    CHECK(starred);
 
     // Quit -> Save, with no path yet: the save panel opens and the window
     // does NOT quit (the action is refused until a path exists).
@@ -806,8 +806,14 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 2));       // Save
     CHECK(WaitFor([&] { return !AlertUp("Unsaved Changes"); }));
     CHECK(WaitFor([&] { return VisibleWindows() >= 2; }));   // the panel
-    CHECK(lockWin());                             // still alive: no quit
-    win->Unlock();
+    // Still alive: no quit. Retried, not a single shot -- the window thread
+    // may be busy for a moment (an autosave tick), and one slow second is not
+    // the failure this is looking for.
+    CHECK(WaitFor([&] {
+        if (!lockWin()) return false;
+        win->Unlock();
+        return true;
+    }));
     HideOtherWindows(win);                        // the panel, as Cancel does
     CHECK(WaitQuiet());
 
@@ -843,11 +849,14 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
         win->Unlock();
         return ok;
     }));
-    {
-        bool clean = false;
-        if (lockWin()) { clean = !stack.IsDirty(); win->Unlock(); }
-        CHECK(clean);
-    }
+    bool clean = false;
+    CHECK(WaitFor([&] {                          // retried: see the lock note above
+        if (!lockWin()) return false;
+        clean = !stack.IsDirty();
+        win->Unlock();
+        return true;
+    }));
+    CHECK(clean);
     std::remove(openPath);
 }
 
