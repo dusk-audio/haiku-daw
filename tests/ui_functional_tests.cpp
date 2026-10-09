@@ -269,6 +269,25 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     CHECK(WaitFor([&] {
         if (!notes(&n) || n.size() != 2) return false;
         return n[0].startFrame == 0 && n[1].startFrame == 6000;
+    }, 3000000));
+    // Diagnostics for the key path: what the model holds, and whether the view
+    // would quantize at all if asked directly.
+    {
+        std::vector<MidiNote> d;
+        notes(&d);
+        std::printf("  after key: %zu notes", d.size());
+        for (const MidiNote& m : d)
+            std::printf(" (p%d s%lld v%d)", m.pitch, (long long)m.startFrame,
+                        m.velocity);
+        std::printf("  undo=%s\n", stack.UndoName().c_str());
+    }
+    roll->Lock();
+    rv->RunMidiOp(MidiOp::Quantize);   // the path the menu item calls
+    roll->Unlock();
+    std::vector<MidiNote> d2;
+    CHECK(WaitFor([&] {
+        if (!notes(&d2) || d2.size() != 2) return false;
+        return d2[0].startFrame == 0 && d2[1].startFrame == 6000;
     }));
     CHECK(stack.UndoName() == "Quantize");
 
