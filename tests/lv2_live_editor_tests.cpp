@@ -104,6 +104,20 @@ int main() {
     const int nParams = (int)pick->params.size();
     float vals[Engine::kWatchMax];
 
+    // Which parameter to move. A continuous one, so a mid-range value survives
+    // clamping: real plugins start with a toggle or an enumeration (`Enabled`
+    // is port 0 on every one of them here), where "the middle of the range"
+    // rounds straight back to where it started and publishes nothing -- correct
+    // behaviour, and a useless thing to assert on.
+    int moveSlot = -1;
+    for (int i = 0; i < nParams; i++) {
+        const Lv2ParamInfo& pi = pick->params[(size_t)i];
+        if (!pi.isInteger && pi.mx > pi.mn) { moveSlot = i; break; }
+    }
+    if (moveSlot < 0)
+        std::printf("lv2_live_editor_tests: no continuous parameter; the "
+                    "value assertions are limited to what is published\n");
+
     // --- nothing is published without a watch -------------------------------
     {
         uint32_t gen = 123;
@@ -139,30 +153,34 @@ int main() {
         // the change survives clamping -- a port whose default sits on its own
         // maximum would clamp a nudge straight back and publish nothing, which
         // is correct behaviour and a useless thing to assert on.
-        const float mid = 0.5f * (pick->params[0].mn + pick->params[0].mx);
-        const float want = mid;
-        e.SetFxParamLive(tid, false, 0, 0, want);
-        e.PublishFxWatchNow();
-        uint32_t gen2 = 0;
-        CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, &gen2) == n);
-        CHECK(gen2 != gen0);
-        const float got = vals[0];
-        CHECK(got >= pick->params[0].mn && got <= pick->params[0].mx);
-        if (pick->params[0].mx > pick->params[0].mn)
-            CHECK(got == want);        // a mid-range value, published as asked
+        const Lv2ParamInfo& pi = pick->params[(size_t)(moveSlot > 0 ? moveSlot : 0)];
+        if (moveSlot > 0) {
+            const float want = 0.5f * (pi.mn + pi.mx);
+            e.SetFxParamLive(tid, false, 0, moveSlot, want);
+            e.PublishFxWatchNow();
+            uint32_t gen2 = 0;
+            CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, &gen2) == n);
+            CHECK(gen2 != gen0);                  // a change IS a publish
+            CHECK(vals[(size_t)moveSlot] == want);   // published as asked
 
-        // Out of range is clamped HERE too, because the value that matters is
-        // the one the plugin reads, not the one the caller asked for.
-        e.SetFxParamLive(tid, false, 0, 0, pick->params[0].mx + 1000.0f);
-        e.PublishFxWatchNow();
-        CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, nullptr) == n);
-        CHECK(vals[0] == pick->params[0].mx);
+            // Out of range is clamped HERE too, because the value that matters
+            // is the one the plugin reads, not the one the caller asked for.
+            e.SetFxParamLive(tid, false, 0, moveSlot, pi.mx + 1000.0f);
+            e.PublishFxWatchNow();
+            CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, nullptr) == n);
+            CHECK(vals[(size_t)moveSlot] == pi.mx);
 
-        // A slot the insert does not have cannot corrupt a neighbour.
-        e.SetFxParamLive(tid, false, 0, nParams + 5, 0.5f);
-        e.PublishFxWatchNow();
-        CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, nullptr) == n);
-        CHECK(vals[0] == pick->params[0].mx);
+            // A slot the insert does not have cannot corrupt a neighbour.
+            e.SetFxParamLive(tid, false, 0, nParams + 5, pi.mn);
+            e.PublishFxWatchNow();
+            CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, nullptr) == n);
+            CHECK(vals[(size_t)moveSlot] == pi.mx);
+        } else {
+            // Still exercise the no-such-slot path on whatever port 0 is.
+            e.SetFxParamLive(tid, false, 0, nParams + 5, 0.0f);
+            e.PublishFxWatchNow();
+            CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, nullptr) == n);
+        }
     }
 
     // --- several watches, and stopping one ----------------------------------

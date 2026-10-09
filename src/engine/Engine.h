@@ -113,6 +113,11 @@ public:
     Engine() {
         for (int i = 0; i < kMeterFxMax; i++)
             fMeterGr[i].store(0.0f, std::memory_order_relaxed);
+        // A watch slot that has published nothing yet -- which is what
+        // WatchedFxParams reports as "0 values, generation untouched" rather
+        // than "0 values, generation 0".
+        for (int s = 0; s < kWatchSlots; s++)
+            fWatchN[s].store(-1, std::memory_order_relaxed);
     }
     ~Engine();
 
