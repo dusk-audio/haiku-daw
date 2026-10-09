@@ -34,6 +34,7 @@
 #include "../model/SmfIO.h"
 #include "../model/MidiOps.h"
 #include "../model/RecordPlan.h"
+#include "../model/TakeNames.h"
 
 #include <Alert.h>
 #include <Application.h>
@@ -1722,15 +1723,15 @@ void MainWindow::StartCapture() {
     if (!fRecTracks.empty()) {
         // Write takes into the project's directory (a self-contained bundle)
         // when the project has been saved; otherwise the working directory.
-        char name[64];
-        std::snprintf(name, sizeof(name), "take-%d.wav", ++fTakeCounter);
-        fTakePath = fTakeDir.empty() ? std::string(name)
-                                     : fTakeDir + "/" + name;
+        // The name is the first free take-N.wav THERE -- not a session counter,
+        // which restarts at 0 after reopening a project and would overwrite the
+        // takes that project still uses (the Recorder refuses to clobber, but
+        // scanning means the take lands instead of failing).
+        fTakePath = NextFreeWavPath(fTakeDir, "take");
         fRecorder.reset(new Recorder());
         if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
             std::fprintf(stderr, "MainWindow: recording failed to start\n");
             fRecorder.reset();
-            --fTakeCounter;
         } else {
             // Wire input monitoring: the engine mixes the recorder's live input
             // (only if the input rate matches the output rate).
@@ -2645,10 +2646,9 @@ void MainWindow::RebuildPeaks() {
 // project) if known, else the working dir. Suffixed with a session counter so
 // repeated ops don't collide.
 std::string MainWindow::RenderPath(const std::string& tag) const {
-    std::string dir = fTakeDir.empty() ? std::string(".") : fTakeDir;
-    char name[64];
-    std::snprintf(name, sizeof(name), "/%s-%d.wav", tag.c_str(), fRenderSeq);
-    return dir + name;
+    // First free <dir>/<tag>-N.wav: a render must not overwrite one a clip of
+    // the reopened project still references (same hazard as the takes).
+    return NextFreeWavPath(fTakeDir.empty() ? std::string(".") : fTakeDir, tag);
 }
 
 int64_t MainWindow::DecodeClipRegion(const Clip& c, std::vector<float>& out,
@@ -2711,12 +2711,13 @@ void MainWindow::RegionReverse(TrackId track, ClipId clip) {
         pcm[i] = (int16_t)lround(s * 32767.0f);
     }
     WavWriter w;
-    if (!w.Open(path, (int)lround(rate), 2)
+    // Exclusive: the path is scanned-free, and if that ever raced, refusing
+    // beats overwriting a file a clip may reference.
+    if (!w.Open(path, (int)lround(rate), 2, /*exclusive*/ true)
         || !w.WriteInt16(pcm.data(), pcm.size()) || !w.Close()) {
         std::fprintf(stderr, "Reverse: cannot write %s\n", path.c_str());
         return;
     }
-    ++fRenderSeq;
 
     // Replace the clip with one pointing at the reversed file (fades swap so the
     // fade follows the now-reversed audio); same position, length, gain.
@@ -2934,7 +2935,6 @@ void MainWindow::FreezeTrack(TrackId track, bool freeze) {
         std::fprintf(stderr, "Freeze: render failed for track %ld\n", (long)track);
         return;
     }
-    ++fRenderSeq;
     WavSource src;
     if (!src.Open(path)) return;
     const double fileRate = src.FrameRate();

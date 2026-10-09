@@ -98,7 +98,11 @@ void Recorder::DiskLoop() {
 
     const int   ch   = fChannels.load();
     const int   rate = (int)(fRate.load() + 0.5f);
-    if (!fWriter.Open(fPath, rate, ch)) {
+    // Exclusive: a take must never truncate a file that already exists. The
+    // name is picked by scanning the take directory (NextFreeWavPath), and
+    // this is the backstop if two picks ever land on the same name -- refusing
+    // the take is recoverable; overwriting a take the project still uses is not.
+    if (!fWriter.Open(fPath, rate, ch, /*exclusive*/ true)) {
         fprintf(stderr, "Recorder: cannot open '%s'\n", fPath.c_str());
         return;
     }

@@ -35,8 +35,8 @@ file existed is in `git log` and `docs/ROADMAP.md`.
 - Plugin delay compensation, offline and in the engine.
 
 **Effects and plugins**
-- Ten built-in effects: EQ with spectrum, biquad filter, compressor, gate,
-  reverb, delay, saturator, stereo widener, look-ahead limiter, plus the
+- Nine built-in effects: EQ with spectrum, biquad filter, compressor, gate,
+  reverb, delay, saturator, stereo widener, look-ahead limiter — plus the
   native add-on ABI.
 - LV2 hosting: insert slots with bypass and wet/dry, a plugin browser, and the
   plugin's own editor when it ships one — driving the playing insert.

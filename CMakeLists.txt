@@ -117,6 +117,10 @@ add_executable(commandstack_tests tests/commandstack_tests.cpp)
 target_link_libraries(commandstack_tests PRIVATE daw_model)
 add_test(NAME commandstack_tests COMMAND commandstack_tests)
 
+add_executable(takenames_tests tests/takenames_tests.cpp)
+target_link_libraries(takenames_tests PRIVATE daw_model)
+add_test(NAME takenames_tests COMMAND takenames_tests)
+
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)

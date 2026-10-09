@@ -239,9 +239,13 @@ int main() {
         // first block is the one that publishes (the slot is marked unpublished
         // by SetFxWatch).
         snooze(200000);                      // 200 ms, ~ dozens of blocks
-        e.SetFxParamLive(tid, false, 0, moveSlot,
-                         0.25f * (pick->params[(size_t)moveSlot].mn
-                                  + pick->params[(size_t)moveSlot].mx));
+        // Only with a continuous parameter to move: with none, moveSlot is -1
+        // and indexing params[] with it would read out of bounds. The publish
+        // assertions below still run -- the write is what needs the guard.
+        if (moveSlot >= 0)
+            e.SetFxParamLive(tid, false, 0, moveSlot,
+                             0.25f * (pick->params[(size_t)moveSlot].mn
+                                      + pick->params[(size_t)moveSlot].mx));
         snooze(200000);
         uint32_t rtGen = 0;
         const int rtN = e.WatchedFxParams(0, vals, Engine::kWatchMax, &rtGen);

@@ -48,8 +48,8 @@ an SFZ/SF2 soundfont — is set in the instrument editor.
 
 - **Clips:** drag to move, drag an edge to trim, drag the top corners to set
   fades. Right-click for Copy / Delete / Split here / Normalize / Reverse /
-  Strip Silence / Clear Fades. Shift constrains, and overlapping clips
-  crossfade automatically, and **Shift** bypasses the grid for free placement.
+  Strip Silence / Clear Fades. Overlapping clips crossfade automatically, and
+  **Shift** bypasses the grid for free placement.
 - **Multi-select:** rubber-band or Cmd-click, then move/delete/duplicate as a
   group.
 - **Notes:** double-click a MIDI region to open the **piano roll**. Its tool
