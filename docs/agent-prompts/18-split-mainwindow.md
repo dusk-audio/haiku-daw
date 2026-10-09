@@ -33,6 +33,11 @@ of code — no behaviour changes — verified by the existing suites, above all
 
 ## Rules for the move
 
+- **A new .cpp must join `daw_ui`'s source list in CMakeLists.txt.** The
+  cross-compile syntax check builds one file standalone, so it will pass while
+  the link fails ("undefined reference") -- exactly what slice 2b hit on the
+  VM. Check the target's list with every new file.
+
 - **No behaviour changes.** Renames and moves only; where a piece of state
   needs a setter, name it after what happened (`NoteSaved`), not after the
   field.
