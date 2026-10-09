@@ -42,5 +42,5 @@ gates run).
 
 | Claim | State |
 | --- | --- |
-| The argv path end to end, again | The M0.6 VM checks (argv at launch, a roster `Launch` hand-off) were run against the OLD (working) form; re-run them against this one — `./build/daw /tmp/mini.dawproj` must log `daw: opening ...`. Worth doing before the hardware pass. |
+| The argv path end to end | **Re-verified on the VM**: `./build/daw /tmp/mini.dawproj` logs `daw: opening ...` with this form. The other M0.6 checks (the roster `Launch` hand-off) were run against the old form (argv at launch, a roster `Launch` hand-off) were run against the OLD (working) form; re-run them against this one — `./build/daw /tmp/mini.dawproj` must log `daw: opening ...`. Worth doing before the hardware pass. |
 | Tab navigation in the window | The fix restores BWindow's own handling; a person with a keyboard should Tab through the transport bar once (click list). |
