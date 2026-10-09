@@ -226,13 +226,55 @@ trusting the generation check (the same missing fence is in the pre-existing
 the claim that keeps one editor per insert now keys on the insert, not the
 plugin.
 
+### Second review (after the refactor)
+
+A second pass over the branch as it stood then found 15 items. The three that
+mattered, all fixed:
+
+- **A regression I introduced when extracting the UI-mode question.**
+  `Lv2Host::UiRequiresInstanceAccess` took the *first* UI of any type; the code
+  it replaced asked about the BeUI the window actually embeds. A bundle carrying
+  an X11UI that disagrees about `instance-access` would have been called a
+  control-port editor — no poll, controls driving nothing, and a title claiming
+  the opposite. It picks the BeUI now, and the fixture bundle grew a plugin with
+  two disagreeing UIs, named so the wrong one is first under any ordering lilv
+  might use, so the choice is pinned by a test rather than by luck.
+- **The one-editor-per-insert claim did not survive a rebind.** The claim is the
+  editor's address, and a reorder moved the address without moving the claim:
+  reopening the insert it had just moved to slipped past and opened a second
+  window on it, and closing either dropped the other's registration.
+- **An editor could be opened onto an ambiguous insert.** With two copies of one
+  plugin in a chain, nothing in the model can tell them apart, so a chain edit
+  left the editor driving the other copy. It now refuses to open rather than
+  open it wrong, and says so on stderr; the parameter list still edits by index.
+
+Plus: a muted or solo'd-out bus publishes its watched insert; the seqlock fence
+moved after the copy, where it actually orders the value loads; a duplicated
+slot in one `SetFxParamCommand` now undoes to the pre-command value; the engine
+is brought up to date *before* republishing, or a reorder with the transport
+stopped showed the old insert's values at the new index; export, stems, freeze
+and autosave flush pending editor gestures the way SaveTo does; an editor
+registered while every watch slot was taken claims one when it frees; the
+registration match goes through the tested `FxWatchFind` instead of a second
+copy of the rule; and with no engine yet (nothing has played) the pulse pushes
+the MODEL's values, so an editor is not left showing a value the project no
+longer holds.
+
+Two tests were called out as vacuous and are not any more: the "forced frame"
+block asserted a constant (now it covers `FxWatchFrameIsNew`, the push decision
+itself), and the VM engine test never started the engine — it does now, and
+deleting the RT-thread publish makes it fail. Its SKIPs exit 77 with
+`SKIP_RETURN_CODE` set, so "no plugin installed" or "no audio device" can no
+longer be reported as a pass.
+
 **Known, not fixed** (each judged smaller than its fix, and stated rather than
 buried):
 
 - The list is capped at `Engine::kWatchSlots` (4) editors following automation;
   past that an editor still works and still writes, it just stops following, and
-  says so once on stderr. `kWatchMax` (64 parameters) truncates the same way for
-  a plugin with more control inputs than that.
+  says so once on stderr. It does claim a slot as soon as one frees.
+  `kWatchMax` (64 parameters) truncates the same way for a plugin with more
+  control inputs than that.
 - `~Lv2UiWindow` joins the editor thread while the looper holds the window lock.
   A plugin whose `idle()` or `port_event()` blocks on that lock would hang the
   close. Inherited from the idle thread package 03 shipped (which Phase 0
@@ -278,7 +320,7 @@ precisely so that what remains manual is wiring rather than logic.
 | Fixture is installable and the DAW's own host scans, verifies, instantiates and processes it | `lv2_host_tests` on the VM: `4K EQ 2 stereo params=34`, 105 checks, 0 failures |
 | The mode split is real, not vacuous | `uimode` probe on the VM: Parameters → 0 required features; 4K EQ 2 → 5, including `instance-access` |
 | Phase 0 close-crash fix | clicked by the user (see above) |
-| Everything builds where it must | VM `build` 49/49, VM `build-off` 45/45, 0 warnings; host `build-host` 48/48 (the counts include the suites added here) |
+| Everything builds where it must | VM `build` 49/49, VM `build-off` 45/45, 0 warnings; host `build-host` 48/48 (the counts include the suites added here). Check the build's exit code, not only ctest: a failed build leaves the previous binaries in place and the suite still reports pass |
 | `SetFxParamCommand` touches only its slots, undoes exactly, honours the master flag, and refuses an index that addresses nothing | host tests, mutation-tested three ways (drop the old-value capture, restore the new value on Undo, ignore the master flag — each made the new assertions fail) |
 | `Lv2Effect::ControlValues` reports what actually took effect (clamped, per slot) and a built-in reports nothing | `lv2_fixture_tests`, mutation-tested twice (ignore `maxSlots`; publish nothing — each made the new assertions fail) |
 | A knob move in a live editor is audible during the drag | **NOT by test** — needs a real window and a real drag; waiting on the click test |
