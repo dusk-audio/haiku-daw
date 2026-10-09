@@ -111,7 +111,7 @@ cmake --build build-host                       # exit 0
 ctest --test-dir build-host                    # 49/49  (48 on merged master + midiops_tests)
 ./build-host/midiops_tests                     # 128 checks, 0 failures
 ./build-host/model_tests                       # 237 checks, 0 failures
-cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # 49/49, clean
+cmake -B b-asan -DDAW_SANITIZE=ON && cmake --build b-asan -j8 && ctest --test-dir b-asan   # 49/49, clean
 sh scripts/haiku_syntax_check.sh <all Haiku-only sources>      # 0 FAIL (see below)
 # On the VM (2 vCPU, -j2), both configurations, configure and build exit 0:
 ctest --test-dir build                         # 50/50   (LV2 on)

@@ -1056,7 +1056,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0; int32 fx = -1;
             msg->FindInt64("track", &tid);
             msg->FindInt32("fx", &fx);
-            OpenNativeEditor((TrackId)tid, fx);
+            if (OpenNativeEditor((TrackId)tid, fx))
+                break;
+            // No editor of its own will appear: the plugin has none, or the
+            // chain holds it twice and its editor cannot tell the copies apart
+            // (the exact case OpenNativeEditor names "use the parameter list").
+            // Senders that are ALREADY a generic panel set "fallback" false --
+            // there the panel simply stays as it is.
+            if (!msg->GetBool("fallback", false))
+                break;
+            Track* t = fProject->FindTrack((TrackId)tid);
+            if (!t) break;
+            if (fx >= (int32)t->fx.size()) fx = -1;   // stale index: whole chain
+            (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
+                               (TrackId)tid, BMessenger(this), fx))->Show();
             break;
         }
         case kMsgFxLive: {   // live knob-drag preview into the running engine

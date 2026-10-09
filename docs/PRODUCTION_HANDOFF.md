@@ -24,7 +24,7 @@ status table (`docs/agent-prompts/README.md`). The commands are still the
 commands:
 ```
 cmake -S . -B build-host && cmake --build build-host && ctest --test-dir build-host
-cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # ASan/UBSan
+cmake -B b-asan -DDAW_SANITIZE=ON && cmake --build b-asan -j8 && ctest --test-dir b-asan   # ASan/UBSan
 sh scripts/haiku_syntax_check.sh                    # 0 FAIL (engine/UI cross-compile)
 sh scripts/vm.sh test                               # builds + ctest on the VM
 ```

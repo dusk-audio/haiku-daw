@@ -554,9 +554,10 @@ void InspectorView::MouseUp(BPoint) {
             // A plugin that ships its own editor opens THAT, because it is the
             // interface its author designed and the generic parameter list is
             // the fallback for plugins without one -- not the other way round.
-            // HasNativeUi decides; a null return from Open means an editor for
-            // this plugin is already up and was raised instead, which is also
-            // "done", so neither case falls through to the generic panel.
+            // HasNativeUi decides; MainWindow reports back by NOT opening one
+            // (no editor at all, or the chain holds the plugin twice, which its
+            // editor cannot address), and "fallback" asks it to open the
+            // generic panel in that case rather than leaving the click dead.
             if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName)) {
                 // Opened through this view's window (the MainWindow), which
                 // resolves the insert against the model and runs the editor.
@@ -565,6 +566,7 @@ void InspectorView::MouseUp(BPoint) {
                 BMessage open(kMsgOpenFxEditor);
                 open.AddInt64("track", (int64)t->id);
                 open.AddInt32("fx", from);
+                open.AddBool("fallback", true);
                 Window()->PostMessage(&open);
                 Refresh();
                 return;

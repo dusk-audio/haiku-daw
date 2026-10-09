@@ -8,5 +8,11 @@
 #define DAW_VERSION_PATCH @PROJECT_VERSION_PATCH@
 #define DAW_VERSION_STRING "@PROJECT_VERSION@"
 
-// The app's signature, which the .rdef and the Deskbar both use.
-#define DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW"
+// The app's signature, which the .rdef and the Deskbar both use. Substituted
+// from CMakeLists, like the version -- one spelling, so the BApplication the
+// code runs under and the signature the resource carries cannot drift.
+#define DAW_APP_SIGNATURE "@DAW_APP_SIGNATURE@"
+
+// The .dawproj MIME type: registered with the MIME DB at startup and listed in
+// the .rdef's file_types.
+#define DAW_PROJECT_MIME "@DAW_PROJECT_MIME@"

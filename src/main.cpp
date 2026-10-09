@@ -1,20 +1,27 @@
-// Haiku DAW — application entry point (milestone 4b).
+// Haiku DAW — application entry point.
 //
-// Builds a Project, optionally seeds it with clips from WAV paths given on the
-// command line (one clip per file, laid end to end on successive tracks), and
-// opens the timeline window. No audio engine wired yet — that is M4d.
+// A bare launch starts a demo session. A `.dawproj` handed to the app -- a
+// double-click in Tracker, `open`, a drag onto the Deskbar entry, or a path on
+// the command line -- is opened through the same message the File menu's open
+// panel posts, so the unsaved-changes prompt is honoured and there is exactly
+// one open path (MainWindow's LoadFrom).
 //
-// Usage:  daw [file1.wav file2.wav ...]
+// The project type itself is registered in the user MIME DB on first run, with
+// a sniffer rule keyed on the header the writer emits ("DAW 1 "), and the
+// resource file declares it as a supported type with B_SINGLE_LAUNCH: a second
+// launch hands its files to the running instance instead of starting a second
+// DAW.
+//
+// Usage:  daw [--version] [project.dawproj ...]
 //
 // Haiku-only: links the Interface Kit. The model layer it drives is kit-free.
 
 #include "model/Project.h"
 #include "model/Commands.h"
 #include "model/PeakCache.h"
-#include "engine/WavSource.h"
 #include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
-#include "Version.h"   // DAW_VERSION_STRING, DAW_APP_SIGNATURE (generated)
+#include "Version.h"   // DAW_VERSION_STRING, DAW_APP_SIGNATURE, DAW_PROJECT_MIME
 
 // Defined by the daw_lv2 target, which exists only when CMake found lilv. With
 // it absent nothing below is compiled, the LV2 factory hook is never installed,
@@ -25,81 +32,24 @@
 #endif
 
 #include <Application.h>
+#include <Entry.h>
 #include <FindDirectory.h>
+#include <MimeType.h>
 #include <Path.h>
 #include <Roster.h>
 
-#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <string>
 #include <vector>
 
 using namespace daw;
 
-// Build a demo/session project. Each WAV path becomes its own audio track with
-// a single clip starting at frame 0; length comes from the file's frame count.
+// The project/session a bare launch starts with: one audio track and one MIDI
+// track, so the window is never blank and the synth is reachable.
 static void SeedDemoTracks(Project& project, CommandStack& stack) {
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Audio 1"), project);
-    // A MIDI track so the synth is reachable: click its lane to add notes.
     stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Synth"), project);
-}
-
-static void SeedProject(Project& project, CommandStack& stack,
-                        const std::vector<std::string>& wavs) {
-    if (wavs.empty()) {
-        SeedDemoTracks(project, stack);   // nothing on the command line
-        return;
-    }
-
-    int n = 1;
-    for (const std::string& path : wavs) {
-        WavSource src;
-        if (!src.Open(path)) {
-            std::fprintf(stderr, "daw: cannot open '%s' as WAV, skipping\n",
-                         path.c_str());
-            continue;
-        }
-        char name[32];
-        std::snprintf(name, sizeof(name), "Track %d", n++);
-        auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, name);
-        AddTrackCommand* addPtr = add.get();
-        stack.Execute(std::move(add), project);
-        TrackId tid = addPtr->CreatedId();
-
-        // lengthFrames is timeline (project-rate) frames; convert from the
-        // source's own frame count by the rate ratio.
-        const double srcRate = src.FrameRate();
-        const double ratio = srcRate > 0 ? project.sampleRate / srcRate : 1.0;
-        Clip clip;
-        clip.startFrame   = 0;
-        clip.lengthFrames = (Frame)llround(src.TotalFrames() * ratio);
-        clip.sourceOffset = 0;
-        clip.sourcePath   = path;
-        stack.Execute(std::make_unique<AddClipCommand>(tid, clip), project);
-    }
-
-    // Every path failed to open: don't leave a blank window.
-    if (project.Tracks().empty())
-        SeedDemoTracks(project, stack);
-}
-
-// Build a min/max waveform envelope for every distinct clip source in the
-// project. Done once, up front (on "import"), so the timeline never scans
-// audio at paint time. Keyed by path so shared sources build only once.
-static void BuildPeaks(const Project& project,
-                       std::map<std::string, PeakCache>& out) {
-    for (const Track& t : project.Tracks()) {
-        for (const Clip& c : t.clips) {
-            if (c.sourcePath.empty() || out.count(c.sourcePath))
-                continue;
-            WavSource src;
-            if (!src.Open(c.sourcePath))
-                continue;
-            out[c.sourcePath].Build(src);
-        }
-    }
 }
 
 // Load native effect add-ons from a "plugins" dir next to the executable and
@@ -136,10 +86,125 @@ static void InstallLv2() {
 #endif
 }
 
+// Make a .dawproj open THIS app: install the type in the user MIME DB, describe
+// it, point it at our signature, and give it a sniffer rule keyed on the
+// writer's header line (ProjectIO writes "DAW 1 <flags>"). Idempotent and
+// best-effort: a read-only or missing MIME DB must never stop the app from
+// starting, and every later run re-asserts the association (a reinstall of the
+// app or an edit in FileTypes can drop it).
+static void RegisterProjectMimeType() {
+    BMimeType type(DAW_PROJECT_MIME);
+    if (!type.IsInstalled()) {
+        if (type.Install() != B_OK) {
+            std::fprintf(stderr, "daw: cannot register %s (read-only MIME DB?)\n",
+                         DAW_PROJECT_MIME);
+            return;
+        }
+        type.SetShortDescription("Haiku DAW project");
+        type.SetLongDescription("A song project for Haiku DAW");
+        type.SetSnifferRule("0.8 [0:6] ('DAW 1 ')");
+    }
+    type.SetPreferredApp(DAW_APP_SIGNATURE);
+}
+
+class DawApplication : public BApplication {
+public:
+    DawApplication() : BApplication(DAW_APP_SIGNATURE) {}
+
+    void ReadyToRun() override {
+        RegisterProjectMimeType();
+        InstallPlugins();
+        InstallLv2();
+        std::fprintf(stderr, "Haiku DAW %s\n", DAW_VERSION_STRING);
+
+        // A launch whose arguments name a project starts THERE, not in the
+        // demo -- and nothing has to be discarded to get there (the pending
+        // refs are opened below, after the window exists).
+        if (fPending.empty()) {
+            SeedDemoTracks(fProject, fStack);
+            // A fresh launch is a CLEAN project: the seeded demo is where the
+            // session starts, not unsaved work to be prompted about on the
+            // first quit. A launch that opens a file needs no baseline of its
+            // own -- loading marks that state saved.
+            fStack.MarkSaved();
+        }
+
+        BRect frame(80, 80, 80 + 1000, 80 + 560);
+        fWindow = new MainWindow(frame, &fProject, &fStack, &fPeaks);
+        fWindow->Show();
+
+        // Files that arrived before the window did (a first launch's argv or
+        // refs race ReadyToRun): open them now.
+        const std::vector<std::string> pending = fPending;
+        fPending.clear();
+        for (const std::string& path : pending)
+            OpenPath(path.c_str());
+    }
+
+    // Files handed to an already-running instance: `open`, a double-click, a
+    // drop on the Deskbar entry. The rdef's B_SINGLE_LAUNCH is what routes
+    // them here instead of starting a second DAW.
+    void RefsReceived(BMessage* message) override {
+        entry_ref ref;
+        for (int32 i = 0; message->FindRef("refs", i, &ref) == B_OK; i++) {
+            BPath path(&ref);
+            if (path.InitCheck() == B_OK)
+                OpenPath(path.Path());
+        }
+    }
+
+    // `daw project.dawproj` from a Terminal -- including the FIRST launch,
+    // which receives its own argv here after Run(). Anything that is not a
+    // project is ignored: the old "each argv WAV becomes a track" seed is
+    // gone, because File > Import Audio is the way a file gets in.
+    void ArgvReceived(int32 argc, char** argv) override {
+        for (int32 i = 1; i < argc; i++)
+            OpenPath(argv[i]);
+    }
+
+private:
+    void OpenPath(const char* path) {
+        if (!path || !path[0])
+            return;
+        const size_t len = std::strlen(path);
+        if (len <= 8 || std::strcmp(path + len - 8, ".dawproj") != 0) {
+            std::fprintf(stderr, "daw: ignoring '%s' (not a .dawproj)\n", path);
+            return;
+        }
+        if (!fWindow) {                 // before ReadyToRun: open it there
+            fPending.push_back(path);
+            return;
+        }
+        BEntry entry(path);
+        entry_ref ref;
+        if (entry.GetRef(&ref) != B_OK) {
+            std::fprintf(stderr, "daw: cannot open '%s'\n", path);
+            return;
+        }
+        // One line, so a launch over SSH can be told from a no-op without a
+        // window; the load itself reports only its failures.
+        std::fprintf(stderr, "daw: opening %s\n", path);
+        // Exactly what the open file panel posts: MSG_OPEN_REF (LoadFrom, with
+        // its unsaved-changes prompt) is the single open path.
+        BMessage open(MSG_OPEN_REF);
+        open.AddRef("refs", &ref);
+        fWindow->PostMessage(&open);
+    }
+
+    // The session: project, stack and peaks outlive the window (as they did
+    // when they were main()'s statics).
+    Project             fProject;
+    CommandStack        fStack;
+    MainWindow::PeakMap fPeaks;
+    MainWindow*         fWindow = nullptr;
+    std::vector<std::string> fPending;
+};
+
 int main(int argc, char** argv) {
     // --version answers without a window (and without an app_server, so a
-    // package manager or a bug report can ask): the same string the About box
-    // shows, from the one place CMake defines it.
+    // package manager or a bug report can ask) -- before the application is
+    // constructed, so a running instance cannot swallow it: the same string
+    // the About box shows, from the one place CMake defines it.
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--version") == 0) {
             std::printf("Haiku DAW %s\n", DAW_VERSION_STRING);
@@ -147,31 +212,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    BApplication app(DAW_APP_SIGNATURE);
-    InstallPlugins();
-    InstallLv2();
-    std::fprintf(stderr, "Haiku DAW %s\n", DAW_VERSION_STRING);
-
-    std::vector<std::string> wavs;
-    for (int i = 1; i < argc; i++)
-        wavs.push_back(argv[i]);
-
-    // The project + command stack outlive the window (they are the session).
-    static Project      project;
-    static CommandStack stack;
-    SeedProject(project, stack, wavs);
-    // A fresh launch is a CLEAN project: the seeded demo (or the WAVs given on
-    // the command line) is where this session starts, not unsaved work the
-    // user would be asked about on the first quit. Every later edit dirties it.
-    stack.MarkSaved();
-
-    static std::map<std::string, PeakCache> peaks;
-    BuildPeaks(project, peaks);
-
-    BRect frame(80, 80, 80 + 1000, 80 + 560);
-    MainWindow* win = new MainWindow(frame, &project, &stack, &peaks);
-    win->Show();
-
+    DawApplication app;
     app.Run();
     return 0;
 }

@@ -114,6 +114,17 @@ static Track MakeMidiTrack(Project& p, const std::vector<MidiNote>& notes,
     return t;
 }
 
+// Add a track with the window locked. The test thread is the only WRITER, but
+// the window looper reads the model continuously (and the export worker reads
+// its snapshot); the file's own rule -- every model read outside the window
+// thread takes the lock -- applies to writes too.
+static bool LockedAddTrack(MainWindow* win, Project& p, const Track& t) {
+    if (!win->Lock()) return false;
+    const bool ok = p.AddTrack(t);
+    win->Unlock();
+    return ok;
+}
+
 // Visible windows: what "a window appeared" means to a user, and what the
 // tests assert on. (CountWindows() includes hidden ones, and MainWindow KEEPS
 // its file panels alive and hidden for the next time -- quitting one behind its
@@ -225,7 +236,7 @@ static void TestPianoRollQuantize(MainWindow* win, Project& project,
     std::printf("test_piano_roll_quantize\n");
     Track t = MakeMidiTrack(project, { { 60, 100, 1000, 500 },
                                        { 62, 100, 7000, 500 } }, "roll-synth");
-    CHECK(project.AddTrack(t));
+    CHECK(LockedAddTrack(win, project, t));
     const ClipId cid = t.midiClips.front().id;
     const TrackId tid = t.id;
 
@@ -280,7 +291,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
     std::printf("test_export_flow\n");
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
-    CHECK(project.AddTrack(t));
+    CHECK(LockedAddTrack(win, project, t));
 
     const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
@@ -310,7 +321,9 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     win->PostMessage(&ref);
 
     // The window must keep answering while it renders: this track has to land.
-    const size_t before = project.Tracks().size();
+    // (Under the lock: the looper is handling the export messages meanwhile.)
+    size_t before = 0;
+    if (win->Lock()) { before = project.Tracks().size(); win->Unlock(); }
     win->PostMessage(MSG_NEW_MIDI);
     CHECK(WaitFor([&] {
         if (!win->Lock()) return false;
@@ -336,7 +349,7 @@ static void TestExportCancel(MainWindow* win, Project& project) {
     std::remove(path);
     // Long enough that the render is still going when the cancel lands.
     Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "long-synth");
-    CHECK(project.AddTrack(t));
+    CHECK(LockedAddTrack(win, project, t));
 
     const int32 windowsBefore = VisibleWindows();
     entry_ref dir;
@@ -411,10 +424,14 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     const char* path = "/tmp/haiku_daw_ui_loop.wav";
     std::remove(path);
 
-    // A loop over the second second of the project.
-    project.transport.loopEnabled = true;
-    project.transport.loopStart = 48000;
-    project.transport.loopEnd   = 96000;
+    // A loop over the second second of the project (under the lock: the
+    // looper reads the transport continuously).
+    if (win->Lock()) {
+        project.transport.loopEnabled = true;
+        project.transport.loopStart = 48000;
+        project.transport.loopEnd   = 96000;
+        win->Unlock();
+    }
 
     const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
@@ -446,7 +463,7 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     CHECK(src.TotalFrames() >= 48000 - 2 && src.TotalFrames() <= 48000 + 2);
     CHECK(WaitQuiet());
     std::remove(path);
-    project.transport.loopEnabled = false;
+    if (win->Lock()) { project.transport.loopEnabled = false; win->Unlock(); }
 }
 
 
@@ -461,7 +478,7 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     // (correct behaviour, bad fixture).
     Track t = MakeMidiTrack(project, { { 60, 100, 1000, 400 },
                                        { 64, 100, 5700, 400 } }, "fx-synth");
-    CHECK(project.AddTrack(t));
+    CHECK(LockedAddTrack(win, project, t));
     const ClipId cid = t.midiClips.front().id;
     const TrackId tid = t.id;
 
@@ -645,7 +662,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
     t.fx.push_back(MakeInsertDesc(EffectType::Lv2, chosen->uri));
     const size_t fxIndex = t.fx.size() - 1;
     const TrackId tid = t.id;
-    CHECK(project.AddTrack(t));
+    CHECK(LockedAddTrack(win, project, t));
 
     // Open it the way the inspector's slot list does.
     const int32 before = VisibleWindows();
@@ -733,6 +750,35 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
         win->PostMessage(&edit);
     }
     CHECK(WaitFor([&] { return VisibleWindows() == before; }, 30000000));
+
+    // A chain that holds the plugin TWICE: its own editor cannot tell the
+    // copies apart, so MainWindow must not leave the click dead -- with
+    // "fallback" set (what the inspector posts) the generic panel opens
+    // instead. Without the flag (the panel's own "open the plugin's editor"
+    // sender) nothing new may appear: it is already a panel.
+    {
+        Track dup = MakeMidiTrack(project, { { 60, 100, 0, 4800 } }, "lv2-dup");
+        dup.fx.push_back(MakeInsertDesc(EffectType::Lv2, chosen->uri));
+        dup.fx.push_back(MakeInsertDesc(EffectType::Lv2, chosen->uri));
+        CHECK(LockedAddTrack(win, project, dup));
+
+        BMessage open(kMsgOpenFxEditor);
+        open.AddInt64("track", (int64)dup.id);
+        open.AddInt32("fx", 0);
+        open.AddBool("fallback", true);
+        win->PostMessage(&open);
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; },
+                      30000000));
+        HideOtherWindows(win);
+        CHECK(WaitQuiet());
+
+        BMessage again(kMsgOpenFxEditor);   // no fallback: the panel's sender
+        again.AddInt64("track", (int64)dup.id);
+        again.AddInt32("fx", 0);
+        win->PostMessage(&again);
+        snooze(300000);
+        CHECK(VisibleWindows() == 1);
+    }
 }
 #endif
 
