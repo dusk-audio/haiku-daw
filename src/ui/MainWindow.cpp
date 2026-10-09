@@ -1340,7 +1340,10 @@ void MainWindow::UpdatePulse() {
     // A native editor watching an insert keeps the pulse alive even when the
     // transport is stopped: the generic parameter panel can move a value with
     // everything idle, and that has to reach the plugin's own editor too.
-    const bool need = fPlaying || fRecMode || fMonitoring || fFxParamMsgr.IsValid()
+    bool watching = false;
+    for (const FxWatch& w : fFxWatches)
+        if (w.msgr.IsValid()) { watching = true; break; }
+    const bool need = fPlaying || fRecMode || fMonitoring || watching
                    || (fRecorder && fRecorder->IsRecording());
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
