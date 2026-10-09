@@ -1440,13 +1440,17 @@ void MainWindow::LayoutTransportBar() {
         else fLoudView->Hide();
     }
 
-    // The tempo field only fits beside the master slider.
-    const bool showBpm = rightEdge >= kSliderR + kGap;
+    // The tempo field only fits when the meter leaves room for the field
+    // ITSELF -- it is the rightmost of the left-hand controls, so clearing the
+    // slider is not enough (which is exactly how it ended up under the meter).
+    const bool showBpm = rightEdge >= kBpmR + kGap;
     if (fBpmLbl)  { if (showBpm) fBpmLbl->Show(); else fBpmLbl->Hide(); }
     if (fTempo)   { if (showBpm) fTempo->Show();  else fTempo->Hide(); }
 
-    // The master slider only fits beside what is left of the left cluster.
-    const bool showVol = rightEdge >= kVolR + kGap;
+    // The master slider only fits beside whatever is now the rightmost control
+    // of the left cluster: the tempo field when it is shown, the slider's own
+    // right edge when it is not.
+    const bool showVol = rightEdge >= (showBpm ? kBpmR : kSliderR) + kGap;
     if (fVolLbl)  { if (showVol) fVolLbl->Show(); else fVolLbl->Hide(); }
     if (fMaster)  { if (showVol) fMaster->Show(); else fMaster->Hide(); }
 }
