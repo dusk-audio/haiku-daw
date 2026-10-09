@@ -14,7 +14,7 @@ namespace daw {
 void TransportController::StartPlayback() {
     if (fWin->fRecCtl.fRecMode)
         return;   // recording runs its own engine (overdub)
-    fWin->StopMidiMonitor();   // playback owns the engine + MIDI input
+    fWin->fRecCtl.StopMidiMonitor();   // playback owns the engine + MIDI input
     // Rebuild the engine from the current model each time (RT-safe: no live
     // mutation of a running graph). Playback begins at the current playhead;
     // if it's already at/after the end (and not looping), rewind first.
@@ -91,7 +91,7 @@ void TransportController::StopPlayback(bool resumeMonitor) {
                           Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
     if (resumeMonitor)
-        fWin->UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
+        fWin->fRecCtl.UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
 }
 
 void TransportController::ReloadActiveEngine() {
@@ -105,7 +105,7 @@ void TransportController::ReloadActiveEngine() {
         if (fEngine) fWin->fProject->transport.playhead = fEngine->Playhead();
         StartPlayback();          // rebuilds at the playhead and keeps playing
     } else if (fMonitoring) {
-        fWin->UpdateMidiMonitor();      // rebuilds the idle monitor engine
+        fWin->fRecCtl.UpdateMidiMonitor();      // rebuilds the idle monitor engine
     }
     // Stopped / recording: the change applies on the next Play / take.
 }

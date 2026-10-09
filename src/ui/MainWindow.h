@@ -74,6 +74,7 @@ public:
     // The transport's method moves (M1.1) live in TransportController; it
     // reaches the widgets and the model through the window it is given.
     friend class TransportController;
+    friend class RecordController;
     // Like TimelineView: BWindow::Frame() would shadow the model's frame type
     // for every unqualified `Frame` in this class. A member typedef hides it.
     using Frame = daw::Frame;
@@ -99,18 +100,7 @@ public:
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
 
 private:
-    void StartRecording();
-    void StopRecording();
-    void StartCapture();             // open the Recorder (after any count-in)
-    void StartMidiCapture();         // connect armed MIDI inputs, begin the take
-    // Resolve each MIDI track's endpoint NAME to a live producer id and publish
-    // the routes to fMidiRoutes + the engine. Called wherever the input opens.
-    void ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps);
     // Feed one live event to every armed track whose route accepts it.
-    void FeedMidiEvent(const MidiEvent& e, Frame at);
-    void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
-    void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
-    void StopMidiMonitor();          // tear down the idle monitor engine + input
     void SyncFxToEngine();           // a committed chain edit -> the running engine
     bool AudioMonitorOn() const;     // global flag OR an armed audio track's I btn
     void UpdatePulse();              // run the poll iff playing or recording

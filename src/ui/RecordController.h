@@ -9,6 +9,7 @@
 #include "../engine/Recorder.h"
 #include "../midi/MidiPort.h"
 #include "../midi/MidiRecorder.h"
+#include "../midi/MidiRouting.h"   // MidiInputRoute
 
 #include <map>
 #include <memory>
@@ -17,8 +18,25 @@
 
 namespace daw {
 
+class MainWindow;
+
 class RecordController {
 public:
+    // The window this controller drives (set once by MainWindow's constructor).
+    // The moved methods reach the widgets and the model through it.
+    void SetWindow(MainWindow* win) { fWin = win; }
+
+    // The window's record work, body for body (M1.1).
+    void StartRecording();
+    void StopRecording();                                  // end the take
+    void StartCapture();                                   // open the Recorder
+    void StartMidiCapture();                               // connect armed inputs
+    void StopMidiCapture(Frame endFrame);                  // end take, drop clips
+    void UpdateMidiMonitor();                              // arm-driven monitor
+    void StopMidiMonitor();
+    void ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps);
+    void FeedMidiEvent(const MidiEvent& e, Frame at);
+
     // Public members on purpose (pure move; the window still drives them).
     std::unique_ptr<Recorder> fRecorder;  // active while recording
     bool   fRecMode = false;              // engine running for a take
@@ -44,6 +62,9 @@ public:
     std::vector<TrackId>      fMidiRecTracks;  // armed MIDI targets for the take
     std::vector<MidiInputRoute> fMidiRoutes;   // per-track endpoint id + channel
     bigtime_t                 fMidiT0 = 0;     // system_time at MIDI capture start
+
+private:
+    MainWindow* fWin = nullptr;
 };
 
 } // namespace daw
