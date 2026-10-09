@@ -130,7 +130,7 @@ static Track MakeMidiTrack(Project& p, const std::vector<MidiNote>& notes,
 // its snapshot); the file's own rule -- every model read outside the window
 // thread takes the lock -- applies to writes too.
 static bool LockedAddTrack(MainWindow* win, Project& p, const Track& t) {
-    if (!win->Lock()) return false;
+    if (win->LockWithTimeout(1000000) != B_OK) return false;
     const bool ok = p.AddTrack(t);
     win->Unlock();
     return ok;
@@ -231,7 +231,7 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
     const size_t before = project.Tracks().size();
     win->PostMessage(MSG_NEW_MIDI);
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
         const size_t now = project.Tracks().size();
         win->Unlock();
         return now == before + 1;
@@ -276,7 +276,7 @@ static void TestPianoRollQuantize(MainWindow* win, Project& project,
 
     // 1000 -> 0 and 7000 -> 6000 on the 16th grid at the default tempo.
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
         const Track* tr = project.FindTrack(tid);
         const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
         const bool snapped = c && c->notes.size() == 2 &&
@@ -304,6 +304,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(LockedAddTrack(win, project, t));
 
+    std::printf("  export: posting options\n");
     const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 16);
@@ -319,9 +320,11 @@ static void TestExportFlow(MainWindow* win, Project& project) {
 
     // Exactly one window appears (the file panel) and nothing renders yet.
     CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    std::printf("  export: the panel is up\n");
     std::remove(kExportPath);
     CHECK(!FileExists(kExportPath));
     HideOtherWindows(win);
+    std::printf("  export: posting the path\n");
 
     // What that panel posts when a name is chosen.
     entry_ref dir;
@@ -333,20 +336,23 @@ static void TestExportFlow(MainWindow* win, Project& project) {
 
     // The window must keep answering while it renders: this track has to land.
     // (Under the lock: the looper is handling the export messages meanwhile.)
+    std::printf("  export: waiting for responsiveness\n");
     size_t before = 0;
-    if (win->Lock()) { before = project.Tracks().size(); win->Unlock(); }
+    if (win->LockWithTimeout(1000000) == B_OK) { before = project.Tracks().size(); win->Unlock(); }
     win->PostMessage(MSG_NEW_MIDI);
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
         const size_t now = project.Tracks().size();
         win->Unlock();
         return now == before + 1;
     }));
 
     CHECK(WaitFor([&] { return FileExists(kExportPath); }, 60000000));
+    std::printf("  export: file written\n");
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
     CHECK(WaitQuiet());   // its bar closes on a pulse
+    std::printf("  export: done\n");
 }
 
 // --- 4. R1: cancel, stems, loop range --------------------------------------
@@ -437,7 +443,7 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
 
     // A loop over the second second of the project (under the lock: the
     // looper reads the transport continuously).
-    if (win->Lock()) {
+    if (win->LockWithTimeout(1000000) == B_OK) {
         project.transport.loopEnabled = true;
         project.transport.loopStart = 48000;
         project.transport.loopEnd   = 96000;
@@ -474,7 +480,7 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     CHECK(src.TotalFrames() >= 48000 - 2 && src.TotalFrames() <= 48000 + 2);
     CHECK(WaitQuiet());
     std::remove(path);
-    if (win->Lock()) { project.transport.loopEnabled = false; win->Unlock(); }
+    if (win->LockWithTimeout(1000000) == B_OK) { project.transport.loopEnabled = false; win->Unlock(); }
 }
 
 
@@ -509,7 +515,7 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     }
 
     auto notes = [&](std::vector<MidiNote>* out) {
-        if (!win->Lock()) return false;
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
         const Track* tr = project.FindTrack(tid);
         const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
         if (c) *out = c->notes;
@@ -695,7 +701,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
     commit.AddFloat("val", target);
     win->PostMessage(&commit);
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
         const Track* tr = project.FindTrack(tid);
         const bool landed = tr && !tr->fx.empty() &&
                             tr->fx[fxIndex].p(0) == target;
@@ -716,7 +722,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
     snooze(300000);
     {
         bool unchanged = false;
-        if (win->Lock()) {
+        if (win->LockWithTimeout(1000000) == B_OK) {
             const Track* tr = project.FindTrack(tid);
             unchanged = tr && !tr->fx.empty() && tr->fx[fxIndex].p(0) == target;
             win->Unlock();
@@ -749,7 +755,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
     // must close rather than keep driving whatever took its index.
     {
         std::vector<EffectDesc> chain;
-        if (win->Lock()) {
+        if (win->LockWithTimeout(1000000) == B_OK) {
             const Track* tr = project.FindTrack(tid);
             if (tr) chain = tr->fx;
             win->Unlock();
@@ -1297,7 +1303,7 @@ static int32 TestThread(void*) {
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
     std::fflush(stdout);
-    win->Lock();
+    win->LockWithTimeout(1000000);
     win->Quit();   // and with it the application
     return 0;
 }

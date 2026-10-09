@@ -18,6 +18,10 @@
 #include "../midi/MidiRecorder.h"
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
+#include "ProjectDocument.h"          // the project's file, recovery, recent list
+#include "RecordController.h"         // the record state + the recorder
+#include "RenderJobs.h"              // export/freeze/region rendering
+#include "TransportController.h"      // the engine + transport state
 
 #include <Messenger.h>
 #include <Window.h>
@@ -68,6 +72,11 @@ constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
 
 class MainWindow : public BWindow {
 public:
+    // The transport's method moves (M1.1) live in TransportController; it
+    // reaches the widgets and the model through the window it is given.
+    friend class TransportController;
+    friend class RecordController;
+    friend class RenderJobs;
     // Like TimelineView: BWindow::Frame() would shadow the model's frame type
     // for every unqualified `Frame` in this class. A member typedef hides it.
     using Frame = daw::Frame;
@@ -90,28 +99,12 @@ public:
     void DispatchMessage(BMessage* message, BHandler* handler) override;
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
-    bool IsPlaying() const { return fPlaying; }
+    bool IsPlaying() const { return fTransportCtl.fPlaying; }
 
 private:
-    void StartPlayback();
-    void StopPlayback(bool resumeMonitor = true);  // false when about to record
-    void StartRecording();
-    void StopRecording();
-    void StartCapture();             // open the Recorder (after any count-in)
-    void StartMidiCapture();         // connect armed MIDI inputs, begin the take
-    // Resolve each MIDI track's endpoint NAME to a live producer id and publish
-    // the routes to fMidiRoutes + the engine. Called wherever the input opens.
-    void ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps);
     // Feed one live event to every armed track whose route accepts it.
-    void FeedMidiEvent(const MidiEvent& e, Frame at);
-    void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
-    void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
-    void StopMidiMonitor();          // tear down the idle monitor engine + input
-    void ReloadActiveEngine();       // rebuild the running engine at the playhead
-                                     // (structural fx / tempo change, keep going)
     void SyncFxToEngine();           // a committed chain edit -> the running engine
     bool AudioMonitorOn() const;     // global flag OR an armed audio track's I btn
-    bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
@@ -141,7 +134,6 @@ private:
     // Open, New). True = the caller may proceed. Save flushes the editors
     // first; with no path yet the save panel opens and the caller is refused.
     bool ConfirmDiscardChanges();
-    void RemoveRecoveryFile();       // the recovery copy is no longer needed
     // One visible report for a failure the user has to know about: an
     // asynchronous alert, so a report can never hold the window thread.
     void ReportError(const char* title, const std::string& detail);
@@ -171,7 +163,6 @@ private:
     int64_t DecodeClipRegion(const Clip& c, std::vector<float>& out,
                              double& outRate) const;
     // A unique path in the take/working dir for a rendered region/freeze file.
-    std::string RenderPath(const std::string& tag) const;
 
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
@@ -194,25 +185,18 @@ private:
     BSlider*        fMaster;
     BTextControl*   fTempo;
 
-    // Declared recorder-first so the engine (which RT-references the recorder as
-    // its monitor source) is destroyed FIRST — members die in reverse order, so
-    // the RT thread is stopped before the recorder it may read is freed.
-    std::unique_ptr<Recorder> fRecorder;  // active while recording
-    std::unique_ptr<Engine>   fEngine;    // rebuilt each Play
+    // The record state (and the recorder) lives in RecordController, declared
+    // BEFORE the transport controller: the engine must be destroyed first.
+    RecordController           fRecCtl;
+    TransportController       fTransportCtl;  // the engine + transport state (M1.1)
     // MIDI capture: a consumer connected to the armed MIDI tracks' input
     // endpoints, feeding a note-pairing recorder. Independent of the audio path.
-    std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
     // One recorder per armed MIDI track, not one shared: inputs are demuxed, so
     // each track pairs only the events its own route accepts. With a single
     // keyboard every track's route is permissive and they all capture the same
     // stream, exactly as before.
-    std::map<TrackId, MidiRecorder> fMidiRecs;
-    std::vector<TrackId>      fMidiRecTracks; // armed MIDI targets for the take
     // Endpoint id + channel each MIDI track listens to, resolved from the
     // track's endpoint NAME when the input is opened (see ResolveMidiRoutes).
-    std::vector<MidiInputRoute> fMidiRoutes;
-    bigtime_t                 fMidiT0 = 0;    // system_time at MIDI capture start
-    bool                      fMonitoring = false;  // idle live-monitor engine up
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     // The dirty marker has to follow edits made anywhere (the timeline and the
@@ -266,61 +250,23 @@ private:
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
     BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
-    size_t                    fBufferFrames = 512;  // output buffer frames/channel
-    bool                      fMetronome = false;
-    bool                      fMonDim = false;
-    bool                      fMonMono = false;
-    bool                      fPlaying = false;
-    bool                      fRecMode = false;      // engine running for a take
-    bool                      fCapturePending = false; // in count-in, not yet capturing
-    bool                      fMonitorInput = false; // hear live input while armed
-    bool                      fLoopRecord = false;   // capturing stacked takes over a loop
-    int                       fTakeGroup = 0;        // running take-group id
-    int                       fCountInBars = 0;      // metronome bars before capture
     BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
     BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
     BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
-    std::vector<TrackId>      fRecTracks;   // all armed targets for the take
-    Frame                     fRecStart = 0; // frame the capture (clip) begins at
-    Frame                     fRecPoint = 0; // record start (== fRecStart)
-    // Record round-trip latency (output + input path), in project-rate frames.
-    // A captured take is this many frames late vs the timeline; the take is slid
-    // earlier by it (RecordPlan::CompensateRoundTrip). 0 = no compensation until
-    // the device latency is queried (Media Kit, on the target) into this field.
-    Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
-    std::string               fProjectPath;  // the project's file ("" until saved)
-    std::vector<std::string>  fRecentProjects;  // File > Open Recent, newest first
+    ProjectDocument           fDoc;          // the file, recovery copy, recent list
     std::vector<RelinkEntry>  fRelinkQueue;     // Locate… walk (newPath filled as picked)
     BFilePanel*               fRelinkPanel = nullptr;
     BMenu*                    fRecentMenu = nullptr;
     std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
-    std::string               fTakeDir;      // where recorded takes are written
-    std::string               fTakePath;     // full path of the current take
 
-    // Off-looper export (R1): the model is snapshotted on the looper — after
-    // StopPlayback and the editor flush, in that order — and the worker renders
-    // the COPY, so the window keeps responding and Cancel is a flag flip. The
-    // worker writes only the atomics and the two result fields, and it sets
-    // fExportRunning false (release) after them; the pulse reads them only
-    // after seeing that (acquire). ~MainWindow cancels and joins before
-    // anything below is freed.
-    std::unique_ptr<Project>  fExportSnapshot;   // what the worker renders
-    std::thread               fExportThread;
-    std::atomic<bool>         fExportRunning{false};
-    std::atomic<bool>         fExportCancel{false};
-    std::atomic<float>        fExportProgress{-1.0f};
-    bool                      fExportOk = false;      // worker -> pulse
-    int                       fExportWritten = 0;     // stems written
-    bool                      fExportIsStems = false; // for the progress title
-    bool                      fExportHandled = true;  // the pulse saw the result
-    std::string               fExportPath;
-    BMessenger                fExportProgMsgr;   // the progress window, while up
+    // RenderJobs carries the off-looper export machinery (M1.1): the snapshot,
+    // the worker thread, the progress messenger and the cancel flag. The
+    // dialog and its remembered choices stay here.
+    RenderJobs                fRender;
     ExportChoices             fExportChoices;    // the dialog's last settings
 
     void OpenExportWindow(bool stems);            // the options dialog
-    void StartExport(const char* path, bool stems);  // snapshot + worker
-    void FinishExport();                          // pulse: report, close the bar
 };
 
 } // namespace daw
