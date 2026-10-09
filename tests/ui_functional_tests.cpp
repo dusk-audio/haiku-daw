@@ -97,14 +97,28 @@ static Track MakeMidiTrack(Project& p, const std::vector<MidiNote>& notes,
     return t;
 }
 
-// A window that is not the one under test (the file panel the export dialog
-// opens, or the probe), closed by the test as the panel's own Cancel would.
-static void CloseOtherWindows(BWindow* keep) {
+// Visible windows: what "a window appeared" means to a user, and what the
+// tests assert on. (CountWindows() includes hidden ones, and MainWindow KEEPS
+// its file panels alive and hidden for the next time -- quitting one behind its
+// back would leave the window holding a dangling pointer.)
+static int VisibleWindows() {
+    int n = 0;
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden()) n++;
+    }
+    return n;
+}
+
+// Put a window that is not the one under test away -- the panel, as its own
+// Cancel button does: HIDE it, never Quit it.
+static void HideOtherWindows(BWindow* keep) {
     for (int32 i = be_app->CountWindows() - 1; i >= 0; i--) {
         BWindow* w = be_app->WindowAt(i);
-        if (w && w != keep) {
+        if (w && w != keep && !w->IsHidden()) {
             w->Lock();
-            w->Quit();
+            w->Hide();
+            w->Unlock();
         }
     }
     snooze(200000);
@@ -144,7 +158,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(project.AddTrack(t));
 
-    const int32 windowsBefore = be_app->CountWindows();
+    const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 16);
     opts.AddBool("dither", true);
@@ -158,10 +172,10 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     win->PostMessage(&opts);
 
     // Exactly one window appears (the file panel) and nothing renders yet.
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore + 1; }));
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
     std::remove(kExportPath);
     CHECK(!FileExists(kExportPath));
-    CloseOtherWindows(win);
+    HideOtherWindows(win);
 
     // What that panel posts when a name is chosen.
     entry_ref dir;
@@ -198,7 +212,7 @@ static void TestExportCancel(MainWindow* win, Project& project) {
     Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "long-synth");
     CHECK(project.AddTrack(t));
 
-    const int32 windowsBefore = be_app->CountWindows();
+    const int32 windowsBefore = VisibleWindows();
     entry_ref dir;
     CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
     BMessage ref(MSG_EXPORT_REF);
@@ -207,11 +221,11 @@ static void TestExportCancel(MainWindow* win, Project& project) {
     win->PostMessage(&ref);
 
     // It is running (its bar is up) when the cancel arrives.
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore + 1; }));
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
     win->PostMessage(kMsgExportCancel);
 
     // The bar goes away, and the destination is left alone.
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore; },
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; },
                   60000000));
     snooze(300000);
     CHECK(!FileExists(path));
@@ -227,10 +241,14 @@ static void TestExportStems(MainWindow* win, Project& project) {
     if (system(rm.c_str()) != 0) return;
 
     int expected = 0;
-    for (const Track& tr : project.Tracks())
-        if (tr.type != TrackType::Bus) expected++;
+    for (const Track& tr : project.Tracks()) {
+        if (tr.type == TrackType::Bus) continue;
+        if (tr.clips.empty() && tr.midiClips.empty()) continue;   // nothing to render
+        expected++;
+    }
+    CHECK(expected > 0);
 
-    const int32 windowsBefore = be_app->CountWindows();
+    const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 16);
     opts.AddBool("dither", true);
@@ -242,8 +260,8 @@ static void TestExportStems(MainWindow* win, Project& project) {
     opts.AddInt32("range", 0);
     opts.AddInt32("stems", 1);          // the dialog's "separate stems" box
     win->PostMessage(&opts);
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore + 1; }));
-    CloseOtherWindows(win);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    HideOtherWindows(win);
 
     entry_ref base;
     CHECK(BEntry("/tmp").GetRef(&base) == B_OK);
@@ -270,7 +288,7 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     project.transport.loopStart = 48000;
     project.transport.loopEnd   = 96000;
 
-    const int32 windowsBefore = be_app->CountWindows();
+    const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 32);          // float: the length is what is read
     opts.AddBool("dither", false);
@@ -282,8 +300,8 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     opts.AddInt32("range", 1);          // loop range
     opts.AddInt32("stems", 0);
     win->PostMessage(&opts);
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore + 1; }));
-    CloseOtherWindows(win);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    HideOtherWindows(win);
 
     entry_ref dir;
     CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
