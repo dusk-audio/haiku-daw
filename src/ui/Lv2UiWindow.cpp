@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <mutex>
 
@@ -632,11 +633,14 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         // Sized by the port count, not the slot count: a slot number can exceed
         // the number of control inputs on a plugin with other port kinds.
         d->link->portOfSlot = Lv2UiPortsForSlots(d->link->slotOfPort);
-        d->link->applied.assign(nPorts, 0.0f);
-        for (uint32_t i = 0; i < nPorts; i++) {
-            const int slot = d->link->slotOfPort[i];
-            if (slot >= 0) d->link->applied[(size_t)slot] = d->ctl[i];
-        }
+        // NaN, deliberately: `applied` records what the GUI has been TOLD, and
+        // it has been told nothing yet. A control-port UI learns parameter
+        // values only through port_event, so seeding this with the values the
+        // insert holds would make the first engine frame match every slot and
+        // skip it -- the editor would sit on its factory defaults while the
+        // insert played the project's values. NaN compares unequal to
+        // everything, including itself, so the first frame applies all of them.
+        d->link->applied.assign(nPorts, std::numeric_limits<float>::quiet_NaN());
 
         // The UI binary's location. Plain strings, so nothing past this point
         // needs the world.
@@ -771,14 +775,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                 if (!link->armed.load(std::memory_order_acquire)) {
                     // End of the editor's first frame. Whatever the plugin
                     // wrote while building itself is its OWN starting state,
-                    // not an edit: take it as the baseline for both directions,
-                    // then start listening.
+                    // not an edit: take it as the baseline for the poll, then
+                    // start listening. `applied` is deliberately NOT seeded --
+                    // the GUI has still been told nothing, and the first engine
+                    // frame is how it learns what the insert holds.
                     link->lastSeen = im->ctl;
-                    for (size_t i = 0; i < link->slotOfPort.size(); i++) {
-                        const int slot = link->slotOfPort[i];
-                        if (slot >= 0 && (size_t)slot < link->applied.size())
-                            link->applied[(size_t)slot] = im->ctl[i];
-                    }
                     link->armed.store(true, std::memory_order_release);
                     snooze(16000);
                     continue;
@@ -986,6 +987,11 @@ void Lv2UiWindow::CommitPending() {
     BMessage m(kMsgFxParamCommit);
     m.AddInt64("track", (int64)d->link->track.load(std::memory_order_relaxed));
     m.AddInt32("fx", d->link->fxIndex.load(std::memory_order_relaxed));
+    // Which plugin these values belong to. The address alone is not enough:
+    // MainWindow applies this asynchronously, and by then the insert at that
+    // index may be a different one -- the project may even have been replaced
+    // (see MainWindow's handler). The URI is what makes a late commit harmless.
+    m.AddString("uri", d->uri.c_str());
     for (const auto& e : pending) {
         m.AddInt32("slot", e.first);
         m.AddFloat("val", e.second);

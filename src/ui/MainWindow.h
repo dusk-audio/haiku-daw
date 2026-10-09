@@ -132,6 +132,12 @@ private:
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
     BStringView*    fVolLbl = nullptr;     // labels + readouts the bar hides
     BStringView*    fBpmLbl = nullptr;     // when there is no room for them
+    // Whether each is currently shown, so the layout only calls Show()/Hide()
+    // on a transition (both are counted, not idempotent, and the layout runs on
+    // every resize).
+    bool fLoudShown = true;
+    bool fBpmShown  = true;
+    bool fVolShown  = true;
     MeterView*      fMeter;
     BSlider*        fMaster;
     BTextControl*   fTempo;

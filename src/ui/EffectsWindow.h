@@ -49,7 +49,10 @@ constexpr uint32 kMsgFxLive = 'fxlv';
 // while the control moved, made permanent in the model once the gesture goes
 // quiet (one undo step per gesture). Sent by Lv2UiWindow on a debounce; fields
 // are int64 "track", int32 "fx", then one int32 "slot" and one float "val" per
-// changed parameter, in matching order.
+// changed parameter, in matching order, plus string "uri" naming the plugin
+// they belong to -- the address alone is not identity enough, since the commit
+// is applied asynchronously and the editor's insert may be gone (or replaced by
+// a different plugin at the same index) by the time it arrives.
 constexpr uint32 kMsgFxParamCommit = 'fxpc';
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).

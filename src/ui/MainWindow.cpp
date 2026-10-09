@@ -945,6 +945,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             if (vals.empty()) break;
             const bool master = ((TrackId)tid == kMasterFxTarget);
+            // The editor's insert may be gone, or a different plugin may have
+            // moved into its index since it sent this: the commit arrives on
+            // this thread, after the editor has already closed itself (a
+            // reloaded project, a removed insert). Applying it then would write
+            // one plugin's parameter values into another's descriptor -- as an
+            // undoable edit, saved to disk. The URI is what tells them apart.
+            BString uri;
+            msg->FindString("uri", &uri);
+            const Track* t = master ? nullptr : fProject->FindTrack((TrackId)tid);
+            const std::vector<EffectDesc>* chain = master ? &fProject->masterFx
+                                                : (t ? &t->fx : nullptr);
+            if (!chain || fx >= (int32)chain->size()
+                || (*chain)[(size_t)fx].pluginName != uri.String())
+                break;   // not this editor's insert any more: not ours to edit
             if (fStack->Execute(std::make_unique<SetFxParamCommand>(
                     (TrackId)tid, master, fx, std::move(vals)), *fProject)) {
                 // Deliberately no engine sync here. The audio already has these
@@ -1448,26 +1462,36 @@ void MainWindow::LayoutTransportBar() {
 
     const float rightEdge = W - 6.0f - kMeterW - kGap;   // what the meter leaves
 
+    // Show()/Hide() are counted, not idempotent: each Hide() adds a level and
+    // each Show() removes one. Calling them on every resize -- which is exactly
+    // when this runs -- would stack levels until the view could no longer be
+    // brought back, so only transitions are applied.
+    auto setVisible = [](bool& shown, bool on,
+                         std::initializer_list<BView*> views) {
+        if (shown == on) return;
+        for (BView* v : views) {
+            if (!v) continue;
+            if (on) v->Show(); else v->Hide();
+        }
+        shown = on;
+    };
+
     // The loudness readout only fits beside the tempo field.
     const bool showLoud = rightEdge - kLoudW >= kBpmR + kGap;
-    if (fLoudView) {
-        if (showLoud) { fLoudView->MoveTo(W - 278.0f, 8.0f); fLoudView->Show(); }
-        else fLoudView->Hide();
-    }
+    if (fLoudView && showLoud) fLoudView->MoveTo(W - 278.0f, 8.0f);
+    setVisible(fLoudShown, showLoud, { fLoudView });
 
     // The tempo field only fits when the meter leaves room for the field
     // ITSELF -- it is the rightmost of the left-hand controls, so clearing the
     // slider is not enough (which is exactly how it ended up under the meter).
     const bool showBpm = rightEdge >= kBpmR + kGap;
-    if (fBpmLbl)  { if (showBpm) fBpmLbl->Show(); else fBpmLbl->Hide(); }
-    if (fTempo)   { if (showBpm) fTempo->Show();  else fTempo->Hide(); }
+    setVisible(fBpmShown, showBpm, { fBpmLbl, fTempo });
 
     // The master slider only fits beside whatever is now the rightmost control
     // of the left cluster: the tempo field when it is shown, the slider's own
     // right edge when it is not.
     const bool showVol = rightEdge >= (showBpm ? kBpmR : kSliderR) + kGap;
-    if (fVolLbl)  { if (showVol) fVolLbl->Show(); else fVolLbl->Hide(); }
-    if (fMaster)  { if (showVol) fMaster->Show(); else fMaster->Hide(); }
+    setVisible(fVolShown, showVol, { fVolLbl, fMaster });
 }
 
 void MainWindow::FrameResized(float newWidth, float newHeight) {
@@ -1910,8 +1934,13 @@ void MainWindow::FlushFxEditors() {
         if (!w.editor || !w.editor->Alive()) continue;
         BMessage flush(kMsgLv2UiFlush);
         BMessage reply;
+        // Both timeouts, not just the delivery one: with no reply timeout the
+        // default is B_INFINITE_TIMEOUT, and an editor that is slow to answer
+        // (its looper may be inside ~Lv2UiWindow joining its own thread) would
+        // block this window while it holds its lock. The save would hang rather
+        // than lose the last gesture.
         if (static_cast<EditorHandle*>(w.editor.get())->msgr.SendMessage(
-                &flush, &reply, 200000) != B_OK) continue;
+                &flush, &reply, 200000, 200000) != B_OK) continue;
         std::vector<SetFxParamCommand::SlotValue> vals;
         for (int32 k = 0; ; k++) {
             int32 slot = 0;
@@ -2244,6 +2273,9 @@ void MainWindow::LoadFrom(const char* path) {
     // (track id, insert index) addresses are reused by whatever loads, so an
     // editor left open would quietly write its old insert's values into a
     // different plugin's descriptor -- an undoable edit, saved to disk.
+    // Flush first, so a gesture still in flight lands in the project it
+    // belongs to rather than being dropped with the window that made it.
+    FlushFxEditors();
     CloseFxEditors();
     if (!ProjectIO::Load(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: load failed: %s\n", path);

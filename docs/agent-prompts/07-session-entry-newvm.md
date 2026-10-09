@@ -85,7 +85,7 @@ Marc replaced the dev VM with a fresh Haiku install on 2026-10-08. The old VM
      overlay dir first on the include path. Plugin sources stay untouched.
    - Copy the sources to the VM with `tar cf - <dirs> | ssh ... 'tar xf -'` into
      a scratch dir such as `~/fixtures/`, never into `~/haiku-daw`.
-   - Install the resulting `.lv2` bundle into `~/config/non-packaged/add-ons/lv2/`
+   - Install the resulting `.lv2` bundle into `~/config/non-packaged/lib/lv2/`
      (or set `LV2_PATH`), then confirm the DAW lists it. Start with **4K EQ 2**;
      it is the plugin the user cares about and it has 26 control ports plus
      latency. If you also need a plain control-port UI (no
