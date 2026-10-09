@@ -1058,8 +1058,12 @@ static void TestErrorReports(MainWindow* win, Project& project,
     open.AddRef("refs", &ref);
     win->PostMessage(&open);
     CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
-    CHECK(AnswerAlertWhenUp("Missing Media", 0));      // Skip
-    CHECK(WaitFor([&] {
+    const bool skipAnswered = AnswerAlertWhenUp("Missing Media", 0);  // Skip
+    std::printf("  skip answered=%d, alert still up=%d, windows=%d\n",
+                (int)skipAnswered, (int)AlertUp("Missing Media"),
+                (int)VisibleWindows());
+    CHECK(skipAnswered);
+    const bool skipped = WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         bool ok = false;
         for (const Track& t : project.Tracks())
@@ -1068,7 +1072,25 @@ static void TestErrorReports(MainWindow* win, Project& project,
                 ok = true;
         win->Unlock();
         return ok;
-    }));
+    });
+    if (!skipped) {
+        const status_t locked = win->LockWithTimeout(1000000);
+        std::printf("  after Skip: lock=%d, windows=%d, alert up=%d\n",
+                    (int)locked, (int)VisibleWindows(),
+                    (int)AlertUp("Missing Media"));
+        if (locked == B_OK) {
+            std::printf("  tracks: %zu\n", project.Tracks().size());
+            for (const Track& t : project.Tracks()) {
+                std::printf("    '%s' (%zu clips)\n", t.name.c_str(),
+                            t.clips.size());
+                for (const Clip& c : t.clips)
+                    std::printf("      clip path '%s'\n",
+                                c.sourcePath.c_str());
+            }
+            win->Unlock();
+        }
+    }
+    CHECK(skipped);
     // ...and Locate… walks the same fixture: the panel appears, its answer is
     // posted here, and the repair lands as one named undo step.
     const char* foundPath = "/tmp/haiku_daw_ui_found.wav";
