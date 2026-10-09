@@ -258,9 +258,10 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     // KeyDown() call: the handler reads the CURRENT message (auto-repeat), so
     // only a dispatched key sees what a real one would.
     {
+        // The shape BView::MessageReceived expects: "bytes" as a STRING (it
+        // strips the terminator itself) and "modifiers" from the message.
         BMessage key(B_KEY_DOWN);
-        key.AddInt32("byte_count", 1);
-        key.AddData("bytes", B_INT8_TYPE, "q", 1);
+        key.AddString("bytes", "q");
         key.AddInt32("modifiers", 0);
         BMessenger(view).SendMessage(&key);
     }
