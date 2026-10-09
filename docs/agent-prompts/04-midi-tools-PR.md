@@ -156,6 +156,10 @@ from a correct one. The test now asserts both halves (the edit path grows to
 
 ### Click list (piano roll window)
 
+Run it with the transport stopped (or expect the change to be heard from the
+next Play): a piano-roll edit is not live — the engine rebuilds from the model
+on Play — and a transform is an edit like any other.
+
 1. Open a MIDI region's piano roll (double-click a MIDI region on the timeline).
    Add a few notes deliberately off the grid (Pencil tool, Shift-drag or zoom in
    so off-grid is visible).
