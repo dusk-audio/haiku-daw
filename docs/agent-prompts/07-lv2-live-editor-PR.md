@@ -18,9 +18,9 @@ below say which parts are done and which are still design.
 | Plugin fixture on the VM | done — **4K EQ 2** (direct-access) and **Parameters** (control-port) |
 | Phase 0 — click the editor-close crash fix | **done, by the user** (see below) |
 | Phase 1 — link control-port UIs | code landed; click test pending |
-| Phase 2 — the DIRECT_ACCESS decision | **decided: option C, by the user** |
-| Phase 3 — engine → UI direction | design below, not implemented |
-| Phase 4 — identity and teardown | partially in from Phase 1 (address-by-(track,fx,slot), commit-on-close) |
+| Phase 2 — the DIRECT_ACCESS decision | **decided: option C, by the user**; implemented |
+| Phase 3 — engine → UI direction | implemented (design below) |
+| Phase 4 — identity and teardown | implemented |
 
 ## The VM, and how the fixture was rebuilt
 
@@ -135,6 +135,11 @@ it opens and again with no messenger when it closes; MainWindow pushes
 runs while an editor is open and the transport is stopped, so a generic-panel
 drag with everything idle still reaches the editor.
 
+One case has no audio block to publish from: the transport is stopped and the
+generic parameter panel moves a value. `Engine::PublishFxWatchNow()` covers it —
+called from MainWindow right after `SetFxParamLive`, and it returns immediately
+while the audio callback is running (then the block publishes on its own).
+
 **3. The editor applies them as `port_event`**, and does so on its own thread —
 never the window looper, where `LockGL` deadlocks. So there is ONE thread per
 editor doing three jobs in a fixed order:
@@ -153,6 +158,30 @@ consistent with what its UI is now showing.
 What this deliberately does not do: the editor still never touches the engine's
 instance, and the engine never calls into the editor's.
 
+## Phase 4 — identity across rebuilds, and teardown
+
+The editor addresses its insert by `(track, fxIndex, slot)` and holds no pointer
+to anything the engine owns: `kMsgFxLive` and the new watch both resolve against
+the running chain per call (the engine) or per message (MainWindow), so an engine
+rebuild — a structural edit, and every play — cannot leave a dangling link.
+
+The one hole that left was *index* identity: reorder or remove an insert and
+`fxIndex` silently means a different effect, so a live editor would drive a
+plugin it is not showing. MainWindow therefore remembers which insert an editor
+registered for (by URI) and re-checks it wherever the chain changes: the editor
+follows its insert if it moved — and is told its new index, or its next write
+would use the old one — and closes if the insert is gone, exactly as the generic
+panel does when its focused insert disappears.
+
+Teardown order, in the destructor, on the way out:
+
+1. stop the editor's thread (last thing that can read port buffers or post);
+2. tell the engine to stop watching (registration cleared; the watch also dies
+   with the editor's messenger, so a crash cannot leave the engine publishing);
+3. commit anything the editor wrote but had not yet committed;
+4. detach the container, then `cleanup()`, then delete the container;
+5. never `dlclose`.
+
 ## What is verified, and how
 
 | Claim | Evidence |
@@ -162,5 +191,8 @@ instance, and the engine never calls into the editor's.
 | Phase 0 close-crash fix | clicked by the user (see above) |
 | Everything builds where it must | VM `build` 46/46, VM `build-off` 43/43, 0 warnings; host `build-host` 46/46 |
 | `SetFxParamCommand` touches only its slots, undoes exactly, honours the master flag, and refuses an index that addresses nothing | host tests, mutation-tested three ways (drop the old-value capture, restore the new value on Undo, ignore the master flag — each made the new assertions fail) |
+| `Lv2Effect::ControlValues` reports what actually took effect (clamped, per slot) and a built-in reports nothing | `lv2_fixture_tests`, mutation-tested twice (ignore `maxSlots`; publish nothing — each made the new assertions fail) |
 | A knob move in a live editor is audible during the drag | **NOT YET — waiting on a click test** |
-| Engine → UI reflection | **not implemented** |
+| Automation moving a parameter shows up in the open editor | **NOT YET — waiting on a click test** |
+| Reordering/removing an insert redirects or closes its editor | **NOT YET — waiting on a click test** |
+| Close during playback is clean with a live editor | **NOT YET — waiting on a click test** (the Phase 0 test preceded any of this code) |

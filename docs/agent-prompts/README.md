@@ -11,7 +11,7 @@ Gap analysis vs Logic Pro / Bitwig / Reaper (2026):
 | Insert FX | Per-track `vector<EffectDesc>` chain, 10 built-ins, native add-on ABI. No per-insert bypass, no wet/dry, no third-party standard | Ordered inserts, per-slot bypass + wet/dry, huge plugin ecosystems | 01, 02, 03 |
 | Third-party plugins | Custom Haiku add-on ABI only | VST3/AU/CLAP/LV2 | 02 (LV2 via lilv — the format actually available on Haiku) |
 | Plugin browser / slot UI | Floating EffectsWindow, add via menu | Channel-strip insert slots, searchable browser | 03 |
-| LV2 plugin editors | Plugin's own GUI opens, but view-only (its own instance, not the playing one) | Editor drives the live insert | 07 |
+| LV2 plugin editors | Plugin's own GUI opens and drives the live insert — control-port UIs directly, DIRECT_ACCESS UIs through a mediated instance (package 07) | Editor drives the live insert | 07 (done on branch, pending click tests) |
 | MIDI tools | Piano roll + CC lanes, no quantize/swing/humanize | All have full MIDI transform suites | 04 |
 | Sidechain | None | All three | 05 |
 | Time-stretch | None (only rate-match resampling) | Elastic Audio / Stretch markers / Warp | 06 |
@@ -49,7 +49,7 @@ Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Eng
 | 01 fx-inserts-core | Merged to master |
 | 02 lv2-host | Merged to master (see `02-lv2-host-PR.md`) |
 | 03 inserts-ui | Merged to master 2026-07-20 (`5a09823`, host suite 46/46; see `03-inserts-ui-PR.md`) |
-| 07 lv2-live-editor | Next on the VM — entry prompt `07-lv2-live-editor-HANDOFF.md`, task `07-lv2-live-editor.md` |
+| 07 lv2-live-editor | **In progress on branch `feature/lv2-live-editor`** — all four phases written and green on the new VM (`build` 46/46, `build-off` 43/43, host 46/46); click-testing of the live paths still owed. Entry prompt `07-session-entry-newvm.md`, task `07-lv2-live-editor.md`, record `07-lv2-live-editor-PR.md` |
 | 04 midi-tools | Next host-side, parallel-safe with 07 — entry prompt `04-midi-tools-HANDOFF.md`, task `04-midi-tools.md` |
 | 05 sidechain | Unstarted; hold until 07 merges (shared engine FX-loop regions) |
 | 06 timestretch | Unstarted, unblocked; DSP/exporter half host-testable, engine half wants the VM after 07 |
