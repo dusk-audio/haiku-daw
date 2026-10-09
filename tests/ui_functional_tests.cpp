@@ -134,25 +134,46 @@ static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
     return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
 }
 
-// Answer a modal alert the way its own buttons do: find the alert window by
-// title, take the button at `which` (0/1/2 = the order they were given to the
-// constructor) and invoke it. BAlert::ButtonAt is the public way in; the
-// invoke is dispatched to the alert's own looper, which is what releases the
-// synchronous Go() on the window's thread.
-static bool AnswerAlert(const char* title, int32 which) {
+// Is a window with this title up? Deliberately takes NO lock: a modal prompt
+// holds the main window's looper until it is answered, so a predicate that
+// locked the window first would block forever instead of failing the test.
+static bool AlertUp(const char* title) {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
-        if (!w || w->IsHidden() || !w->Name()) continue;
-        if (std::strcmp(w->Name(), title) != 0) continue;
-        BAlert* a = dynamic_cast<BAlert*>(w);
-        if (!a) continue;
-        a->Lock();
-        BButton* b = a->ButtonAt(which);
-        if (b) b->Invoke();
-        a->Unlock();
-        return b != nullptr;
+        if (w && !w->IsHidden() && w->Name()
+            && std::strcmp(w->Name(), title) == 0)
+            return true;
     }
     return false;
+}
+
+// Answer a modal alert the way its own buttons do: wait for the alert titled
+// `title` to come up (it opens on the window's thread a moment after the
+// message that triggers it), then take the button at `which` (0/1/2 = the
+// order they were given to the constructor) and invoke it. BAlert::ButtonAt
+// is the public way in; the invoke is dispatched to the alert's own looper,
+// which is what releases the synchronous Go() on the window's thread.
+static bool AnswerAlertWhenUp(const char* title, int32 which,
+                              bigtime_t timeoutUs = 10000000) {
+    const bigtime_t step = 20000;
+    bigtime_t waited = 0;
+    for (;;) {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || !w->Name()) continue;
+            if (std::strcmp(w->Name(), title) != 0) continue;
+            BAlert* a = dynamic_cast<BAlert*>(w);
+            if (!a) continue;
+            a->Lock();
+            BButton* b = a->ButtonAt(which);
+            if (b) b->Invoke();
+            a->Unlock();
+            return b != nullptr;
+        }
+        if (waited >= timeoutUs) return false;
+        snooze(step);
+        waited += step;
+    }
 }
 
 // Put a window that is not the one under test away -- the panel, as its own
@@ -711,62 +732,72 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
 // clean with its name in the title. Left for last: it replaces the project.
 static void TestUnsavedChanges(MainWindow* win, Project& project,
                                CommandStack& stack) {
+    HideOtherWindows(win);   // nothing lingering from earlier tests
     CHECK(WaitQuiet());
     std::printf("test_unsaved_changes\n");
+
+    // Every window lock here is bounded. A prompt holds the window's looper
+    // until it is answered; an unbounded Lock() inside a predicate would hang
+    // the whole run instead of failing the test (found the hard way), and a
+    // prompt wait keyed on window COUNT can be satisfied by an unrelated
+    // panel -- so prompts are found by title, never by counting.
+    auto lockWin = [&] { return win->LockWithTimeout(1000000) == B_OK; };
 
     // Dirty the project through the window's own path.
     const size_t before = project.Tracks().size();
     win->PostMessage(MSG_NEW_MIDI);
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (!lockWin()) return false;
         const size_t now = project.Tracks().size();
         win->Unlock();
         return now == before + 1;
     }));
+
     // The title picks the marker up on its own slow poll (not on the 60 Hz
     // pulse, which only runs while the transport does).
-    CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
-        const bool marked = win->Name() && win->Name()[0] == '*';
+    const bool marked = WaitFor([&] {
+        if (!lockWin()) return false;
+        const bool ok = win->Name() && win->Name()[0] == '*';
         win->Unlock();
-        return marked;
-    }));
+        return ok;
+    });
+    if (!marked) {   // say what the title actually reads, not just that it failed
+        if (lockWin()) {
+            std::printf("  title is '%s' (dirty=%d)\n",
+                        win->Name() ? win->Name() : "(null)",
+                        (int)stack.IsDirty());
+            win->Unlock();
+        }
+    }
+    CHECK(marked);
 
     // Quit -> the prompt. Cancel: the window stays up, still dirty.
     win->PostMessage(B_QUIT_REQUESTED);
-    CHECK(WaitFor([&] { return VisibleWindows() >= 2; }));
-    CHECK(AnswerAlert("Unsaved Changes", 0));       // Cancel
+    CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+    CHECK(AnswerAlertWhenUp("Unsaved Changes", 0));       // Cancel
+    CHECK(WaitFor([&] { return !AlertUp("Unsaved Changes"); }));
     CHECK(WaitFor([&] { return VisibleWindows() == 1; }));
     {
-        bool dirty = false, marked = false;
-        if (win->Lock()) {
-            dirty  = stack.IsDirty();
-            marked = win->Name() && win->Name()[0] == '*';
+        bool dirty = false, starred = false;
+        if (lockWin()) {
+            dirty   = stack.IsDirty();
+            starred = win->Name() && win->Name()[0] == '*';
             win->Unlock();
         }
         CHECK(dirty);
-        CHECK(marked);
+        CHECK(starred);
     }
 
     // Quit -> Save, with no path yet: the save panel opens and the window
     // does NOT quit (the action is refused until a path exists).
     win->PostMessage(B_QUIT_REQUESTED);
-    CHECK(WaitFor([&] { return VisibleWindows() == 2; }));
-    CHECK(AnswerAlert("Unsaved Changes", 2));       // Save
-    CHECK(WaitFor([&] {
-        // The alert gives way to the file panel; two windows either way, so
-        // the assertion is that the prompt is gone and the panel is there.
-        for (int32 i = 0; i < be_app->CountWindows(); i++) {
-            BWindow* w = be_app->WindowAt(i);
-            if (w && !w->IsHidden() && w->Name()
-                && std::strcmp(w->Name(), "Unsaved Changes") == 0)
-                return false;
-        }
-        return VisibleWindows() >= 2;
-    }));
-    CHECK(win->Lock());                             // still alive: no quit
+    CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+    CHECK(AnswerAlertWhenUp("Unsaved Changes", 2));       // Save
+    CHECK(WaitFor([&] { return !AlertUp("Unsaved Changes"); }));
+    CHECK(WaitFor([&] { return VisibleWindows() >= 2; }));   // the panel
+    CHECK(lockWin());                             // still alive: no quit
     win->Unlock();
-    HideOtherWindows(win);                          // the panel, as Cancel does
+    HideOtherWindows(win);                        // the panel, as Cancel does
     CHECK(WaitQuiet());
 
     // Open, over the dirty project: Discard loads the file, and the loaded
@@ -784,17 +815,17 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     BMessage open(MSG_OPEN_REF);
     open.AddRef("refs", &ref);
     win->PostMessage(&open);
-    CHECK(WaitFor([&] { return VisibleWindows() >= 2; }));   // the prompt
-    CHECK(AnswerAlert("Unsaved Changes", 1));                // Discard
+    CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+    CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (!lockWin()) return false;
         const bool loaded = project.Tracks().size() == 1
                          && project.Tracks().front().name == "opened-synth";
         win->Unlock();
         return loaded;
     }));
     CHECK(WaitFor([&] {
-        if (!win->Lock()) return false;
+        if (!lockWin()) return false;
         const bool ok = win->Name()
                      && std::strstr(win->Name(), "haiku_daw_ui_open") != nullptr
                      && win->Name()[0] != '*';
@@ -803,7 +834,7 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     }));
     {
         bool clean = false;
-        if (win->Lock()) { clean = !stack.IsDirty(); win->Unlock(); }
+        if (lockWin()) { clean = !stack.IsDirty(); win->Unlock(); }
         CHECK(clean);
     }
     std::remove(openPath);
@@ -849,6 +880,10 @@ static int32 TestThread(void*) {
 }
 
 int main() {
+    // Line-buffer stdout: with a pipe (ctest) the progress lines would sit in
+    // the buffer until exit, and a hung run would show nothing at all.
+    setvbuf(stdout, nullptr, _IOLBF, 0);
+
     BApplication app("application/x-haiku-daw-uitests");
     if (app.InitCheck() != B_OK) {
         std::printf("ui_functional_tests: no app_server - skipping\n");
