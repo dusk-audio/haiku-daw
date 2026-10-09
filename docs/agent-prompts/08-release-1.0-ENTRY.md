@@ -90,10 +90,20 @@ record the answer in the relevant doc):
 - Version string: **1.0.0**.
 - License: **MIT**.
 - Distribution: **HaikuPorts recipe** (`haiku-daw-<ver>.recipe`).
-- Still open, no decision taken: FLAC/Ogg/MP3 export in 1.0 (default until
-  answered: WAV only); multichannel input in 1.0 (default: post-1.0);
-  dynamic-latency policy (do not pick; the option list now lives in
-  `02-lv2-host-PR.md` §"What is still NOT verified").
+- ~~Still open, no decision taken~~ — **all three resolved later on 2026-10-09,
+  see the block below.**
+
+**Recorded 2026-10-09 (later the same day), by Marc — the commercial-feel plan:**
+- The 1.0 tag is **held** until that plan lands; the CHANGELOG heading reads
+  `1.0.0 — unreleased` until then and `Version.h` stays 1.0.0. The plan
+  (M0 data safety → M1 UI foundation → … → M8 release) is
+  `~/.claude/plans/bright-juggling-bird.md`.
+- **In 1.0 scope:** sidechain (package 05), multichannel audio input, FLAC/Ogg
+  export, time-stretch (package 06). MP3 stays out.
+- **Dynamic LV2 latency:** re-solve PDC when a plugin's reported latency
+  changes — this replaces the "do not pick" above; the option list in
+  `02-lv2-host-PR.md` stays for history.
+- Each plan item gets its spec and record in this directory (`10-*` onwards).
 
 ## 3. Stale documentation — trust this section over these
 
@@ -153,7 +163,12 @@ Fixing these docs is a legitimate small task (5.R4) — do it in a `docs:` commi
   (port 8000 is firewalled and *hangs*, it does not refuse).
 - Ask Marc before using it — it is his physical machine.
 
-## 5. Ordered task list (proposal — confirm scope with Marc first)
+## 5. Ordered task list — **complete; superseded by the M0–M8 plan**
+
+R1–R4 merged to master on 2026-10-09, R5 (`docs/RELEASE_CHECKLIST.md`) is
+written and waiting on Marc's hardware pass, and package 07 merged the same
+day. The remaining 1.0 work follows the plan named in §2. The list below stays
+as the record of what R0–R5 asked for.
 
 Before starting task R1, post the "Open decisions" list from section 2 to Marc
 and ask him to confirm or edit the 1.0 scope below. Work on whatever he does not

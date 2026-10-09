@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0 — 2026-10-09
+## 1.0.0 — unreleased
 
 The first release. Everything below is in it; the project's history before this
 file existed is in `git log` and `docs/ROADMAP.md`.
