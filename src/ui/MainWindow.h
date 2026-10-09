@@ -20,6 +20,7 @@
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
 #include "RecordController.h"         // the record state + the recorder
+#include "RenderJobs.h"              // export/freeze/region rendering
 #include "TransportController.h"      // the engine + transport state
 
 #include <Messenger.h>
@@ -75,6 +76,7 @@ public:
     // reaches the widgets and the model through the window it is given.
     friend class TransportController;
     friend class RecordController;
+    friend class RenderJobs;
     // Like TimelineView: BWindow::Frame() would shadow the model's frame type
     // for every unqualified `Frame` in this class. A member typedef hides it.
     using Frame = daw::Frame;
@@ -161,7 +163,6 @@ private:
     int64_t DecodeClipRegion(const Clip& c, std::vector<float>& out,
                              double& outRate) const;
     // A unique path in the take/working dir for a rendered region/freeze file.
-    std::string RenderPath(const std::string& tag) const;
 
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
@@ -259,29 +260,13 @@ private:
     BMenu*                    fRecentMenu = nullptr;
     std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
 
-    // Off-looper export (R1): the model is snapshotted on the looper — after
-    // StopPlayback and the editor flush, in that order — and the worker renders
-    // the COPY, so the window keeps responding and Cancel is a flag flip. The
-    // worker writes only the atomics and the two result fields, and it sets
-    // fExportRunning false (release) after them; the pulse reads them only
-    // after seeing that (acquire). ~MainWindow cancels and joins before
-    // anything below is freed.
-    std::unique_ptr<Project>  fExportSnapshot;   // what the worker renders
-    std::thread               fExportThread;
-    std::atomic<bool>         fExportRunning{false};
-    std::atomic<bool>         fExportCancel{false};
-    std::atomic<float>        fExportProgress{-1.0f};
-    bool                      fExportOk = false;      // worker -> pulse
-    int                       fExportWritten = 0;     // stems written
-    bool                      fExportIsStems = false; // for the progress title
-    bool                      fExportHandled = true;  // the pulse saw the result
-    std::string               fExportPath;
-    BMessenger                fExportProgMsgr;   // the progress window, while up
+    // RenderJobs carries the off-looper export machinery (M1.1): the snapshot,
+    // the worker thread, the progress messenger and the cancel flag. The
+    // dialog and its remembered choices stay here.
+    RenderJobs                fRender;
     ExportChoices             fExportChoices;    // the dialog's last settings
 
     void OpenExportWindow(bool stems);            // the options dialog
-    void StartExport(const char* path, bool stems);  // snapshot + worker
-    void FinishExport();                          // pulse: report, close the bar
 };
 
 } // namespace daw

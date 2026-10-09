@@ -425,9 +425,9 @@ MainWindow::~MainWindow() {
     // stop before anything it touches goes away. The cancel flag is polled
     // between blocks, so this waits at most one block (and none at all when
     // nothing is running).
-    if (fExportThread.joinable()) {
-        fExportCancel.store(true);
-        fExportThread.join();
+    if (fRender.fExportThread.joinable()) {
+        fRender.fExportCancel.store(true);
+        fRender.fExportThread.join();
     }
     delete fPulse;
     delete fAutosave;
@@ -617,7 +617,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 && msg->FindString("name", &name) == B_OK) {
                 BPath path(&dir);
                 path.Append(name);
-                StartExport(path.Path(), false);
+                fRender.StartExport(path.Path(), false);
             }
             break;
         }
@@ -628,7 +628,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BPath base(&dir);
                 BPath stemDir(base.Path(), name && name[0] ? name : "stems");
                 create_directory(stemDir.Path(), 0755);
-                StartExport(stemDir.Path(), true);
+                fRender.StartExport(stemDir.Path(), true);
             }
             break;
         }
@@ -636,7 +636,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // The progress window's button. The worker polls this between
             // blocks; the completion path (on the pulse) closes the window, so
             // the bar never disappears before the outcome is known.
-            fExportCancel.store(true);
+            fRender.fExportCancel.store(true);
             break;
         case MSG_IMPORT_MIDI:
             if (!fMidiImportPanel) {
@@ -1306,18 +1306,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindInt64("clip", &cid);
             if (msg->what == kMsgRegionNormalize)
-                RegionNormalize((TrackId)tid, (ClipId)cid);
+                fRender.RegionNormalize((TrackId)tid, (ClipId)cid);
             else if (msg->what == kMsgRegionReverse)
-                RegionReverse((TrackId)tid, (ClipId)cid);
+                fRender.RegionReverse((TrackId)tid, (ClipId)cid);
             else
-                RegionStripSilence((TrackId)tid, (ClipId)cid);
+                fRender.RegionStripSilence((TrackId)tid, (ClipId)cid);
             break;
         }
         case kMsgFreezeTrack: {
             int64 tid = 0; bool freeze = true;
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindBool("freeze", &freeze);
-            FreezeTrack((TrackId)tid, freeze);
+            fRender.FreezeTrack((TrackId)tid, freeze);
             break;
         }
         case MSG_SHORTCUTS: {
@@ -1499,17 +1499,17 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // An export reports through the pulse: the worker writes only
             // atomics (the codebase's pattern for streamed values), and the bar
             // is a window this looper owns a messenger to.
-            if (!fExportHandled) {
-                if (fExportRunning.load(std::memory_order_acquire)) {
+            if (!fRender.fExportHandled) {
+                if (fRender.fExportRunning.load(std::memory_order_acquire)) {
                     const float f =
-                        fExportProgress.load(std::memory_order_relaxed);
-                    if (f >= 0.0f && fExportProgMsgr.IsValid()) {
+                        fRender.fExportProgress.load(std::memory_order_relaxed);
+                    if (f >= 0.0f && fRender.fExportProgMsgr.IsValid()) {
                         BMessage pm(kMsgExportProgress);
                         pm.AddFloat("f", f);
-                        fExportProgMsgr.SendMessage(&pm);
+                        fRender.fExportProgMsgr.SendMessage(&pm);
                     }
                 } else {
-                    FinishExport();
+                    fRender.FinishExport();
                 }
             }
             // Before any branch: an open native editor is fed on every pulse,
@@ -1708,7 +1708,7 @@ void MainWindow::UpdatePulse() {
         if (w.editor && w.editor->Alive()) { watching = true; break; }
     const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
                    || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
-                   || !fExportHandled;   // an export's progress + completion
+                   || !fRender.fExportHandled;   // an export's progress + completion
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
                                     kPulseInterval);
@@ -2407,135 +2407,20 @@ void MainWindow::RebuildPeaks() {
 // A unique path for a rendered region/freeze file: in the take dir (beside the
 // project) if known, else the working dir. Suffixed with a session counter so
 // repeated ops don't collide.
-std::string MainWindow::RenderPath(const std::string& tag) const {
-    // First free <dir>/<tag>-N.wav: a render must not overwrite one a clip of
-    // the reopened project still references (same hazard as the takes).
-    return NextFreeWavPath(fRecCtl.fTakeDir.empty() ? std::string(".") : fRecCtl.fTakeDir, tag);
-}
 
-int64_t MainWindow::DecodeClipRegion(const Clip& c, std::vector<float>& out,
-                                     double& outRate) const {
-    out.clear();
-    outRate = 0.0;
-    WavSource src;
-    if (!src.Open(c.sourcePath))
-        return 0;
-    outRate = src.FrameRate();
-    if (c.sourceOffset > 0)
-        src.Seek(c.sourceOffset);
-    // The clip plays lengthFrames project-frames == that many source-frames
-    // scaled by the rate ratio, starting at sourceOffset.
-    const double projRate = fProject->sampleRate;
-    int64_t wantSrc = c.lengthFrames;
-    if (outRate > 0 && projRate > 0)
-        wantSrc = (int64_t)llround((double)c.lengthFrames * outRate / projRate);
-    const float* chunk = nullptr;
-    size_t frames = 0;
-    while ((int64_t)(out.size() / 2) < wantSrc && src.ReadChunk(&chunk, &frames)) {
-        int64_t have = (int64_t)(out.size() / 2);
-        int64_t take = wantSrc - have;
-        if ((int64_t)frames > take) frames = (size_t)take;
-        out.insert(out.end(), chunk, chunk + frames * 2);
-    }
-    return (int64_t)(out.size() / 2);
-}
 
-void MainWindow::RegionNormalize(TrackId track, ClipId clip) {
-    const Track* t = fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0) return;
-    const float peak = PeakLinear(buf.data(), n);
-    if (peak <= 1e-6f) return;              // silent: nothing to normalize
-    float g = 1.0f / peak;
-    if (g > 64.0f) g = 64.0f;               // ceiling for near-silent clips
-    fStack->Execute(std::make_unique<SetClipGainCommand>(track, clip, g), *fProject);
-    fTimeline->Invalidate();
-}
 
-void MainWindow::RegionReverse(TrackId track, ClipId clip) {
-    const Track* t = fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0 || rate <= 0) return;
-    ReverseStereo(buf.data(), n);
 
-    const std::string path = RenderPath("reversed");
-    std::vector<int16_t> pcm((size_t)n * 2);
-    for (int64_t i = 0; i < n * 2; ++i) {
-        float s = buf[i];
-        if (s >  1.0f) s =  1.0f;
-        if (s < -1.0f) s = -1.0f;
-        pcm[i] = (int16_t)lround(s * 32767.0f);
-    }
-    WavWriter w;
-    // Exclusive: the path is scanned-free, and if that ever raced, refusing
-    // beats overwriting a file a clip may reference.
-    if (!w.Open(path, (int)lround(rate), 2, /*exclusive*/ true)
-        || !w.WriteInt16(pcm.data(), pcm.size()) || !w.Close()) {
-        std::fprintf(stderr, "Reverse: cannot write %s\n", path.c_str());
-        return;
-    }
 
-    // Replace the clip with one pointing at the reversed file (fades swap so the
-    // fade follows the now-reversed audio); same position, length, gain.
-    Clip nc = *c;
-    nc.id = kInvalidClipId;
-    nc.sourcePath   = path;
-    nc.sourceOffset = 0;
-    nc.takeGroup    = 0;
-    std::swap(nc.fadeInFrames, nc.fadeOutFrames);
-    auto macro = std::make_unique<MacroCommand>("Reverse Clip");
-    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
-    macro->Add(std::make_unique<AddClipCommand>(track, nc));
-    fStack->Execute(std::move(macro), *fProject);
 
-    WavSource src;
-    if (src.Open(path)) (*fPeaks)[path].Build(src);
-    fTimeline->Invalidate();
-}
 
-void MainWindow::RegionStripSilence(TrackId track, ClipId clip) {
-    const Track* t = fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0 || rate <= 0) return;
 
-    const float   thresh = 0.00316f;               // ~ -50 dBFS
-    const int64_t minSil = (int64_t)(0.25 * rate); // 250 ms of silence = a gap
-    const int64_t pad    = (int64_t)(0.02 * rate); // keep 20 ms of air each side
-    auto spans = NonSilentSpans(buf.data(), n, thresh, minSil, pad);
-    if (spans.size() <= 1) return;                 // no gaps worth cutting
 
-    const double projRate = fProject->sampleRate;
-    const double toProj = (rate > 0) ? projRate / rate : 1.0;   // src -> project
-    auto macro = std::make_unique<MacroCommand>("Strip Silence");
-    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
-    for (const daw::Span& s : spans) {
-        Clip nc = *c;
-        nc.id           = kInvalidClipId;
-        nc.sourceOffset = c->sourceOffset + s.start;              // source frames
-        nc.startFrame   = c->startFrame + (Frame)llround(s.start * toProj);
-        nc.lengthFrames = (Frame)llround((s.end - s.start) * toProj);
-        nc.fadeInFrames = 0;
-        nc.fadeOutFrames = 0;
-        nc.takeGroup    = 0;
-        macro->Add(std::make_unique<AddClipCommand>(track, nc));
-    }
-    fStack->Execute(std::move(macro), *fProject);
-    fTimeline->Invalidate();
-}
 
 // Render one track in isolation (its clips/notes through its fader + effect
 // chain) to a stereo WAV — the basis for Freeze. Routing/sends are stripped so
 // only the track's own output is baked; solo/mute are cleared so it's audible.
-static bool RenderTrackToWav(const Project& src, TrackId id,
+bool RenderTrackToWav(const Project& src, TrackId id,
                              const std::string& out) {
     const Track* t = src.FindTrack(id);
     if (!t) return false;
@@ -2575,143 +2460,13 @@ void MainWindow::OpenExportWindow(bool stems) {
 // holds the value the user just heard -- the reason the old synchronous path
 // flushed), and only then snapshot. The worker renders the COPY, so editing
 // may continue while it runs and the model is never read across threads.
-void MainWindow::StartExport(const char* path, bool stems) {
-    if (!path || !path[0]) return;
-    if (fExportThread.joinable()) return;   // one at a time (a bar is up)
 
-    fTransportCtl.StopPlayback();
-    FlushFxEditors();
 
-    fExportSnapshot = std::make_unique<Project>(*fProject);
-    const std::string outPath(path);
-    fExportPath    = outPath;
-    fExportIsStems = stems;
-    fExportWritten = 0;
-    fExportOk      = false;
-    fExportHandled = false;
-    fExportProgress.store(-1.0f, std::memory_order_relaxed);
-    fExportCancel.store(false, std::memory_order_relaxed);
-
-    const ExportChoices c = fExportChoices;
-    const double rate = c.sampleRate > 0 ? (double)c.sampleRate : 0.0;
-    ExportOptions opts;
-    opts.format    = ExportFormat{ c.bitDepth, c.dither };
-    opts.normalize = ExportNormalize{ c.normalize, c.targetLufs, c.truePeak,
-                                      c.limiter };
-    opts.range     = ExportRange{};   // whole project unless the loop is asked
-    if (c.range == 1 && fProject->transport.loopEnabled
-        && fProject->transport.loopEnd > fProject->transport.loopStart)
-        opts.range = ExportRange{ fProject->transport.loopStart,
-                                  fProject->transport.loopEnd };
-    Project* snap = fExportSnapshot.get();
-
-    // The bar goes up BEFORE the thread starts, so a very short export cannot
-    // finish and be handled before there is anything to close. (It is created
-    // only now: the flush above can block the looper for a moment, and a
-    // visible "exporting" must never precede a settled model.)
-    BRect wr(240, 240, 240 + 320, 240 + 96);
-    ExportProgressWindow* w = new ExportProgressWindow(
-        wr, BMessenger(this), stems ? "Rendering stems" : "Rendering mix");
-    fExportProgMsgr = BMessenger(w);
-    w->Show();
-
-    fExportRunning.store(true, std::memory_order_release);
-    fExportThread = std::thread([this, snap, stems, rate, opts, outPath]() {
-        ExportOptions o = opts;
-        ExportJob job;
-        job.cancel = &fExportCancel;
-        job.progress = [this](float v) {
-            fExportProgress.store(v, std::memory_order_relaxed);
-        };
-        o.job = &job;
-        if (stems) {
-            fExportWritten = ExportStems(*snap, outPath, rate, o);
-            fExportOk = fExportWritten > 0;
-        } else {
-            fExportOk = ExportWav(*snap, outPath, rate, o);
-        }
-        fExportRunning.store(false, std::memory_order_release);
-    });
-    UpdatePulse();
-}
-
-// The pulse saw the worker finish (fExportRunning went false). Close the bar,
+// The pulse saw the worker finish (fRender.fExportRunning went false). Close the bar,
 // reap the thread, drop the snapshot and say what happened. Runs on the looper.
-void MainWindow::FinishExport() {
-    fExportHandled = true;
-    if (fExportProgMsgr.IsValid()) {
-        BMessage q(B_QUIT_REQUESTED);
-        fExportProgMsgr.SendMessage(&q);
-        fExportProgMsgr = BMessenger();
-    }
-    if (fExportThread.joinable()) fExportThread.join();
-    fExportSnapshot.reset();
 
-    // Cancellation is checked FIRST: a stems run that was stopped after some
-    // stems were written still reports a count, and that is a cancel, not a
-    // finished export.
-    if (fExportCancel.load()) {
-        std::fprintf(stderr, "MainWindow: export cancelled: %s\n",
-                     fExportPath.c_str());
-    } else if (fExportOk) {
-        if (fExportIsStems)
-            std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
-                         fExportWritten, fExportPath.c_str());
-        else
-            std::fprintf(stderr, "MainWindow: exported %s\n",
-                         fExportPath.c_str());
-    } else {
-        std::fprintf(stderr, "MainWindow: export failed: %s\n",
-                     fExportPath.c_str());
-        // Only a real failure is worth an alert: a cancel is the user's own
-        // doing, and it already said so on stderr.
-        BAlert* a = new BAlert("Export", "The export failed. Nothing was "
-                               "written to that name.", "OK", nullptr, nullptr,
-                               B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-        a->Go(nullptr);   // async, like the other warnings
-    }
-    UpdatePulse();
-}
 
-void MainWindow::FreezeTrack(TrackId track, bool freeze) {
-    Track* t = fProject->FindTrack(track);
-    if (!t) return;
 
-    // Freezing renders this track from the model, so an editor gesture still
-    // inside its debounce has to land first -- otherwise the frozen audio is
-    // missing the change the user just heard (unfreezing only checks the flag).
-    if (freeze) FlushFxEditors();
-
-    if (!freeze) {                     // unfreeze: pure model restore
-        if (!t->frozen) return;
-        fStack->Execute(std::make_unique<FreezeTrackCommand>(track, false),
-                        *fProject);
-        RebuildPeaks();
-        fTimeline->Invalidate();
-        return;
-    }
-    if (t->frozen) return;
-
-    const std::string path = RenderPath("frozen");
-    if (!RenderTrackToWav(*fProject, track, path)) {
-        std::fprintf(stderr, "Freeze: render failed for track %ld\n", (long)track);
-        return;
-    }
-    WavSource src;
-    if (!src.Open(path)) return;
-    const double fileRate = src.FrameRate();
-    const double projRate = fProject->sampleRate;
-    Clip fc;
-    fc.startFrame   = 0;
-    fc.sourceOffset = 0;
-    fc.sourcePath   = path;
-    fc.lengthFrames = (Frame)llround(src.TotalFrames()
-                        * (fileRate > 0 ? projRate / fileRate : 1.0));
-    fStack->Execute(std::make_unique<FreezeTrackCommand>(track, true, fc),
-                    *fProject);
-    (*fPeaks)[path].Build(src);
-    fTimeline->Invalidate();
-}
 
 // Resolve ~/config/settings/HaikuDAW/settings, creating the dir if needed.
 // The crash-recovery autosave file (settings dir). A leftover after startup

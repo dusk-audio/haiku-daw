@@ -499,6 +499,7 @@ if(HAIKU)
         src/ui/ProjectDocument.cpp
         src/ui/TransportController.cpp
         src/ui/RecordController.cpp
+        src/ui/RenderJobs.cpp
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
