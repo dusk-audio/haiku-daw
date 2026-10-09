@@ -287,8 +287,26 @@ total.
   moves its reported latency at runtime (0 → 27 → 0). The host latches at activate
   and so reports 0 for it, leaving playback ~27 samples out whenever that EQ is
   doing work with oversampling on. No fixed value is correct for such a plugin;
-  see the options in the handoff notes. The *mechanism* is now well tested — the
-  *policy* needs a call.
+  the *mechanism* is now well tested — the *policy* needs a call, and it is
+  Marc's (do not pick one). The options, none of them chosen:
+
+  1. **Leave it.** Latch at activate, and document that a plugin whose latency
+     port moves at runtime is misaligned by that much (≈0.6 ms at 44.1 kHz for
+     this one) while it oversamples. No code, no risk.
+  2. **Fix it in the plugin.** Report a constant — e.g. the oversampled maximum —
+     from the latency port. Keeping the value fixed across an activation is the
+     plugin's side of the contract; the host cannot represent latency that moves
+     after activation (`IEffect::LatencySamples()` is constant by design, and
+     `InsertSlot.h` sizes its dry-delay line from it once at chain build).
+  3. **Re-latch at safe points.** Read the port at block boundaries (a
+     word-sized load), and when it differs from the latched value mark the PDC
+     solve dirty and re-solve at the next engine rebuild — every Play already
+     rebuilds. Alignment then shifts at a rebuild boundary instead of being
+     continuously wrong. Medium complexity: touches the PDC solve and the
+     per-insert dry-delay sizing.
+  4. **Warn only.** Keep latching as today, but print one stderr line when the
+     live port value differs from the latched one, so the user knows the
+     reported PDC may be off.
 - **No third-party plugin with non-zero latency has ever been hosted.** The
   fixture proves the mechanism end to end, but every real plugin on both machines
   reports 0, so the interaction with a real latent plugin is still unexercised.
