@@ -37,7 +37,7 @@ do_sync() {
 case "$cmd" in
   ssh)   $SSH "${@:-uname -a; pwd}";;
   sync)  do_sync;;
-  build) do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j4 2>&1 | tail -3';;
-  test)  do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j4 >/tmp/b.log 2>&1 && ctest --test-dir build 2>&1 | tail -3';;
+  build) do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 2>&1 | tail -3';;
+  test)  do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 >/tmp/b.log 2>&1 && ctest --test-dir build 2>&1 | tail -3';;
   *)     echo "usage: sh scripts/vm.sh {ssh|sync|build|test} [cmd...]"; exit 1;;
 esac

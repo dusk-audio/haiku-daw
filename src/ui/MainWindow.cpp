@@ -22,6 +22,7 @@
 #include "RenameWindow.h"
 #include "UiMetrics.h"
 
+#include "../engine/DeviceLatency.h"
 #include "../engine/WavSource.h"
 #include "../engine/WavWriter.h"
 #include "../engine/Exporter.h"
@@ -2143,6 +2144,12 @@ void MainWindow::StartRecording() {
     // and each pass becomes a stacked take.
     const Transport& tr = fProject->transport;
     fLoopRecord = tr.loopEnabled && tr.loopEnd > tr.loopStart;
+    // What the device costs, in frames: the capture arrives this many frames
+    // after the timeline frame it belongs to, and every take path below slides
+    // it back by that much. Asked here, once per take, because the device (and
+    // so the number) can change between them; 0 when the roster cannot answer,
+    // which degrades to no compensation rather than to a wrong slide.
+    fRoundTripFrames = DeviceRoundTripFrames(fProject->sampleRate);
 
     // Record point = loop start (loop-record) or the playhead. A count-in plays
     // the engine (existing tracks + click) for N bars leading up to it.
@@ -2232,8 +2239,11 @@ void MainWindow::StopRecording() {
     // Loop-record: split the linear capture into one take per loop pass and
     // stack them as a take group on each armed track (last pass active).
     if (fLoopRecord) {
+        // The capture's first `fRoundTripFrames` frames belong to the pass
+        // BEFORE the loop; dropping them is what makes each take start where
+        // the loop does.
         const std::vector<TakeRegion> takes =
-            LoopTakes(tr.loopStart, tr.loopEnd, captureLen);
+            LoopTakes(tr.loopStart, tr.loopEnd, captureLen, fRoundTripFrames);
         fLoopRecord = false;
         if (takes.empty()) { fRecorder.reset(); return; }
         for (TrackId target : targets) {
@@ -2265,8 +2275,11 @@ void MainWindow::StopRecording() {
         region.startFrame = fRecStart;
         region.sourceOffset = 0;
         region.lengthFrames = captureLen;
-        if (!PunchedTake(fRecStart, captureLen, tr.punchIn, tr.punchOut,
-                         &region)) {
+        // The capture's own origin is the record start slid earlier by the
+        // round trip: frame i of the file IS timeline frame (fRecStart -
+        // rtFrames) + i, so the punch is intersected against that.
+        if (!PunchedTake(fRecStart - fRoundTripFrames, captureLen,
+                         tr.punchIn, tr.punchOut, &region)) {
             std::fprintf(stderr, "MainWindow: take outside punch range, discarded\n");
             fRecorder.reset();
             return;

@@ -15,6 +15,8 @@
 #include "TempoMap.h"
 #include "types.h"
 
+#include <cmath>
+
 #include <algorithm>
 #include <vector>
 
@@ -83,12 +85,28 @@ inline TakeRegion CompensateRoundTrip(Frame recStart, Frame captureLen,
 // began at `loopStart` and ran `captureLen` frames while playback looped over
 // [loopStart, loopEnd). Each pass i is a clip at loopStart with source offset
 // i*L; the final pass may be shorter. Empty if the loop range is degenerate.
+// Device latency in microseconds as a frame count at `fps` -- the bridge
+// between what the Media Kit reports and the timeline the take lands on.
+// Round-to-nearest: a frame either way is a sub-millisecond error, and the
+// alternative (rounding up "to be safe") is the same size in the other
+// direction.
+inline Frame LatencyUsToFrames(int64_t us, double fps) {
+    if (us <= 0 || !(fps > 0.0)) return 0;
+    return (Frame)std::llround((double)us * fps / 1e6);
+}
+
+// `captureOffset` is how many frames of the capture belong to BEFORE the loop
+// starts: a capture that is `roundTrip` frames late begins with that many
+// frames of the pass before it, and dropping them is what makes the first take
+// start where the loop does.
 inline std::vector<TakeRegion> LoopTakes(Frame loopStart, Frame loopEnd,
-                                         Frame captureLen) {
+                                         Frame captureLen,
+                                         Frame captureOffset = 0) {
     std::vector<TakeRegion> takes;
     const Frame L = loopEnd - loopStart;
     if (L <= 0 || captureLen <= 0) return takes;
-    Frame consumed = 0;
+    Frame consumed = captureOffset < 0 ? 0 : captureOffset;
+    if (consumed >= captureLen) return takes;
     while (consumed < captureLen) {
         const Frame len = std::min(L, captureLen - consumed);
         TakeRegion t;
