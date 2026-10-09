@@ -616,7 +616,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
         win->Unlock();
         return landed;
     }));
-    CHECK(stack.UndoName() == "Set Parameter");
+    CHECK(stack.UndoName() == "Edit Effect Parameter");
 
     // ...and a commit for a plugin that is not at that address any more is
     // dropped rather than written into whatever is (the identity rule).
@@ -657,8 +657,10 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
         CHECK(sent == B_OK);
     }
 
-    // Remove the insert: the editor must close rather than keep driving
-    // whatever took its index.
+    // Remove the insert, posted the way the parameter panel posts a chain edit
+    // (kMsgApplyFx -- NOT by executing a command here): that handler is what
+    // re-checks the watch table, and it is the thing under test. The editor
+    // must close rather than keep driving whatever took its index.
     {
         std::vector<EffectDesc> chain;
         if (win->Lock()) {
@@ -667,9 +669,10 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
             win->Unlock();
         }
         chain.erase(chain.begin() + (long)fxIndex);
-        stack.Execute(std::make_unique<SetFxCommand>(tid, false,
-                                                     std::move(chain)),
-                      project);
+        BMessage edit(kMsgApplyFx);
+        edit.AddInt64("track", (int64)tid);
+        EncodeFxChain(edit, chain);
+        win->PostMessage(&edit);
     }
     CHECK(WaitFor([&] { return VisibleWindows() == before; }, 30000000));
 }
