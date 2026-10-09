@@ -254,10 +254,16 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
         return ok;
     };
 
-    // 'q': the last-used quantize, through the view's key handler.
-    roll->Lock();
-    rv->KeyDown("q", 1);
-    roll->Unlock();
+    // 'q': the last-used quantize. A KEY_DOWN message rather than a direct
+    // KeyDown() call: the handler reads the CURRENT message (auto-repeat), so
+    // only a dispatched key sees what a real one would.
+    {
+        BMessage key(B_KEY_DOWN);
+        key.AddInt32("byte_count", 1);
+        key.AddData("bytes", B_INT8_TYPE, "q", 1);
+        key.AddInt32("modifiers", 0);
+        BMessenger(view).SendMessage(&key);
+    }
     std::vector<MidiNote> n;
     CHECK(WaitFor([&] {
         if (!notes(&n) || n.size() != 2) return false;
@@ -284,7 +290,10 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     std::vector<MidiNote> l;
     CHECK(WaitFor([&] {
         if (!notes(&l) || l.size() != 2) return false;
-        return l[0].lengthFrames >= 6000;
+        // It reaches exactly the NEXT note's start -- which humanize has moved,
+        // so the assertion is the relation, not a literal 6000.
+        return l[0].lengthFrames > 400 &&
+               l[0].startFrame + l[0].lengthFrames == l[1].startFrame;
     }));
 
     // Transpose +12 and -12 back: the pitches move, and the name says so.
