@@ -154,15 +154,18 @@ public:
     }
 
     // `daw project.dawproj` from a Terminal -- including the FIRST launch,
-    // which receives its own argv as a message after Run(). Handled as the
-    // MESSAGE, not through ArgvReceived(int32, char**): with B_SINGLE_LAUNCH a
-    // second launch hands its argv to the running instance, and a relative
-    // path must be resolved against the SENDER's directory ("cwd"), not this
-    // instance's -- that field is what only the message carries (`daw
-    // song.dawproj` from another directory used to look in the wrong place).
+    // which receives its own argv as a message after Run(). Handled in
+    // DispatchMessage, where Haiku delivers it: BApplication's own dispatch
+    // CONSUMES B_ARGV_RECEIVED (it calls ArgvReceived) and never passes it to
+    // MessageReceived, so an override there is dead code -- which is what this
+    // was in its first version. The message is also the only place the sender's
+    // "cwd" is visible, and with B_SINGLE_LAUNCH a second launch hands its argv
+    // to the running instance: a relative path must resolve against the
+    // SENDER's directory, or `daw song.dawproj` from elsewhere opens the wrong
+    // file (or none).
     // Anything that is not a project is ignored: the old "each argv WAV
     // becomes a track" seed is gone; File > Import Audio is the way in.
-    void MessageReceived(BMessage* message) override {
+    void DispatchMessage(BMessage* message, BHandler* handler) override {
         if (message->what == B_ARGV_RECEIVED) {
             const char* cwd = nullptr;
             message->FindString("cwd", &cwd);
@@ -175,9 +178,9 @@ public:
                 else
                     OpenPath(arg);
             }
-            return;   // consumed: the default handler would only re-parse it
+            return;   // consumed before BApplication's own argv dispatch
         }
-        BApplication::MessageReceived(message);
+        BApplication::DispatchMessage(message, handler);
     }
 
 private:

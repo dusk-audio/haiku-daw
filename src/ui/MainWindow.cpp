@@ -445,14 +445,20 @@ MainWindow::~MainWindow() {
 
 void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
     if (message->what == B_KEY_DOWN && fTimeline) {
-        // A text field keeps its keys: a space is a space while the tempo
-        // field (or any other text view) is being edited.
+        // The timeline takes the transport keys only when nothing else is
+        // using them: a focused control (a text field being edited, a slider's
+        // arrows) keeps its keys, and Tab always belongs to BWindow's own
+        // focus navigation -- stealing it made the keyboard unusable. The
+        // common cases this covers: nothing focused yet (a fresh window), or
+        // the timeline itself after a click on it.
         BView* focus = CurrentFocus();
-        const bool editing = dynamic_cast<BTextView*>(focus) != nullptr
-                          || dynamic_cast<BTextControl*>(focus) != nullptr;
+        const bool held = focus != nullptr && focus != fTimeline;
         int32 mods = 0;
         message->FindInt32("modifiers", &mods);
-        if (!(mods & B_COMMAND_KEY) && !editing) {
+        const char* bytes = nullptr;
+        const bool isTab = message->FindString("bytes", &bytes) == B_OK
+                        && bytes && bytes[0] == B_TAB;
+        if (!(mods & B_COMMAND_KEY) && !held && !isTab) {
             // Hand it straight to the timeline: a BMessage carries no
             // retarget verb (Haiku's BMessage has no SetTarget), and this is
             // precisely "the timeline gets the key instead of the focus view".
