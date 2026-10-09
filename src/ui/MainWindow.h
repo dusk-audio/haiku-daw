@@ -56,6 +56,7 @@ constexpr uint32 MSG_PULSE            = 'puls';   // the 60 Hz BMessageRunner
 constexpr uint32 MSG_NEW_AUDIO        = 'naud';
 constexpr uint32 MSG_NEW_MIDI         = 'nmid';
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
+constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
 constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';
@@ -111,8 +112,14 @@ private:
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
     void FlushFxEditors();           // before a save: commit what they wrote
-    void SaveTo(const char* path);
+    bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path);
+    // Ask about unsaved changes before an action that would drop them (Quit,
+    // Open, New). True = the caller may proceed. Save flushes the editors
+    // first; with no path yet the save panel opens and the caller is refused.
+    bool ConfirmDiscardChanges();
+    void RemoveRecoveryFile();       // the recovery copy is no longer needed
+    void UpdateTitle();              // "*name — Haiku DAW" while dirty
     // Decode the loaded project's soundfonts into the SoundfontCache before
     // the engine is built (it only ever looks them up). Warns about misses.
     void PrimeSoundfonts();
@@ -182,6 +189,11 @@ private:
     bool                      fMonitoring = false;  // idle live-monitor engine up
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
+    // The dirty marker has to follow edits made anywhere (the timeline and the
+    // inspector execute commands directly, with no message to the window), and
+    // the 60 Hz pulse only runs while the transport does — so it gets its own
+    // slow runner. UpdateTitle() is also called directly on save/load/undo.
+    BMessageRunner*           fTitlePoll = nullptr; // 2 Hz dirty-marker poll
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
@@ -252,6 +264,8 @@ private:
     // the device latency is queried (Media Kit, on the target) into this field.
     Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
+    std::string               fProjectPath;  // the project's file ("" until saved)
+    std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take
     int                       fRenderSeq = 0; // counter for rendered region/freeze filenames

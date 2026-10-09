@@ -160,6 +160,10 @@ int main(int argc, char** argv) {
     static Project      project;
     static CommandStack stack;
     SeedProject(project, stack, wavs);
+    // A fresh launch is a CLEAN project: the seeded demo (or the WAVs given on
+    // the command line) is where this session starts, not unsaved work the
+    // user would be asked about on the first quit. Every later edit dirties it.
+    stack.MarkSaved();
 
     static std::map<std::string, PeakCache> peaks;
     BuildPeaks(project, peaks);

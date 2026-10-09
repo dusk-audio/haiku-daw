@@ -70,7 +70,6 @@ enum {
     MSG_REDO  = 'redo',
     MSG_SAVE  = 'save',
     MSG_OPEN  = 'open',
-    MSG_OPEN_REF = 'oprf',   // from the open file panel
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',
@@ -92,6 +91,7 @@ enum {
     MSG_BROWSER   = 'brws',
     MSG_AUTOSAVE  = 'asav',
     MSG_RECOVER   = 'rcvr',   // deferred startup recovery check
+    MSG_TITLE     = 'titl',   // 2 Hz: refresh the dirty marker in the title
     MSG_IMPORT_MIDI     = 'imid',
     MSG_IMPORT_MIDI_REF = 'imdr',
     MSG_EXPORT_MIDI     = 'emid',
@@ -401,6 +401,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // Autosave for crash recovery; check for a leftover once the looper runs.
     fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
                                    30LL * 1000 * 1000);   // every 30 s
+    fTitlePoll = new BMessageRunner(BMessenger(this), new BMessage(MSG_TITLE),
+                                    500LL * 1000);        // 2 Hz dirty marker
+    UpdateTitle();
     PostMessage(MSG_RECOVER);
 }
 
@@ -415,6 +418,7 @@ MainWindow::~MainWindow() {
     }
     delete fPulse;
     delete fAutosave;
+    delete fTitlePoll;
     delete fSavePanel;
     delete fOpenPanel;
     delete fExportPanel;
@@ -1199,10 +1203,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     "Unsaved work from a previous session was found. Recover it?",
                     "Discard", "Recover");
                 if (a->Go() == 1) LoadFrom(p.Path());
-                else              std::remove(p.Path());
+                else              RemoveRecoveryFile();
             }
             break;
         }
+        case MSG_TITLE:
+            UpdateTitle();   // cheap; SetTitle only fires on an actual change
+            break;
         case MSG_BROWSER: {
             BRect wr = BWindow::Frame();
             wr.OffsetBy(40, 40);
@@ -1285,6 +1292,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
                 fTimeline->Invalidate();
+                UpdateTitle();
             }
             break;
         case MSG_REDO:
@@ -1294,6 +1302,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
                 fTimeline->Invalidate();
+                UpdateTitle();
             }
             break;
         case MSG_PASTE:
@@ -2329,7 +2338,7 @@ static std::string DirOfPath(const char* path) {
     return slash == std::string::npos ? std::string() : p.substr(0, slash);
 }
 
-void MainWindow::SaveTo(const char* path) {
+bool MainWindow::SaveTo(const char* path) {
     // A knob turned in a native editor reaches the audio immediately but the
     // MODEL only after its debounce goes quiet. Saving inside that window would
     // write the value from before the gesture -- to disk, silently. Ask every
@@ -2338,10 +2347,17 @@ void MainWindow::SaveTo(const char* path) {
     FlushFxEditors();
     if (!ProjectIO::Save(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: save failed: %s\n", path);
-        return;
+        return false;
     }
+    fProjectPath = path;
     fTakeDir = DirOfPath(path);   // new takes land beside the project
     fLastDir = fTakeDir;
+    // The file on disk is this state now: the dirty marker clears, and the
+    // recovery copy (which exists to rescue unsaved work) is done.
+    fStack->MarkSaved();
+    RemoveRecoveryFile();
+    UpdateTitle();
+    return true;
 }
 
 // Decode every soundfont the loaded project references, here on the UI thread.
@@ -2384,6 +2400,10 @@ void MainWindow::PrimeSoundfonts() {
 }
 
 void MainWindow::LoadFrom(const char* path) {
+    // Ask first, before stopping anything or touching the open editors: a
+    // Cancel must leave the session exactly as it was. (The Save answer goes
+    // through SaveTo, which flushes the editors itself.)
+    if (!ConfirmDiscardChanges()) return;
     StopPlayback();
     StopRecording();
     // The editors that are open belong to the project being replaced: their
@@ -2398,9 +2418,12 @@ void MainWindow::LoadFrom(const char* path) {
         std::fprintf(stderr, "MainWindow: load failed: %s\n", path);
         return;
     }
+    fProjectPath = path;
     fTakeDir = DirOfPath(path);
     fLastDir = fTakeDir;
     fStack->Clear();          // history from the previous project is invalid
+    fStack->MarkSaved();      // the loaded file IS the saved state
+    UpdateTitle();
     PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine
     RebuildPeaks();           // waveform envelopes for the loaded clips
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
@@ -2408,6 +2431,59 @@ void MainWindow::LoadFrom(const char* path) {
     fTimeline->SetPlayhead(fProject->transport.playhead);
     UpdateTimeReadout(fProject->transport.playhead);
     fTimeline->Invalidate();
+}
+
+// The project's display name: the file's base name with its extension
+// dropped, or "Untitled" before the first save.
+static std::string ProjectDisplayName(const std::string& path) {
+    if (path.empty()) return "Untitled";
+    std::string name = path;
+    const size_t slash = name.find_last_of('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    const size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) name = name.substr(0, dot);
+    return name;
+}
+
+void MainWindow::UpdateTitle() {
+    std::string title;
+    if (fStack->IsDirty()) title = "*";
+    title += ProjectDisplayName(fProjectPath);
+    title += " — Haiku DAW";
+    if (title == fTitleShown) return;   // the poll runs often; only set on change
+    fTitleShown = title;
+    SetTitle(title.c_str());
+}
+
+void MainWindow::RemoveRecoveryFile() {
+    BPath p;
+    if (RecoveryPath(p)) std::remove(p.Path());
+}
+
+// Ask about unsaved changes before an action that would drop them (Quit, Open,
+// New). True = the caller may proceed: nothing was dirty, the user saved, or
+// the user explicitly discarded. A project with no path yet gets the save
+// panel and a refusal -- the caller is retried after the panel lands (M0.2
+// gives Save a silent path; this is the smallest correct answer until then).
+bool MainWindow::ConfirmDiscardChanges() {
+    if (!fStack->IsDirty()) return true;
+    BAlert* a = new BAlert("Unsaved Changes",
+        "This project has unsaved changes.", "Cancel", "Discard", "Save",
+        B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    a->SetShortcut(0, B_ESCAPE);
+    const int32 choice = a->Go();   // synchronous, like the recovery prompt
+    if (choice == 1) {              // Discard: the user authorised losing it
+        RemoveRecoveryFile();
+        return true;
+    }
+    if (choice == 2) {              // Save (SaveTo clears the recovery itself)
+        if (fProjectPath.empty()) {
+            PostMessage(MSG_SAVE);
+            return false;
+        }
+        return SaveTo(fProjectPath.c_str());   // a failed save does not proceed
+    }
+    return false;                   // Cancel (Escape)
 }
 
 void MainWindow::ImportAudio(const char* path) {
@@ -3206,12 +3282,17 @@ void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
 }
 
 bool MainWindow::QuitRequested() {
+    // Both Cmd-Q and the window's close button arrive here. Ask before stopping
+    // anything, so a Cancel leaves the session exactly as it was.
+    if (!ConfirmDiscardChanges())
+        return false;               // stay: the user has not decided yet
     StopPlayback();
     StopRecording();
     SaveSettings();
-    // Clean exit: drop the recovery file so next launch doesn't offer it.
-    BPath rp;
-    if (RecoveryPath(rp)) std::remove(rp.Path());
+    // Clean exit (nothing was unsaved, or an explicit Save/Discard above): the
+    // recovery file has nothing left to rescue, so next launch does not offer
+    // it. A Cancel never reaches this line.
+    RemoveRecoveryFile();
     be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
 }
