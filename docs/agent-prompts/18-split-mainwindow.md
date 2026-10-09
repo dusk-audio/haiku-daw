@@ -13,11 +13,17 @@ of code — no behaviour changes — verified by the existing suites, above all
    IS on disk: the path, the window title string, the recovery copy's path and
    removal, the recent-project list, and the bookkeeping that every flow
    shares (`NoteSaved`, `NoteLoaded`, `NoteRecovered`, `NoteNew`). The window
-   keeps the prompts, the panels, the menus and the timeline. **DONE in this
-   branch's first commit.**
+   keeps the prompts, the panels, the menus and the timeline. **DONE.**
 2. **`TransportController`** — engine lifetime (build/rebuild/swap), play,
    stop, seek, loop, the buffer size, the metronome, `UpdatePulse`'s transport
    half. The window keeps the widgets and the messages that drive it.
+   **State DONE** (`src/ui/TransportController.h`: the engine pointer, playing,
+   monitoring, buffer frames, metronome and the monitor flags; the window's
+   member is `fTransportCtl` — `fTransport` is the bar widget). The METHOD
+   moves (play, stop, rebuild, seek, loop, the pulse's transport half) are the
+   next pass on this item: they interleave with the widgets, so they move with
+   the window passed in, and each one is a mechanical transplant verified by
+   the suites. Do them one method per commit.
 3. **`RecordController`** — arm state, take setup (targets, counter-free take
    naming, latency compensation), capture start/stop, the disk-thread failure
    report, loop-record.
