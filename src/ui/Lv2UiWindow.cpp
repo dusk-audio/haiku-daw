@@ -20,6 +20,8 @@
 
 #include <dlfcn.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
