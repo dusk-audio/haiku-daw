@@ -12,6 +12,7 @@
 #pragma once
 
 #include "../model/Project.h"
+#include "../model/MidiOps.h"
 #include "../model/TempoMap.h"
 #include "../model/types.h"
 
@@ -32,6 +33,13 @@ constexpr uint32 kMsgApplyNotes = 'ntap';
 // (clip-relative frame). Separate from kMsgApplyNotes so a controller edit never
 // rewrites notes and vice versa.
 constexpr uint32 kMsgApplyEvents = 'evap';
+
+// Applied to the model: one region's note list after a named transform
+// (quantize / humanize / legato / transpose / velocity) ran in the roll --
+// int64 "track" + int64 "clip", int32 "op" (MidiOp), then the same per-note
+// shape as kMsgApplyNotes (int32 "np","nv" + int64 "ns","nl"). The RESULT
+// travels, not the parameters: MidiOps.h says why.
+constexpr uint32 kMsgApplyMidiOp = 'mopz';
 
 // MainWindow -> piano roll: current playhead (int64 "ph", absolute frames; a
 // negative value hides it).
@@ -73,6 +81,15 @@ private:
     int   VelNoteAtX(float x) const;    // nearest note to a velocity-lane click
     void  SetVelocityFromLane(float y); // set dragged/selected note velocity
     void  Apply();
+
+    // --- MIDI transforms ---------------------------------------------------
+    // The transform runs here, on the snapshot, and the result is posted as one
+    // undoable step (kMsgApplyMidiOp). `param` is the semitone count for
+    // Transpose and the velocity delta for Velocity; the others ignore it.
+    void  RunMidiOp(MidiOp op, int param = 0);
+    void  ApplyMidiOp(MidiOp op);       // post the (already transformed) list
+    void  MidiMenu();                   // the toolbar button's popup
+    void  OpenQuantizeWindow();         // settings, remembered in fQuant
 
     // --- bottom lane ------------------------------------------------------
     // The strip under the grid shows either note velocity or one continuous
@@ -116,9 +133,15 @@ private:
     TrackId    fTrack;
     ClipId     fClip;
     Frame      fClipStart = 0;    // region start (notes are relative to it)
+    Frame      fClipLen   = 0;    // region length (the window transforms respect)
     TempoMap   fTempo;
     double     fSampleRate;
     BMessenger fApply;
+
+    // Quantize settings, remembered for the session ("last used"): the MIDI
+    // menu's plain Quantize and the 'q' key both run these.
+    QuantizeOpts fQuant;
+    uint64_t     fHumanSeed = 0;  // varies per humanize, so two runs differ
 
     double fFramesPerPixel = 128.0;
     Frame  fScrollFrame    = 0;
