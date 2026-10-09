@@ -231,7 +231,21 @@ the feature, not the bug the idempotency requirement is about.
 | Everything in `src/ui/` | **Compiles (cross-compiler); never clicked.** The popup menu, the settings dialog, the `q` key and the commit path need a window. Click list below. |
 | VM `build` + `build-off` + ctest | **DONE 2026-10-09**: configure and build exit 0 in both configurations, 50/50 (LV2 on) and 46/46 (`-DDAW_LV2=OFF`) — the rebased branch, i.e. master + package 07 + this package. |
 
-### Click list (piano roll window)
+### Click list (piano roll window) — mostly automated now
+
+**Automated on the target** (`tests/ui_functional_tests.cpp`, run by `ctest` on
+the VM): the roll opens on a real region; the settings message its dialog posts
+quantizes and leaves one named undo step; the `q` key does the same through a
+dispatched `B_KEY_DOWN`; and Humanize, Legato, Transpose and Velocity each run
+through the entry point their menu item calls, asserting the model they leave
+and the undo name the user would read.
+
+**Still manual** (no honest way to synthesize): the popup menu itself — opening
+the MIDI button and picking an item (the transforms behind it are covered); the
+mouse drags (a drag previews on the model and commits on mouse-up); holding `q`
+(auto-repeat is a real key stream); and how any of it looks.
+
+
 
 Run it with the transport stopped (or expect the change to be heard from the
 next Play): a piano-roll edit is not live — the engine rebuilds from the model
