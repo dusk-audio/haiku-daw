@@ -8,6 +8,7 @@
 
 #include "Project.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,6 +40,12 @@ public:
 
 class CommandStack {
 public:
+    // Serial of a stack position. Serials are never reused: one serial names
+    // one exact history state, which is what lets the unsaved-changes test
+    // (MainWindow's title and save prompt) survive undo, redo, coalescing and
+    // the trimming below. A position index cannot: see MarkSaved().
+    using Serial = uint64_t;
+
     // Cap on retained undo history. Without it a long session accumulates every
     // edit forever (some commands capture large state, e.g. a removed Track's
     // whole clip/note/fx payload). At the cap the oldest entries are dropped —
@@ -52,15 +59,25 @@ public:
         // Fold into the previous command when they coalesce (one undo step per
         // gesture). The model is already mutated by Do(); we just avoid pushing
         // a redundant entry, keeping the earlier command's captured "old".
-        if (!fUndo.empty() && cmd->CoalesceInto(fUndo.back().get())) {
+        if (!fUndo.empty() && cmd->CoalesceInto(fUndo.back().cmd.get())) {
+            // The entry still reverses the whole gesture, but the state it
+            // leads to just moved — so it takes a NEW serial. Otherwise a save
+            // taken mid-drag would read clean while the drag is still going.
+            fUndo.back().serial = fNextSerial++;
             fRedo.clear();
             return true;
         }
-        fUndo.push_back(std::move(cmd));
+        fUndo.push_back(Entry{std::move(cmd), fNextSerial++});
         // Trim the oldest history past the cap (usually a single entry).
-        if (fUndo.size() > kMaxUndoDepth)
-            fUndo.erase(fUndo.begin(),
-                        fUndo.begin() + (fUndo.size() - kMaxUndoDepth));
+        if (fUndo.size() > kMaxUndoDepth) {
+            const size_t drop = fUndo.size() - kMaxUndoDepth;
+            // The last dropped entry's serial becomes the empty stack's base:
+            // undoing everything left lands on the state AFTER that entry, not
+            // on the original project, and the base serial says so. (With a
+            // position index, an emptied stack would claim to be the original.)
+            fBaseSerial = fUndo[drop - 1].serial;
+            fUndo.erase(fUndo.begin(), fUndo.begin() + drop);
+        }
         fRedo.clear();
         return true;
     }
@@ -69,37 +86,59 @@ public:
     bool CanRedo() const { return !fRedo.empty(); }
 
     // Drop all history (e.g. after loading a different project, whose edits
-    // these commands could no longer correctly reverse).
+    // these commands could no longer correctly reverse). The replacement state
+    // is on disk by the time a caller does this, so the caller must MarkSaved()
+    // once the new project is in place.
     void Clear() { fUndo.clear(); fRedo.clear(); }
 
     bool Undo(Project& p) {
         if (fUndo.empty()) return false;
-        std::unique_ptr<Command> cmd = std::move(fUndo.back());
+        Entry e = std::move(fUndo.back());
         fUndo.pop_back();
-        cmd->Undo(p);
-        fRedo.push_back(std::move(cmd));
+        e.cmd->Undo(p);
+        fRedo.push_back(std::move(e));
         return true;
     }
 
     bool Redo(Project& p) {
         if (fRedo.empty()) return false;
-        std::unique_ptr<Command> cmd = std::move(fRedo.back());
+        Entry e = std::move(fRedo.back());
         fRedo.pop_back();
-        cmd->Do(p);
-        fUndo.push_back(std::move(cmd));
+        e.cmd->Do(p);
+        fUndo.push_back(std::move(e));
         return true;
     }
 
     std::string UndoName() const {
-        return fUndo.empty() ? std::string() : fUndo.back()->Name();
+        return fUndo.empty() ? std::string() : fUndo.back().cmd->Name();
     }
     std::string RedoName() const {
-        return fRedo.empty() ? std::string() : fRedo.back()->Name();
+        return fRedo.empty() ? std::string() : fRedo.back().cmd->Name();
     }
 
+    // --- unsaved-changes tracking -----------------------------------------
+    // The serial of the state the stack is at right now: the top entry's, or
+    // the base serial when the stack is empty.
+    Serial CurrentSerial() const {
+        return fUndo.empty() ? fBaseSerial : fUndo.back().serial;
+    }
+
+    // Record the current state as the one on disk (a save, a load).
+    void MarkSaved() { fSavedSerial = CurrentSerial(); }
+
+    bool IsDirty() const { return CurrentSerial() != fSavedSerial; }
+
 private:
-    std::vector<std::unique_ptr<Command>> fUndo;
-    std::vector<std::unique_ptr<Command>> fRedo;
+    struct Entry {
+        std::unique_ptr<Command> cmd;
+        Serial                   serial = 0;
+    };
+
+    std::vector<Entry> fUndo;
+    std::vector<Entry> fRedo;
+    Serial fNextSerial  = 1;   // 0 is the base serial, so entries start at 1
+    Serial fBaseSerial  = 0;   // the state under the oldest surviving entry
+    Serial fSavedSerial = 0;   // what MarkSaved() recorded
 };
 
 } // namespace daw
