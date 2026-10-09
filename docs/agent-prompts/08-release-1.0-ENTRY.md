@@ -134,9 +134,15 @@ Fixing these docs is a legitimate small task (5.R4) — do it in a `docs:` commi
   `scripts/vm.sh sync`).
 - Build dirs on the VM: `build` (LV2 on) and `build-off` (`-DDAW_LV2=OFF`). Both
   must stay green.
-- **`app_server` is not reachable from SSH.** No test can create a `BWindow`,
-  and nothing is audible. You cannot click-test. GUI and audio behaviour is
-  verified by Marc; your job is to write him a precise click list (section 6).
+- **The GUI can be driven from SSH** — the old "app_server is not reachable"
+  belief was wrong (it came from `screenshot` failing, not from a window test;
+  disproved 2026-10-09). `tests/ui_functional_tests.cpp` builds a real
+  `BApplication` and the real windows and drives them by posting what the
+  widgets post; it runs under `ctest` on the VM. **Automate a click list rather
+  than handing it over** — Marc performs manual testing only when it is
+  genuinely necessary (sound, looks, third-party GUIs). See
+  `docs/agent-prompts/09-ui-functional-tests.md`.
+- **Nothing is audible on the VM**; sound is R5's, on the real hardware.
 - Plugin fixtures installed: 4K EQ 2 (direct-access UI) and DAF
   `examples/Parameters` (control-port UI) in `~/config/non-packaged/lib/lv2/`.
 
@@ -273,7 +279,8 @@ synthesis, live CC recording, MIDI clock.
   Body explains *why*, not just what.
 - **Never** commit directly to `master`, merge to `master`, rewrite history,
   force anything, or delete branches unless Marc asks in this session. There is
-  no remote; do not add one.
+  There IS a GitHub remote (`dusk-audio/haiku-daw`, public since 2026-10-09):
+  push branches and master, and **never force-push** anything already pushed.
 - **Never modify** Marc's checkouts outside this repo (`/home/marc/projects/DAF`,
   `/home/marc/projects/plugins`). Work on copies.
 - Do not touch the VM's libvirt network config.
