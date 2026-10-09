@@ -357,9 +357,7 @@ void RecordController::StopMidiCapture(Frame endFrame) {
 }
 
 void RecordController::UpdateMidiMonitor() {
-    std::fprintf(stderr, "umi: head\n");
     StopMidiMonitor();
-    std::fprintf(stderr, "umi: after stop\n");
     if (fWin->fTransportCtl.fPlaying || fRecMode) return;   // playback / record own the engine + input
 
     std::vector<TrackId> armed;   // MIDI tracks to monitor: armed OR input-monitor
@@ -367,7 +365,6 @@ void RecordController::UpdateMidiMonitor() {
         if (t.type == TrackType::Midi && (t.armed || t.inputMonitor)
             && t.input.kind == InputSource::kMidi)
             armed.push_back(t.id);
-    std::fprintf(stderr, "umi: armed=%zu\n", armed.size());
     if (armed.empty()) return;
 
     // Open a consumer and connect each armed track's endpoint by name.
@@ -415,7 +412,6 @@ void RecordController::UpdateMidiMonitor() {
 }
 
 void RecordController::StopMidiMonitor() {
-    std::fprintf(stderr, "smm: head (mon=%d)\n", (int)fWin->fTransportCtl.fMonitoring);
     if (!fWin->fTransportCtl.fMonitoring) return;
     if (fWin->fTransportCtl.fEngine) {
         fWin->fTransportCtl.fEngine->SetLiveMidi(nullptr);

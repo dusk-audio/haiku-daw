@@ -220,6 +220,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
       fProject(project), fStack(stack), fPeaks(peaks),
       fDoc(*project, *stack) {
     fTransportCtl.SetWindow(this);
+    fRecCtl.SetWindow(this);
     BRect bounds = Bounds();
     // Keep the tempo map's rate in sync with the project's sample rate.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
@@ -2578,14 +2579,10 @@ void MainWindow::StartExport(const char* path, bool stems) {
     if (!path || !path[0]) return;
     if (fExportThread.joinable()) return;   // one at a time (a bar is up)
 
-    std::fprintf(stderr, "export-trace: stop\n");
     fTransportCtl.StopPlayback();
-    std::fprintf(stderr, "export-trace: flush\n");
     FlushFxEditors();
-    std::fprintf(stderr, "export-trace: snapshot\n");
 
     fExportSnapshot = std::make_unique<Project>(*fProject);
-    std::fprintf(stderr, "export-trace: options\n");
     const std::string outPath(path);
     fExportPath    = outPath;
     fExportIsStems = stems;
@@ -2612,14 +2609,12 @@ void MainWindow::StartExport(const char* path, bool stems) {
     // finish and be handled before there is anything to close. (It is created
     // only now: the flush above can block the looper for a moment, and a
     // visible "exporting" must never precede a settled model.)
-    std::fprintf(stderr, "export-trace: bar\n");
     BRect wr(240, 240, 240 + 320, 240 + 96);
     ExportProgressWindow* w = new ExportProgressWindow(
         wr, BMessenger(this), stems ? "Rendering stems" : "Rendering mix");
     fExportProgMsgr = BMessenger(w);
     w->Show();
 
-    std::fprintf(stderr, "export-trace: worker\n");
     fExportRunning.store(true, std::memory_order_release);
     fExportThread = std::thread([this, snap, stems, rate, opts, outPath]() {
         ExportOptions o = opts;
@@ -2637,7 +2632,6 @@ void MainWindow::StartExport(const char* path, bool stems) {
         }
         fExportRunning.store(false, std::memory_order_release);
     });
-    std::fprintf(stderr, "export-trace: started\n");
     UpdatePulse();
 }
 
