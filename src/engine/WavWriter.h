@@ -23,13 +23,18 @@ public:
 
     // Create the file and write a placeholder header. Returns false on error.
     // The default writes 16-bit PCM (the recorder's take format).
-    bool Open(const std::string& path, int sampleRate, int channels);
+    // `exclusive` refuses to touch a file that already exists (POSIX
+    // O_CREAT|O_EXCL): the recorded-take path sets it, so a name collision can
+    // never destroy a file the project still references. The default (false)
+    // truncates, which is what the exporter's `.part` temp wants.
+    bool Open(const std::string& path, int sampleRate, int channels,
+              bool exclusive = false);
 
     // Open for a specific sample format: bitsPerSample 16 or 24 (PCM), or 32
     // with floatFmt=true (IEEE float). Used by the exporter for higher-depth
     // bounces. Returns false on an unsupported combination.
     bool OpenFormat(const std::string& path, int sampleRate, int channels,
-                    int bitsPerSample, bool floatFmt);
+                    int bitsPerSample, bool floatFmt, bool exclusive = false);
 
     bool    IsOpen() const { return fOpen; }
     // Read live from the UI thread while the disk thread writes -> atomic.

@@ -242,7 +242,6 @@ private:
     BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
     BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
     BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
-    int                       fTakeCounter = 0;
     std::vector<TrackId>      fRecTracks;   // all armed targets for the take
     Frame                     fRecStart = 0; // frame the capture (clip) begins at
     Frame                     fRecPoint = 0; // record start (== fRecStart)
@@ -254,7 +253,6 @@ private:
     std::string               fLastDir;      // last Open/Save/Import directory
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take
-    int                       fRenderSeq = 0; // counter for rendered region/freeze filenames
 
     // Off-looper export (R1): the model is snapshotted on the looper — after
     // StopPlayback and the editor flush, in that order — and the worker renders

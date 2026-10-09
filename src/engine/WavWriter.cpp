@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 
 namespace daw {
 
@@ -25,17 +27,33 @@ WavWriter::~WavWriter() {
     Close();
 }
 
-bool WavWriter::Open(const std::string& path, int sampleRate, int channels) {
-    return OpenFormat(path, sampleRate, channels, 16, false);
+bool WavWriter::Open(const std::string& path, int sampleRate, int channels,
+                     bool exclusive) {
+    return OpenFormat(path, sampleRate, channels, 16, false, exclusive);
 }
 
 bool WavWriter::OpenFormat(const std::string& path, int sampleRate,
-                           int channels, int bitsPerSample, bool floatFmt) {
+                           int channels, int bitsPerSample, bool floatFmt,
+                           bool exclusive) {
     if (channels < 1 || sampleRate < 1)
         return false;
     if (floatFmt) { if (bitsPerSample != 32) return false; }
     else if (bitsPerSample != 16 && bitsPerSample != 24 && bitsPerSample != 32)
         return false;
+
+    if (exclusive) {
+        // Refuse to touch an existing file. std::ofstream has no O_EXCL; probe
+        // with one, then let the stream open the (now ours) empty file. The
+        // point is that a name collision leaves the existing file intact
+        // rather than truncating it.
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666);
+        if (fd < 0) {
+            std::fprintf(stderr, "WavWriter: refusing to overwrite '%s'\n",
+                         path.c_str());
+            return false;
+        }
+        ::close(fd);
+    }
 
     fFile.open(path, std::ios::binary | std::ios::trunc);
     if (!fFile) {
