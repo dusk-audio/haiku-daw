@@ -245,6 +245,32 @@ buried):
 - A control-port UI that pushes widget defaults through the write function after
   its first frame is indistinguishable from the user moving a control.
 
+## Automated tests, and what they can and cannot reach
+
+The live-editor code splits into three layers, and each is tested where it can
+actually run:
+
+| Suite | Runs on | Covers |
+| --- | --- | --- |
+| `lv2_ui_map_tests` (46 checks) | host | Port↔slot numbering (control OUTPUTS must not consume a slot), the inverse map, and the inbound apply policy: a value the GUI already shows is not re-sent, a parameter with a gesture in flight is left alone, out-of-range slots and unknown ports are dropped, and the port buffer plus the poll's last-seen are kept in step so the two directions cannot echo |
+| `fx_watch_tests` (33 checks) | host | Registration identity by `(uri, track, fx)`, engine-slot allocation and exhaustion, and every chain-edit rule: keep, follow-a-move (with the new index), close on removal/dead window/dead track, close on an ambiguous URI, and the forced frame after a re-registration |
+| `lv2_fixture_tests` (+9 checks) | host | `Lv2Effect::ControlValues` reports what actually took effect (clamped, per slot) and nothing for a built-in; `UiRequiresInstanceAccess` answers both ways against a fixture bundle that declares one UI of each kind |
+| `fx_insert_tests` (+83 checks) | host | `SetFxParamCommand`: touches only its slots, undoes exactly, honours the master flag, refuses an index that addresses nothing |
+| `lv2_live_editor_tests` (24 checks) | **Haiku VM** | The engine half, which no host test can reach because `Engine.cpp` links the Media Kit: a watched insert publishes its real, clamped parameter values; an untouched insert publishes NOTHING (the generation is the UI's cheap change test); watches are independent, survive being re-pointed, and report 0 — never a negative count — when there is nothing to publish |
+
+Every one of these was mutation-tested: numbering every port, dropping the
+gesture guard, matching registrations on URI alone, allowing an ambiguous URI,
+looking for the wrong required feature, storing an unclamped parameter, and
+publishing on every block each made the new assertions fail, and each mutation
+was reverted.
+
+**What no automated test here can reach, and why:** `app_server` is not
+reachable from an SSH session on this VM (that is also why `screenshot` over SSH
+exits 69), so no test can create a `BWindow`. That rules out the editor window
+itself, the MainWindow message paths, and anything audible. Those stay on the
+click list below, and the design tries to keep the *decision-making* out of them
+precisely so that what remains manual is wiring rather than logic.
+
 ## What is verified, and how
 
 | Claim | Evidence |
@@ -252,10 +278,10 @@ buried):
 | Fixture is installable and the DAW's own host scans, verifies, instantiates and processes it | `lv2_host_tests` on the VM: `4K EQ 2 stereo params=34`, 105 checks, 0 failures |
 | The mode split is real, not vacuous | `uimode` probe on the VM: Parameters → 0 required features; 4K EQ 2 → 5, including `instance-access` |
 | Phase 0 close-crash fix | clicked by the user (see above) |
-| Everything builds where it must | VM `build` 46/46, VM `build-off` 43/43, 0 warnings; host `build-host` 46/46 |
+| Everything builds where it must | VM `build` 49/49, VM `build-off` 45/45, 0 warnings; host `build-host` 48/48 (the counts include the suites added here) |
 | `SetFxParamCommand` touches only its slots, undoes exactly, honours the master flag, and refuses an index that addresses nothing | host tests, mutation-tested three ways (drop the old-value capture, restore the new value on Undo, ignore the master flag — each made the new assertions fail) |
 | `Lv2Effect::ControlValues` reports what actually took effect (clamped, per slot) and a built-in reports nothing | `lv2_fixture_tests`, mutation-tested twice (ignore `maxSlots`; publish nothing — each made the new assertions fail) |
-| A knob move in a live editor is audible during the drag | **NOT YET — waiting on a click test** |
+| A knob move in a live editor is audible during the drag | **NOT by test** — needs a real window and a real drag; waiting on the click test |
 | Automation moving a parameter shows up in the open editor | **NOT YET — waiting on a click test** |
 | Reordering/removing an insert redirects or closes its editor | **NOT YET — waiting on a click test** |
 | Close during playback is clean with a live editor | **NOT YET — waiting on a click test** (the Phase 0 test preceded any of this code) |
