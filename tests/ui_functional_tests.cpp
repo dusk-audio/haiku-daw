@@ -13,14 +13,18 @@
 #include "../src/ui/MainWindow.h"
 #include "../src/model/Project.h"
 #include "../src/model/Command.h"
+#include "../src/engine/WavSource.h"   // reading a bounce back
 
 #include <Application.h>
+#include <Directory.h>
 #include <Entry.h>
 #include <Messenger.h>
 #include <OS.h>
+#include <Path.h>
 #include <Window.h>
 
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -50,6 +54,22 @@ static bool WaitFor(const std::function<bool()>& pred,
     }
 }
 
+// How many .wav files a directory holds (0 when it does not exist yet).
+static int CountWavs(const std::string& dir) {
+    BDirectory d(dir.c_str());
+    if (d.InitCheck() != B_OK) return 0;
+    int n = 0;
+    BEntry e;
+    d.Rewind();
+    while (d.GetNextEntry(&e) == B_OK) {
+        BPath p;
+        if (e.GetPath(&p) != B_OK) continue;
+        const size_t len = std::strlen(p.Path());
+        if (len > 4 && std::strcmp(p.Path() + len - 4, ".wav") == 0) n++;
+    }
+    return n;
+}
+
 static bool FileExists(const std::string& p) {
     BEntry e(p.c_str());
     return e.Exists();
@@ -77,14 +97,35 @@ static Track MakeMidiTrack(Project& p, const std::vector<MidiNote>& notes,
     return t;
 }
 
-// A window that is not the one under test (the file panel the export dialog
-// opens, or the probe), closed by the test as the panel's own Cancel would.
-static void CloseOtherWindows(BWindow* keep) {
+// Visible windows: what "a window appeared" means to a user, and what the
+// tests assert on. (CountWindows() includes hidden ones, and MainWindow KEEPS
+// its file panels alive and hidden for the next time -- quitting one behind its
+// back would leave the window holding a dangling pointer.)
+static int VisibleWindows() {
+    int n = 0;
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden()) n++;
+    }
+    return n;
+}
+
+// Wait until only the main window is up: the previous test's export bar closes
+// on a pulse, and a stale bar would shift every window count that follows (and
+// make a later "the bar appeared" assertion pass vacuously).
+static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
+    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
+}
+
+// Put a window that is not the one under test away -- the panel, as its own
+// Cancel button does: HIDE it, never Quit it.
+static void HideOtherWindows(BWindow* keep) {
     for (int32 i = be_app->CountWindows() - 1; i >= 0; i--) {
         BWindow* w = be_app->WindowAt(i);
-        if (w && w != keep) {
+        if (w && w != keep && !w->IsHidden()) {
             w->Lock();
-            w->Quit();
+            w->Hide();
+            w->Unlock();
         }
     }
     snooze(200000);
@@ -120,11 +161,12 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
 // hand) starts the worker; the window keeps answering while it renders; the
 // file appears and the temp does not survive.
 static void TestExportFlow(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
     std::printf("test_export_flow\n");
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(project.AddTrack(t));
 
-    const int32 windowsBefore = be_app->CountWindows();
+    const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 16);
     opts.AddBool("dither", true);
@@ -138,10 +180,10 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     win->PostMessage(&opts);
 
     // Exactly one window appears (the file panel) and nothing renders yet.
-    CHECK(WaitFor([&] { return be_app->CountWindows() == windowsBefore + 1; }));
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
     std::remove(kExportPath);
     CHECK(!FileExists(kExportPath));
-    CloseOtherWindows(win);
+    HideOtherWindows(win);
 
     // What that panel posts when a name is chosen.
     entry_ref dir;
@@ -164,6 +206,131 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return FileExists(kExportPath); }, 60000000));
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
+    CHECK(WaitQuiet());   // its bar closes on a pulse
+}
+
+// --- 4. R1: cancel, stems, loop range --------------------------------------
+
+// Cancel is a flag the worker polls: the run stops, and NOTHING is left where
+// a finished file is expected.
+static void TestExportCancel(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
+    std::printf("test_export_cancel\n");
+    const char* path = "/tmp/haiku_daw_ui_cancel.wav";
+    std::remove(path);
+    // Long enough that the render is still going when the cancel lands.
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "long-synth");
+    CHECK(project.AddTrack(t));
+
+    const int32 windowsBefore = VisibleWindows();
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    BMessage ref(MSG_EXPORT_REF);
+    ref.AddRef("directory", &dir);
+    ref.AddString("name", "haiku_daw_ui_cancel.wav");
+    win->PostMessage(&ref);
+
+    // It is running (its bar is up) when the cancel arrives.
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    win->PostMessage(kMsgExportCancel);
+
+    // The bar goes away, and the destination is left alone.
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; },
+                  60000000));
+    snooze(300000);
+    CHECK(!FileExists(path));
+    CHECK(!FileExists(std::string(path) + ".part"));
+}
+
+// Stems: the dialog's answer opens the folder panel, and its answer writes one
+// file per non-bus track.
+static void TestExportStems(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
+    std::printf("test_export_stems\n");
+    const std::string dir = "/tmp/haiku_daw_ui_stems";
+    const std::string rm = "rm -rf " + dir;
+    if (system(rm.c_str()) != 0) return;
+
+    int expected = 0;
+    for (const Track& tr : project.Tracks()) {
+        if (tr.type == TrackType::Bus) continue;
+        if (tr.clips.empty() && tr.midiClips.empty()) continue;   // nothing to render
+        expected++;
+    }
+    CHECK(expected > 0);
+
+    const int32 windowsBefore = VisibleWindows();
+    BMessage opts(kMsgExportOptions);
+    opts.AddInt32("bits", 16);
+    opts.AddBool("dither", true);
+    opts.AddInt32("rate", 0);
+    opts.AddBool("norm", false);
+    opts.AddFloat("lufs", -14.0f);
+    opts.AddFloat("ceil", -1.0f);
+    opts.AddBool("lim", false);
+    opts.AddInt32("range", 0);
+    opts.AddInt32("stems", 1);          // the dialog's "separate stems" box
+    win->PostMessage(&opts);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    HideOtherWindows(win);
+
+    entry_ref base;
+    CHECK(BEntry("/tmp").GetRef(&base) == B_OK);
+    BMessage ref(MSG_EXPORT_STEMS_REF);
+    ref.AddRef("directory", &base);
+    ref.AddString("name", "haiku_daw_ui_stems");
+    win->PostMessage(&ref);
+
+    // One file per track, whatever they are called (the names carry the track
+    // and its number, and depending on the order the tests ran in, both move).
+    CHECK(WaitFor([&] { return CountWavs(dir) == expected; }, 60000000));
+
+    if (system(rm.c_str()) != 0) return;
+}
+
+// The loop range bounces what the loop covers, not the whole timeline.
+static void TestExportLoopRange(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
+    std::printf("test_export_loop_range\n");
+    const char* path = "/tmp/haiku_daw_ui_loop.wav";
+    std::remove(path);
+
+    // A loop over the second second of the project.
+    project.transport.loopEnabled = true;
+    project.transport.loopStart = 48000;
+    project.transport.loopEnd   = 96000;
+
+    const int32 windowsBefore = VisibleWindows();
+    BMessage opts(kMsgExportOptions);
+    opts.AddInt32("bits", 32);          // float: the length is what is read
+    opts.AddBool("dither", false);
+    opts.AddInt32("rate", 0);
+    opts.AddBool("norm", false);
+    opts.AddFloat("lufs", -14.0f);
+    opts.AddFloat("ceil", -1.0f);
+    opts.AddBool("lim", false);
+    opts.AddInt32("range", 1);          // loop range
+    opts.AddInt32("stems", 0);
+    win->PostMessage(&opts);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    HideOtherWindows(win);
+
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    BMessage ref(MSG_EXPORT_REF);
+    ref.AddRef("directory", &dir);
+    ref.AddString("name", "haiku_daw_ui_loop.wav");
+    win->PostMessage(&ref);
+
+    CHECK(WaitFor([&] { return FileExists(path); }, 60000000));
+    WavSource src;
+    CHECK(src.Open(path));
+    CHECK(src.TotalFrames() > 0);
+    // One second of loop, not the whole project (a frame of slack).
+    CHECK(src.TotalFrames() >= 48000 - 2 && src.TotalFrames() <= 48000 + 2);
+    CHECK(WaitQuiet());
+    std::remove(path);
+    project.transport.loopEnabled = false;
 }
 
 // --- driver ----------------------------------------------------------------
@@ -185,6 +352,9 @@ static int32 TestThread(void*) {
 
     TestMessageRoundTrip(win, project);
     TestExportFlow(win, project);
+    TestExportCancel(win, project);
+    TestExportStems(win, project);
+    TestExportLoopRange(win, project);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
