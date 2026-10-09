@@ -39,6 +39,6 @@ marked the project dirty (M0.1's title marker stayed dark for them):
 
 | Claim | State |
 | --- | --- |
-| VM `build` / `build-off` ctest | **Pending**: the VM was taken down mid-session (an in-flight openssh package update broke its `sshd`; the syslog showed `rexec of .../.self/lib/openssh/sshd-session failed`). Rerun both suites and the ui flows when it is back, then merge. |
+| VM `build` / `build-off` ctest | Green: **build 54/54**, **build-off 50/50**, `ui_functional_tests` included. (The first attempt was interrupted by the VM being taken down -- an in-flight openssh package update had broken its `sshd`; rerun after the reboot.) |
 | The wiring itself (a slider drag, the temo field's Enter, the strip Apply, the track menu's Solo Safe) | Cannot be driven from a test: a slider drag and a popup menu are outside the harness. The commands are host-tested; the four handlers are code-read and compile-checked. Click line for the hardware pass: drag the master fader, undo once → back to where the drag started; set a tempo, undo → the field and the grid follow. |
 | The tempo field's ramp flattening | Pre-existing (the handler always wrote `ramp=false`); `Undo` now restores a flattened ramp, but a *change* still flattens it. Recorded, not fixed — nothing in the UI sets a ramp at frame 0 today. |
