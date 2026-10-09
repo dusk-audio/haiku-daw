@@ -102,9 +102,6 @@ enum {
     MSG_FOLLOW    = 'folw',   // toggle: chase the playhead
 };
 
-// Defined below; used by MessageReceived above its definition.
-static bool RecoveryPath(BPath& out);
-
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
 
@@ -220,7 +217,8 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                        PeakMap* peaks)
     : BWindow(frame, "Haiku DAW", B_TITLED_WINDOW,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
-      fProject(project), fStack(stack), fPeaks(peaks) {
+      fProject(project), fStack(stack), fPeaks(peaks),
+      fDoc(*project, *stack) {
     BRect bounds = Bounds();
     // Keep the tempo map's rate in sync with the project's sample rate.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
@@ -1253,19 +1251,19 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // past (the same reason SaveTo flushes).
                 FlushFxEditors();
                 BPath p;
-                if (RecoveryPath(p)) ProjectIO::Save(*fProject, p.Path());
+                if (fDoc.RecoveryPath(p)) ProjectIO::Save(*fProject, p.Path());
             }
             break;
         }
         case MSG_RECOVER: {
             BPath p;
             BEntry e;
-            if (RecoveryPath(p) && (e.SetTo(p.Path()), e.Exists())) {
+            if (fDoc.RecoveryPath(p) && (e.SetTo(p.Path()), e.Exists())) {
                 BAlert* a = new BAlert("Recover",
                     "Unsaved work from a previous session was found. Recover it?",
                     "Discard", "Recover");
                 if (a->Go() == 1) LoadFrom(p.Path(), /*asRecovery*/ true);
-                else              RemoveRecoveryFile();
+                else              fDoc.RemoveRecoveryFile();
             }
             break;
         }
@@ -1409,8 +1407,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Save goes straight to the project's own file once it has one --
             // Save As… is the way to move it. Both ask for a path when there
             // is none, through the same panel.
-            if (msg->what == MSG_SAVE && !fProjectPath.empty()) {
-                SaveTo(fProjectPath.c_str());
+            if (msg->what == MSG_SAVE && fDoc.HasPath()) {
+                SaveTo(fDoc.Path().c_str());
                 break;
             }
             if (!fSavePanel) {
@@ -2512,14 +2510,11 @@ bool MainWindow::SaveTo(const char* path) {
                     "still here.");
         return false;
     }
-    fProjectPath = path;
     fTakeDir = DirOfPath(path);   // new takes land beside the project
     fLastDir = fTakeDir;
-    // The file on disk is this state now: the dirty marker clears, and the
-    // recovery copy (which exists to rescue unsaved work) is done.
-    fStack->MarkSaved();
-    RemoveRecoveryFile();
-    RememberProject(fProjectPath);
+    // The document records it: path, clean, recovery copy done, recent list.
+    fDoc.NoteSaved(path);
+    RebuildRecentMenu();
     UpdateTitle();
     return true;
 }
@@ -2588,19 +2583,13 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     }
     fStack->Clear();          // history from the previous project is invalid
     if (asRecovery) {
-        // A recovered session is UNSAVED, nameless work: the recovery file is
-        // a rescue copy, not the project. Treating it as an opened document
-        // made the next Quit (clean -> no prompt) delete the only copy, and a
-        // Cmd-S save it to the recovery path and then delete that same path.
-        fProjectPath.clear();
+        fDoc.NoteRecovered(); // unsaved, nameless work (see ProjectDocument)
         fTakeDir.clear();
-        fStack->MarkUnsaved();
     } else {
-        fProjectPath = path;
+        fDoc.NoteLoaded(path);
         fTakeDir = DirOfPath(path);
         fLastDir = fTakeDir;
-        fStack->MarkSaved();  // the loaded file IS the saved state
-        RememberProject(fProjectPath);
+        RebuildRecentMenu();
     }
     UpdateTitle();
     CollectMissingMedia();    // gone media: one dialog, Skip or Locate…
@@ -2613,31 +2602,11 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     fTimeline->Invalidate();
 }
 
-// The project's display name: the file's base name with its extension
-// dropped, or "Untitled" before the first save.
-static std::string ProjectDisplayName(const std::string& path) {
-    if (path.empty()) return "Untitled";
-    std::string name = path;
-    const size_t slash = name.find_last_of('/');
-    if (slash != std::string::npos) name = name.substr(slash + 1);
-    const size_t dot = name.find_last_of('.');
-    if (dot != std::string::npos && dot > 0) name = name.substr(0, dot);
-    return name;
-}
-
 void MainWindow::UpdateTitle() {
-    std::string title;
-    if (fStack->IsDirty()) title = "*";
-    title += ProjectDisplayName(fProjectPath);
-    title += " — Haiku DAW";
+    const std::string title = fDoc.Title();
     if (title == fTitleShown) return;   // the poll runs often; only set on change
     fTitleShown = title;
     SetTitle(title.c_str());
-}
-
-void MainWindow::RemoveRecoveryFile() {
-    BPath p;
-    if (RecoveryPath(p)) std::remove(p.Path());
 }
 
 void MainWindow::ReportError(const char* title, const std::string& detail) {
@@ -2742,8 +2711,7 @@ void MainWindow::NewProject() {
     fProject->sampleRate = rate;
     fProject->tempoMap.sampleRate = rate;
     fStack->Clear();
-    fStack->MarkSaved();          // a new project is the saved state
-    fProjectPath.clear();
+    fDoc.NoteNew();               // no path, and nothing to lose
     fTakeDir.clear();
     fRecTracks.clear();           // arms addressed the old project's tracks
     UpdateTitle();
@@ -2759,16 +2727,13 @@ void MainWindow::NewProject() {
 // is not re-derivable, so it survives even an unclean end of the session).
 void MainWindow::RememberProject(const std::string& path) {
     if (path.empty()) return;
-    AppSettings::RememberRecent(fRecentProjects, path);
+    fDoc.Remember(path);
     RebuildRecentMenu();
     SaveSettings();
 }
 
 void MainWindow::ForgetRecent(const std::string& path) {
-    const auto it = std::find(fRecentProjects.begin(), fRecentProjects.end(),
-                              path);
-    if (it == fRecentProjects.end()) return;
-    fRecentProjects.erase(it);
+    fDoc.Forget(path);
     RebuildRecentMenu();
     SaveSettings();
 }
@@ -2780,14 +2745,15 @@ void MainWindow::RebuildRecentMenu() {
     if (!fRecentMenu) return;
     while (fRecentMenu->CountItems() > 0)
         delete fRecentMenu->RemoveItem((int32)0);
-    if (fRecentProjects.empty()) {
+    if (fDoc.Recent().empty()) {
         BMenuItem* none = new BMenuItem("(none)", nullptr);
         none->SetEnabled(false);   // an empty submenu is a dead end
         fRecentMenu->AddItem(none);
         return;
     }
-    for (const std::string& path : fRecentProjects) {
-        BMenuItem* item = new BMenuItem(ProjectDisplayName(path).c_str(),
+    for (const std::string& path : fDoc.Recent()) {
+        BMenuItem* item = new BMenuItem(
+            ProjectDocument::DisplayName(path).c_str(),
                                         new BMessage(MSG_OPEN_RECENT));
         item->Message()->AddString("path", path.c_str());
         fRecentMenu->AddItem(item);
@@ -2807,15 +2773,15 @@ bool MainWindow::ConfirmDiscardChanges() {
     a->SetShortcut(0, B_ESCAPE);
     const int32 choice = a->Go();   // synchronous, like the recovery prompt
     if (choice == 1) {              // Discard: the user authorised losing it
-        RemoveRecoveryFile();
+        fDoc.RemoveRecoveryFile();
         return true;
     }
     if (choice == 2) {              // Save (SaveTo clears the recovery itself)
-        if (fProjectPath.empty()) {
+        if (!fDoc.HasPath()) {
             PostMessage(MSG_SAVE);
             return false;
         }
-        return SaveTo(fProjectPath.c_str());   // a failed save does not proceed
+        return SaveTo(fDoc.Path().c_str());    // a failed save does not proceed
     }
     return false;                   // Cancel (Escape)
 }
@@ -3285,27 +3251,9 @@ void MainWindow::FreezeTrack(TrackId track, bool freeze) {
 }
 
 // Resolve ~/config/settings/HaikuDAW/settings, creating the dir if needed.
-static bool SettingsPath(BPath& out) {
-    BPath p;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK) return false;
-    p.Append("HaikuDAW");
-    mkdir(p.Path(), 0755);   // ignore EEXIST
-    p.Append("settings");
-    out = p;
-    return true;
-}
-
 // The crash-recovery autosave file (settings dir). A leftover after startup
 // means the last session didn't exit cleanly.
-static bool RecoveryPath(BPath& out) {
-    BPath p;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK) return false;
-    p.Append("HaikuDAW");
-    mkdir(p.Path(), 0755);
-    p.Append("recovery.dawproj");
-    out = p;
-    return true;
-}
+
 
 // Mark the radio item in `menu` whose message's int32 `field` equals `value`.
 static void MarkRadio(BMenu* menu, const char* field, int32 value) {
@@ -3318,7 +3266,7 @@ static void MarkRadio(BMenu* menu, const char* field, int32 value) {
 
 void MainWindow::LoadSettings() {
     BPath p;
-    if (!SettingsPath(p)) return;
+    if (!ProjectDocument::SettingsPath(p)) return;
     BFile f(p.Path(), B_READ_ONLY);
     if (f.InitCheck() != B_OK) return;
     off_t sz = 0;
@@ -3349,7 +3297,7 @@ void MainWindow::LoadSettings() {
     fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fMonitorInput);
     fLastDir      = s.lastDir;
-    fRecentProjects = s.recentProjects;
+    fDoc.SetRecent(s.recentProjects);
     RebuildRecentMenu();
     // The export dialog reopens on the last choices, not on its defaults.
     fExportChoices.bitDepth   = s.exportBitDepth;
@@ -3379,7 +3327,7 @@ void MainWindow::SaveSettings() {
     s.metronome    = fMetronome;
     s.monitorInput = fMonitorInput;
     s.lastDir      = fLastDir;
-    s.recentProjects = fRecentProjects;
+    s.recentProjects = fDoc.Recent();
     s.exportBitDepth  = fExportChoices.bitDepth;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
@@ -3393,7 +3341,7 @@ void MainWindow::SaveSettings() {
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
 
     BPath p;
-    if (!SettingsPath(p)) return;
+    if (!ProjectDocument::SettingsPath(p)) return;
     BFile f(p.Path(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
     if (f.InitCheck() != B_OK) return;
     const std::string t = s.Serialize();
@@ -3628,7 +3576,7 @@ bool MainWindow::QuitRequested() {
     // Clean exit (nothing was unsaved, or an explicit Save/Discard above): the
     // recovery file has nothing left to rescue, so next launch does not offer
     // it. A Cancel never reaches this line.
-    RemoveRecoveryFile();
+    fDoc.RemoveRecoveryFile();
     be_app->PostMessage(B_QUIT_REQUESTED);
     return true;
 }

@@ -18,6 +18,7 @@
 #include "../midi/MidiRecorder.h"
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
+#include "ProjectDocument.h"          // the project's file, recovery, recent list
 
 #include <Messenger.h>
 #include <Window.h>
@@ -141,7 +142,6 @@ private:
     // Open, New). True = the caller may proceed. Save flushes the editors
     // first; with no path yet the save panel opens and the caller is refused.
     bool ConfirmDiscardChanges();
-    void RemoveRecoveryFile();       // the recovery copy is no longer needed
     // One visible report for a failure the user has to know about: an
     // asynchronous alert, so a report can never hold the window thread.
     void ReportError(const char* title, const std::string& detail);
@@ -289,8 +289,7 @@ private:
     // the device latency is queried (Media Kit, on the target) into this field.
     Frame                     fRoundTripFrames = 0;
     std::string               fLastDir;      // last Open/Save/Import directory
-    std::string               fProjectPath;  // the project's file ("" until saved)
-    std::vector<std::string>  fRecentProjects;  // File > Open Recent, newest first
+    ProjectDocument           fDoc;          // the file, recovery copy, recent list
     std::vector<RelinkEntry>  fRelinkQueue;     // Locate… walk (newPath filled as picked)
     BFilePanel*               fRelinkPanel = nullptr;
     BMenu*                    fRecentMenu = nullptr;

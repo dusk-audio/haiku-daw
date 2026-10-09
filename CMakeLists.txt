@@ -496,6 +496,7 @@ if(HAIKU)
         src/ui/TimelineView.cpp
         src/ui/InspectorView.cpp
         src/ui/MainWindow.cpp
+        src/ui/ProjectDocument.cpp
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
         src/ui/EffectsWindow.cpp
