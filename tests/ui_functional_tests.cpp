@@ -16,10 +16,16 @@
 #include "../src/model/MidiOps.h"       // QuantGrid
 #include "../src/model/Project.h"
 #include "../src/model/Command.h"
+#include "../src/model/Commands.h"   // SetFxCommand
 #include "../src/engine/WavSource.h"   // reading a bounce back
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
+#ifdef DAW_HAVE_LV2
+#include "../src/plugin/Lv2Host.h"
+#include "../src/ui/Lv2UiWindow.h"
+#include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
+#endif
 
 #include <Application.h>
 #include <Directory.h>
@@ -452,10 +458,15 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     roll->Lock();
     rv->RunMidiOp(MidiOp::Humanize);
     roll->Unlock();
+    std::vector<MidiNote> before;
+    CHECK(notes(&before));
     std::vector<MidiNote> h;
+    // Against the state before it, not against one note: humanize draws for
+    // each note, and a clamped timing draw plus a zero velocity draw can leave
+    // any single note exactly as it was.
     CHECK(WaitFor([&] {
-        if (!notes(&h) || h.size() != 2) return false;
-        return h[0].startFrame != 0 || h[0].velocity != 100;
+        if (!notes(&h) || h.size() != before.size()) return false;
+        return !NotesEqual(h, before);
     }));
     CHECK(stack.UndoName() == "Humanize");
 
@@ -544,6 +555,129 @@ static void TestAboutBox(MainWindow* win) {
     CHECK(std::strcmp(DAW_VERSION_STRING, "1.0.0") == 0);
 }
 
+
+#ifdef DAW_HAVE_LV2
+// --- 7. package 07: the host half of a native editor ------------------------
+
+// What the wiring between a plugin's own editor and the model does, without
+// the editor's GUI: MainWindow opens one for an insert, its debounced commit
+// lands as one named undo step, the save/export flush is answered, and a chain
+// edit closes the editor. The plugin's window itself still needs a person --
+// it renders in the plugin's own code -- but everything on our side of it is
+// here.
+static void TestLv2EditorWiring(MainWindow* win, Project& project,
+                                CommandStack& stack) {
+    std::printf("test_lv2_editor_wiring\n");
+    // main() does this at startup; a test binary is its own application.
+    Lv2Host::Instance().ScanAll();
+    const std::vector<Lv2PluginInfo>& plugins = Lv2Host::Instance().Plugins();
+    const Lv2PluginInfo* chosen = nullptr;
+    for (const Lv2PluginInfo& p : plugins)
+        if (Lv2UiWindow::HasNativeUi(p.uri) && !p.params.empty()) {
+            chosen = &p;
+            break;
+        }
+    if (!chosen) {
+        std::printf("  no plugin with a native UI installed - nothing to drive\n");
+        return;                       // the machine may have none; not a failure
+    }
+    std::printf("  driving %s\n", chosen->uri.c_str());
+
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 4800 } }, "lv2-synth");
+    t.fx.push_back(MakeInsertDesc(EffectType::Lv2, chosen->uri));
+    const size_t fxIndex = t.fx.size() - 1;
+    const TrackId tid = t.id;
+    CHECK(project.AddTrack(t));
+
+    // Open it the way the inspector's slot list does.
+    const int32 before = VisibleWindows();
+    BMessage open(kMsgOpenFxEditor);
+    open.AddInt64("track", (int64)tid);
+    open.AddInt32("fx", (int32)fxIndex);
+    win->PostMessage(&open);
+    CHECK(WaitFor([&] { return VisibleWindows() == before + 1; },
+                  30000000));
+
+    // The committed write an editor posts when a gesture goes quiet: one undo
+    // step, in the model.
+    const float target = chosen->params[0].def + 1.0f;
+    BMessage commit(kMsgFxParamCommit);
+    commit.AddInt64("track", (int64)tid);
+    commit.AddInt32("fx", (int32)fxIndex);
+    commit.AddString("uri", chosen->uri.c_str());
+    commit.AddInt32("slot", 0);
+    commit.AddFloat("val", target);
+    win->PostMessage(&commit);
+    CHECK(WaitFor([&] {
+        if (!win->Lock()) return false;
+        const Track* tr = project.FindTrack(tid);
+        const bool landed = tr && !tr->fx.empty() &&
+                            tr->fx[fxIndex].p(0) == target;
+        win->Unlock();
+        return landed;
+    }));
+    CHECK(stack.UndoName() == "Edit Effect Parameter");
+
+    // ...and a commit for a plugin that is not at that address any more is
+    // dropped rather than written into whatever is (the identity rule).
+    BMessage stale(kMsgFxParamCommit);
+    stale.AddInt64("track", (int64)tid);
+    stale.AddInt32("fx", (int32)fxIndex);
+    stale.AddString("uri", "http://example.invalid/not-this-plugin");
+    stale.AddInt32("slot", 0);
+    stale.AddFloat("val", target + 5.0f);
+    win->PostMessage(&stale);
+    snooze(300000);
+    {
+        bool unchanged = false;
+        if (win->Lock()) {
+            const Track* tr = project.FindTrack(tid);
+            unchanged = tr && !tr->fx.empty() && tr->fx[fxIndex].p(0) == target;
+            win->Unlock();
+        }
+        CHECK(unchanged);
+    }
+
+    // The save/export flush: the editor is asked for what it has not committed
+    // and answers. (The window is the one we just opened; a flush that cannot
+    // be answered is the failure this guards.)
+    BWindow* editor = nullptr;
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && w != win && !w->IsHidden() && w->Name() &&
+            std::strstr(w->Name(), chosen->name.c_str()))
+            editor = w;
+    }
+    CHECK(editor != nullptr);
+    if (editor) {
+        BMessage flush(kMsgLv2UiFlush);
+        BMessage reply;
+        const status_t sent = BMessenger(editor).SendMessage(&flush, &reply,
+                                                             200000, 200000);
+        CHECK(sent == B_OK);
+    }
+
+    // Remove the insert, posted the way the parameter panel posts a chain edit
+    // (kMsgApplyFx -- NOT by executing a command here): that handler is what
+    // re-checks the watch table, and it is the thing under test. The editor
+    // must close rather than keep driving whatever took its index.
+    {
+        std::vector<EffectDesc> chain;
+        if (win->Lock()) {
+            const Track* tr = project.FindTrack(tid);
+            if (tr) chain = tr->fx;
+            win->Unlock();
+        }
+        chain.erase(chain.begin() + (long)fxIndex);
+        BMessage edit(kMsgApplyFx);
+        edit.AddInt64("track", (int64)tid);
+        EncodeFxChain(edit, chain);
+        win->PostMessage(&edit);
+    }
+    CHECK(WaitFor([&] { return VisibleWindows() == before; }, 30000000));
+}
+#endif
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -570,6 +704,9 @@ static int32 TestThread(void*) {
     TestExportStems(win, project);
     TestExportLoopRange(win, project);
     TestAboutBox(win);
+#ifdef DAW_HAVE_LV2
+    TestLv2EditorWiring(win, project, stack);
+#endif
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
