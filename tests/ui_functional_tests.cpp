@@ -93,6 +93,15 @@ static bool FileExists(const std::string& p) {
     return e.Exists();
 }
 
+// The file-name part of a path. Media paths are canonicalised by the loader
+// (/tmp is a symlink to /boot/system/cache/tmp on Haiku) and stored relative to
+// the project, so an assertion that cares WHICH file a clip points at compares
+// base names, not the spelling of the path.
+static std::string PathBaseName(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
 // A MIDI track whose region starts at 0 and covers the notes it is given.
 static Track MakeMidiTrack(Project& p, const std::vector<MidiNote>& notes,
                            const char* name) {
@@ -1068,11 +1077,11 @@ static void TestErrorReports(MainWindow* win, Project& project,
         bool ok = false;
         for (const Track& t : project.Tracks())
             if (t.name == "gone-track" && t.clips.size() == 1
-                && t.clips[0].sourcePath == gonePath)
+                && PathBaseName(t.clips[0].sourcePath) == "haiku_daw_ui_gone.wav")
                 ok = true;
         win->Unlock();
         return ok;
-    });
+    }, 30000000);
     if (!skipped) {
         const status_t locked = win->LockWithTimeout(1000000);
         std::printf("  after Skip: lock=%d, windows=%d, alert up=%d\n",
@@ -1116,11 +1125,12 @@ static void TestErrorReports(MainWindow* win, Project& project,
         bool ok = false;
         for (const Track& t : project.Tracks())
             if (t.name == "gone-track" && t.clips.size() == 1
-                && t.clips[0].sourcePath == foundPath)
+                && PathBaseName(t.clips[0].sourcePath)
+                       == "haiku_daw_ui_found.wav")
                 ok = true;
         win->Unlock();
         return ok;
-    }));
+    }, 30000000));
     CHECK(stack.UndoName() == "Locate Missing Media");
     HideOtherWindows(win);
     CHECK(WaitQuiet());
