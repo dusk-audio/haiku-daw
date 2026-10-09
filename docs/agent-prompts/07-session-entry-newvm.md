@@ -73,13 +73,13 @@ Marc replaced the dev VM with a fresh Haiku install on 2026-10-08. The old VM
    must stay green for the whole package.
 2. Rebuild the plugin fixture. Inputs on the Linux host:
    - Marc's plugins: `/home/marc/projects/plugins` (per-plugin
-     `plugins/<name>/dpf-plugin/`, shared DSP `plugins/shared-dpf/`).
+     `plugins/<name>/daf-plugin/`, shared DSP `plugins/shared-daf/`).
    - **DAF** (the framework formerly called DPF; its widgets live in-tree as
      `DAF/widgets/`): `/home/marc/projects/DAF`. There is no `/home/marc/projects/DPF`.
    - The Haiku GL UI port is a DAF patch: `/home/marc/projects/dpf-haiku-gl-ui.patch`
      (apply with `patch -p1` from a **copy** of DAF on the VM — never modify
      Marc's host checkout of DPF or the plugins repo).
-   - Build recipe that worked before: copy the plugin's `DistrhoPluginInfo.h` into
+   - Build recipe that worked before: copy the plugin's `DafPluginInfo.h` into
      an overlay dir, write a standalone CMakeLists that calls
      `daf_add_plugin(<name> TARGETS lv2 FILES_DSP ... FILES_UI ...)`, and put the
      overlay dir first on the include path. Plugin sources stay untouched.
@@ -99,17 +99,12 @@ Marc replaced the dev VM with a fresh Haiku install on 2026-10-08. The old VM
 
 **Syncing your work to the VM**
 
-The host is authoritative; the VM never commits. `scripts/vm.sh sync` bundles
-**`master` only**, so it will not carry your feature branch. Use one of these:
-
-- Committed feature branch:
-  ```sh
-  git bundle create /tmp/b.bundle feature/lv2-live-editor
-  sh -c 'scp -i ~/.ssh/haiku_vm -o IdentitiesOnly=yes /tmp/b.bundle user@192.168.122.48:/tmp/b.bundle'
-  sh scripts/vm.sh ssh 'cd ~/haiku-daw && git fetch /tmp/b.bundle feature/lv2-live-editor && git reset --hard FETCH_HEAD && git log --oneline -1'
-  ```
-- Uncommitted work, **including new untracked files** (`git stash create` misses
-  untracked files, which silently breaks the VM build):
+The host is authoritative; the VM never commits. For a committed branch,
+`sh scripts/vm.sh sync` puts the **current branch** on the VM (`VM_REF=<ref>`
+picks another): a commit already on GitHub is fetched there, one that is not is
+sent over in a `git bundle`. For uncommitted work, **including new untracked
+files** (`git stash create` misses untracked files, which silently breaks the
+VM build):
   ```sh
   git add -A && TREE=$(git write-tree) && CT=$(git commit-tree $TREE -p HEAD -m wip) && git reset -q --mixed HEAD
   git update-ref refs/heads/_vmwt $CT && git bundle create /tmp/wt.bundle _vmwt && git update-ref -d refs/heads/_vmwt
@@ -126,8 +121,10 @@ checkout this should not cause make to skip files, but if it does, `touch` them.
 **Seeing and driving the VM screen** (GUI testing)
 
 - Screenshot: `virsh -c qemu:///system screenshot haiku-beta6 /path/s.ppm` then
-  convert with `magick s.ppm s.png` and read the PNG. Running `screenshot` over
-  SSH fails (exit 69) because app_server is out of reach from that session.
+  convert with `magick s.ppm s.png` and read the PNG. Running the `screenshot`
+  command over SSH fails (exit 69) — that is the command, not app_server, which
+  a process started over SSH DOES reach: `tests/ui_functional_tests.cpp` drives
+  the real windows that way (see `09-ui-functional-tests.md`).
 - Keyboard works: `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp 'sendkey <key>'`
   (e.g. `ctrl-alt-delete`, `ret`, `shift-a`). A typing helper that maps text to
   sendkey names is easy to write; one `sendkey` per character.
