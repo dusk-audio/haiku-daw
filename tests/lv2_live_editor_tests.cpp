@@ -135,8 +135,12 @@ int main() {
         CHECK(gen1 == gen0);
 
         // A live parameter write does publish, and publishes exactly what the
-        // plugin will read.
-        const float want = pick->params[0].def + 0.1f;
+        // plugin will read. The target is the middle of the port's range, so
+        // the change survives clamping -- a port whose default sits on its own
+        // maximum would clamp a nudge straight back and publish nothing, which
+        // is correct behaviour and a useless thing to assert on.
+        const float mid = 0.5f * (pick->params[0].mn + pick->params[0].mx);
+        const float want = mid;
         e.SetFxParamLive(tid, false, 0, 0, want);
         e.PublishFxWatchNow();
         uint32_t gen2 = 0;
@@ -145,8 +149,7 @@ int main() {
         const float got = vals[0];
         CHECK(got >= pick->params[0].mn && got <= pick->params[0].mx);
         if (pick->params[0].mx > pick->params[0].mn)
-            CHECK(got == want || got == pick->params[0].mx
-                            || got == pick->params[0].mn);
+            CHECK(got == want);        // a mid-range value, published as asked
 
         // Out of range is clamped HERE too, because the value that matters is
         // the one the plugin reads, not the one the caller asked for.

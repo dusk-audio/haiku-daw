@@ -205,6 +205,10 @@ public:
             // a weakly-ordered machine, never on x86).
             std::atomic_thread_fence(std::memory_order_acquire);
             const int n = fWatchN[slot].load(std::memory_order_relaxed);
+            // Nothing has ever been published for this slot (no watch, or the
+            // watched insert is not in the running chain). 0 values, and the
+            // caller's generation is left alone rather than clobbered.
+            if (n < 0) return 0;
             c = n < maxSlots ? n : maxSlots;
             for (int i = 0; i < c; i++) out[i] = fWatchValues[slot][i];
             g1 = fWatchGen[slot].load(std::memory_order_acquire);
