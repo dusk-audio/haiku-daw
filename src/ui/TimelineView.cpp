@@ -463,7 +463,57 @@ void TimelineView::DuplicateSelection() {
     Invalidate();
 }
 
+namespace {
+// Optional draw timing (DAW_TIMELINE_TIMING=1), so the plan's "under 4 ms per
+// frame" claim is measured on the target rather than asserted here. Reports
+// the average of every 60 draws on stderr; handles Draw()'s early returns.
+struct DrawTimer {
+    bigtime_t start = 0;
+    bool      on    = false;
+    DrawTimer() {
+        static const bool enabled = std::getenv("DAW_TIMELINE_TIMING") != nullptr;
+        on = enabled;
+        if (on) start = system_time();
+    }
+    ~DrawTimer() {
+        if (!on) return;
+        static bigtime_t sum = 0;
+        static int       n   = 0;
+        sum += system_time() - start;
+        if (++n >= 60) {
+            std::fprintf(stderr, "timeline draw: %.2f ms average over %d draws\n",
+                         (double)sum / 1000.0 / n, n);
+            sum = 0;
+            n = 0;
+        }
+    }
+};
+} // namespace
+
+// The effective fades for a track, cached against the exact clip tuple they
+// were computed from (ComputeCrossfades allocates; it changes only on edits).
+const std::vector<ClipFades>& TimelineView::FadesFor(const Track& t) {
+    FadeCache& e = fFadeCache[t.id];
+    bool same = e.key.size() == t.clips.size();
+    for (std::size_t i = 0; same && i < t.clips.size(); i++) {
+        const Clip& c = t.clips[i];
+        same = e.key[i][0] == c.startFrame && e.key[i][1] == c.lengthFrames
+            && e.key[i][2] == c.fadeInFrames && e.key[i][3] == c.fadeOutFrames
+            && e.key[i][4] == c.takeGroup;
+    }
+    if (!same) {
+        e.fades = ComputeCrossfades(t.clips);
+        e.key.clear();
+        e.key.reserve(t.clips.size());
+        for (const Clip& c : t.clips)
+            e.key.push_back({ c.startFrame, c.lengthFrames, c.fadeInFrames,
+                              c.fadeOutFrames, c.takeGroup });
+    }
+    return e.fades;
+}
+
 void TimelineView::Draw(BRect updateRect) {
+    DrawTimer timer;   // no-op unless DAW_TIMELINE_TIMING is set
     DrawLanes(updateRect);
     if (fDrag == Drag::Clip && fDragCurLane >= 0)
         DrawDragGhost();     // clip-move preview
@@ -700,6 +750,11 @@ void TimelineView::HandleRulerMenu(BPoint where) {
 void TimelineView::MouseDown(BPoint where) {
     if (!fProject || !fStack)
         return;
+
+    // A click makes the timeline the focused view, so the transport keys
+    // (Space, arrows, Home) work without clicking twice -- and so the
+    // window's key router knows a text field is no longer being edited.
+    MakeFocus(true);
 
     // Secondary (right) button = delete the thing under the cursor.
     int32 buttons = 0;
@@ -1878,12 +1933,19 @@ void TimelineView::DrawLanes(BRect update) {
     int idx = 0;
     for (const Track& t : fProject->Tracks()) {
         BRect lane = LaneRect(idx);
+        // Off-screen lanes cost nothing: the draw is handed the update rect
+        // precisely so it can skip them (idx still advances -- it names the
+        // lane, not the row on screen).
+        if (!lane.Intersects(update)) { idx++; continue; }
 
         SetHighColor((idx & 1) ? ColLaneAlt() : ColLane());
         FillRect(lane);
 
         // Bar/beat grid lines through the lane content area (bars brighter).
+        // Lines outside the update rect are skipped: on a long project the
+        // loop covered every bar in the timeline, most of them invisible.
         ForEachGridLine([&](float x, bool isBar, long) {
+            if (x < update.left || x > update.right) return;
             SetHighColor(isBar ? ColGrid() : ColLaneAlt());
             StrokeLine(BPoint(x, lane.top), BPoint(x, lane.bottom));
         });
@@ -1891,14 +1953,15 @@ void TimelineView::DrawLanes(BRect update) {
         // Effective fades for this lane: the clips' own fades folded together
         // with any auto-crossfade implied by overlaps. Same call the engine and
         // the exporter make, so the drawing shows the fades that actually sound.
-        const std::vector<ClipFades> fades = ComputeCrossfades(t.clips);
+        const std::vector<ClipFades>& fades = FadesFor(t);
 
         std::size_t ci = 0;
         for (const Clip& c : t.clips) {
             const ClipFades& ef = fades[ci++];
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // only the active take of a group is drawn
-            DrawClip(c, lane, TrackColor(t.colorIndex), ef.fadeIn, ef.fadeOut);
+            DrawClip(c, lane, TrackColor(t.colorIndex), ef.fadeIn, ef.fadeOut,
+                     update);
             if (c.takeGroup > 0) {   // "T k/N" badge on the active take
                 int n = 0, k = 0;
                 for (const Clip& o : t.clips)
@@ -2183,18 +2246,21 @@ void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
-                            Frame fadeIn, Frame fadeOut) {
+                            Frame fadeIn, Frame fadeOut, BRect update) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
     if (x1 < kHeaderWidth || x0 > lane.right)
         return;                       // fully outside the content area
+    // ...and nothing of it is being repainted.
+    if (x1 < update.left || x0 > update.right)
+        return;
     if (x0 < kHeaderWidth) x0 = kHeaderWidth;
 
     BRect block(x0, lane.top + 3, x1, lane.bottom - 3);
     SetHighColor(base);
     FillRoundRect(block, 5, 5);        // Logic-style rounded region
 
-    DrawClipWave(c, block);
+    DrawClipWave(c, block, update);
 
     // Fade ramps: a diagonal from the block corner up to where the fade ends.
     // These are the effective fades, so an auto-crossfade with a neighbour draws
@@ -2377,7 +2443,7 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
 // column, from the column's min sample to its max. Reads a handful of peak
 // buckets per column (never scans the audio). No cache for this clip's source
 // -> just the flat filled block.
-void TimelineView::DrawClipWave(const Clip& c, BRect block) {
+void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
     if (!fPeaks)
         return;
     auto it = fPeaks->find(c.sourcePath);
@@ -2395,9 +2461,22 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block) {
     const double srcRate  = pc.SampleRate();
     const double toSrc = (srcRate > 0 && projRate > 0) ? srcRate / projRate : 1.0;
 
-    SetHighColor(ColWave());
-    const int xL = static_cast<int>(block.left);
-    const int xR = static_cast<int>(block.right);
+    // Haiku's line array carries the colour per line (SetHighColor does not
+    // apply inside BeginLineArray/EndLineArray).
+    const rgb_color wave = ColWave();
+    // Only the columns being repainted: a clip can span the whole timeline,
+    // and the loop used to walk all of it (one StrokeLine per column) even
+    // when a sliver was visible.
+    float lo = block.left  > update.left  ? block.left  : update.left;
+    float hi = block.right < update.right ? block.right : update.right;
+    if (lo < kHeaderWidth) lo = kHeaderWidth;
+    const int xL = static_cast<int>(lo);
+    const int xR = static_cast<int>(hi);
+    // Batch the columns: one BeginLineArray per chunk, not one app_server call
+    // per column.
+    const int kChunk = 256;
+    BPoint pts[kChunk * 2];
+    int n = 0;
     for (int x = xL; x <= xR; x++) {
         // Timeline frames this column spans -> source frames within the clip.
         const Frame tf0 = XToFrame(static_cast<float>(x));
@@ -2410,7 +2489,21 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block) {
         Peak pk = pc.Range(s0 < 0 ? 0 : s0, s1);
         const float yMax = mid - pk.max * half;   // max amplitude -> up
         const float yMin = mid - pk.min * half;   // min amplitude -> down
-        StrokeLine(BPoint(x, yMin), BPoint(x, yMax));
+        pts[n++] = BPoint(x, yMin);
+        pts[n++] = BPoint(x, yMax);
+        if (n == kChunk * 2) {
+            BeginLineArray(n / 2);
+            for (int i = 0; i < n; i += 2)
+                AddLine(pts[i], pts[i + 1], wave);
+            EndLineArray();
+            n = 0;
+        }
+    }
+    if (n > 0) {
+        BeginLineArray(n / 2);
+        for (int i = 0; i < n; i += 2)
+            AddLine(pts[i], pts[i + 1], wave);
+        EndLineArray();
     }
 }
 

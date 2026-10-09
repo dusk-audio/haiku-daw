@@ -82,7 +82,15 @@ public:
     ~MainWindow() override;
 
     void MessageReceived(BMessage* msg) override;
+    // Keys belong to the focused view -- except that the timeline only takes
+    // focus on a click, so after anyone touched a text field the transport
+    // keys (Space, arrows, Home) went nowhere. Route a key with no command
+    // modifier to the timeline whenever the focus is not a text field; Cmd
+    // shortcuts keep flowing to the menus.
+    void DispatchMessage(BMessage* message, BHandler* handler) override;
     bool QuitRequested() override;   // quit the app when the window closes
+    // For the functional tests: whether the transport is rolling.
+    bool IsPlaying() const { return fPlaying; }
 
 private:
     void StartPlayback();

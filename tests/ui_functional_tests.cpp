@@ -11,6 +11,7 @@
 // model is read under a window's lock, the way any other looper-external reader
 // has to.
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/model/MidiOps.h"       // QuantGrid
@@ -1140,6 +1141,70 @@ static void TestErrorReports(MainWindow* win, Project& project,
     std::remove(cleanPath);
 }
 
+// --- 12. M0.7: the transport keys and the timeline's focus ------------------
+
+// Space reaches the timeline without clicking it first; a text field keeps its
+// own keys (a space is a space there); a click on the timeline takes the focus.
+// Needs a project with content: an empty one has nothing to play (StartPlayback
+// stops again), which is a different behaviour entirely.
+static void TestKeyboardFocus(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_keyboard_focus\n");
+    CHECK(!project.Tracks().empty());
+
+    auto playing = [&] {
+        bool p = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            p = win->IsPlaying();
+            win->Unlock();
+        }
+        return p;
+    };
+    auto sendKey = [&](const char* bytes) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    };
+
+    // No text focus: Space toggles the transport...
+    CHECK(!playing());
+    sendKey(" ");
+    CHECK(WaitFor([&] { return playing(); }, 10000));
+    sendKey(" ");
+    CHECK(WaitFor([&] { return !playing(); }, 10000));
+
+    // ...but with the tempo field focused it is text, not transport.
+    BView* tempo = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tempo = win->FindView("tempo");
+        if (tempo) tempo->MakeFocus(true);
+        win->Unlock();
+    }
+    CHECK(tempo != nullptr);
+    sendKey(" ");
+    snooze(400000);
+    CHECK(!playing());
+
+    // A click on the timeline takes the focus back (and with it the keys).
+    BMessage down(B_MOUSE_DOWN);
+    down.AddInt32("buttons", 1);
+    down.AddPoint("where", BPoint(400, 50));   // the ruler, in the timeline
+    win->PostMessage(&down);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus())
+                            != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+    sendKey(" ");
+    CHECK(WaitFor([&] { return playing(); }, 10000));
+    sendKey(" ");                              // leave the transport stopped
+    CHECK(WaitFor([&] { return !playing(); }, 10000));
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1170,6 +1235,7 @@ static int32 TestThread(void*) {
     TestLv2EditorWiring(win, project, stack);
 #endif
     TestErrorReports(win, project, stack);
+    TestKeyboardFocus(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
