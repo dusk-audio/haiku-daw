@@ -18,10 +18,14 @@ inline uint64_t Mix(uint64_t x) {
 }
 
 // A symmetric draw in [-mag, +mag] from the note's own hash. 0 draws 0.
+// The subtraction is done 64-bit: a large mag (up to INT_MAX for the velocity
+// jitter) makes h % span exceed INT_MAX, and subtracting in int would be signed
+// overflow -- UB the sanitizer flags, even though the wrapped value happens to
+// be the right one.
 inline int Jitter(uint64_t h, int mag) {
     if (mag <= 0) return 0;
     const uint32_t span = (uint32_t)(2 * (uint32_t)mag + 1u);
-    return (int)(h % span) - mag;
+    return (int)((int64_t)(h % span) - (int64_t)mag);
 }
 
 // Does the region window let this note sound? Content outside [0, clipLen) is
@@ -32,21 +36,33 @@ inline bool InWindow(const MidiNote& n, Frame clipLen) {
     return n.startFrame >= 0 && n.startFrame < clipLen;
 }
 
-// Keep a transformed note inside the region window. Callers pass only notes
-// that were INSIDE it (InWindow above), so this is about what the transform did
-// to them: the notes command grows a region to fit anything past its end, and a
-// transform must not resize the region as a side effect -- nor silence the note
-// it just moved by pushing its start out the back.
-inline void ClampToWindow(MidiNote& n, const MidiNote& orig, Frame clipLen) {
+// The two halves of the window rule, kept separate because the order matters:
+// a transform that derives a LENGTH must measure it from where the start
+// actually lands, so it clamps the start first (see Quantize).
+inline void ClampStartToWindow(MidiNote& n, Frame clipLen) {
+    if (clipLen < 1) clipLen = 1;
+    if (n.startFrame < 0) n.startFrame = 0;
+    if (n.startFrame >= clipLen) n.startFrame = clipLen - 1;
+}
+
+// The end rule. Callers pass only notes that were INSIDE the window (InWindow
+// above), so this is about what the transform did to them: the notes command
+// grows a region to fit anything past its end, and a transform must not resize
+// the region as a side effect -- nor silence the note it just moved by pushing
+// its start out the back.
+inline void ClampEndToWindow(MidiNote& n, const MidiNote& orig, Frame clipLen) {
     if (clipLen < 1) clipLen = 1;
     const Frame origEnd = orig.startFrame
                         + std::max<Frame>(1, orig.lengthFrames);
-    if (n.startFrame < 0) n.startFrame = 0;
-    if (n.startFrame >= clipLen) n.startFrame = clipLen - 1;
     if (n.lengthFrames < 1) n.lengthFrames = 1;
     if (origEnd <= clipLen && n.startFrame + n.lengthFrames > clipLen)
         n.lengthFrames = clipLen - n.startFrame;
     if (n.lengthFrames < 1) n.lengthFrames = 1;
+}
+
+inline void ClampToWindow(MidiNote& n, const MidiNote& orig, Frame clipLen) {
+    ClampStartToWindow(n, clipLen);
+    ClampEndToWindow(n, orig, clipLen);
 }
 
 } // namespace
@@ -105,11 +121,14 @@ std::vector<MidiNote> Quantize(const std::vector<MidiNote>& notes,
     std::vector<MidiNote> out = notes;
     const double step = GridStepBeats(opts.grid);
     if (!(step > 0.0)) return out;   // also catches NaN
+    // "Not a number in range" means no movement, which is the safe reading of
+    // garbage: the plain comparisons would let a NaN through to the arithmetic
+    // below, where it lands every note on frame 0.
     double strength = (double)opts.strength;
-    if (strength < 0.0) strength = 0.0;
+    if (!(strength >= 0.0)) strength = 0.0;
     if (strength > 1.0) strength = 1.0;
     double swing = (double)opts.swingPct;
-    if (swing < 0.0) swing = 0.0;
+    if (!(swing >= 0.0)) swing = 0.0;
     if (swing > 100.0) swing = 100.0;
     swing /= 100.0;
 
@@ -131,6 +150,11 @@ std::vector<MidiNote> Quantize(const std::vector<MidiNote>& notes,
 
         MidiNote n = orig;
         n.startFrame = tempo.FrameAt(newBeat) - clipStart;
+        // Clamp the start BEFORE measuring a new length: at the region edge the
+        // clamp moves the note, and a length measured from the pre-clamp start
+        // would put the end that many frames past the grid line the code itself
+        // computed (and make a second quantize move it again).
+        ClampStartToWindow(n, clipLen);
 
         if (opts.quantizeLengths) {
             const Frame endRel = orig.startFrame
@@ -161,9 +185,11 @@ std::vector<MidiNote> Humanize(const std::vector<MidiNote>& notes,
         if (!NoteSelected(sel, i)) continue;
         const MidiNote orig = notes[i];
         if (!InWindow(orig, clipLen)) continue;
-        // Hash the note's own identity as well as its index: two notes at the
-        // same frame and pitch must move independently, and a note's draw must
-        // not depend on where it sits in the list.
+        // Hash the note's identity AND its place in the list: two notes at the
+        // same frame and pitch must move independently, and the index is what
+        // separates them. The price is that inserting or removing a note
+        // re-rolls the draws of the ones after it -- humanize is a fresh take,
+        // not a property of the notes.
         const uint64_t h = Mix(seed
             ^ (uint64_t)i * 0x9E3779B97F4A7C15ull
             ^ ((uint64_t)(uint32_t)orig.startFrame << 1)

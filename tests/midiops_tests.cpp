@@ -3,6 +3,7 @@
 // non-destructive-window rules every time-domain transform must honour.
 #include "../src/model/MidiOps.h"
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +46,20 @@ static void test_grid_steps() {
     CHECK(Near(GridStepBeats(QuantGrid::SixteenthTriplet), 1.0 / 6.0));
     CHECK(std::string(GridName(QuantGrid::Sixteenth)) == "1/16");
     CHECK(std::string(GridName(QuantGrid::EighthTriplet)) == "1/8T");
+    // The enum values ARE the wire format: the settings dialog's grid menu is
+    // built in this order and the roll casts the posted int32 straight back, so
+    // a reordering would silently make the menu label one grid and apply
+    // another. Every name is pinned for the same reason.
+    CHECK((int)QuantGrid::Quarter == 0 && (int)QuantGrid::Eighth == 1
+          && (int)QuantGrid::Sixteenth == 2 && (int)QuantGrid::ThirtySecond == 3
+          && (int)QuantGrid::QuarterTriplet == 4
+          && (int)QuantGrid::EighthTriplet == 5
+          && (int)QuantGrid::SixteenthTriplet == 6);
+    CHECK(std::string(GridName(QuantGrid::Quarter)) == "1/4");
+    CHECK(std::string(GridName(QuantGrid::Eighth)) == "1/8");
+    CHECK(std::string(GridName(QuantGrid::ThirtySecond)) == "1/32");
+    CHECK(std::string(GridName(QuantGrid::QuarterTriplet)) == "1/4T");
+    CHECK(std::string(GridName(QuantGrid::SixteenthTriplet)) == "1/16T");
 }
 
 static void test_quantize_strength() {
@@ -59,7 +74,7 @@ static void test_quantize_strength() {
 
     // Strength 1 pulls a note the whole way to the grid, strength 0 not at all.
     std::vector<MidiNote> off = { N(60, 100, 1000, 1000) };
-    CHECK(NotesEqual(Quantize(off, {}, tm, 0, 1 << 20, o), onGrid) == false);
+    CHECK(!NotesEqual(Quantize(off, {}, tm, 0, 1 << 20, o), off));
     o.strength = 0.0f;
     CHECK(NotesEqual(Quantize(off, {}, tm, 0, 1 << 20, o), off));
     o.strength = 1.0f;
@@ -83,6 +98,17 @@ static void test_quantize_strength() {
     // A note whose end is past the half-step point snaps up instead.
     std::vector<MidiNote> up = { N(60, 100, 1000, 6000) };   // end 7000 -> 6000
     CHECK(Quantize(up, {}, tm, 0, 1 << 20, o)[0].lengthFrames == 6000);
+
+    // Garbage strength or swing reads as "do not transform": both would
+    // otherwise reach the arithmetic as NaN and land every note on frame 0.
+    QuantizeOpts nan;
+    nan.strength = std::nanf("");
+    CHECK(NotesEqual(Quantize(off, {}, tm, 0, 1 << 20, nan), off));
+    QuantizeOpts nanSwing;   // NaN swing == straight swing, not NaN positions
+    nanSwing.swingPct = std::nanf("");
+    QuantizeOpts straight;
+    CHECK(NotesEqual(Quantize(off, {}, tm, 0, 1 << 20, nanSwing),
+                     Quantize(off, {}, tm, 0, 1 << 20, straight)));
 }
 
 static void test_quantize_swing() {
@@ -111,6 +137,22 @@ static void test_quantize_swing() {
     std::vector<MidiNote> sq = Quantize(one, {}, tm, 0, 1 << 20, o);
     CHECK(sq[0].startFrame == 8000);            // swung
     CHECK(sq[0].startFrame + sq[0].lengthFrames == 12000);   // end unswung
+
+    o.quantizeLengths = false;
+    // An OFF-grid note near a swung slot snaps to the slot, not to its own
+    // position shifted by the offset: 6100 and 5500 both belong to slot 1 and
+    // both must land on the same 8000.
+    std::vector<MidiNote> loose = { N(60, 100, 6100, 500), N(60, 100, 5500, 500) };
+    std::vector<MidiNote> lq = Quantize(loose, {}, tm, 0, 1 << 20, o);
+    CHECK(lq[0].startFrame == 8000);
+    CHECK(lq[1].startFrame == 8000);
+
+    // Strength scales the swing too: the swung target is what strength
+    // interpolates toward, so half strength on an odd slot lands halfway.
+    o.strength = 0.5f;
+    std::vector<MidiNote> mid = { N(60, 100, 6000, 500) };
+    CHECK(Quantize(mid, {}, tm, 0, 1 << 20, o)[0].startFrame == 7000);
+    o.strength = 1.0f;
 }
 
 static void test_quantize_triplets() {
@@ -160,10 +202,26 @@ static void test_quantize_tempo_change() {
     CHECK(NotesEqual(Quantize(rq, {}, ramp, 0, 1 << 20, quarter), rq));
 
     // Mid-clip tempo change with a clip that does not start at 0: the grid is
-    // still the song's, not the clip's.
-    std::vector<MidiNote> cn = { N(60, 100, 1000, 100) };   // abs 97000
+    // still the song's, not the clip's. The note is placed so that IGNORING the
+    // clip start gives a different answer (a note closer to the head would be
+    // clamped to 0 either way and prove nothing), and the check is on the
+    // absolute frame so "clamped to the region head" cannot pass for it.
+    std::vector<MidiNote> cn = { N(60, 100, 5000, 100) };   // abs 101000
     std::vector<MidiNote> cq = Quantize(cn, {}, tm, 96000, 1 << 20, o);
-    CHECK(cq[0].startFrame == 0);       // abs 96000 == the change frame, on grid
+    CHECK(cq[0].startFrame == 6000);
+    CHECK(cq[0].startFrame + 96000 == 102000);   // 4.5 beats: the song grid
+
+    // Strength interpolates in BEAT space, not frame space. This map falls from
+    // 120 to 5 BPM at frame 30000, so a quarter-note line sits at beat 1 while
+    // the note at frame 130000 is at beat 1.4236: half strength lands on 29083.
+    // Interpolating in frames would land on 77000 -- a second away.
+    TempoMap slow;
+    slow.SetTempoAt(30000, 5.0);
+    QuantizeOpts half;
+    half.grid = QuantGrid::Quarter;
+    half.strength = 0.5f;
+    std::vector<MidiNote> sn = { N(60, 100, 130000, 100) };
+    CHECK(Quantize(sn, {}, slow, 0, 1 << 20, half)[0].startFrame == 29083);
 }
 
 static void test_quantize_window() {
@@ -194,6 +252,21 @@ static void test_quantize_window() {
     std::vector<MidiNote> sel = Quantize(many, Sel({1}, many.size()), tm, 0, 1 << 20, o);
     CHECK(sel[0].startFrame == 1000);
     CHECK(sel[1].startFrame == 0);
+
+    // A start clamped at the region head must not drag the snapped END with it:
+    // the length is measured from where the note actually lands. With the
+    // pre-clamp start it would store 24000 (ending at abs 419999, a quarter of
+    // a beat past the line the code itself computed) and a second quantize
+    // would move the note again.
+    QuantizeOpts q;
+    q.grid = QuantGrid::Quarter;
+    q.quantizeLengths = true;
+    std::vector<MidiNote> edge2 = { N(60, 100, 0, 24000) };
+    std::vector<MidiNote> e2 = Quantize(edge2, {}, tm, 395999, 2000000, q);
+    CHECK(e2[0].startFrame == 0);                     // clamped to the head
+    // The END (in absolute frames) is the beat line, not start+old length.
+    CHECK(e2[0].startFrame + e2[0].lengthFrames + 395999 == 408000);
+    CHECK(NotesEqual(Quantize(e2, {}, tm, 395999, 2000000, q), e2));   // idempotent
 }
 
 static void test_humanize() {
@@ -227,6 +300,17 @@ static void test_humanize() {
         CHECK(Humanize(quiet, {}, kLen, 0, 60, seed)[0].velocity >= 1);
         CHECK(Humanize(loud,  {}, kLen, 0, 60, seed)[0].velocity <= 127);
     }
+    // An absurd jitter still clamps. This case is here for the SANITIZER build:
+    // a draw this wide makes the jitter arithmetic overflow int unless it is
+    // done 64-bit, which UBSan reports as a runtime error (a normal build sees
+    // only the clamp, because the wrapped value happens to be right).
+    std::vector<MidiNote> wild = { N(60, 64, 1000, 100) };
+    for (uint64_t seed = 1; seed <= 4; seed++) {
+        const MidiNote r = Humanize(wild, {}, kLen, (Frame)1 << 30,
+                                    INT_MAX, seed)[0];
+        CHECK(r.velocity >= 1 && r.velocity <= 127);
+        CHECK(r.startFrame >= 0 && r.startFrame < kLen);
+    }
 
     // A start can never be pushed before the region.
     std::vector<MidiNote> near0 = { N(60, 100, 10, 100) };
@@ -249,6 +333,15 @@ static void test_humanize() {
     // Out-of-window content is not touched by a time transform.
     std::vector<MidiNote> outw = { N(60, 100, 20000, 100) };
     CHECK(NotesEqual(Humanize(outw, {}, 10000, 500, 20, 3), outw));
+
+    // The ceiling: a note near the region end cannot be pushed OUT of it by a
+    // positive draw -- a start outside the window never sounds. Pinned for
+    // these seeds, which draw upward.
+    std::vector<MidiNote> nearEnd = { N(60, 100, 9950, 50) };
+    for (uint64_t seed : { 1u, 2u, 5u }) {
+        const Frame s = Humanize(nearEnd, {}, 10000, 500, 0, seed)[0].startFrame;
+        CHECK(s >= 0 && s < 10000);
+    }
 }
 
 static void test_legato() {
@@ -298,6 +391,7 @@ static void test_pitch_and_velocity() {
     CHECK(ScaleVelocity(notes, {}, 0.0f, -100.0f)[0].velocity == 1);   // floor
     CHECK(ScaleVelocity(notes, {}, 10.0f, 0.0f)[0].velocity == 127);   // ceiling
     CHECK(ScaleVelocity(notes, Sel({1}, 2), 1.0f, 10.0f)[0].velocity == 100);
+    CHECK(ScaleVelocity(notes, {}, 1.0f, 0.7f)[0].velocity == 101);    // rounds, not truncates
 }
 
 int main() {

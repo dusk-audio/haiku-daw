@@ -844,10 +844,13 @@ static void test_apply_midi_op_command() {
     stack.Execute(std::move(add), p);
     const ClipId cid = addPtr->CreatedId();
 
-    MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 0; n.lengthFrames = 500;
+    // Two notes that differ in every field, so a mangled commit (reordered,
+    // zeroed, duplicated) cannot pass as the applied list.
+    MidiNote n; n.pitch = 61; n.velocity = 44; n.startFrame = 100; n.lengthFrames = 200;
     stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
         id, cid, std::vector<MidiNote>{ n }), p);
-    MidiNote longNote = n;
+    MidiNote longNote;
+    longNote.pitch = 72; longNote.velocity = 111;
     longNote.startFrame = 7500; longNote.lengthFrames = 1000;   // ends at 8500
     std::vector<MidiNote> stretched = { n, longNote };
 
@@ -863,13 +866,20 @@ static void test_apply_midi_op_command() {
     auto cmd = std::make_unique<ApplyMidiOpCommand>(id, cid, stretched, "Quantize");
     CHECK(cmd->Name() == "Quantize");
     stack.Execute(std::move(cmd), p);
-    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 2);
-    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].pitch == 64);
-    CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8000);
+    const MidiClip* applied = p.FindTrack(id)->FindMidiClip(cid);
+    CHECK(applied->notes.size() == 2);
+    CHECK(applied->notes[0].pitch == 61 && applied->notes[0].velocity == 44);
+    CHECK(applied->notes[0].startFrame == 100);
+    CHECK(applied->notes[0].lengthFrames == 200);
+    CHECK(applied->notes[1].pitch == 72 && applied->notes[1].velocity == 111);
+    CHECK(applied->notes[1].startFrame == 7500);
+    CHECK(applied->notes[1].lengthFrames == 1000);
+    CHECK(applied->lengthFrames == 8000);
 
     stack.Undo(p);
     CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 1);
-    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].startFrame == 0);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].startFrame == 100);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].velocity == 44);
     CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8000);
     stack.Redo(p);
     CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 2);
