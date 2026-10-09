@@ -53,12 +53,15 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
     const float w = Bounds().Width();
     float y = 8.0f;
 
-    // Grid.
+    // Grid. The items carry NO message: a popup menu is radio by default, so
+    // choosing one marks it (and updates the field's label) but must not send
+    // anything -- picking a grid is a setting, and applying belongs to the
+    // button. With a message here, choosing a grid would quantize with the
+    // strength and swing the user had not set yet.
     {
         BPopUpMenu* menu = new BPopUpMenu("grid");
         for (int i = 0; i < 7; i++) {
-            BMenuItem* it = new BMenuItem(GridName(kGrids[i]),
-                                          new BMessage(MSG_APPLY));
+            BMenuItem* it = new BMenuItem(GridName(kGrids[i]), nullptr);
             if (kGrids[i] == opts.grid) it->SetMarked(true);
             menu->AddItem(it);
         }
@@ -80,8 +83,10 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
     root->AddChild(fSwing);
     y += 44.0f;
 
+    // Same rule as the grid: the box is a setting, read when the button is
+    // pressed. A message here would apply and close on the tick itself.
     fLengths = new BCheckBox(BRect(8, y, w - 8, y + 20), "ln",
-                             "Quantize note ends", new BMessage(MSG_APPLY));
+                             "Quantize note ends", nullptr);
     fLengths->SetValue(opts.quantizeLengths ? B_CONTROL_ON : B_CONTROL_OFF);
     root->AddChild(fLengths);
     y += 30.0f;
