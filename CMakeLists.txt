@@ -415,6 +415,7 @@ set_tests_properties(wavsource_fuzz_tests projectio_fuzz_tests
 if(HAIKU)
     add_library(daw_engine
         src/engine/Engine.cpp
+        src/engine/DeviceLatency.cpp  # what the device costs, in frames
         src/engine/Recorder.cpp
         src/midi/MidiPort.cpp       # Midi Kit 2 adapter (external MIDI I/O)
     )

@@ -17,6 +17,8 @@
 #include "../src/model/Project.h"
 #include "../src/model/Command.h"
 #include "../src/engine/WavSource.h"   // reading a bounce back
+#include "../src/engine/DeviceLatency.h"   // R3: what the device costs
+#include "../src/model/RecordPlan.h"      // LatencyUsToFrames
 
 #include <Application.h>
 #include <Directory.h>
@@ -24,6 +26,8 @@
 #include <Messenger.h>
 #include <OS.h>
 #include <Path.h>
+#include <MediaNode.h>
+#include <MediaRoster.h>
 #include <Window.h>
 
 #include <cstdio>
@@ -494,6 +498,35 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
     snooze(200000);
 }
 
+// --- 5. R3: the device latency the recorder compensates with ---------------
+
+// The helper sums the output and input nodes' latencies and converts to
+// frames; the test asks the roster ITSELF and checks the arithmetic against
+// it, so a helper that queried the wrong node, dropped a term or returned
+// nonsense fails here -- a take cannot be recorded in a test, but the number
+// that places it can be.
+static void TestDeviceLatency() {
+    std::printf("test_device_latency\n");
+    const Frame frames = DeviceRoundTripFrames(48000.0);
+    CHECK(frames >= 0);
+
+    BMediaRoster* roster = BMediaRoster::Roster();
+    CHECK(roster != nullptr);
+    if (roster) {
+        media_node out, in;
+        bigtime_t lo = 0, li = 0;
+        const bool have = roster->GetAudioOutput(&out) == B_OK
+                       && roster->GetAudioInput(&in) == B_OK
+                       && roster->GetLatencyFor(out, &lo) == B_OK
+                       && roster->GetLatencyFor(in, &li) == B_OK;
+        std::printf("  device round trip: %lld frames (%s)\n",
+                    (long long)frames,
+                    have ? "the roster answered" : "no device to ask");
+        if (have)
+            CHECK(frames == LatencyUsToFrames((int64_t)(lo + li), 48000.0));
+    }
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -515,6 +548,7 @@ static int32 TestThread(void*) {
     TestPianoRollQuantize(win, project, stack);
     TestPianoRollTransforms(win, project, stack);
     TestExportFlow(win, project);
+    TestDeviceLatency();
     TestExportCancel(win, project);
     TestExportStems(win, project);
     TestExportLoopRange(win, project);

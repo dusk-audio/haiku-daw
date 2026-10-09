@@ -58,6 +58,31 @@ int main() {
         CHECK(LoopTakes(0, 1000, 2000).size() == 2);
         // Degenerate loop -> none.
         CHECK(LoopTakes(500, 500, 2000).empty());
+
+        // A capture that is `offset` frames late starts with the tail of the
+        // pass before the loop: those frames are dropped, and every take keeps
+        // its place on the timeline.
+        auto off = LoopTakes(0, 1000, 2500, 250);
+        CHECK(off.size() == 3);
+        CHECK(off[0].sourceOffset == 250  && off[0].lengthFrames == 1000);
+        CHECK(off[1].sourceOffset == 1250 && off[1].lengthFrames == 1000);
+        CHECK(off[2].sourceOffset == 2250 && off[2].lengthFrames == 250);
+        for (auto& tk : off) CHECK(tk.startFrame == 0);
+        // An offset that eats the whole capture leaves no take at all.
+        CHECK(LoopTakes(0, 1000, 250, 250).empty());
+        CHECK(LoopTakes(0, 1000, 100, 250).empty());
+        // And a negative offset is treated as none (out-of-range input).
+        CHECK(LoopTakes(0, 1000, 2000, -5).size() == 2);
+    }
+
+    // Device latency -> frames: what the Media Kit reports, in timeline frames.
+    {
+        CHECK(LatencyUsToFrames(0, 48000.0) == 0);
+        CHECK(LatencyUsToFrames(10000, 48000.0) == 480);
+        CHECK(LatencyUsToFrames(1000, 44100.0) == 44);      // rounds to nearest
+        CHECK(LatencyUsToFrames(-100, 48000.0) == 0);       // nonsense in, 0 out
+        CHECK(LatencyUsToFrames(10000, 0.0) == 0);
+        CHECK(LatencyUsToFrames(10000, -48000.0) == 0);
     }
 
     // Round-trip compensation: a take slides earlier by the round-trip latency.
