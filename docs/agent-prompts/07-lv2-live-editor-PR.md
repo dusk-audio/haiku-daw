@@ -267,6 +267,37 @@ deleting the RT-thread publish makes it fail. Its SKIPs exit 77 with
 `SKIP_RETURN_CODE` set, so "no plugin installed" or "no audio device" can no
 longer be reported as a pass.
 
+### Third review
+
+Six findings, all fixed (a seventh, the UI-selection regression, was already
+fixed by the second round — the reviewer's snapshot predated it):
+
+- **The editor was told nothing when it opened.** `applied` (what the GUI has
+  been shown) was seeded with the insert's stored values, so the first engine
+  frame matched every slot and was skipped — and `port_event` is the ONLY way a
+  control-port UI learns a parameter. It opened on factory defaults while the
+  insert played the project's values. Seeded with NaN now (unequal to
+  everything, itself included), so the first frame applies all of them; the
+  kit-free helper `Lv2UiNothingApplied` is host-tested, including the property
+  that no value can match the seed.
+- **A commit knew its address but not its insert.** It is applied
+  asynchronously, so a project load or a removed insert could leave it landing
+  on whatever insert held that index by then — one plugin's values written into
+  another's descriptor, as an undoable edit, saved to disk. The message carries
+  the plugin URI and the handler drops it unless that address is still that
+  plugin; `LoadFrom` flushes pending gestures into the project they belong to
+  before closing the editors.
+- **The save-time flush could block forever.** `SendMessage(msg, reply, 200000)`
+  bounds the DELIVERY timeout; the reply timeout kept its infinite default, so
+  an editor slow to answer (its looper may be joining its own thread) would hang
+  the main window while it held its lock. Both are bounded now.
+- **`Show()`/`Hide()` are counted, not idempotent.** The transport-bar layout
+  called them on every resize, stacking hide levels until a control could not be
+  brought back. Only transitions are applied.
+- Plus the two documentation fixes: the fixture install path in the new-VM entry
+  prompt (it named a directory the DAW does not scan) and the suite counts in
+  the package README.
+
 **Known, not fixed** (each judged smaller than its fix, and stated rather than
 buried):
 
