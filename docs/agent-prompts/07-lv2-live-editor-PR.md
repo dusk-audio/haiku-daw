@@ -104,13 +104,54 @@ path:
 The title keeps telling the truth per editor: a direct-access editor says
 "(live - drives the playing insert)" only once this path exists, never before.
 
-## Phase 3 — engine → UI (design, to be written up before coding)
+## Phase 3 — engine → UI (design)
 
-Not started. The shape: the engine already publishes per-insert meters; this adds
-a parallel publish of per-insert control values, and the editor pushes them into
-its UI as `port_event` from a thread that is not the window looper (`LockGL`
-deadlocks there). Applying an inbound value must also update the poll's
-"last seen" so the two directions do not echo each other.
+Without this, everything is one-way: automation moving a parameter, or the
+generic parameter panel being dragged while the native editor is open, changes
+the sound and leaves the editor showing the old value. The design below is the
+one being implemented.
+
+**1. The engine publishes one insert's control values.** `IEffect` grows
+
+```cpp
+    // Current values of this insert's control parameters, in slot order.
+    // Optional: an effect with no such notion returns 0. Read by the engine's
+    // own audio thread while publishing, never by a UI.
+    virtual int ControlValues(float* out, int maxSlots) const { return 0; }
+```
+
+and only `Lv2Effect` implements it (a copy of the control buffer it already
+keeps). `Engine::SetFxWatch(track, master, fxIndex)` names the insert to publish
+— addressed exactly like `SetFxParamLive`, and resolved against the RUNNING
+chain on every block, so a rebuild cannot leave it pointing at a freed instance
+(`fxIndex < 0` stops). In `FillBuffer`, next to `CaptureFxMeters`, the watched
+insert's values are copied into flat storage behind a seqlock, the same
+mechanism `MeterSpectrum` already uses, so a reader cannot see a torn frame.
+
+**2. MainWindow carries them to the editor** on the 60 Hz pulse it already runs
+for meters. The editor registers with `kMsgFxWatch` (track, fx, messenger) when
+it opens and again with no messenger when it closes; MainWindow pushes
+`kMsgFxParams` (~40 floats) while a registration is live. The pulse now also
+runs while an editor is open and the transport is stopped, so a generic-panel
+drag with everything idle still reaches the editor.
+
+**3. The editor applies them as `port_event`**, and does so on its own thread —
+never the window looper, where `LockGL` deadlocks. So there is ONE thread per
+editor doing three jobs in a fixed order:
+
+```
+  idle()            renders the plugin's frame
+  apply inbound     port_event() for values the engine published
+  poll own buffers  (direct-access only) notice the user's edits
+```
+
+Applying an inbound value also writes it into the port buffer AND into the
+direct poll's "last seen", so the two directions cannot echo each other into a
+loop. `port_event` on the direct mode's instance keeps the plugin's own state
+consistent with what its UI is now showing.
+
+What this deliberately does not do: the editor still never touches the engine's
+instance, and the engine never calls into the editor's.
 
 ## What is verified, and how
 
