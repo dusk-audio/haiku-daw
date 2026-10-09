@@ -11,6 +11,9 @@
 // model is read under a window's lock, the way any other looper-external reader
 // has to.
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/PianoRoll.h"
+#include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
+#include "../src/model/MidiOps.h"       // QuantGrid
 #include "../src/model/Project.h"
 #include "../src/model/Command.h"
 
@@ -106,13 +109,60 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
     }));
 }
 
-// --- 2. package 04's path lives on its own branch ---------------------------
-//
-// The piano roll's transform path (a real PianoRoll, kMsgRollQuantize, and the
-// named undo step it leaves) is written and waiting where that package is
-// merged: it needs kMsgRollQuantize and QuantGrid, neither of which is in
-// master until package 04 lands. Its body is in this file's history on
-// feature/ui-functional-tests-04; it moves here in the merge.
+// --- 2. package 04's path, minus the mouse ---------------------------------
+
+// A real PianoRoll on its own looper, the settings message its dialog posts,
+// and the commit that lands in the model as one named undo step.
+static void TestPianoRollQuantize(MainWindow* win, Project& project,
+                                  CommandStack& stack) {
+    std::printf("test_piano_roll_quantize\n");
+    Track t = MakeMidiTrack(project, { { 60, 100, 1000, 500 },
+                                       { 62, 100, 7000, 500 } }, "roll-synth");
+    CHECK(project.AddTrack(t));
+    const ClipId cid = t.midiClips.front().id;
+    const TrackId tid = t.id;
+
+    // What TimelineView::OpenPianoRollForClip does, without the double-click.
+    PianoRoll* roll = new PianoRoll(BRect(90, 90, 810, 570), tid, cid, 0,
+                                    t.midiClips.front().lengthFrames,
+                                    t.midiClips.front().notes, {},
+                                    project.tempoMap, project.sampleRate, -1,
+                                    BMessenger(win));
+    roll->Show();
+    snooze(300000);
+    BView* view = roll->FindView("roll");
+    CHECK(view != nullptr);
+
+    if (view) {
+        // What QuantizeWindow posts: 1/16, full strength, no swing.
+        BMessage q(kMsgRollQuantize);
+        q.AddInt32("grid", (int32)QuantGrid::Sixteenth);
+        q.AddInt32("strength", 100);
+        q.AddInt32("swing", 0);
+        q.AddBool("lengths", false);
+        // A view is not a looper: this is what a widget's own post ends up as,
+        // a message delivered to the view on the roll's thread.
+        BMessenger(view).SendMessage(&q);
+    }
+
+    // 1000 -> 0 and 7000 -> 6000 on the 16th grid at the default tempo.
+    CHECK(WaitFor([&] {
+        if (!win->Lock()) return false;
+        const Track* tr = project.FindTrack(tid);
+        const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
+        const bool snapped = c && c->notes.size() == 2 &&
+                             c->notes[0].startFrame == 0 &&
+                             c->notes[1].startFrame == 6000;
+        win->Unlock();
+        return snapped;
+    }));
+    // ...and it is one undoable step, named after the transform.
+    CHECK(stack.UndoName() == "Quantize");
+
+    roll->Lock();
+    roll->Quit();
+    snooze(200000);
+}
 
 // --- 3. R1's export flow, minus the file panel -----------------------------
 
@@ -184,6 +234,7 @@ static int32 TestThread(void*) {
     snooze(300000);
 
     TestMessageRoundTrip(win, project);
+    TestPianoRollQuantize(win, project, stack);
     TestExportFlow(win, project);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
