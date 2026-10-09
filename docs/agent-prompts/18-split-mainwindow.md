@@ -33,6 +33,16 @@ of code — no behaviour changes — verified by the existing suites, above all
 
 ## Rules for the move
 
+- **A crashed app under debug_server reads as a hang.** The crash-report
+  dialog freezes the process, its window thread never answers, and the suite
+  sits until ctest's timeout -- and the last stderr line is NOT where it
+  stopped, because the frozen process holds stderr's lock. If a suite wedges
+  with no named failure, check for `Crashed program` windows in `ps -a`
+  before tracing anything.
+- **Assert every scripted replacement.** A no-op `replace()` (an anchor that
+  did not match, in the wrong file) silently left `fRecCtl.SetWindow(this)`
+  unwritten and cost the debugging session above; every later step in this
+  item asserts its anchors.
 - **A new .cpp must join `daw_ui`'s source list in CMakeLists.txt.** The
   cross-compile syntax check builds one file standalone, so it will pass while
   the link fails ("undefined reference") -- exactly what slice 2b hit on the
