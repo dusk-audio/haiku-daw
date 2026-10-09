@@ -106,18 +106,18 @@ listed under "Not done" below rather than smuggled into this package.
 ```
 cmake --build build-host                       # exit 0
 ctest --test-dir build-host                    # 47/47  (46 on master + midiops_tests)
-./build-host/midiops_tests                     # 100 checks, 0 failures
-./build-host/model_tests                       # 231 checks, 0 failures
+./build-host/midiops_tests                     # 128 checks, 0 failures
+./build-host/model_tests                       # 237 checks, 0 failures
 cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # 47/47, clean
 sh scripts/haiku_syntax_check.sh <all Haiku-only sources>      # 0 FAIL (see below)
 ```
 
 **Mutation testing** — every mutation was applied, the test run, and the code
-restored (this is what caught a vacuous region-growth assertion; see below):
+restored. The last column says which suite caught it:
 
 | Mutation | Result |
 | --- | --- |
-| swing divisor 3 -> 6 | caught (4 checks) |
+| swing divisor 3 -> 6 | caught (7 checks) |
 | strength ignored (always full snap) | caught (2) |
 | window rule off (`InWindow` always true) | caught (3) |
 | humanize hash loses the note index | caught (1) |
@@ -129,11 +129,24 @@ restored (this is what caught a vacuous region-growth assertion; see below):
 | `ApplyMidiOpCommand::Undo` does nothing | caught (1) |
 | `ApplyMidiOpCommand::Do` ignores the new list | caught (3) |
 | `Name()` loses the transform name | caught (2) |
+| **strength interpolates in FRAME space** | caught (1) — added after the review |
+| **swing offsets from the note instead of snapping** | caught (20) — added after the review |
+| **`clipStart` ignored in the beat lookup** | caught (2) — added after the review |
+| **length measured from the pre-clamp start** | caught (1) — added after the review |
+| **NaN strength not sanitised** | caught (1) — added after the review |
+| **jitter arithmetic in 32-bit** | caught by UBSan only (see below) |
+| **commit applies the list reversed / zeroed / duplicated** | caught (6 / 2 / 2) — added after the review |
 
-The one that first got away: the region-growth test originally used a region
-that the *edit* path had already grown, so a growing `Do()` was indistinguishable
-from a correct one. The test now asserts both halves (the edit path grows to
-8500, the transform path leaves it at 8000) and the mutation fails 3 checks.
+One mutation is deliberately caught by a *sanitizer* rather than by a check:
+32-bit jitter arithmetic wraps to the same value, so no assertion can see it;
+the UBSan build reports it as a runtime error. `midiops_tests` carries a
+maximum-width jitter case (velocity ±INT_MAX) precisely so the sanitizer build
+has something to trap on.
+
+Two early mutations also got away and changed the code, not just the tests: the
+region-growth test originally used a region the *edit* path had already grown
+(a growing `Do()` was indistinguishable from a correct one), and the clip-start
+case asserted a value the clamp floor would produce anyway. Both are fixed.
 
 **Cross-compile check** — `PianoRoll.cpp`, `QuantizeWindow.cpp` and
 `MainWindow.cpp` all report OK. Two notes on the script:
@@ -146,6 +159,64 @@ from a correct one. The test now asserts both halves (the edit path grows to
   `lilv/lilv.h: No such file or directory` — the cross tree has no lilv headers.
   Pre-existing, unrelated to this package, and the reason those two are not in
   the default list.
+
+## The adversarial review, and what it changed
+
+Four lenses (transform math, command/integration, UI wiring, test vacuity) read
+the whole diff. Every finding below was reproduced before it was fixed.
+
+**Fixed in the model** (`src/model/MidiOps.cpp`):
+
+1. **The new length was measured from the pre-clamp start** (medium). With
+   "Quantize note ends" on, a note whose snapped start is clamped at the region
+   head kept a length measured from where it had *not* landed, so its end sat up
+   to half a grid step past the line the code itself had computed — and a second
+   quantize moved it again (a 1-frame note, in the reviewer's worst case). The
+   start now clamps before any length is derived from it. Pinned by a new
+   edge case that asserts the absolute end frame and idempotency.
+2. **NaN strength or swing was not sanitised** (low): both comparisons are false
+   for NaN, so it reached `FrameAt(NaN)` and every affected note landed on frame
+   0. "Not a number in range" now reads as *no movement*, the safe default.
+3. **The jitter arithmetic could overflow `int`** (low): a draw of `h % span`
+   exceeds INT_MAX for the widest jitters, and subtracting in `int` is signed
+   overflow — UB, reported by the project's own UBSan build. Done 64-bit now,
+   with the maximum-width test above.
+
+**Fixed in the UI:**
+
+4. **The roll's own edit could leave its window stale** (medium). Drawing a note
+   past the region end grows the region in the model, but the roll's `fClipLen`
+   stayed put — so the very note the user had just drawn was the one a later
+   quantize skipped (and a note near the old edge lost a tail the region now had
+   room for). `Apply()` now grows `fClipLen` by the same rule the command uses.
+   A region resized from the *timeline* while the roll is open is still stale —
+   that is the pre-existing snapshot editor, see "Known, not fixed".
+5. **Holding `q` stacked one undo step per auto-repeat** (low), and at strength
+   < 1 each one moved the notes further, so nothing collapsed them. Repeats are
+   ignored now, the way the project already filters them for space.
+6. **A transform could land in the middle of a note drag** (low): the drag
+   replays `fDragOrig` on the next mouse move, so the transform survived for the
+   unselected notes and was overwritten for the dragged ones — a state no single
+   action produced. `RunMidiOp` refuses while a drag is live.
+
+**Test gaps closed** (all nine from the vacuity lens, each proven by a mutant
+that passed before): the commit's applied list is now asserted field by field
+instead of by size and one pitch; the clip-start case asserts the absolute frame
+so the clamp floor cannot stand in for it; strength 0.5 is pinned across a tempo
+change (frame-space interpolation passes everything else); swing is pinned for
+OFF-grid notes and combined with strength; humanize's ceiling clamp has its own
+fixed-seed case; the grid enum's numeric order (the wire contract with the
+settings dialog) and every grid name are pinned; `ScaleVelocity` pins rounding;
+and one check that compared lists of different lengths was replaced with the
+comparison it meant.
+
+**Judged not defects** (recorded, not changed): `MidiOpName((MidiOp)op)` casts a
+forged int32 to an enum, which is formally UB, but the switch default handles
+every value and only a hand-built message can reach it; legato takes its "next
+note" from the whole list including out-of-window notes, which is intended (a
+silent note still ends a phrase) and is what the header says; and the review's
+own note that a partial-strength quantize is naturally non-idempotent — that is
+the feature, not the bug the idempotency requirement is about.
 
 ## What is NOT verified
 
@@ -188,16 +259,22 @@ on Play — and a transform is an edit like any other.
    notes fall outside), then quantize the whole region.
    -> Expected: the notes outside stay outside (the region does not grow back,
    and nothing that was silent starts sounding).
+10. Hold `q` down for a second or two.
+   -> Expected: ONE quantize (one undo step), not a stream of them.
+11. Draw a note past the region's right edge with the Pencil (the region grows
+   to cover it), then press `q`.
+   -> Expected: that note is quantized too — it is inside the region now.
 
 ## Known, not fixed
 
 - The transform clamps to the region window **as the roll saw it when it
-  opened** (`fClipLen`, alongside the pre-existing `fClipStart` and `fTempo`
-  copies). Resize the region on the timeline while its piano roll is open, and a
-  transform will still use the old length. This is the snapshot editor the roll
-  already is — a note drawn in it lands by the same stale origin — and the fix
-  is a "region changed" push the roll does not have. Stated rather than buried;
-  it is not a new class of staleness.
+  opened** (`fClipLen` — now at least kept in step with the roll's own growing
+  edits — plus the pre-existing `fClipStart` and `fTempo` copies). Resize or
+  move the region on the *timeline* while its piano roll is open, and a
+  transform will still use the old window and grid phase. This is the snapshot
+  editor the roll already is — a note drawn in it lands by the same stale origin
+  — and the fix is a "region changed" push the roll does not have. Stated rather
+  than buried; it is not a new class of staleness.
 - Humanize's seed comes from `system_time()`, so reproducing a specific take
   means calling `Humanize` directly (the function is deterministic from its
   seed; the UI just does not keep the seed). A groove/save-the-seed feature
