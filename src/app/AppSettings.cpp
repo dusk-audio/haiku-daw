@@ -1,8 +1,17 @@
 #include "AppSettings.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace daw {
+
+void AppSettings::RememberRecent(std::vector<std::string>& recent,
+                                 const std::string& path) {
+    if (path.empty()) return;
+    recent.erase(std::remove(recent.begin(), recent.end(), path), recent.end());
+    recent.insert(recent.begin(), path);
+    if (recent.size() > kMaxRecent) recent.resize(kMaxRecent);
+}
 
 std::string AppSettings::Serialize() const {
     std::ostringstream o;
@@ -20,6 +29,10 @@ std::string AppSettings::Serialize() const {
       << "explim "    << (exportLimiter ? 1 : 0) << "\n"
       << "exprange "  << exportRange << "\n"
       << "expstems "  << exportStems << "\n";
+    // The recent list is one line per entry (paths may contain spaces -> rest
+    // of the line, like lastdir below).
+    for (const std::string& r : recentProjects)
+        o << "recent " << r << "\n";
     // lastDir last (may contain spaces -> rest of the line).
     o << "lastdir " << lastDir << "\n";
     return o.str();
@@ -27,6 +40,9 @@ std::string AppSettings::Serialize() const {
 
 bool AppSettings::Deserialize(const std::string& text) {
     if (text.empty()) return false;
+    // A parse is the whole state: the list would otherwise accumulate across
+    // repeated parses into one object.
+    recentProjects.clear();
     std::istringstream in(text);
     std::string line;
     bool any = false;
@@ -55,6 +71,13 @@ bool AppSettings::Deserialize(const std::string& text) {
         else if (kw == "explim")    { int v; if (ls >> v) exportLimiter = (v != 0); }
         else if (kw == "exprange")  { int v; if (ls >> v) exportRange = v; }
         else if (kw == "expstems")  { int v; if (ls >> v) exportStems = v; }
+        else if (kw == "recent") {
+            std::string rest;
+            std::getline(ls, rest);
+            if (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+            if (!rest.empty() && recentProjects.size() < kMaxRecent)
+                recentProjects.push_back(rest);
+        }
         else if (kw == "lastdir") {
             std::string rest;
             std::getline(ls, rest);

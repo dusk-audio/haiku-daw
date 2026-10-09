@@ -782,7 +782,88 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
 }
 #endif
 
-// --- 8. M0.1: unsaved changes are tracked and asked about -------------------
+// --- 8. M0.2: Save As, silent Save, and New --------------------------------
+
+// The File menu's paths, minus the menu itself (a popup a test cannot open):
+// Save As answers the panel and writes the file; Save afterwards writes the
+// same path with NO panel and clears the marker; New over a dirty project
+// prompts, and Discard leaves an empty, clean, Untitled session.
+static void TestFileMenuFlows(MainWindow* win, Project& project,
+                              CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_file_menu\n");
+
+    const char* savePath = "/tmp/haiku_daw_ui_save.dawproj";
+    std::remove(savePath);
+
+    // Make it dirty so there is something worth saving, and learn how.
+    auto dirtyIt = [&] {
+        win->PostMessage(MSG_NEW_MIDI);
+        return WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool dirty = stack.IsDirty();
+            win->Unlock();
+            return dirty;
+        });
+    };
+
+    CHECK(dirtyIt());
+    win->PostMessage(MSG_SAVE_AS);
+    CHECK(WaitFor([&] { return VisibleWindows() == 2; }));   // the panel
+    HideOtherWindows(win);                    // the panel, as its Cancel does
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    BMessage ref(MSG_SAVE_REF);
+    ref.AddRef("directory", &dir);
+    ref.AddString("name", "haiku_daw_ui_save.dawproj");
+    win->PostMessage(&ref);
+
+    CHECK(WaitFor([&] { return FileExists(savePath); }));
+    // ...and it lands clean, with the file's name in the title.
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = !stack.IsDirty()
+                     && std::strstr(WindowTitle(win), "haiku_daw_ui_save");
+        win->Unlock();
+        return ok;
+    }));
+
+    // Save is silent now: dirty it again, Save, and NO panel may appear.
+    CHECK(dirtyIt());
+    win->PostMessage(MSG_SAVE);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool clean = !stack.IsDirty();
+        win->Unlock();
+        return clean;
+    }));
+    snooze(300000);                           // a panel would be up by now
+    CHECK(VisibleWindows() == 1);
+    CHECK(FileExists(savePath));
+
+    // New over the dirty project: the prompt, then Discard.
+    CHECK(dirtyIt());
+    win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+    CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool empty = project.Tracks().empty() && !stack.IsDirty();
+        win->Unlock();
+        return empty;
+    }));
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const char* title = WindowTitle(win);
+        const bool ok = std::strstr(title, "Untitled") && title[0] != '*';
+        win->Unlock();
+        return ok;
+    }));
+    std::remove(savePath);
+}
+
+// --- 9. M0.1: unsaved changes are tracked and asked about -------------------
 
 // The window half of the dirty tracking (the serial semantics themselves are
 // host-tested in commandstack_tests): the title carries the marker, Quit asks
@@ -938,6 +1019,9 @@ static int32 TestThread(void*) {
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);
 #endif
+    // New leaves no path behind, so the unsaved-changes flow after it still
+    // exercises the save-panel branch.
+    TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,

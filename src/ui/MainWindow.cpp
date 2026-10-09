@@ -57,6 +57,7 @@
 
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <set>
@@ -69,8 +70,9 @@ enum {
     MSG_REC   = 'rec ',
     MSG_UNDO  = 'undo',
     MSG_REDO  = 'redo',
-    MSG_SAVE  = 'save',
     MSG_OPEN  = 'open',
+    MSG_OPEN_RECENT = 'orpj',   // File > Open Recent (path in the message)
+    MSG_CLOSE = 'clos',         // File > Close: the window's quit path
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',
@@ -228,14 +230,24 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
     BMenu* fileMenu = new BMenu("File");
+    fileMenu->AddItem(new BMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
     fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
-    fileMenu->AddItem(new BMenuItem("Save" B_UTF8_ELLIPSIS, new BMessage(MSG_SAVE), 'S'));
+    fRecentMenu = new BMenu("Open Recent");
+    fileMenu->AddItem(fRecentMenu);
+    // Save has no ellipsis: once the project has a path it writes straight to
+    // it (Save As is the way to move it). Both ask when there is no path yet.
+    fileMenu->AddItem(new BMenuItem("Save", new BMessage(MSG_SAVE), 'S'));
+    fileMenu->AddItem(new BMenuItem("Save As" B_UTF8_ELLIPSIS,
+                                    new BMessage(MSG_SAVE_AS), 'S', B_SHIFT_KEY));
     fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
     fileMenu->AddItem(new BMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
     fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
     fileMenu->AddItem(new BMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
     fileMenu->AddItem(new BMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
+    // Close is the window's own quit request, so the unsaved-changes prompt
+    // applies exactly as it does to the title-bar button and Cmd-Q.
+    fileMenu->AddItem(new BMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
     fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
     menuBar->AddItem(fileMenu);
     BMenu* editMenu = new BMenu("Edit");
@@ -1345,7 +1357,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             ReloadActiveEngine();
             break;
         }
+        case MSG_NEW_PROJECT:
+            NewProject();
+            break;
         case MSG_SAVE:
+        case MSG_SAVE_AS:
+            // Save goes straight to the project's own file once it has one --
+            // Save As… is the way to move it. Both ask for a path when there
+            // is none, through the same panel.
+            if (msg->what == MSG_SAVE && !fProjectPath.empty()) {
+                SaveTo(fProjectPath.c_str());
+                break;
+            }
             if (!fSavePanel) {
                 BMessenger to(this);
                 fSavePanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
@@ -1353,6 +1376,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             fSavePanel->Show();
             break;
+        case MSG_CLOSE:
+            // The window's own quit request: whatever Cmd-Q and the title-bar
+            // button do (the prompt included) happens here too.
+            PostMessage(B_QUIT_REQUESTED);
+            break;
+        case MSG_OPEN_RECENT: {
+            const char* path = nullptr;
+            if (msg->FindString("path", &path) != B_OK || !path)
+                break;
+            BEntry e(path);
+            if (!e.Exists()) {
+                // Prune rather than hand a vanished file to LoadFrom: the list
+                // is a convenience, and a dead entry only ever fails.
+                std::fprintf(stderr, "daw: recent project is gone: %s\n", path);
+                ForgetRecent(path);
+                break;
+            }
+            LoadFrom(path);
+            break;
+        }
         case MSG_OPEN:
             if (!fOpenPanel) {
                 BMessenger to(this);
@@ -2370,6 +2413,7 @@ bool MainWindow::SaveTo(const char* path) {
     // recovery copy (which exists to rescue unsaved work) is done.
     fStack->MarkSaved();
     RemoveRecoveryFile();
+    RememberProject(fProjectPath);
     UpdateTitle();
     return true;
 }
@@ -2437,6 +2481,7 @@ void MainWindow::LoadFrom(const char* path) {
     fLastDir = fTakeDir;
     fStack->Clear();          // history from the previous project is invalid
     fStack->MarkSaved();      // the loaded file IS the saved state
+    RememberProject(fProjectPath);
     UpdateTitle();
     PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine
     RebuildPeaks();           // waveform envelopes for the loaded clips
@@ -2472,6 +2517,72 @@ void MainWindow::UpdateTitle() {
 void MainWindow::RemoveRecoveryFile() {
     BPath p;
     if (RecoveryPath(p)) std::remove(p.Path());
+}
+
+// File > New: a fresh, empty session. The sample rate stays -- it belongs to
+// the session (the device), not to the project's content -- and everything
+// else goes. Same "the engine rebuilds at the next play" stance as LoadFrom.
+void MainWindow::NewProject() {
+    if (!ConfirmDiscardChanges()) return;
+    StopPlayback();
+    StopRecording();
+    FlushFxEditors();
+    CloseFxEditors();
+    const double rate = fProject->sampleRate;
+    *fProject = Project{};
+    fProject->sampleRate = rate;
+    fProject->tempoMap.sampleRate = rate;
+    fStack->Clear();
+    fStack->MarkSaved();          // a new project is the saved state
+    fProjectPath.clear();
+    fTakeDir.clear();
+    fRecTracks.clear();           // arms addressed the old project's tracks
+    UpdateTitle();
+    RebuildPeaks();
+    fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
+    fTimeline->SetProject(fProject);   // same object, new content
+    fTimeline->SetPlayhead(0);
+    UpdateTimeReadout(0);
+    fTimeline->Invalidate();
+}
+
+// Record a project in the recent list, refresh the menu, persist it (the list
+// is not re-derivable, so it survives even an unclean end of the session).
+void MainWindow::RememberProject(const std::string& path) {
+    if (path.empty()) return;
+    AppSettings::RememberRecent(fRecentProjects, path);
+    RebuildRecentMenu();
+    SaveSettings();
+}
+
+void MainWindow::ForgetRecent(const std::string& path) {
+    const auto it = std::find(fRecentProjects.begin(), fRecentProjects.end(),
+                              path);
+    if (it == fRecentProjects.end()) return;
+    fRecentProjects.erase(it);
+    RebuildRecentMenu();
+    SaveSettings();
+}
+
+// Rebuilt, not built once: the list changes on every save and open. Labels are
+// the file's base name (the full path would not fit a menu); the message
+// carries the path.
+void MainWindow::RebuildRecentMenu() {
+    if (!fRecentMenu) return;
+    while (fRecentMenu->CountItems() > 0)
+        delete fRecentMenu->RemoveItem((int32)0);
+    if (fRecentProjects.empty()) {
+        BMenuItem* none = new BMenuItem("(none)", nullptr);
+        none->SetEnabled(false);   // an empty submenu is a dead end
+        fRecentMenu->AddItem(none);
+        return;
+    }
+    for (const std::string& path : fRecentProjects) {
+        BMenuItem* item = new BMenuItem(ProjectDisplayName(path).c_str(),
+                                        new BMessage(MSG_OPEN_RECENT));
+        item->Message()->AddString("path", path.c_str());
+        fRecentMenu->AddItem(item);
+    }
 }
 
 // Ask about unsaved changes before an action that would drop them (Quit, Open,
@@ -3029,6 +3140,8 @@ void MainWindow::LoadSettings() {
     fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fMonitorInput);
     fLastDir      = s.lastDir;
+    fRecentProjects = s.recentProjects;
+    RebuildRecentMenu();
     // The export dialog reopens on the last choices, not on its defaults.
     fExportChoices.bitDepth   = s.exportBitDepth;
     fExportChoices.dither     = s.exportDither;
@@ -3057,6 +3170,7 @@ void MainWindow::SaveSettings() {
     s.metronome    = fMetronome;
     s.monitorInput = fMonitorInput;
     s.lastDir      = fLastDir;
+    s.recentProjects = fRecentProjects;
     s.exportBitDepth  = fExportChoices.bitDepth;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
