@@ -291,6 +291,12 @@ add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
 
+# The export job surface: format (bit depth + dither), the timeline range,
+# progress, cancellation, and the temp+rename write.
+add_executable(exporter_job_tests tests/exporter_job_tests.cpp)
+target_link_libraries(exporter_job_tests PRIVATE daw_model)
+add_test(NAME exporter_job_tests COMMAND exporter_job_tests)
+
 add_executable(exporter_pdc_tests tests/exporter_pdc_tests.cpp)
 target_link_libraries(exporter_pdc_tests PRIVATE daw_model)
 add_test(NAME exporter_pdc_tests COMMAND exporter_pdc_tests)
@@ -459,8 +465,12 @@ if(HAIKU)
     target_link_libraries(midi_loop PRIVATE daw_engine)
 
     # --- The app: timeline UI (milestone 4) ---------------------------
-    add_executable(daw
-        src/main.cpp
+    # The UI as a library, so `daw` is a main() around it and the functional
+    # tests can build the REAL windows: they construct MainWindow and post the
+    # same messages the widgets post, instead of a person clicking. (A GUI
+    # process launched over SSH does reach app_server on this VM -- that is
+    # what made this possible; see docs/agent-prompts/09-ui-functional-tests.md.)
+    add_library(daw_ui STATIC
         src/ui/TimelineView.cpp
         src/ui/InspectorView.cpp
         src/ui/MainWindow.cpp
@@ -471,6 +481,8 @@ if(HAIKU)
         src/ui/SendsWindow.cpp
         src/ui/InstrumentWindow.cpp
         src/ui/PianoRoll.cpp
+        src/ui/ExportWindow.cpp
+        src/ui/ExportProgressWindow.cpp
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
@@ -478,17 +490,30 @@ if(HAIKU)
         src/storage/BfsAttr.cpp
         src/plugin/PluginHost.cpp
     )
+    target_include_directories(daw_ui PUBLIC src)
     # -lbe (Application/Interface Kit), -ltracker (BFilePanel). daw_engine
     # pulls in daw_model + media.
-    target_link_libraries(daw PRIVATE daw_engine be tracker)
+    target_link_libraries(daw_ui PUBLIC daw_engine be tracker)
 
     # Brings in DAW_HAVE_LV2, which is what gates the registration in main.cpp.
     # Lv2UiWindow hosts a plugin's own GUI, so it needs lilv AND the Interface
     # Kit; it only exists in an LV2-enabled build.
     if(DAW_LV2_ENABLED)
-        target_sources(daw PRIVATE src/ui/Lv2UiWindow.cpp)
-        target_link_libraries(daw PRIVATE daw_lv2)
+        target_sources(daw_ui PRIVATE src/ui/Lv2UiWindow.cpp)
+        target_link_libraries(daw_ui PUBLIC daw_lv2)
     endif()
+
+    add_executable(daw src/main.cpp)
+    target_link_libraries(daw PRIVATE daw_ui)
+
+    # Functional tests for the UI: a BApplication, the real windows, and
+    # messages posted the way the widgets post them. Needs a reachable
+    # app_server, so it SKIPS (exit 77) where there is none rather than
+    # reporting a pass for a window that never opened.
+    add_executable(ui_functional_tests tests/ui_functional_tests.cpp)
+    target_link_libraries(ui_functional_tests PRIVATE daw_ui)
+    add_test(NAME ui_functional_tests COMMAND ui_functional_tests)
+    set_tests_properties(ui_functional_tests PROPERTIES SKIP_RETURN_CODE 77)
 
     # --- Sample effect add-on (plugin ABI demo) -----------------------
     # A Haiku shared add-on (.so) the host loads at runtime. Only needs the

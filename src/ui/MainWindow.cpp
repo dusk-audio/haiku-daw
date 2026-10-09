@@ -12,6 +12,8 @@
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
 #include "PluginBrowser.h"
+#include "ExportWindow.h"
+#include "ExportProgressWindow.h"
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
 #endif
@@ -62,22 +64,14 @@ enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
     MSG_REC   = 'rec ',
-    MSG_PULSE = 'puls',
     MSG_UNDO  = 'undo',
     MSG_REDO  = 'redo',
     MSG_SAVE  = 'save',
     MSG_OPEN  = 'open',
-    MSG_SAVE_REF = 'svrf',   // from the save file panel
     MSG_OPEN_REF = 'oprf',   // from the open file panel
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',
-    MSG_EXPORT   = 'expt',
-    MSG_EXPORT_REF = 'exrf',
-    MSG_EXPORT_STEMS = 'stem',
-    MSG_EXPORT_STEMS_REF = 'stmr',
-    MSG_NEW_AUDIO = 'naud',
-    MSG_NEW_MIDI  = 'nmid',
     MSG_NEW_BUS   = 'nbus',
     MSG_MIXER     = 'mixr',
     MSG_METRONOME = 'metr',
@@ -404,6 +398,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 }
 
 MainWindow::~MainWindow() {
+    // The export worker renders a snapshot taken on this thread, so it has to
+    // stop before anything it touches goes away. The cancel flag is polled
+    // between blocks, so this waits at most one block (and none at all when
+    // nothing is running).
+    if (fExportThread.joinable()) {
+        fExportCancel.store(true);
+        fExportThread.join();
+    }
     delete fPulse;
     delete fAutosave;
     delete fSavePanel;
@@ -527,38 +529,54 @@ void MainWindow::MessageReceived(BMessage* msg) {
             else                        StartPlayback();
             break;
         case MSG_EXPORT:
-            if (!fExportPanel) {
-                BMessenger to(this);
-                fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
-                                              new BMessage(MSG_EXPORT_REF));
-            }
-            fExportPanel->Show();
+            OpenExportWindow(false);   // mixdown; the dialog can switch to stems
             break;
+        case MSG_EXPORT_STEMS:
+            OpenExportWindow(true);
+            break;
+        case kMsgExportOptions: {
+            // The dialog's choices. Remembered (AppSettings persists them at
+            // quit) and answered with the panel that matches, so the format is
+            // settled before a destination is asked for.
+            int32 v = 0; bool b = false; float f = 0.0f;
+            if (msg->FindInt32("bits", &v) == B_OK) fExportChoices.bitDepth = v;
+            if (msg->FindBool("dither", &b) == B_OK) fExportChoices.dither = b;
+            if (msg->FindInt32("rate", &v) == B_OK) fExportChoices.sampleRate = v;
+            if (msg->FindBool("norm", &b) == B_OK) fExportChoices.normalize = b;
+            if (msg->FindFloat("lufs", &f) == B_OK) fExportChoices.targetLufs = f;
+            if (msg->FindFloat("ceil", &f) == B_OK) fExportChoices.truePeak = f;
+            if (msg->FindBool("lim", &b) == B_OK) fExportChoices.limiter = b;
+            if (msg->FindInt32("range", &v) == B_OK) fExportChoices.range = v;
+            if (msg->FindInt32("stems", &v) == B_OK) fExportChoices.stems = (v != 0);
+
+            if (fExportChoices.stems) {
+                if (!fStemsPanel) {
+                    BMessenger to(this);
+                    fStemsPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
+                                                 new BMessage(MSG_EXPORT_STEMS_REF));
+                    fStemsPanel->SetSaveText("stems");   // subfolder name
+                }
+                fStemsPanel->Show();
+            } else {
+                if (!fExportPanel) {
+                    BMessenger to(this);
+                    fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
+                                                  new BMessage(MSG_EXPORT_REF));
+                }
+                fExportPanel->Show();
+            }
+            break;
+        }
         case MSG_EXPORT_REF: {
             entry_ref dir; const char* name = nullptr;
             if (msg->FindRef("directory", &dir) == B_OK
                 && msg->FindString("name", &name) == B_OK) {
                 BPath path(&dir);
                 path.Append(name);
-                StopPlayback();
-                // The exporter reads the model directly, so a knob still inside
-                // an editor's commit debounce has to land before it renders.
-                FlushFxEditors();
-                if (!ExportWav(*fProject, path.Path(), fProject->sampleRate))
-                    std::fprintf(stderr, "MainWindow: export failed: %s\n",
-                                 path.Path());
+                StartExport(path.Path(), false);
             }
             break;
         }
-        case MSG_EXPORT_STEMS:
-            if (!fStemsPanel) {
-                BMessenger to(this);
-                fStemsPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
-                                             new BMessage(MSG_EXPORT_STEMS_REF));
-                fStemsPanel->SetSaveText("stems");   // subfolder name
-            }
-            fStemsPanel->Show();
-            break;
         case MSG_EXPORT_STEMS_REF: {
             entry_ref dir; const char* name = nullptr;
             if (msg->FindRef("directory", &dir) == B_OK
@@ -566,17 +584,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BPath base(&dir);
                 BPath stemDir(base.Path(), name && name[0] ? name : "stems");
                 create_directory(stemDir.Path(), 0755);
-                StopPlayback();
-                // Renders read the model directly: commit any gesture still
-                // inside an editor's debounce first, or the stem is missing it.
-                FlushFxEditors();
-                const int n = ExportStems(*fProject, stemDir.Path(),
-                                          fProject->sampleRate);
-                std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
-                             n, stemDir.Path());
+                StartExport(stemDir.Path(), true);
             }
             break;
         }
+        case kMsgExportCancel:
+            // The progress window's button. The worker polls this between
+            // blocks; the completion path (on the pulse) closes the window, so
+            // the bar never disappears before the outcome is known.
+            fExportCancel.store(true);
+            break;
         case MSG_IMPORT_MIDI:
             if (!fMidiImportPanel) {
                 BMessenger to(this);
@@ -1334,6 +1351,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // An export reports through the pulse: the worker writes only
+            // atomics (the codebase's pattern for streamed values), and the bar
+            // is a window this looper owns a messenger to.
+            if (!fExportHandled) {
+                if (fExportRunning.load(std::memory_order_acquire)) {
+                    const float f =
+                        fExportProgress.load(std::memory_order_relaxed);
+                    if (f >= 0.0f && fExportProgMsgr.IsValid()) {
+                        BMessage pm(kMsgExportProgress);
+                        pm.AddFloat("f", f);
+                        fExportProgMsgr.SendMessage(&pm);
+                    }
+                } else {
+                    FinishExport();
+                }
+            }
             // Before any branch: an open native editor is fed on every pulse,
             // including while stopped (see PushFxParams).
             PushFxParams();
@@ -1512,7 +1545,8 @@ void MainWindow::UpdatePulse() {
     for (const FxEntry& w : fFxWatches)
         if (w.editor && w.editor->Alive()) { watching = true; break; }
     const bool need = fPlaying || fRecMode || fMonitoring || watching
-                   || (fRecorder && fRecorder->IsRecording());
+                   || (fRecorder && fRecorder->IsRecording())
+                   || !fExportHandled;   // an export's progress + completion
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
                                     kPulseInterval);
@@ -1975,6 +2009,33 @@ void MainWindow::FlushFxEditors() {
         const bool master = (w.track == kMasterFxTarget);
         fStack->Execute(std::make_unique<SetFxParamCommand>(
             w.track, master, w.fx, std::move(vals)), *fProject);
+    }
+
+    // ...and the GENERIC panel, which this loop does not reach: it folds wheel
+    // notches into one undo step behind its own 400 ms timer, and its commit is
+    // an async post to this window -- which a caller cannot wait for, because
+    // it renders as soon as this returns. So the panel is asked for the chain
+    // itself and the answer is applied HERE, synchronously, exactly as
+    // kMsgApplyFx would have applied it. Bounded both ways, like the editor
+    // flush above: a panel that cannot answer within 200 ms forfeits the edit
+    // rather than hanging the save.
+    if (fFxMsgr.IsValid()) {
+        BMessage flush(kMsgFxPanelFlush);
+        BMessage reply;
+        if (fFxMsgr.SendMessage(&flush, &reply, 200000, 200000) == B_OK
+            && reply.what == kMsgFxPanelFlush) {
+            bool pending = false;
+            int64 tid = 0;
+            reply.FindBool("pending", &pending);
+            reply.FindInt64("track", &tid);
+            const bool master = ((TrackId)tid == kMasterFxTarget);
+            if (pending && (master || fProject->FindTrack((TrackId)tid))) {
+                fStack->Execute(std::make_unique<SetFxCommand>(
+                    (TrackId)tid, master, DecodeFxChain(reply)), *fProject);
+                SyncFxToEngine();
+                fTimeline->Invalidate();
+            }
+        }
     }
 }
 
@@ -2623,6 +2684,122 @@ static bool RenderTrackToWav(const Project& src, TrackId id,
     return ExportWav(iso, out, src.sampleRate);
 }
 
+// --- off-looper export ------------------------------------------------------
+
+// The options dialog. It never touches the model: its choices come back as
+// kMsgExportOptions, and THAT handler opens the file panel -- so the format is
+// settled before a destination is asked for, and a cancelled dialog asks for
+// nothing.
+void MainWindow::OpenExportWindow(bool stems) {
+    BRect r(200, 200, 200 + 380, 200 + 400);
+    ExportChoices c = fExportChoices;
+    c.stems = stems;
+    (new ExportWindow(r, c, stems, BMessenger(this)))->Show();
+}
+
+// Start a bounce. Runs on the looper, and in this order for a reason: stop the
+// transport (nothing else may be rendering), flush the editors (so the model
+// holds the value the user just heard -- the reason the old synchronous path
+// flushed), and only then snapshot. The worker renders the COPY, so editing
+// may continue while it runs and the model is never read across threads.
+void MainWindow::StartExport(const char* path, bool stems) {
+    if (!path || !path[0]) return;
+    if (fExportThread.joinable()) return;   // one at a time (a bar is up)
+
+    StopPlayback();
+    FlushFxEditors();
+
+    fExportSnapshot = std::make_unique<Project>(*fProject);
+    const std::string outPath(path);
+    fExportPath    = outPath;
+    fExportIsStems = stems;
+    fExportWritten = 0;
+    fExportOk      = false;
+    fExportHandled = false;
+    fExportProgress.store(-1.0f, std::memory_order_relaxed);
+    fExportCancel.store(false, std::memory_order_relaxed);
+
+    const ExportChoices c = fExportChoices;
+    const double rate = c.sampleRate > 0 ? (double)c.sampleRate : 0.0;
+    ExportOptions opts;
+    opts.format    = ExportFormat{ c.bitDepth, c.dither };
+    opts.normalize = ExportNormalize{ c.normalize, c.targetLufs, c.truePeak,
+                                      c.limiter };
+    opts.range     = ExportRange{};   // whole project unless the loop is asked
+    if (c.range == 1 && fProject->transport.loopEnabled
+        && fProject->transport.loopEnd > fProject->transport.loopStart)
+        opts.range = ExportRange{ fProject->transport.loopStart,
+                                  fProject->transport.loopEnd };
+    Project* snap = fExportSnapshot.get();
+
+    // The bar goes up BEFORE the thread starts, so a very short export cannot
+    // finish and be handled before there is anything to close. (It is created
+    // only now: the flush above can block the looper for a moment, and a
+    // visible "exporting" must never precede a settled model.)
+    BRect wr(240, 240, 240 + 320, 240 + 96);
+    ExportProgressWindow* w = new ExportProgressWindow(
+        wr, BMessenger(this), stems ? "Rendering stems" : "Rendering mix");
+    fExportProgMsgr = BMessenger(w);
+    w->Show();
+
+    fExportRunning.store(true, std::memory_order_release);
+    fExportThread = std::thread([this, snap, stems, rate, opts, outPath]() {
+        ExportOptions o = opts;
+        ExportJob job;
+        job.cancel = &fExportCancel;
+        job.progress = [this](float v) {
+            fExportProgress.store(v, std::memory_order_relaxed);
+        };
+        o.job = &job;
+        if (stems) {
+            fExportWritten = ExportStems(*snap, outPath, rate, o);
+            fExportOk = fExportWritten > 0;
+        } else {
+            fExportOk = ExportWav(*snap, outPath, rate, o);
+        }
+        fExportRunning.store(false, std::memory_order_release);
+    });
+    UpdatePulse();
+}
+
+// The pulse saw the worker finish (fExportRunning went false). Close the bar,
+// reap the thread, drop the snapshot and say what happened. Runs on the looper.
+void MainWindow::FinishExport() {
+    fExportHandled = true;
+    if (fExportProgMsgr.IsValid()) {
+        BMessage q(B_QUIT_REQUESTED);
+        fExportProgMsgr.SendMessage(&q);
+        fExportProgMsgr = BMessenger();
+    }
+    if (fExportThread.joinable()) fExportThread.join();
+    fExportSnapshot.reset();
+
+    // Cancellation is checked FIRST: a stems run that was stopped after some
+    // stems were written still reports a count, and that is a cancel, not a
+    // finished export.
+    if (fExportCancel.load()) {
+        std::fprintf(stderr, "MainWindow: export cancelled: %s\n",
+                     fExportPath.c_str());
+    } else if (fExportOk) {
+        if (fExportIsStems)
+            std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
+                         fExportWritten, fExportPath.c_str());
+        else
+            std::fprintf(stderr, "MainWindow: exported %s\n",
+                         fExportPath.c_str());
+    } else {
+        std::fprintf(stderr, "MainWindow: export failed: %s\n",
+                     fExportPath.c_str());
+        // Only a real failure is worth an alert: a cancel is the user's own
+        // doing, and it already said so on stderr.
+        BAlert* a = new BAlert("Export", "The export failed. Nothing was "
+                               "written to that name.", "OK", nullptr, nullptr,
+                               B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+        a->Go(nullptr);   // async, like the other warnings
+    }
+    UpdatePulse();
+}
+
 void MainWindow::FreezeTrack(TrackId track, bool freeze) {
     Track* t = fProject->FindTrack(track);
     if (!t) return;
@@ -2712,6 +2889,15 @@ void MainWindow::LoadSettings() {
     s.countInBars  = fCountInBars;
     s.metronome    = fMetronome;
     s.monitorInput = fMonitorInput;
+    s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportDither    = fExportChoices.dither;
+    s.exportSampleRate = fExportChoices.sampleRate;
+    s.exportNormalize = fExportChoices.normalize;
+    s.exportTargetLufs = fExportChoices.targetLufs;
+    s.exportTruePeakCeil = fExportChoices.truePeak;
+    s.exportLimiter   = fExportChoices.limiter;
+    s.exportRange     = fExportChoices.range;
+    s.exportStems     = fExportChoices.stems ? 1 : 0;
     if (!s.Deserialize(text)) return;
 
     fBufferFrames = (size_t)s.bufferFrames;
@@ -2720,6 +2906,16 @@ void MainWindow::LoadSettings() {
     fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fMonitorInput);
     fLastDir      = s.lastDir;
+    // The export dialog reopens on the last choices, not on its defaults.
+    fExportChoices.bitDepth   = s.exportBitDepth;
+    fExportChoices.dither     = s.exportDither;
+    fExportChoices.sampleRate = s.exportSampleRate;
+    fExportChoices.normalize  = s.exportNormalize;
+    fExportChoices.targetLufs = s.exportTargetLufs;
+    fExportChoices.truePeak   = s.exportTruePeakCeil;
+    fExportChoices.limiter    = s.exportLimiter;
+    fExportChoices.range      = s.exportRange;
+    fExportChoices.stems      = s.exportStems != 0;
     MarkRadio(fBufMenu, "frames", (int32)fBufferFrames);
     MarkRadio(fCountInMenu, "bars", fCountInBars);
     if (fMetItem)   fMetItem->SetMarked(fMetronome);
@@ -2738,6 +2934,15 @@ void MainWindow::SaveSettings() {
     s.metronome    = fMetronome;
     s.monitorInput = fMonitorInput;
     s.lastDir      = fLastDir;
+    s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportDither    = fExportChoices.dither;
+    s.exportSampleRate = fExportChoices.sampleRate;
+    s.exportNormalize = fExportChoices.normalize;
+    s.exportTargetLufs = fExportChoices.targetLufs;
+    s.exportTruePeakCeil = fExportChoices.truePeak;
+    s.exportLimiter   = fExportChoices.limiter;
+    s.exportRange     = fExportChoices.range;
+    s.exportStems     = fExportChoices.stems ? 1 : 0;
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
 

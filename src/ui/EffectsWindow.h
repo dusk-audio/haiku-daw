@@ -83,6 +83,15 @@ constexpr uint32 kMsgOpenFxEditor = 'fxoe';
 // committed" (sent before a save). Answered with the REPLY message itself, one
 // int32 "slot" and one float "val" per pending change.
 constexpr uint32 kMsgLv2UiFlush   = 'fxfl';
+// MainWindow -> EffectsWindow: "hand me the chain you have edited but not yet
+// committed" (sent before a save/export/autosave, next to the editor flush
+// above). This panel folds wheel notches into one undo step behind a 400 ms
+// timer, and its commit is an ASYNC post to MainWindow -- which the caller
+// cannot wait for, because it renders as soon as the flush returns. So the
+// reply carries the payload kMsgApplyFx would have (int64 "track" + the same
+// EncodeFxChain layout, plus bool "pending" = false when there is nothing
+// uncommitted), and MainWindow applies it synchronously itself.
+constexpr uint32 kMsgFxPanelFlush = 'fxpf';
 // Lv2UiWindow -> MainWindow: "this native editor is open on this insert, publish
 // its control values to me". Fields: int64 "track", int32 "fx", messenger
 // "msgr". The SAME message with no messenger means the editor closed and the
@@ -135,6 +144,14 @@ public:
     // calls this on close: the engine already heard the change (kMsgFxLive), so
     // dropping the commit would leave the model behind the audio.
     void FlushPendingEdit();
+
+    // The same edit, for a caller that will apply it itself (MainWindow's
+    // kMsgFxPanelFlush handler): the chain is handed over and the timer is
+    // dropped, so the panel's own commit cannot post the same edit a second
+    // time as its own undo step.
+    bool HasPendingEdit() const { return fCommit != nullptr; }
+    const std::vector<EffectDesc>& Chain() const { return fChain; }
+    void DropPendingEdit();
 
 private:
     void  Apply();

@@ -147,8 +147,8 @@ int main() {
     const std::string dryPath = "/tmp/haiku_daw_pdc_dry.wav";
     const std::string latPath = "/tmp/haiku_daw_pdc_lat.wav";
     std::remove(dryPath.c_str()); std::remove(latPath.c_str());
-    CHECK(ExportWav(makeProject(false), dryPath, SR, 32));
-    CHECK(ExportWav(makeProject(true),  latPath, SR, 32));
+    CHECK(ExportWav(makeProject(false), dryPath, SR, {ExportFormat{32}}));
+    CHECK(ExportWav(makeProject(true),  latPath, SR, {ExportFormat{32}}));
 
     int64_t nDry = 0, nLat = 0;
     std::vector<float> dry = ReadAll(dryPath, &nDry);
@@ -183,7 +183,7 @@ int main() {
 
     const std::string sibPath = "/tmp/haiku_daw_pdc_sibling.wav";
     std::remove(sibPath.c_str());
-    CHECK(ExportWav(pr2, sibPath, SR, 32));
+    CHECK(ExportWav(pr2, sibPath, SR, {ExportFormat{32}}));
     int64_t nSib = 0;
     std::vector<float> sib = ReadAll(sibPath, &nSib);
     const int64_t pkSib = PeakFrame(sib);
@@ -207,7 +207,7 @@ int main() {
     pr0.AddTrack(t0);
     const std::string zeroPath = "/tmp/haiku_daw_pdc_zero.wav";
     std::remove(zeroPath.c_str());
-    CHECK(ExportWav(pr0, zeroPath, SR, 32));
+    CHECK(ExportWav(pr0, zeroPath, SR, {ExportFormat{32}}));
     int64_t nZero = 0;
     std::vector<float> zero = ReadAll(zeroPath, &nZero);
     CHECK(std::llabs(PeakFrame(zero) - P) <= 1);
@@ -230,7 +230,7 @@ int main() {
     pr3.AddTrack(bus); pr3.AddTrack(ta);
     const std::string prePath = "/tmp/haiku_daw_pdc_pre.wav";
     std::remove(prePath.c_str());
-    CHECK(ExportWav(pr3, prePath, SR, 32));
+    CHECK(ExportWav(pr3, prePath, SR, {ExportFormat{32}}));
     int64_t nPre = 0;
     std::vector<float> pre = ReadAll(prePath, &nPre);
     CHECK(std::llabs(PeakFrame(pre) - P) <= 1);         // aligned single peak at P
@@ -253,7 +253,7 @@ int main() {
     prL.AddTrack(tL);
     const std::string realPath = "/tmp/haiku_daw_pdc_real.wav";
     std::remove(realPath.c_str());
-    CHECK(ExportWav(prL, realPath, SR, 32));
+    CHECK(ExportWav(prL, realPath, SR, {ExportFormat{32}}));
     int64_t nReal = 0;
     std::vector<float> real = ReadAll(realPath, &nReal);
     CHECK(std::llabs(PeakFrame(real) - P) <= 1);            // transparent: peak at P
