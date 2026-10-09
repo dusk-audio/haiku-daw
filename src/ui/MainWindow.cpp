@@ -219,6 +219,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
               B_ASYNCHRONOUS_CONTROLS | B_QUIT_ON_WINDOW_CLOSE),
       fProject(project), fStack(stack), fPeaks(peaks),
       fDoc(*project, *stack) {
+    fTransportCtl.SetWindow(this);
     BRect bounds = Bounds();
     // Keep the tempo map's rate in sync with the project's sample rate.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
@@ -462,9 +463,9 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
 
 void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
-        case MSG_PLAY:  StartPlayback(); break;
+        case MSG_PLAY:  fTransportCtl.StartPlayback(); break;
         case MSG_STOP:
-            StopPlayback();
+            fTransportCtl.StopPlayback();
             StopRecording();
             break;
         case MSG_REC:
@@ -521,7 +522,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
             if (fTransportCtl.fPlaying)        // restart from the new position
-                StartPlayback();
+                fTransportCtl.StartPlayback();
             break;
         }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
@@ -567,8 +568,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgTransportToggle:   // spacebar
-            if (fTransportCtl.fPlaying || fRecMode) { StopPlayback(); StopRecording(); }
-            else                        StartPlayback();
+            if (fTransportCtl.fPlaying || fRecMode) { fTransportCtl.StopPlayback(); StopRecording(); }
+            else                        fTransportCtl.StartPlayback();
             break;
         case MSG_EXPORT:
             OpenExportWindow(false);   // mixdown; the dialog can switch to stems
@@ -997,7 +998,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             SyncFxToEngine();
             break;
         case kMsgReloadEngine:   // clip/fade edit: rebuild so it takes effect live
-            ReloadActiveEngine();
+            fTransportCtl.ReloadActiveEngine();
             break;
         case kMsgFxParamCommit: {
             // A native plugin editor's committed gesture: the values it already
@@ -1219,7 +1220,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // before posting), so this is a cheap graph rebuild, not a
                 // decode. Without this the edit sat in the model and was only
                 // heard after the next manual stop/play.
-                ReloadActiveEngine();
+                fTransportCtl.ReloadActiveEngine();
                 fTimeline->Invalidate();
             }
             break;
@@ -1353,7 +1354,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // showing, and with the transport stopped ReloadActiveEngine
                 // does nothing at all -- so this cannot wait for a rebuild.
                 ValidateFxWatch();
-                ReloadActiveEngine();   // brings the engine to the model's state
+                fTransportCtl.ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
                 // Same staleness rule as a native commit: an undo rewrites the
                 // chain under an open panel's copy.
@@ -1366,7 +1367,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fStack->CanRedo()) {
                 fStack->Redo(*fProject);
                 ValidateFxWatch();
-                ReloadActiveEngine();   // brings the engine to the model's state
+                fTransportCtl.ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
                 PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
@@ -1396,7 +1397,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();   // grid + ruler follow tempo
             // Rebuild the running engine so the metronome + tempo-synced effects
             // (delay) pick up the new tempo live; stopped, it applies next Play.
-            ReloadActiveEngine();
+            fTransportCtl.ReloadActiveEngine();
             break;
         }
         case MSG_NEW_PROJECT:
@@ -1565,7 +1566,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     // loop start (the recorder keeps capturing across the seam).
                     if (fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
                         fProject->transport.playhead = tr.loopStart;
-                        if (!StartRecordEngine(tr.loopStart)) {
+                        if (!fTransportCtl.StartRecordEngine(tr.loopStart)) {
                             std::fprintf(stderr, "MainWindow: loop-record engine "
                                                  "restart failed; stopping\n");
                             StopRecording();
@@ -1600,7 +1601,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 if (tr.loopEnabled && tr.loopEnd > tr.loopStart
                     && ph >= tr.loopEnd) {
                     fProject->transport.playhead = tr.loopStart;
-                    StartPlayback();
+                    fTransportCtl.StartPlayback();
                     break;
                 }
                 fTimeline->SetPlayhead(ph);
@@ -1613,7 +1614,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 PushTrackPeaks();
                 PushFxMeters();
                 if (fTransportCtl.fEngine->IsFinished())
-                    StopPlayback();
+                    fTransportCtl.StopPlayback();
             }
             break;
         }
@@ -1717,7 +1718,7 @@ void MainWindow::UpdatePulse() {
 }
 
 // Latest frame any clip or note reaches in the project (timeline frames).
-static Frame ProjectEndFrame(const Project& p) {
+Frame ProjectEndFrame(const Project& p) {
     Frame end = 0;
     for (const Track& t : p.Tracks()) {
         for (const Clip& c : t.clips)
@@ -1728,125 +1729,14 @@ static Frame ProjectEndFrame(const Project& p) {
     return end;
 }
 
-void MainWindow::StartPlayback() {
-    if (fRecMode)
-        return;   // recording runs its own engine (overdub)
-    StopMidiMonitor();   // playback owns the engine + MIDI input
-    // Rebuild the engine from the current model each time (RT-safe: no live
-    // mutation of a running graph). Playback begins at the current playhead;
-    // if it's already at/after the end (and not looping), rewind first.
-    const Transport& tr = fProject->transport;
-    const bool looping = tr.loopEnabled && tr.loopEnd > tr.loopStart;
-    if (!looping && fProject->transport.playhead >= ProjectEndFrame(*fProject)) {
-        fProject->transport.playhead = 0;
-        fTimeline->SetPlayhead(0);
-    }
-    // When looping, begin at the loop start unless already inside the loop.
-    if (looping && (fProject->transport.playhead < tr.loopStart
-                    || fProject->transport.playhead >= tr.loopEnd)) {
-        fProject->transport.playhead = tr.loopStart;
-        fTimeline->SetPlayhead(tr.loopStart);
-    }
-    const Frame start   = fProject->transport.playhead;
-    Frame minEnd  = looping ? tr.loopEnd : 0;   // run through silence to loop end
-    // Metronome with no audio content: run the transport (10 min) so the click
-    // plays over silence rather than the engine reporting "nothing to play".
-    if (fTransportCtl.fMetronome && ProjectEndFrame(*fProject) == 0) {
-        const Frame ten = (Frame)(fProject->sampleRate * 600.0);
-        if (ten > minEnd) minEnd = ten;
-    }
-    fTransportCtl.fEngine.reset(new Engine());
-    fTransportCtl.fEngine->SetBufferFrames(fTransportCtl.fBufferFrames);
-    const status_t loadRc = fTransportCtl.fEngine->Load(*fProject, start, minEnd);
-    if (loadRc != B_OK) {
-        // B_ENTRY_NOT_FOUND is "nothing to play": a fact, not an alert.
-        if (loadRc != B_ENTRY_NOT_FOUND)
-            ReportError("Audio Device",
-                        "The audio output device could not be opened.\n\n"
-                        "Check the Audio menu's buffer size, and that no other "
-                        "application holds the device.");
-        std::fprintf(stderr, "MainWindow: engine load failed (%s)\n",
-                     strerror(loadRc));
-        fTransportCtl.fEngine.reset();
-        // Leave the transport genuinely stopped. ReloadActiveEngine calls this
-        // while fTransportCtl.fPlaying is ALREADY true, and Load failing there is reachable —
-        // an undo that removes the last clip is enough. Returning without
-        // clearing the flag left fTransportCtl.fPlaying true with a null fTransportCtl.fEngine: the
-        // transport button stayed lit, the pulse kept firing for an engine that
-        // no longer existed, and live monitoring refused to start because it
-        // believed playback still owned the engine.
-        fTransportCtl.fPlaying = false;
-        if (fTransport) fTransport->SetPlaying(false);
-        UpdatePulse();
-        return;
-    }
-    fTransportCtl.fEngine->Start();
-    fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
-    fTransportCtl.fEngine->SetMonitorDim(fTransportCtl.fMonDim);
-    fTransportCtl.fEngine->SetMonitorMono(fTransportCtl.fMonMono);
-    // Re-apply the effect-meter focus onto the fresh engine (else an open FX
-    // editor's GR/FFT meters die on every play / loop-wrap / seek rebuild).
-    if (fFxTrack != kInvalidTrackId) fTransportCtl.fEngine->SetMeterFocus(fFxTrack);
-    // Same reason, same rebuild: the watches live in the Engine object too.
-    ReapplyFxWatches();
-    fTransportCtl.fEngine->SetMidiRoutes(fMidiRoutes);   // survives the rebuild, as above
-    fTransportCtl.fPlaying = true;
-    if (fTransport) fTransport->SetPlaying(true);
-    UpdatePulse();
-}
 
-void MainWindow::StopPlayback(bool resumeMonitor) {
-    if (fTransportCtl.fEngine)
-        fTransportCtl.fEngine->Stop();
-    fTransportCtl.fPlaying = false;
-    if (fTransport) fTransport->SetPlaying(false);
-    UpdatePulse();
-    PushRollPlayhead(-1);   // hide the roll playhead when stopped
-    fMeter->SetLevels(0.0f, 0.0f);
-    fTimeline->ClearTrackPeaks();
-    UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
-                          Loudness::kSilenceDb);
-    // Leave the playhead where it stopped; the readout keeps its last value.
-    if (resumeMonitor)
-        UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
-}
+
+
 
 // Start the playback engine from `engineStart` for overdub monitoring during a
 // record pass (existing tracks + metronome play while capturing). Returns true
 // on success. Runs a long transport so it keeps advancing through silence.
-bool MainWindow::StartRecordEngine(Frame engineStart) {
-    const Frame tenMin = (Frame)(fProject->sampleRate * 600.0);
-    fTransportCtl.fEngine.reset(new Engine());
-    fTransportCtl.fEngine->SetBufferFrames(fTransportCtl.fBufferFrames);
-    const status_t recRc = fTransportCtl.fEngine->Load(*fProject, engineStart,
-                                         engineStart + tenMin);
-    if (recRc != B_OK) {
-        if (recRc != B_ENTRY_NOT_FOUND)
-            ReportError("Audio Device",
-                        "The audio device could not be opened, so the take "
-                        "was not started.");
-        fTransportCtl.fEngine.reset();
-        return false;
-    }
-    fTransportCtl.fEngine->Start();
-    // Count-in needs the click; force it on during record if a count-in is set.
-    fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome || fCountInBars > 0);
-    fTransportCtl.fEngine->SetMonitorDim(fTransportCtl.fMonDim);
-    fTransportCtl.fEngine->SetMonitorMono(fTransportCtl.fMonMono);
-    // Re-attach input monitoring across an engine restart (loop-record seam).
-    if (fRecorder) {
-        fTransportCtl.fEngine->SetMonitorSource(fRecorder.get());
-        fTransportCtl.fEngine->SetInputMonitor(AudioMonitorOn());
-    }
-    if (fMidiIn) fTransportCtl.fEngine->SetLiveMidi(fMidiIn->MonitorInput());
-    // Routes live on the Engine, and this is a BRAND NEW one — without this the
-    // loop-record seam would quietly drop the demux mid-take and every armed
-    // track would start hearing every keyboard.
-    fTransportCtl.fEngine->SetMidiRoutes(fMidiRoutes);
-    if (fFxTrack != kInvalidTrackId) fTransportCtl.fEngine->SetMeterFocus(fFxTrack);
-    ReapplyFxWatches();   // the watches live in the Engine object too
-    return true;
-}
+
 
 bool MainWindow::AudioMonitorOn() const {
     if (fTransportCtl.fMonitorInput) return true;
@@ -2050,21 +1940,7 @@ void MainWindow::StopMidiCapture(Frame endFrame) {
     if (any) fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
-void MainWindow::ReloadActiveEngine() {
-    // Rebuild whatever engine is running, at the current position, so a change
-    // that can't be applied in place (adding/removing an effect, a tempo edit)
-    // takes effect without a manual stop/play. A brief seam is expected.
-    if (fTransportCtl.fPlaying) {
-        // If the engine has already reached the end, let it stop naturally
-        // rather than restart from 0 (StartPlayback rewinds a past-end playhead).
-        if (fTransportCtl.fEngine && fTransportCtl.fEngine->IsFinished()) return;
-        if (fTransportCtl.fEngine) fProject->transport.playhead = fTransportCtl.fEngine->Playhead();
-        StartPlayback();          // rebuilds at the playhead and keeps playing
-    } else if (fTransportCtl.fMonitoring) {
-        UpdateMidiMonitor();      // rebuilds the idle monitor engine
-    }
-    // Stopped / recording: the change applies on the next Play / take.
-}
+
 
 // Push a committed effect-chain edit into the running engine.
 //
@@ -2102,7 +1978,7 @@ void MainWindow::SyncFxToEngine() {
     // An open panel's copy of the chain is now out of date; give it the model's.
     PushChainToFxWindow(fFxTrack);
     if (fTransportCtl.fEngine && !fTransportCtl.fEngine->SyncFx(*fProject))
-        ReloadActiveEngine();
+        fTransportCtl.ReloadActiveEngine();
     // Publish AFTER the engine has been brought up to date, not before. With
     // the transport stopped the sync fails and the rebuild is a no-op, so the
     // engine still holds the OLD chain: publishing first would read the
@@ -2307,7 +2183,7 @@ void MainWindow::UpdateMidiMonitor() {
 void MainWindow::StartRecording() {
     if (fRecMode || (fRecorder && fRecorder->IsRecording()))
         return;
-    if (fTransportCtl.fPlaying) StopPlayback(false);   // don't spin up a monitor we replace
+    if (fTransportCtl.fPlaying) fTransportCtl.StopPlayback(false);   // don't spin up a monitor we replace
     StopMidiMonitor();   // the record engine takes over monitoring
 
     // Record onto every armed audio track (one input take, dropped on each),
@@ -2346,7 +2222,7 @@ void MainWindow::StartRecording() {
                                         fCountInBars);
     const Frame engineStart = (fRecPoint > countIn) ? fRecPoint - countIn : 0;
 
-    if (!StartRecordEngine(engineStart)) {
+    if (!fTransportCtl.StartRecordEngine(engineStart)) {
         std::fprintf(stderr, "MainWindow: record engine failed to start\n");
         return;
     }
@@ -2563,7 +2439,7 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     // Cancel must leave the session exactly as it was. (The Save answer goes
     // through SaveTo, which flushes the editors itself.)
     if (!ConfirmDiscardChanges()) return;
-    StopPlayback();
+    fTransportCtl.StopPlayback();
     StopRecording();
     // The editors that are open belong to the project being replaced: their
     // (track id, insert index) addresses are reused by whatever loads, so an
@@ -2702,7 +2578,7 @@ void MainWindow::FinishRelink() {
 // else goes. Same "the engine rebuilds at the next play" stance as LoadFrom.
 void MainWindow::NewProject() {
     if (!ConfirmDiscardChanges()) return;
-    StopPlayback();
+    fTransportCtl.StopPlayback();
     StopRecording();
     FlushFxEditors();
     CloseFxEditors();
@@ -3116,7 +2992,7 @@ void MainWindow::StartExport(const char* path, bool stems) {
     if (!path || !path[0]) return;
     if (fExportThread.joinable()) return;   // one at a time (a bar is up)
 
-    StopPlayback();
+    fTransportCtl.StopPlayback();
     FlushFxEditors();
 
     fExportSnapshot = std::make_unique<Project>(*fProject);
@@ -3570,7 +3446,7 @@ bool MainWindow::QuitRequested() {
     // anything, so a Cancel leaves the session exactly as it was.
     if (!ConfirmDiscardChanges())
         return false;               // stay: the user has not decided yet
-    StopPlayback();
+    fTransportCtl.StopPlayback();
     StopRecording();
     SaveSettings();
     // Clean exit (nothing was unsaved, or an explicit Save/Discard above): the

@@ -70,6 +70,9 @@ constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
 
 class MainWindow : public BWindow {
 public:
+    // The transport's method moves (M1.1) live in TransportController; it
+    // reaches the widgets and the model through the window it is given.
+    friend class TransportController;
     // Like TimelineView: BWindow::Frame() would shadow the model's frame type
     // for every unqualified `Frame` in this class. A member typedef hides it.
     using Frame = daw::Frame;
@@ -95,8 +98,6 @@ public:
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
 
 private:
-    void StartPlayback();
-    void StopPlayback(bool resumeMonitor = true);  // false when about to record
     void StartRecording();
     void StopRecording();
     void StartCapture();             // open the Recorder (after any count-in)
@@ -109,11 +110,8 @@ private:
     void StopMidiCapture(Frame endFrame);  // end take, drop MidiClip(s)
     void UpdateMidiMonitor();        // start/stop idle live-monitoring per arming
     void StopMidiMonitor();          // tear down the idle monitor engine + input
-    void ReloadActiveEngine();       // rebuild the running engine at the playhead
-                                     // (structural fx / tempo change, keep going)
     void SyncFxToEngine();           // a committed chain edit -> the running engine
     bool AudioMonitorOn() const;     // global flag OR an armed audio track's I btn
-    bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
