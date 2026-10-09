@@ -221,6 +221,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
       fDoc(*project, *stack) {
     fTransportCtl.SetWindow(this);
     fRecCtl.SetWindow(this);
+    fRender.SetWindow(this);
     BRect bounds = Bounds();
     // Keep the tempo map's rate in sync with the project's sample rate.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
