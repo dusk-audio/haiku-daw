@@ -1992,6 +1992,33 @@ void MainWindow::FlushFxEditors() {
         fStack->Execute(std::make_unique<SetFxParamCommand>(
             w.track, master, w.fx, std::move(vals)), *fProject);
     }
+
+    // ...and the GENERIC panel, which this loop does not reach: it folds wheel
+    // notches into one undo step behind its own 400 ms timer, and its commit is
+    // an async post to this window -- which a caller cannot wait for, because
+    // it renders as soon as this returns. So the panel is asked for the chain
+    // itself and the answer is applied HERE, synchronously, exactly as
+    // kMsgApplyFx would have applied it. Bounded both ways, like the editor
+    // flush above: a panel that cannot answer within 200 ms forfeits the edit
+    // rather than hanging the save.
+    if (fFxMsgr.IsValid()) {
+        BMessage flush(kMsgFxPanelFlush);
+        BMessage reply;
+        if (fFxMsgr.SendMessage(&flush, &reply, 200000, 200000) == B_OK
+            && reply.what == kMsgFxPanelFlush) {
+            bool pending = false;
+            int64 tid = 0;
+            reply.FindBool("pending", &pending);
+            reply.FindInt64("track", &tid);
+            const bool master = ((TrackId)tid == kMasterFxTarget);
+            if (pending && (master || fProject->FindTrack((TrackId)tid))) {
+                fStack->Execute(std::make_unique<SetFxCommand>(
+                    (TrackId)tid, master, DecodeFxChain(reply)), *fProject);
+                SyncFxToEngine();
+                fTimeline->Invalidate();
+            }
+        }
+    }
 }
 
 // Close every native editor and forget every watch: their insert addresses

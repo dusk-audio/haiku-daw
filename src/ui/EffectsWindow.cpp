@@ -241,9 +241,14 @@ EffectsView::~EffectsView() {
     delete fCommit;
 }
 
+void EffectsView::DropPendingEdit() {
+    delete fCommit;
+    fCommit = nullptr;
+}
+
 void EffectsView::FlushPendingEdit() {
     if (!fCommit) return;
-    delete fCommit; fCommit = nullptr;
+    DropPendingEdit();
     Apply();
 }
 
@@ -1232,6 +1237,19 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
         msg->FindInt32("specn", &specN);
         fView->SetMeters(gr, gr ? (int)(grBytes / sizeof(float)) : 0,
                          sp, specN, specFx);
+        return;
+    }
+    if (msg->what == kMsgFxPanelFlush) {
+        // Answer on the CALLER's thread (the reply is delivered to whatever
+        // sent this), with the payload kMsgApplyFx carries -- so MainWindow can
+        // apply exactly what this panel would have applied, before it renders.
+        BMessage reply(kMsgFxPanelFlush);
+        reply.AddInt64("track", (int64)fTrack);
+        const bool pending = fView && fView->HasPendingEdit();
+        reply.AddBool("pending", pending);
+        if (pending) EncodeFxChain(reply, fView->Chain());
+        msg->SendReply(&reply);
+        if (pending) fView->DropPendingEdit();   // applied by the caller now
         return;
     }
     if (msg->what == kMsgFxChain) {
