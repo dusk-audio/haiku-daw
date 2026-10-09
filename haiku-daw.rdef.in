@@ -14,6 +14,6 @@ resource app_version {
 	minor = @PROJECT_VERSION_PATCH@,
 	variety = B_APPV_FINAL,
 	internal = 0,
-	short_info = "@PROJECT_NAME@ @PROJECT_VERSION@",
+	short_info = "Haiku DAW @PROJECT_VERSION@",
 	long_info  = "Haiku DAW @PROJECT_VERSION@ - a native digital audio workstation for Haiku"
 };

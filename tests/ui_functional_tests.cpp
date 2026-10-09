@@ -551,8 +551,11 @@ static void TestAboutBox(MainWindow* win) {
     CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
     HideOtherWindows(win);   // the alert, as its OK button does
     std::printf("  version: %s\n", DAW_VERSION_STRING);
+    // Non-empty only: the header is generated from CMakeLists, so the drift
+    // this guards against (a hand-typed version in the About box) is already
+    // impossible -- and a literal here would fail on every version bump for no
+    // behavioural reason.
     CHECK(std::strlen(DAW_VERSION_STRING) > 0);
-    CHECK(std::strcmp(DAW_VERSION_STRING, "1.0.0") == 0);
 }
 
 

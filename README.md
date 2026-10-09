@@ -22,7 +22,7 @@ the Interface Kit, not ported from somewhere else.
   fader taps, master bus effects, monitor dim/mono, per-track meters and a
   BS.1770 loudness meter (momentary, short-term, true peak).
 - **Automation** — volume, pan and any effect parameter, drawn on the timeline.
-- **Inserts** — ten built-in effects (EQ with spectrum, compressor, gate,
+- **Inserts** — nine built-in effects (EQ with spectrum, compressor, gate,
   reverb, delay, saturator, widener, look-ahead limiter, …), native add-ons,
   and **LV2** plugins with their own editors when the plugin ships one.
 - **Export** — mixdown or stems, 16/24-bit PCM or 32-bit float, TPDF dither,
