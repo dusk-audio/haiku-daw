@@ -50,6 +50,10 @@ public:
     using Frame = daw::Frame;
 
     using PeakMap = std::map<std::string, PeakCache>;
+
+    // The transport bar's controls are pinned offsets, not a flow, so the
+    // window fits them to the bar's new width itself (see LayoutTransportBar).
+    void FrameResized(float newWidth, float newHeight) override;
     MainWindow(BRect frame, Project* project, CommandStack* stack,
                PeakMap* peaks);
     ~MainWindow() override;
@@ -84,6 +88,7 @@ private:
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void PushFxParams();             // engine insert values -> native editor
+    void LayoutTransportBar();       // fit the bar's controls to its width
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
     void FlushFxEditors();           // before a save: commit what they wrote
@@ -125,6 +130,8 @@ private:
     class TransportBar* fTransport = nullptr;
     BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
+    BStringView*    fVolLbl = nullptr;     // labels + readouts the bar hides
+    BStringView*    fBpmLbl = nullptr;     // when there is no room for them
     MeterView*      fMeter;
     BSlider*        fMaster;
     BTextControl*   fTempo;

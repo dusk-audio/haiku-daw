@@ -314,11 +314,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // (Zoom -/+ buttons are drawn by the TransportBar at x366..420.)
 
     // "Vol" label + master volume slider (0..150% -> gain 0..1.5).
-    BStringView* volLbl = new BStringView(BRect(430, 8, 460, kTransportH - 6),
-                                          "vollbl", "Vol");
-    volLbl->SetViewColor(ColChrome());
-    volLbl->SetHighColor(ColText());
-    bar->AddChild(volLbl);
+    fVolLbl = new BStringView(BRect(430, 8, 460, kTransportH - 6),
+                              "vollbl", "Vol");
+    fVolLbl->SetViewColor(ColChrome());
+    fVolLbl->SetHighColor(ColText());
+    bar->AddChild(fVolLbl);
     fMaster = new BSlider(BRect(462, 4, 588, kTransportH - 4),
                           "master", NULL, new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
@@ -333,11 +333,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
     // "BPM" label + tempo field (light field for legibility; affects grid/snap
     // + metronome on the next Play).
-    BStringView* bpmLbl = new BStringView(BRect(602, 8, 636, kTransportH - 6),
+    fBpmLbl = new BStringView(BRect(602, 8, 636, kTransportH - 6),
                                           "bpmlbl", "BPM");
-    bpmLbl->SetViewColor(ColChrome());
-    bpmLbl->SetHighColor(ColText());
-    bar->AddChild(bpmLbl);
+    fBpmLbl->SetViewColor(ColChrome());
+    fBpmLbl->SetHighColor(ColText());
+    bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
     fTempo = new BTextControl(BRect(638, 6, 704, kTransportH - 6),
@@ -370,6 +370,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
     // Restore persisted preferences + window layout (after the menus exist).
     LoadSettings();
+    // A restored window frame resizes the bar before the user touches anything,
+    // so the layout has to be applied once here as well as on every resize.
+    LayoutTransportBar();
+    // Below this the bar has nothing left to hide: the transport controls, the
+    // time readout and the meter need the room, and a window that clipped them
+    // would be showing a fault rather than a small window.
+    SetSizeLimits(620.0f, 32767.0f, 300.0f, 32767.0f);
     // Autosave for crash recovery; check for a leftover once the looper runs.
     fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
                                    30LL * 1000 * 1000);   // every 30 s
@@ -1391,6 +1398,67 @@ void MainWindow::MessageReceived(BMessage* msg) {
         default:
             BWindow::MessageReceived(msg);
     }
+}
+
+// Fit the transport bar's controls to whatever width it currently has.
+//
+// The bar itself follows the window (B_FOLLOW_LEFT_RIGHT) and the master meter
+// follows its right edge, but everything between them was placed at absolute x
+// for the width the window happened to open at -- so a narrower window slid the
+// meter left onto the BPM field and clipped the loudness readout off the edge,
+// which reads as a drawing fault rather than as a smaller window. This is what
+// the window's FrameResized calls; it is also what the constructor calls, since
+// a restored window frame resizes the bar before the user ever touches it.
+//
+// The right cluster is pinned to the right edge in the design's own offsets, so
+// the standard-size layout is unchanged to the pixel. Optional readouts are
+// dropped, in order of how little they are missed, before anything is allowed
+// to overlap: the loudness numbers first, then the tempo field, then the master
+// slider (the mixer window still has it). The transport controls, the time
+// readout and the meter are never hidden.
+void MainWindow::LayoutTransportBar() {
+    if (!fTransport) return;
+    const float W = fTransport->Bounds().right + 1.0f;
+
+    // Design offsets, from the original 1000-wide layout: meter 130 from the
+    // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
+    const float kGap     = 12.0f;
+    const float kMeterW  = 124.0f;
+    const float kLoudW   = 136.0f;
+    const float kBpmR    = 704.0f;   // right edge of the tempo field
+    const float kSliderR = 588.0f;   // right edge of the master slider
+    const float kVolR    = 460.0f;   // right edge of the "Vol" label
+
+    if (fMeter) fMeter->MoveTo(W - 6.0f - kMeterW, 5.0f);
+
+    const float rightEdge = W - 6.0f - kMeterW - kGap;   // what the meter leaves
+
+    // The loudness readout only fits beside the tempo field.
+    const bool showLoud = rightEdge - kLoudW >= kBpmR + kGap;
+    if (fLoudView) {
+        if (showLoud) { fLoudView->MoveTo(W - 278.0f, 8.0f); fLoudView->Show(); }
+        else fLoudView->Hide();
+    }
+
+    // The tempo field only fits beside the master slider.
+    const bool showBpm = rightEdge >= kSliderR + kGap;
+    if (fBpmLbl)  { if (showBpm) fBpmLbl->Show(); else fBpmLbl->Hide(); }
+    if (fTempo)   { if (showBpm) fTempo->Show();  else fTempo->Hide(); }
+
+    // The master slider only fits beside what is left of the left cluster.
+    const bool showVol = rightEdge >= kVolR + kGap;
+    if (fVolLbl)  { if (showVol) fVolLbl->Show(); else fVolLbl->Hide(); }
+    if (fMaster)  { if (showVol) fMaster->Show(); else fMaster->Hide(); }
+}
+
+void MainWindow::FrameResized(float newWidth, float newHeight) {
+    BWindow::FrameResized(newWidth, newHeight);
+    // The inspector column and the timeline carry resizing modes that the
+    // server applies for them; the transport bar's CONTENTS do not, because
+    // they are not a flow -- they are pinned offsets. Do them here.
+    LayoutTransportBar();
+    if (fTimeline)  fTimeline->Invalidate();
+    if (fInspector) fInspector->Invalidate();
 }
 
 void MainWindow::UpdatePulse() {
