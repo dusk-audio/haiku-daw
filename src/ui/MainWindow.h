@@ -60,6 +60,7 @@ constexpr uint32 MSG_SAVE             = 'save';   // File > Save (silent once pa
 constexpr uint32 MSG_SAVE_AS          = 'svas';   // File > Save As (always a panel)
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
 constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
+constexpr uint32 MSG_RELINK_REF       = 'rlkr';   // from the Locate… walk's panel
 constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';

@@ -19,6 +19,7 @@
 #include "../src/model/Command.h"
 #include "../src/model/Commands.h"   // SetFxCommand
 #include "../src/engine/WavSource.h"   // reading a bounce back
+#include "../src/engine/WavWriter.h"   // ...and writing the Locate… fixture
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
@@ -1068,7 +1069,42 @@ static void TestErrorReports(MainWindow* win, Project& project,
         win->Unlock();
         return ok;
     }));
+    // ...and Locate… walks the same fixture: the panel appears, its answer is
+    // posted here, and the repair lands as one named undo step.
+    const char* foundPath = "/tmp/haiku_daw_ui_found.wav";
+    std::remove(foundPath);
+    {
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 1000, -1000 };   // 2 stereo frames
+        CHECK(w.Open(foundPath, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+    }
+    win->PostMessage(&open);                       // the fixture again
+    CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
+    CHECK(AnswerAlertWhenUp("Missing Media", 1));  // Locate…
+    CHECK(WaitFor([&] { return VisibleWindows() == 2; }));   // the panel
+    entry_ref found;
+    CHECK(BEntry(foundPath).GetRef(&found) == B_OK);
+    BMessage picked(MSG_RELINK_REF);
+    picked.AddRef("refs", &found);
+    win->PostMessage(&picked);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        bool ok = false;
+        for (const Track& t : project.Tracks())
+            if (t.name == "gone-track" && t.clips.size() == 1
+                && t.clips[0].sourcePath == foundPath)
+                ok = true;
+        win->Unlock();
+        return ok;
+    }));
+    CHECK(stack.UndoName() == "Locate Missing Media");
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+
     std::remove(projPath);
+    std::remove(foundPath);
     std::remove(cleanPath);
 }
 

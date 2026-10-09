@@ -6,6 +6,7 @@
 #include "PluginBrowser.h"
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
+#include "../plugin/Lv2Host.h"   // InsertAvailable's lookup (LV2 builds only)
 #endif
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"

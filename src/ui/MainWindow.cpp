@@ -73,7 +73,6 @@ enum {
     MSG_OPEN  = 'open',
     MSG_OPEN_RECENT = 'orpj',   // File > Open Recent (path in the message)
     MSG_CLOSE = 'clos',         // File > Close: the window's quit path
-    MSG_RELINK_REF = 'rlkr',    // from the Locate… walk's file panel
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',
