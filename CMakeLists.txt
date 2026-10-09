@@ -520,21 +520,29 @@ if(HAIKU)
     add_executable(daw src/main.cpp)
     target_link_libraries(daw PRIVATE daw_ui)
 
-    # Attach the app's resource (signature + version) to the binary: Deskbar
-    # and the package manager read the version off the executable, and Tracker
-    # uses the signature to know it is an application. rc/xres ship with the
-    # system; a build without them is left alone rather than broken.
+    # Attach the app's resource (signature, version, file types, app flags) to
+    # the binary: Deskbar and the package manager read the version off the
+    # executable, and Tracker uses the signature to know it is an application.
+    # mimeset then copies those resources into the file's ATTRIBUTES and enters
+    # the app in the MIME database -- the roster reads the attributes, not the
+    # resources, so without it a build-tree `daw` is a launch-flagless stranger:
+    # `open project.dawproj` would not find it (or would start a second one).
+    # rc/xres/mimeset ship with the system; a build without them is left alone
+    # rather than broken.
     find_program(DAW_RC rc)
     find_program(DAW_XRES xres)
-    if(DAW_RC AND DAW_XRES)
+    find_program(DAW_MIMESET mimeset)
+    if(DAW_RC AND DAW_XRES AND DAW_MIMESET)
         add_custom_command(TARGET daw POST_BUILD
             COMMAND ${DAW_RC} -o ${CMAKE_BINARY_DIR}/generated/daw.rsrc
                     ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef
             COMMAND ${DAW_XRES} -o $<TARGET_FILE:daw>
                     ${CMAKE_BINARY_DIR}/generated/daw.rsrc
-            COMMENT "Attaching the app resource (signature, version)")
+            COMMAND ${DAW_MIMESET} -A $<TARGET_FILE:daw>
+            COMMENT "Attaching the app resource (signature, version, types)")
     else()
-        message(STATUS "rc/xres not found - the binary gets no app resource")
+        message(STATUS "rc/xres/mimeset not found - the binary gets no app "
+                       "resource and no MIME registration")
     endif()
 
     # Functional tests for the UI: a BApplication, the real windows, and
