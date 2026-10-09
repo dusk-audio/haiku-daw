@@ -134,14 +134,24 @@ static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
     return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
 }
 
+// The window's title, as SetTitle set it. BWindow::Name() returns the
+// window's THREAD name, which Haiku prefixes with "w>" (BWindow::_SetName
+// renames the thread "w>window title"), so a raw Name() comparison against a
+// title never matches -- which is how the first cut of this test failed to
+// find its own prompt.
+static const char* WindowTitle(BWindow* w) {
+    const char* name = w ? w->Name() : nullptr;
+    if (!name) return "";
+    return std::strncmp(name, "w>", 2) == 0 ? name + 2 : name;
+}
+
 // Is a window with this title up? Deliberately takes NO lock: a modal prompt
 // holds the main window's looper until it is answered, so a predicate that
 // locked the window first would block forever instead of failing the test.
 static bool AlertUp(const char* title) {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
-        if (w && !w->IsHidden() && w->Name()
-            && std::strcmp(w->Name(), title) == 0)
+        if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
             return true;
     }
     return false;
@@ -160,8 +170,8 @@ static bool AnswerAlertWhenUp(const char* title, int32 which,
     for (;;) {
         for (int32 i = 0; i < be_app->CountWindows(); i++) {
             BWindow* w = be_app->WindowAt(i);
-            if (!w || w->IsHidden() || !w->Name()) continue;
-            if (std::strcmp(w->Name(), title) != 0) continue;
+            if (!w || w->IsHidden()) continue;
+            if (std::strcmp(WindowTitle(w), title) != 0) continue;
             BAlert* a = dynamic_cast<BAlert*>(w);
             if (!a) continue;
             a->Lock();
@@ -757,13 +767,14 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     // pulse, which only runs while the transport does).
     const bool marked = WaitFor([&] {
         if (!lockWin()) return false;
-        const bool ok = win->Name() && win->Name()[0] == '*';
+        const bool ok = WindowTitle(win)[0] == '*';
         win->Unlock();
         return ok;
     });
     if (!marked) {   // say what the title actually reads, not just that it failed
         if (lockWin()) {
-            std::printf("  title is '%s' (dirty=%d)\n",
+            std::printf("  title is '%s' (raw '%s', dirty=%d)\n",
+                        WindowTitle(win),
                         win->Name() ? win->Name() : "(null)",
                         (int)stack.IsDirty());
             win->Unlock();
@@ -781,7 +792,7 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
         bool dirty = false, starred = false;
         if (lockWin()) {
             dirty   = stack.IsDirty();
-            starred = win->Name() && win->Name()[0] == '*';
+            starred = WindowTitle(win)[0] == '*';
             win->Unlock();
         }
         CHECK(dirty);
@@ -826,9 +837,9 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     }));
     CHECK(WaitFor([&] {
         if (!lockWin()) return false;
-        const bool ok = win->Name()
-                     && std::strstr(win->Name(), "haiku_daw_ui_open") != nullptr
-                     && win->Name()[0] != '*';
+        const char* title = WindowTitle(win);
+        const bool ok = std::strstr(title, "haiku_daw_ui_open") != nullptr
+                     && title[0] != '*';
         win->Unlock();
         return ok;
     }));
