@@ -77,7 +77,7 @@ struct FxWatchUpdate {
 //
 // The caller performs the actions -- engine watch, message to the editor -- and
 // erases the entries that were closed, matching by index.
-std::vector<FxWatchUpdate> FxWatchValidate(
+inline std::vector<FxWatchUpdate> FxWatchValidate(
     const std::vector<FxWatch>& entries,
     const std::vector<FxChainView>& chains)   // parallel to `entries`
 {
