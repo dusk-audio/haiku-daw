@@ -17,12 +17,15 @@
 #include "../midi/MidiPort.h"
 #include "../midi/MidiRecorder.h"
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
+#include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 
 #include <Messenger.h>
 #include <Window.h>
 
+#include <atomic>
 #include <map>
 #include <memory>
+#include <thread>
 #include <utility>
 #include <string>
 #include <vector>
@@ -237,6 +240,30 @@ private:
     std::string               fTakeDir;      // where recorded takes are written
     std::string               fTakePath;     // full path of the current take
     int                       fRenderSeq = 0; // counter for rendered region/freeze filenames
+
+    // Off-looper export (R1): the model is snapshotted on the looper — after
+    // StopPlayback and the editor flush, in that order — and the worker renders
+    // the COPY, so the window keeps responding and Cancel is a flag flip. The
+    // worker writes only the atomics and the two result fields, and it sets
+    // fExportRunning false (release) after them; the pulse reads them only
+    // after seeing that (acquire). ~MainWindow cancels and joins before
+    // anything below is freed.
+    std::unique_ptr<Project>  fExportSnapshot;   // what the worker renders
+    std::thread               fExportThread;
+    std::atomic<bool>         fExportRunning{false};
+    std::atomic<bool>         fExportCancel{false};
+    std::atomic<float>        fExportProgress{-1.0f};
+    bool                      fExportOk = false;      // worker -> pulse
+    int                       fExportWritten = 0;     // stems written
+    bool                      fExportIsStems = false; // for the progress title
+    bool                      fExportHandled = true;  // the pulse saw the result
+    std::string               fExportPath;
+    BMessenger                fExportProgMsgr;   // the progress window, while up
+    ExportChoices             fExportChoices;    // the dialog's last settings
+
+    void OpenExportWindow(bool stems);            // the options dialog
+    void StartExport(const char* path, bool stems);  // snapshot + worker
+    void FinishExport();                          // pulse: report, close the bar
 };
 
 } // namespace daw

@@ -53,5 +53,6 @@ Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Eng
 | 04 midi-tools | Next host-side, parallel-safe with 07 — entry prompt `04-midi-tools-HANDOFF.md`, task `04-midi-tools.md` |
 | 05 sidechain | Unstarted; hold until 07 merges (shared engine FX-loop regions) |
 | 06 timestretch | Unstarted, unblocked; DSP/exporter half host-testable, engine half wants the VM after 07 |
+| R1 export dialog | **Merged to master 2026-10-09** — the bounce options dialog (format / rate / dither / loudness / true-peak / range / stems), the render moved off the UI looper with progress + Cancel, and the generic panel's wheel edit finally flushed before a save or a render. Record `08-export-dialog-PR.md` |
 
 Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.

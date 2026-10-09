@@ -20,6 +20,15 @@ int main() {
     a.monitorInput = true;
     a.lastDir      = "/boot/home/My Samples";   // note the space
     a.winL = 10; a.winT = 20; a.winR = 900; a.winB = 640;
+    a.exportBitDepth     = 24;
+    a.exportDither       = false;
+    a.exportSampleRate   = 96000;
+    a.exportNormalize    = true;
+    a.exportTargetLufs   = -16.5f;
+    a.exportTruePeakCeil = -1.5f;
+    a.exportLimiter      = true;
+    a.exportRange        = 1;
+    a.exportStems        = 1;
 
     AppSettings b;
     CHECK(b.Deserialize(a.Serialize()));
@@ -29,6 +38,24 @@ int main() {
     CHECK(b.monitorInput == true);
     CHECK(b.lastDir == "/boot/home/My Samples");
     CHECK(std::fabs(b.winL - 10) < 1e-3 && std::fabs(b.winR - 900) < 1e-3);
+    // The export dialog's last choices survive too (they are the reason the
+    // dialog does not have to be re-specified on every bounce).
+    CHECK(b.exportBitDepth == 24);
+    CHECK(b.exportDither == false);
+    CHECK(b.exportSampleRate == 96000);
+    CHECK(b.exportNormalize == true);
+    CHECK(std::fabs(b.exportTargetLufs - (-16.5f)) < 1e-3);
+    CHECK(std::fabs(b.exportTruePeakCeil - (-1.5f)) < 1e-3);
+    CHECK(b.exportLimiter == true);
+    CHECK(b.exportRange == 1);
+    CHECK(b.exportStems == 1);
+
+    // An old settings file (no export keys at all) keeps the dialog defaults.
+    AppSettings old;
+    CHECK(old.Deserialize("buffer 512\nmetronome 0\n"));
+    CHECK(old.exportBitDepth == 16 && old.exportDither == true);
+    CHECK(old.exportSampleRate == 0 && old.exportNormalize == false);
+    CHECK(old.exportRange == 0 && old.exportStems == 0);
 
     // Garbage / empty -> false, defaults retained.
     AppSettings c;

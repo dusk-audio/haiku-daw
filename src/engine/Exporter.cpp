@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>   // std::remove / std::rename for the temp+rename write
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -54,9 +55,13 @@ void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
     *outR = gain * std::sin(theta);
 }
 
-// Convert a project-frame position to an output-frame position.
+// Convert a project-frame position to an output-frame position. Rounds to
+// nearest — including below zero, which a range export reaches when a clip or
+// note starts before the window (`+0.5` then truncating would round those
+// toward zero, shifting the straddling material by a frame).
 inline int64_t ToOut(Frame projFrame, double scale) {
-    return static_cast<int64_t>(static_cast<double>(projFrame) * scale + 0.5);
+    return static_cast<int64_t>(
+        std::llround(static_cast<double>(projFrame) * scale));
 }
 
 // Decode one audio clip's source resampled to `outRate` into an interleaved-
@@ -85,11 +90,14 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
 
 // Place a decoded clip into a track buffer at its timeline position, applying
 // linear fade-in/out (both measured in output frames) and per-channel gain.
-void PlaceClip(const Clip& c, double scale, double outRate,
+void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
                int64_t totalOut, const float* gainLR,
                std::vector<float>& trackBuf,
                Frame effFadeIn, Frame effFadeOut) {
-    const int64_t startOut  = ToOut(c.startFrame, scale);
+    // A clip that starts before the window lands at a negative offset: the loop
+    // below skips those frames (they are outside the bounce), which is exactly
+    // what a range export wants from a clip straddling the range start.
+    const int64_t startOut  = ToOut(c.startFrame - winStart, scale);
     const int64_t lengthOut = ToOut(c.lengthFrames, scale);
     if (lengthOut <= 0)
         return;
@@ -130,16 +138,48 @@ void PlaceClip(const Clip& c, double scale, double outRate,
     }
 }
 
+// Progress + cancellation for one export. Every phase below reports through
+// this and polls it, so the contract lives in one place: monotonic (a phase
+// weight that would go backwards is dropped, not delivered) and clamped to
+// [0,1] by the time it reaches the caller's callback.
+class ExportRun {
+public:
+    explicit ExportRun(const ExportJob* job) : fJob(job) {}
+    void Report(float f) {
+        if (!fJob || !fJob->progress) return;
+        // `<=` and not `<`: a repeated value is noise, and the contract is that
+        // 1.0 arrives exactly once -- the caller's "done" signal, not a
+        // measurement that can arrive twice.
+        if (f <= fLast) return;
+        if (f > 1.0f) f = 1.0f;
+        fLast = f;
+        fJob->progress(f);
+    }
+    bool Cancelled() const {
+        return fJob && fJob->cancel
+            && fJob->cancel->load(std::memory_order_relaxed);
+    }
+private:
+    const ExportJob* fJob = nullptr;
+    float fLast = -1.0f;
+};
+
 } // namespace
 
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate, int bitDepth, ExportNormalize norm) {
+               double outRate, const ExportOptions& opts) {
     EnableDenormalFlush();
+    ExportRun run(opts.job);
+    int bitDepth = opts.format.bitDepth;
     if (bitDepth != 16 && bitDepth != 24 && bitDepth != 32) bitDepth = 16;
+    const bool dither = opts.format.dither && bitDepth == 16;
+    const ExportNormalize& norm = opts.normalize;
     const double projRate = project.sampleRate;
     if (outRate <= 0.0)
         outRate = projRate;
     const double scale = outRate / projRate;
+    run.Report(0.0f);
+    if (run.Cancelled()) return false;
 
     // Solo overrides mute: if any track is soloed (and not muted), only those
     // are audible; otherwise every non-muted track is audible.
@@ -163,7 +203,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 projEnd = n.startFrame + n.lengthFrames;
     }
 
-    const int64_t totalOut = ToOut(projEnd, scale);
+    // The window to render, in project frames: from range.start to range.end
+    // (or the project's own end). The default range is the whole project, and
+    // every offset below subtracts winStart, which is exact integer arithmetic
+    // that changes nothing when it is 0.
+    Frame winStart = opts.range.start < 0 ? 0 : opts.range.start;
+    Frame winEnd   = opts.range.end < 0 ? projEnd : std::min(projEnd, opts.range.end);
+    if (winEnd <= winStart)
+        return false;   // nothing to render
+    const int64_t totalOut = ToOut(winEnd - winStart, scale);
     if (totalOut <= 0)
         return false;   // nothing to render
 
@@ -315,8 +363,12 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // inLat, so the chain runs over the full padded buffer (priming the leading
     // inLat frames + flushing the plugin's own latency tail) and fx-param
     // automation maps buffer offset -> timeline frame as (off - inLat)/scale.
+    // `p0`/`p1` are the progress band this chain's blocks report inside (the
+    // caller owns the phase weights). Returns false when the job was
+    // cancelled mid-chain.
     auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf,
-                       const std::vector<FxAutoLane>& fxAuto, int64_t inLat) {
+                       const std::vector<FxAutoLane>& fxAuto, int64_t inLat,
+                       float p0, float p1) -> bool {
         // Chain kept index-aligned with fxDescs (nullptr for any skipped) so
         // effect-parameter automation can address chain[fxIndex].
         std::vector<std::unique_ptr<IEffect>> chain;
@@ -326,7 +378,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
             if (e) { e->Prepare(outRate); any = true; }
             chain.push_back(std::move(e));
         }
-        if (!any) return;
+        if (!any) return true;
 
         const int64_t kBlock = 8192;
 
@@ -350,9 +402,11 @@ bool ExportWav(const Project& project, const std::string& outPath,
         std::vector<float> dryBlock((size_t)kBlock * 2, 0.0f);
 
         for (int64_t off = 0; off < totalOutPadded; off += kBlock) {
+            if (run.Cancelled()) return false;
             int64_t n = totalOutPadded - off;
             if (n > kBlock) n = kBlock;
-            const Frame pf = off >= inLat ? (Frame)((off - inLat) / scale) : 0;
+            const Frame pf = off >= inLat
+                ? winStart + (Frame)((off - inLat) / scale) : winStart;
             for (const FxAutoLane& fa : fxAuto) {
                 if (fa.fxIndex < 0 || fa.fxIndex >= (int)chain.size()) continue;
                 if (!chain[fa.fxIndex] || fa.lane.Count() == 0) continue;
@@ -364,10 +418,24 @@ bool ExportWav(const Project& project, const std::string& outPath,
             for (size_t i = 0; i < chain.size(); i++)
                 RunInsertSlot(chain[i].get(), dryDelay[i], bypassed[i] != 0,
                               mixes[i], p, (size_t)n, dryBlock.data());
+            if (p1 > p0 && totalOutPadded > 0)
+                run.Report(p0 + (p1 - p0)
+                    * (float)((double)off / (double)totalOutPadded));
         }
+        run.Report(p1);
+        return true;
     };
 
-    for (TrackId id : order) {
+    // Mixing is the bulk of the work: each node owns an equal slice of the
+    // 5%..65% band, refined by the fx blocks inside it.
+    const float kNodesP0 = 0.05f, kNodesP1 = 0.65f;
+    const float kNodeCount = (float)std::max<size_t>(1, order.size());
+    run.Report(kNodesP0);
+    for (size_t oi = 0; oi < order.size(); oi++) {
+        if (run.Cancelled()) return false;
+        const TrackId id = order[oi];
+        const float nodeP0 = kNodesP0 + (kNodesP1 - kNodesP0) * ((float)oi / kNodeCount);
+        const float nodeP1 = kNodesP0 + (kNodesP1 - kNodesP0) * ((float)(oi + 1) / kNodeCount);
         auto it = idx.find(id);
         if (it == idx.end()) continue;
         const Track& t = tracks[it->second];
@@ -401,7 +469,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
                 if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
-                PlaceClip(c, scale, outRate, totalOut, kUnity,
+                PlaceClip(c, scale, winStart, outRate, totalOut, kUnity,
                           nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
             }
         } else if (audible && t.type == TrackType::Midi) {
@@ -410,11 +478,14 @@ bool ExportWav(const Project& project, const std::string& outPath,
             // block for block even though the block size differs.
             std::unique_ptr<IInstrument> inst = MakeInstrument(t.instrument, outRate);
             std::vector<MidiNote> notes = t.CollectNotes();
-            if (scale != 1.0)
-                for (MidiNote& n : notes) {
-                    n.startFrame   = ToOut(n.startFrame, scale);
-                    n.lengthFrames = ToOut(n.lengthFrames, scale);
-                }
+            // Into window-relative output frames. A note that starts before the
+            // window keeps its (negative) offset so its tail still sounds — the
+            // instrument renders the part of it that falls inside the window,
+            // exactly as a straddling clip does above.
+            for (MidiNote& n : notes) {
+                n.startFrame   = ToOut(n.startFrame - winStart, scale);
+                n.lengthFrames = ToOut(n.lengthFrames, scale);
+            }
             // Render in blocks so the CC7 (volume) x CC11 (expression) channel
             // gain and the CC10 pan are re-evaluated as they step. Events stay in
             // project frames;
@@ -428,8 +499,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
             // Negative = first block, which snaps instead of sweeping from unity.
             float lastL = -1.0f, lastR = -1.0f;
             for (int64_t off = 0; off < totalOut; off += kBlk) {
+                if (run.Cancelled()) return false;
                 const int64_t nn = std::min<int64_t>(kBlk, totalOut - off);
-                const Frame pf = (Frame)(off / scale);   // project frame @ block
+                // Project frame at the block, in the window's own terms.
+                const Frame pf = winStart + (Frame)(off / scale);
                 float cgl, cgr;
                 MidiChannelGains(events, pf, &cgl, &cgr);
                 const StereoGain to{cgl, cgr};
@@ -463,7 +536,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
         } else {
             for (int64_t i = 0; i < totalOutPadded; ++i) {
                 const Frame pf = i >= nodeIn
-                    ? static_cast<Frame>((i - nodeIn) / scale) : 0;
+                    ? winStart + static_cast<Frame>((i - nodeIn) / scale)
+                    : winStart;
                 const float g = t.gainAuto.ValueAt(pf, t.gain);
                 const float p = t.panAuto.ValueAt(pf, t.pan);
                 float gLR[2];
@@ -473,7 +547,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
             }
         }
 
-        applyFx(t.fx, nb, t.fxAuto, nodeIn);
+        if (!applyFx(t.fx, nb, t.fxAuto, nodeIn, nodeP0, nodeP1)) return false;
         addSends(t, /*pre=*/false, nb);         // post-fader taps
 
         // Route this node into its output (a bus) or the master mix, delay-
@@ -486,14 +560,17 @@ bool ExportWav(const Project& project, const std::string& outPath,
             if (d != idx.end()) { dst = nodeVec(d->second).data(); destId = t.output; }
         }
         sumDelayed(dst, nb, 1.0f, pdcOk ? pdc.EdgeDelay(t.id, destId) : 0);
+        run.Report(nodeP1);
     }
+    if (run.Cancelled()) return false;
 
     // Master bus FX chain (applied to the summed mix before master gain). Runs
     // through the same applyFx as a track chain so per-insert bypass / wet-dry
     // behave identically on the master. It has no fx automation, and its content
     // needs no input-latency offset (the mix already sits at buffer offset 0),
     // hence the empty lane list and inLat 0.
-    applyFx(project.masterFx, master.data(), {}, 0);
+    if (!applyFx(project.masterFx, master.data(), {}, 0, kNodesP1, 0.70f))
+        return false;
 
     // PDC trim: the whole mix lags the timeline by `pad` frames (node graph +
     // master fx). Drop that leading latency so the bounce is timeline-aligned —
@@ -514,6 +591,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
     for (size_t i = 0; i < nfloats; ++i)
         if (!std::isfinite(outp[i])) outp[i] = 0.0f;
 
+    run.Report(0.72f);
+
     // Loudness normalization (offline): measure the finished master's integrated
     // loudness + true peak, then apply one gain that brings it to the target
     // LUFS. Without a limiter, the gain is backed off so the true peak never
@@ -525,8 +604,11 @@ bool ExportWav(const Project& project, const std::string& outPath,
         meter.SetIntegratedEnabled(true);   // whole-program gated loudness
         const int64_t kBlk = 8192;
         for (int64_t off = 0; off < totalOut; off += kBlk) {
+            if (run.Cancelled()) return false;
             const int64_t n = std::min(kBlk, totalOut - off);
             meter.Process(outp + off * 2, static_cast<int>(n));
+            run.Report(0.74f + 0.08f * (float)((double)off
+                / (double)std::max<int64_t>(1, totalOut)));
         }
         const float lufs = meter.IntegratedLufs();
         const float tp   = meter.TruePeakDb();
@@ -545,18 +627,58 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // peaks rather than attenuating the whole program. Runs last, after any
     // normalization gain, so its guarantee is on the final master.
     if (norm.limiter) {
+        // One whole-buffer pass — the limiter allocates and sweeps the buffer
+        // forwards and backwards, so a cancel can only precede it, not
+        // interrupt it.
+        if (run.Cancelled()) return false;
         Limiter lim(norm.truePeakCeil, /*attackMs=*/2.0f, /*releaseMs=*/60.0f);
         lim.Process(outp, static_cast<size_t>(totalOut), outRate);
     }
+    run.Report(0.84f);
 
+    // Write to a temporary and rename on success. A cancelled or failed export
+    // must not leave a partial WAV where a finished one is expected, and an
+    // existing file at `outPath` keeps its old contents until the new one is
+    // complete (the writer used to truncate it at open).
+    const std::string tmpPath = outPath + ".part";
     WavWriter writer;
     const bool floatOut = (bitDepth == 32);
-    if (!writer.OpenFormat(outPath, static_cast<int>(outRate + 0.5), 2,
+    if (!writer.OpenFormat(tmpPath, static_cast<int>(outRate + 0.5), 2,
                            bitDepth, floatOut))
         return false;
-    if (!writer.WriteFloat(outp, nfloats, /*dither=*/bitDepth == 16))
+    // Chunked so progress is real progress and a cancel lands within a chunk.
+    // The write is byte-identical to one big call: the dither PRNG lives in the
+    // writer and continues across calls.
+    const int64_t kChunkFrames = 1 << 16;
+    const int64_t framesTotal  = static_cast<int64_t>(nfloats / 2);
+    for (int64_t f = 0; f < framesTotal; f += kChunkFrames) {
+        if (run.Cancelled()) {
+            writer.Close();
+            std::remove(tmpPath.c_str());
+            return false;
+        }
+        const int64_t cnt = std::min(kChunkFrames, framesTotal - f);
+        if (!writer.WriteFloat(outp + f * 2, static_cast<size_t>(cnt) * 2,
+                               dither)) {
+            writer.Close();
+            std::remove(tmpPath.c_str());
+            return false;
+        }
+        // Up to 0.99: the final 1.0 is the explicit "done" below, so the
+        // contract holds even if the chunk arithmetic changes.
+        run.Report(0.84f + 0.15f * (float)((double)(f + cnt)
+            / (double)std::max<int64_t>(1, framesTotal)));
+    }
+    if (!writer.Close()) {
+        std::remove(tmpPath.c_str());
         return false;
-    return writer.Close();
+    }
+    if (std::rename(tmpPath.c_str(), outPath.c_str()) != 0) {
+        std::remove(tmpPath.c_str());
+        return false;
+    }
+    run.Report(1.0f);
+    return true;
 }
 
 // Replace path-hostile characters so a track name is a safe filename.
@@ -568,11 +690,28 @@ static std::string SanitizeName(const std::string& n) {
     return s;
 }
 
-int ExportStems(const Project& project, const std::string& dir, double outRate) {
-    int written = 0, idx = 0;
+int ExportStems(const Project& project, const std::string& dir, double outRate,
+                const ExportOptions& opts) {
+    // The stems report through the job's own guard: one stem's band must not be
+    // able to walk the whole job's progress backwards, and the final 1.0 below
+    // must not be a second one.
+    ExportRun run(opts.job);
+    // Count the stems first so each one can own an equal slice of the job's
+    // progress (one stem is a whole export of its own).
+    int total = 0;
+    for (const Track& t : project.Tracks())
+        if (t.type != TrackType::Bus) total++;
+
+    int written = 0, idx = 0, done = 0;
     for (const Track& t : project.Tracks()) {
         idx++;
         if (t.type == TrackType::Bus) continue;   // stems are source tracks
+        // A cancelled job either stops here (skipping the deep copy of the
+        // project the next stem would need) or, failing that, returns from the
+        // inner export at its own first check — either way no stem is written.
+        if (opts.job && opts.job->cancel
+            && opts.job->cancel->load(std::memory_order_relaxed))
+            break;
         // Solo this track so ExportWav renders only it (through its own fader /
         // fx / bus / master). Solo overrides mute in the mix.
         Project copy = project;
@@ -586,8 +725,35 @@ int ExportStems(const Project& project, const std::string& dir, double outRate) 
         char pre[8];
         std::snprintf(pre, sizeof(pre), "%02d_", idx);
         const std::string path = dir + "/" + pre + SanitizeName(t.name) + ".wav";
-        if (ExportWav(copy, path, outRate)) written++;
+
+        // Each stem reports 0..1 of itself; rescale that into this stem's band
+        // of the whole job, and pass the cancel flag straight through.
+        ExportOptions sub = opts;
+        ExportJob subJob;
+        if (opts.job) {
+            subJob.cancel = opts.job->cancel;
+            if (opts.job->progress && total > 0) {
+                const float s0 = (float)done / (float)total;
+                const float s1 = (float)(done + 1) / (float)total;
+                subJob.progress = [&run, s0, s1](float f) {
+                    run.Report(s0 + (s1 - s0) * f);
+                };
+            }
+            sub.job = &subJob;
+        }
+        if (ExportWav(copy, path, outRate, sub)) written++;
+        done++;
     }
+    // A stem that renders nothing (an empty track has nothing to render) fails
+    // its own export but does not fail the RUN: the other stems were written,
+    // and the caller is told so. Its progress band therefore never reached its
+    // end, and without this the bar would stall short of 100% over a result the
+    // caller reports as success. (Not after a cancel: that run did not finish,
+    // and the bar should stop where it stopped.)
+    if (written > 0
+        && !(opts.job && opts.job->cancel
+             && opts.job->cancel->load(std::memory_order_relaxed)))
+        run.Report(1.0f);
     return written;
 }
 

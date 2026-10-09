@@ -10,7 +10,16 @@ std::string AppSettings::Serialize() const {
       << "countin "  << countInBars  << "\n"
       << "metronome " << (metronome ? 1 : 0) << "\n"
       << "monitorin " << (monitorInput ? 1 : 0) << "\n"
-      << "win " << winL << " " << winT << " " << winR << " " << winB << "\n";
+      << "win " << winL << " " << winT << " " << winR << " " << winB << "\n"
+      << "expbits "   << exportBitDepth << "\n"
+      << "expdither " << (exportDither ? 1 : 0) << "\n"
+      << "exprate "   << exportSampleRate << "\n"
+      << "expnorm "   << (exportNormalize ? 1 : 0) << "\n"
+      << "explufs "   << exportTargetLufs << "\n"
+      << "expceil "   << exportTruePeakCeil << "\n"
+      << "explim "    << (exportLimiter ? 1 : 0) << "\n"
+      << "exprange "  << exportRange << "\n"
+      << "expstems "  << exportStems << "\n";
     // lastDir last (may contain spaces -> rest of the line).
     o << "lastdir " << lastDir << "\n";
     return o.str();
@@ -37,6 +46,15 @@ bool AppSettings::Deserialize(const std::string& text) {
             float l, t, r, b;
             if (ls >> l >> t >> r >> b) { winL = l; winT = t; winR = r; winB = b; }
         }
+        else if (kw == "expbits")   { int v; if (ls >> v) exportBitDepth = v; }
+        else if (kw == "expdither") { int v; if (ls >> v) exportDither = (v != 0); }
+        else if (kw == "exprate")   { int v; if (ls >> v) exportSampleRate = v; }
+        else if (kw == "expnorm")   { int v; if (ls >> v) exportNormalize = (v != 0); }
+        else if (kw == "explufs")   { float v; if (ls >> v) exportTargetLufs = v; }
+        else if (kw == "expceil")   { float v; if (ls >> v) exportTruePeakCeil = v; }
+        else if (kw == "explim")    { int v; if (ls >> v) exportLimiter = (v != 0); }
+        else if (kw == "exprange")  { int v; if (ls >> v) exportRange = v; }
+        else if (kw == "expstems")  { int v; if (ls >> v) exportStems = v; }
         else if (kw == "lastdir") {
             std::string rest;
             std::getline(ls, rest);

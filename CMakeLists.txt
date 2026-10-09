@@ -290,6 +290,12 @@ add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
 
+# The export job surface: format (bit depth + dither), the timeline range,
+# progress, cancellation, and the temp+rename write.
+add_executable(exporter_job_tests tests/exporter_job_tests.cpp)
+target_link_libraries(exporter_job_tests PRIVATE daw_model)
+add_test(NAME exporter_job_tests COMMAND exporter_job_tests)
+
 add_executable(exporter_pdc_tests tests/exporter_pdc_tests.cpp)
 target_link_libraries(exporter_pdc_tests PRIVATE daw_model)
 add_test(NAME exporter_pdc_tests COMMAND exporter_pdc_tests)
@@ -464,6 +470,8 @@ if(HAIKU)
         src/ui/SendsWindow.cpp
         src/ui/InstrumentWindow.cpp
         src/ui/PianoRoll.cpp
+        src/ui/ExportWindow.cpp
+        src/ui/ExportProgressWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp

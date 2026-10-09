@@ -78,7 +78,7 @@ static std::vector<float> Render(const std::vector<EffectDesc>& fx,
     const std::string path = "/tmp/haiku_daw_fx_insert_test.wav";
     std::remove(path.c_str());
     std::vector<float> out;
-    if (!ExportWav(p, path, SR, /*bitDepth=*/32))
+    if (!ExportWav(p, path, SR, {ExportFormat{32}}))
         return out;
     WavSource src;
     if (!src.Open(path)) return out;
