@@ -1772,6 +1772,33 @@ void MainWindow::ValidateFxWatch() {
     UpdatePulse();
 }
 
+// Ask every open native editor for the values it has written but not yet
+// committed, and apply them here, now. Blocking on purpose: this runs on the
+// save path, where "the file matches what you heard" matters more than a few
+// milliseconds of UI stall (the editors answer from their own looper and the
+// timeout is short).
+void MainWindow::FlushFxEditors() {
+    for (size_t i = fFxWatches.size(); i > 0; --i) {
+        const FxWatch w = fFxWatches[i - 1];
+        if (!w.msgr.IsValid()) continue;
+        BMessage flush(kMsgLv2UiFlush);
+        BMessage reply;
+        if (w.msgr.SendMessage(&flush, &reply, 200000) != B_OK) continue;
+        std::vector<SetFxParamCommand::SlotValue> vals;
+        for (int32 k = 0; ; k++) {
+            int32 slot = 0;
+            float v = 0.0f;
+            if (reply.FindInt32("slot", k, &slot) != B_OK) break;
+            if (reply.FindFloat("val", k, &v) != B_OK) break;
+            vals.push_back({ slot, v });
+        }
+        if (vals.empty()) continue;
+        const bool master = (w.track == kMasterFxTarget);
+        fStack->Execute(std::make_unique<SetFxParamCommand>(
+            w.track, master, w.fx, std::move(vals)), *fProject);
+    }
+}
+
 // Close every native editor and forget every watch: their insert addresses
 // (track id, index) belong to the project that is going away, and the loaded
 // project can reuse the same ids for entirely different effects.
@@ -2029,6 +2056,12 @@ static std::string DirOfPath(const char* path) {
 }
 
 void MainWindow::SaveTo(const char* path) {
+    // A knob turned in a native editor reaches the audio immediately but the
+    // MODEL only after its debounce goes quiet. Saving inside that window would
+    // write the value from before the gesture -- to disk, silently. Ask every
+    // open editor for its pending values first, so what is saved is what is
+    // playing.
+    FlushFxEditors();
     if (!ProjectIO::Save(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: save failed: %s\n", path);
         return;

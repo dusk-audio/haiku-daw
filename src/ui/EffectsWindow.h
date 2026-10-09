@@ -69,6 +69,10 @@ constexpr uint32 kMsgFxMeter     = 'fxmt';
 // editor addresses its insert by INDEX -- only MainWindow sees the model, so
 // only it can say what is at that index now.
 constexpr uint32 kMsgOpenFxEditor = 'fxoe';
+// MainWindow -> Lv2UiWindow: "hand me the values you have written but not yet
+// committed" (sent before a save). Answered with the REPLY message itself, one
+// int32 "slot" and one float "val" per pending change.
+constexpr uint32 kMsgLv2UiFlush   = 'fxfl';
 // Lv2UiWindow -> MainWindow: "this native editor is open on this insert, publish
 // its control values to me". Fields: int64 "track", int32 "fx", messenger
 // "msgr". The SAME message with no messenger means the editor closed and the

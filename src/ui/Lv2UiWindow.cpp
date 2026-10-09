@@ -917,6 +917,27 @@ bool Lv2UiWindow::QuitRequested() { return true; }
 void Lv2UiWindow::MessageReceived(BMessage* msg) {
     if (msg->what == kMsgLv2UiRaise) { Activate(true); return; }
     if (msg->what == kMsgLv2UiCommit) { CommitPending(); return; }
+    if (msg->what == kMsgLv2UiFlush) {
+        // MainWindow is about to save and wants what this editor wrote but has
+        // not committed yet -- answered in the REPLY, because a commit posted
+        // from here would sit in MainWindow's queue until after the save.
+        Impl* d = fImpl;
+        if (!d || !d->link) return;
+        std::map<int, float> pending;
+        {
+            std::lock_guard<std::mutex> lock(d->link->mutex);
+            pending.swap(d->link->pending);
+            delete d->link->runner;      // this gesture is being committed now
+            d->link->runner = nullptr;
+        }
+        BMessage reply;
+        for (const auto& e : pending) {
+            reply.AddInt32("slot", e.first);
+            reply.AddFloat("val", e.second);
+        }
+        msg->SendReply(&reply);
+        return;
+    }
     if (msg->what == kMsgFxWatch) {
         // MainWindow telling this editor that its insert MOVED within the
         // chain (a reorder). Without this the editor would keep writing to the

@@ -84,6 +84,7 @@ private:
     void PushFxParams();             // engine insert values -> native editor
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
+    void FlushFxEditors();           // before a save: commit what they wrote
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     // Decode the loaded project's soundfonts into the SoundfontCache before
