@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -41,6 +42,17 @@ inline std::vector<int> Lv2UiPortsForSlots(const std::vector<int>& slotOfPort) {
             portOfSlot[(std::size_t)slot] = (int)i;
     }
     return portOfSlot;
+}
+
+// The `applied` seed for an editor that has just opened: it has been told
+// NOTHING yet. NaN compares unequal to everything, including itself, so the
+// first frame applies every parameter -- which for a control-port UI is the
+// only way it ever learns them, since port_event is its sole channel. Seeding
+// this with the insert's stored values instead would make that first frame
+// match every slot and be skipped, leaving the editor on its factory defaults
+// while the insert plays the project's values.
+inline std::vector<float> Lv2UiNothingApplied(std::size_t ports) {
+    return std::vector<float>(ports, std::numeric_limits<float>::quiet_NaN());
 }
 
 // One value to hand the plugin's GUI as port_event.

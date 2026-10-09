@@ -69,6 +69,42 @@ int main() {
         for (size_t i = 3; i < back.size(); i++) CHECK(back[i] == -1);
     }
 
+    // --- an editor that has just opened --------------------------------------
+    {
+        const std::vector<int> slots = Lv2UiSlotsForPorts(MixedPorts());
+        const std::vector<int> portOfSlot = Lv2UiPortsForSlots(slots);
+
+        // The property the whole thing rests on: whatever the engine later
+        // publishes, the seed must never look like "the GUI is already showing
+        // that". A control-port UI learns parameters ONLY through port_event,
+        // so a seed that could match would leave it on its factory defaults
+        // while the insert played the project's values.
+        const std::vector<float> seed = Lv2UiNothingApplied(7);
+        CHECK(seed.size() == 7);
+        bool matchesNothing = true;
+        for (float v : seed)
+            if (v == v || v == 0.0f || v == 1.0f || v == -1.0f || v == 0.5f)
+                matchesNothing = false;
+        CHECK(matchesNothing);
+
+        // Which is what makes the first frame apply every parameter.
+        std::vector<float> applied = Lv2UiNothingApplied(7);
+        std::vector<float> ctl(7, 0.0f), lastSeen(7, 0.0f);
+        const std::map<int, float> frame{ { 0, 1.0f }, { 1, 2.0f }, { 2, 3.0f } };
+        const auto ev = Lv2UiPlanApply(frame, portOfSlot, {}, applied, ctl, lastSeen);
+        CHECK(ev.size() == 3);            // every parameter, not none
+        CHECK(ctl[2] == 1.0f && ctl[4] == 2.0f && ctl[6] == 3.0f);
+
+        // And what the seed must NOT be: the values the insert already holds,
+        // which make that first frame match every slot and be skipped. That was
+        // the bug, and this is the shape of it.
+        std::vector<float> seeded(7, 0.0f);
+        seeded[0] = 1.0f; seeded[1] = 2.0f; seeded[2] = 3.0f;
+        std::vector<float> ctl2(7, 0.0f), lastSeen2(7, 0.0f);
+        const auto ev2 = Lv2UiPlanApply(frame, portOfSlot, {}, seeded, ctl2, lastSeen2);
+        CHECK(ev2.empty());
+    }
+
     // --- what an engine frame does to the GUI -------------------------------
     const std::vector<int> slotOfPort = Lv2UiSlotsForPorts(MixedPorts());
     const std::vector<int> portOfSlot = Lv2UiPortsForSlots(slotOfPort);

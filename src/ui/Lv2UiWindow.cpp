@@ -640,7 +640,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         // skip it -- the editor would sit on its factory defaults while the
         // insert played the project's values. NaN compares unequal to
         // everything, including itself, so the first frame applies all of them.
-        d->link->applied.assign(nPorts, std::numeric_limits<float>::quiet_NaN());
+        d->link->applied = Lv2UiNothingApplied(nPorts);
 
         // The UI binary's location. Plain strings, so nothing past this point
         // needs the world.
