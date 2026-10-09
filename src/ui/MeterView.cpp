@@ -34,10 +34,9 @@ void MeterView::DrawBar(BRect r, float level) {
     float lv = level; if (lv < 0) lv = 0; if (lv > 1) lv = 1;
     BRect fill = r;
     fill.right = r.left + r.Width() * lv;
-    // Green under ~0.7, amber up to clip, red at/over 1.0.
-    if (level >= 1.0f)      SetHighColor(Rgb(220, 70, 60));
-    else if (level >= 0.7f) SetHighColor(Rgb(210, 170, 60));
-    else                    SetHighColor(Rgb(90, 190, 110));
+    // The theme's one threshold set (M1.2): this used to disagree with
+    // Theme.h's MeterColor (1.0/0.7 here, 0.9/0.6 there).
+    SetHighColor(MeterColor(level));
     FillRect(fill);
 
     SetHighColor(ColGrid());
