@@ -216,6 +216,104 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
 }
 
+
+// Every transform's commit path, plus the keyboard one: the menu is a popup a
+// test cannot open, so RunMidiOp (what each item calls) is driven directly,
+// and 'q' goes through the view's own KeyDown.
+static void TestPianoRollTransforms(MainWindow* win, Project& project,
+                                    CommandStack& stack) {
+    std::printf("test_piano_roll_transforms\n");
+    Track t = MakeMidiTrack(project, { { 60, 100, 1000, 400 },
+                                       { 64, 100, 5000, 400 } }, "fx-synth");
+    CHECK(project.AddTrack(t));
+    const ClipId cid = t.midiClips.front().id;
+    const TrackId tid = t.id;
+
+    PianoRoll* roll = new PianoRoll(BRect(90, 90, 810, 570), tid, cid, 0,
+                                    t.midiClips.front().lengthFrames,
+                                    t.midiClips.front().notes, {},
+                                    project.tempoMap, project.sampleRate, -1,
+                                    BMessenger(win));
+    roll->Show();
+    snooze(300000);
+    BView* view = roll->FindView("roll");
+    PianoRollView* rv = dynamic_cast<PianoRollView*>(view);
+    CHECK(rv != nullptr);
+    if (!rv) {
+        roll->Lock(); roll->Quit();
+        return;
+    }
+
+    auto notes = [&](std::vector<MidiNote>* out) {
+        if (!win->Lock()) return false;
+        const Track* tr = project.FindTrack(tid);
+        const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
+        if (c) *out = c->notes;
+        const bool ok = c != nullptr;
+        win->Unlock();
+        return ok;
+    };
+
+    // 'q': the last-used quantize, through the view's key handler.
+    roll->Lock();
+    rv->KeyDown("q", 1);
+    roll->Unlock();
+    std::vector<MidiNote> n;
+    CHECK(WaitFor([&] {
+        if (!notes(&n) || n.size() != 2) return false;
+        return n[0].startFrame == 0 && n[1].startFrame == 6000;
+    }));
+    CHECK(stack.UndoName() == "Quantize");
+
+    // Humanize: a fresh take each time (times/velocities move, and the model
+    // says so).
+    roll->Lock();
+    rv->RunMidiOp(MidiOp::Humanize);
+    roll->Unlock();
+    std::vector<MidiNote> h;
+    CHECK(WaitFor([&] {
+        if (!notes(&h) || h.size() != 2) return false;
+        return h[0].startFrame != 0 || h[0].velocity != 100;
+    }));
+    CHECK(stack.UndoName() == "Humanize");
+
+    // Legato: the first note stretches to the second one's start.
+    roll->Lock();
+    rv->RunMidiOp(MidiOp::Legato);
+    roll->Unlock();
+    std::vector<MidiNote> l;
+    CHECK(WaitFor([&] {
+        if (!notes(&l) || l.size() != 2) return false;
+        return l[0].lengthFrames >= 6000;
+    }));
+
+    // Transpose +12 and -12 back: the pitches move, and the name says so.
+    roll->Lock();
+    rv->RunMidiOp(MidiOp::Transpose, 12);
+    roll->Unlock();
+    std::vector<MidiNote> up;
+    CHECK(WaitFor([&] {
+        if (!notes(&up) || up.size() != 2) return false;
+        return up[0].pitch == l[0].pitch + 12;
+    }));
+    CHECK(stack.UndoName() == "Transpose");
+
+    // Velocity -10: each note drops by ten, clamped.
+    roll->Lock();
+    rv->RunMidiOp(MidiOp::Velocity, -10);
+    roll->Unlock();
+    std::vector<MidiNote> v;
+    CHECK(WaitFor([&] {
+        if (!notes(&v) || v.size() != 2) return false;
+        return v[0].velocity == (up[0].velocity - 10 > 1 ? up[0].velocity - 10 : 1);
+    }));
+    CHECK(stack.UndoName() == "Adjust Velocity");
+
+    roll->Lock();
+    roll->Quit();
+    snooze(200000);
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -235,6 +333,7 @@ static int32 TestThread(void*) {
 
     TestMessageRoundTrip(win, project);
     TestPianoRollQuantize(win, project, stack);
+    TestPianoRollTransforms(win, project, stack);
     TestExportFlow(win, project);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,

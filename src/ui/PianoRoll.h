@@ -63,6 +63,16 @@ public:
 
     void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
 
+    // --- MIDI transforms ---------------------------------------------------
+    // The transform runs here, on the snapshot, and the result is posted as one
+    // undoable step (kMsgApplyMidiOp). `param` is the semitone count for
+    // Transpose and the velocity delta for Velocity; the others ignore it.
+    //
+    // Public because it is the entry point each menu item calls, and the menu
+    // is a popup -- a test (tests/ui_functional_tests.cpp) cannot open one, so
+    // this is how each transform's commit path gets driven on the target.
+    void  RunMidiOp(MidiOp op, int param = 0);
+
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
@@ -83,10 +93,8 @@ private:
     void  Apply();
 
     // --- MIDI transforms ---------------------------------------------------
-    // The transform runs here, on the snapshot, and the result is posted as one
-    // undoable step (kMsgApplyMidiOp). `param` is the semitone count for
-    // Transpose and the velocity delta for Velocity; the others ignore it.
-    void  RunMidiOp(MidiOp op, int param = 0);
+
+    // --- MIDI transforms (implementation) ----------------------------------
     void  ApplyMidiOp(MidiOp op);       // post the (already transformed) list
     void  MidiMenu();                   // the toolbar button's popup
     void  OpenQuantizeWindow();         // settings, remembered in fQuant
