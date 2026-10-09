@@ -316,7 +316,12 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   (`MidiPort`/`MidiRecorder` capture note on/off only — CC/bend are dropped);
   MIDI clock/MTC; sysex.
 
-## Phase I — Plugins (long-term)
+## Phase I — Plugins (SHIPPED: LV2 hosting landed in packages 02/03/07)
+
+*(Kept for the record; what follows was the plan. The native add-on ABI and
+LV2 hosting both exist now — see `docs/agent-prompts/02-lv2-host-PR.md` and
+`07-lv2-live-editor-PR.md`. Only the VST stage remains unbuilt, and it stays a
+non-goal.)*
 
 Internal effect add-on ABI (`PluginHost` + native `.so` exists), then LV2
 hosting with native generic GUIs (ARCHITECTURE §8 stages 2–3). VST is a maybe.
@@ -393,7 +398,7 @@ native-feeling, and not blocked by the plugin-less VM:
 
 ### Deliberately skipped (for now — low value here or out of scope)
 
-Full plugin hosting (LV2/VST) & PDC beyond Phase I; timecode/LTC/MTC/MMC &
+VST hosting (LV2 shipped); PDC beyond Phase I; timecode/LTC/MTC/MMC &
 Ableton Link sync; control surfaces / OSC / MIDI-learn; VCA masters + full
 routing matrix (basic buses/sends in Phase A are enough for now); transient
 detection / audio quantize; video timeline; Lua scripting; surround/VBAP. These

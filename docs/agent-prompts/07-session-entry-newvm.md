@@ -60,7 +60,7 @@ Marc replaced the dev VM with a fresh Haiku install on 2026-10-08. The old VM
 
 - **No LV2 plugins with a native UI.** Haiku's system bundles in
   `/boot/system/lib/lv2` are DSP examples with no editor. Package 07 cannot be
-  tested without a plugin UI. The old VM had Marc's DPF plugins (4K EQ 2 and
+  tested without a plugin UI. The old VM had Marc's DAF plugins (4K EQ 2 and
   others) built for Haiku with their GL UIs; those builds are gone.
 - **No crash-core tooling.** `~/crashreports/drive.py` and `coremem.py`
   (described in the RESUME doc) are gone.
@@ -74,14 +74,14 @@ Marc replaced the dev VM with a fresh Haiku install on 2026-10-08. The old VM
 2. Rebuild the plugin fixture. Inputs on the Linux host:
    - Marc's plugins: `/home/marc/projects/plugins` (per-plugin
      `plugins/<name>/dpf-plugin/`, shared DSP `plugins/shared-dpf/`).
-   - DPF and DPF-Widgets are siblings, not vendored: `/home/marc/projects/DPF`,
-     `/home/marc/projects/DPF-Widgets`.
-   - The Haiku GL UI port for DPF: `/home/marc/projects/dpf-haiku-gl-ui.patch`
-     (apply with `patch -p1` from a **copy** of DPF on the VM — never modify
+   - **DAF** (the framework formerly called DPF; its widgets live in-tree as
+     `DAF/widgets/`): `/home/marc/projects/DAF`. There is no `/home/marc/projects/DPF`.
+   - The Haiku GL UI port is a DAF patch: `/home/marc/projects/dpf-haiku-gl-ui.patch`
+     (apply with `patch -p1` from a **copy** of DAF on the VM — never modify
      Marc's host checkout of DPF or the plugins repo).
    - Build recipe that worked before: copy the plugin's `DistrhoPluginInfo.h` into
      an overlay dir, write a standalone CMakeLists that calls
-     `dpf_add_plugin(<name> TARGETS lv2 FILES_DSP ... FILES_UI ...)`, and put the
+     `daf_add_plugin(<name> TARGETS lv2 FILES_DSP ... FILES_UI ...)`, and put the
      overlay dir first on the include path. Plugin sources stay untouched.
    - Copy the sources to the VM with `tar cf - <dirs> | ssh ... 'tar xf -'` into
      a scratch dir such as `~/fixtures/`, never into `~/haiku-daw`.

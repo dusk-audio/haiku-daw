@@ -97,12 +97,12 @@ Kit** (UI, not yet started). Owner: Marc. The full design of record is
   runtime pending on VM): overdub (record runs the engine), count-in (D1),
   punch-in/out (D2), input monitoring (D3, rate-matched), loop-record + take
   comping (D4). Kit-free `RecordPlan.h`; new `IMonitorSource.h`. See ROADMAP.
-- **TESTING NOW LOCAL** — `scripts/haiku_syntax_check.sh` compile-checks all
-  Haiku-only sources with a local `x86_64-unknown-haiku-g++` (built under
-  `~/haiku-cross/`). Run it before every commit that touches engine/UI — it
-  catches the compile breaks the host `ctest` can't. VM SSH: passt port-forward
-  `2222->22` is live; run `fix_ssh.sh` in the guest, then
-  `ssh -i ~/.ssh/haiku_vm -p 2222 <user>@127.0.0.1` builds/runs on the real VM.
+- **TESTING** — `scripts/haiku_syntax_check.sh` compile-checks the Haiku-only
+  sources with a local `x86_64-unknown-haiku-g++` (under `~/haiku-cross/`); run
+  it before every commit that touches engine/UI. On the VM, `sh scripts/vm.sh
+  test` builds and runs the whole suite there, and `ui_functional_tests` drives
+  the real windows over SSH (a GUI process on that VM does reach app_server).
+  See `docs/agent-prompts/09-ui-functional-tests.md`.
 - **Phase E — MIDI depth** ✅ (instrument; host-tested + VM-verified): per-track
   `Instrument` (waveform + ADSR), rewritten stateless Synth, InstrumentWindow
   editor. External MIDI-in + sample/wavetable synth deferred. New: `Instrument.h`.
@@ -195,7 +195,7 @@ scripts/               VM helper scripts (git-pulled + run in the VM)
 
 ## CRITICAL constraint — this Haiku image has no media reader plugins
 
-The target VM (Haiku **hrev57937**, r1beta5-era, x86_64) ships Media Kit
+The target image (Haiku R1/beta6, x86_64) ships Media Kit
 *nodes* but **no file reader/decoder plugins** (`/boot/system/add-ons/media/
 plugins/` does not exist). So `BMediaFile` returns **"No handler"** and
 MediaPlayer itself can't open a WAV. `pkgman install ffmpeg` does NOT fix it
@@ -227,22 +227,25 @@ cmake -B build && cmake --build build
 
 ## Dev loop (host ⇄ VM)
 
-Claude edits + builds/tests kit-free code on Marc's **Linux host**. Haiku
-runs in a **GNOME Boxes / libvirt KVM** VM. Code moves host→VM via git:
-the host serves the repo over `python3 -m http.server 8000` (host IP
-`192.168.1.230`); the VM `git pull`s from `http://192.168.1.230:8000/.git`.
-There is **no GitHub remote**. To ship code: commit on host →
-`git update-server-info` → in VM `git pull && cmake --build build`.
+Claude edits + builds/tests kit-free code on Marc's **Linux host**. Haiku runs
+in a **libvirt QEMU/KVM** VM (`haiku-beta6`, 2 vCPU / 2 GB, 192.168.122.48).
 
-Helper scripts pattern: commit a script under `scripts/`, then in the VM
-`cd ~/haiku-daw && git pull && sh scripts/<name>.sh`.
+Code moves with **`sh scripts/vm.sh`**, which puts the host's current branch on
+the VM's checkout (or `VM_REF=<ref>`): a commit already pushed is fetched by the
+VM **from GitHub** (`origin`, public, through the VM's NAT), and one that is not
+pushed goes over in a `git bundle`. `sh scripts/vm.sh ssh '<cmd>'` runs a
+command there, `build`/`test` sync and build. The host is authoritative; the VM
+never commits.
+
+The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
+2026-10-09). Push branches and master; never force-push.
 
 ## Hard-won lessons (don't repeat these)
 
 - **Do NOT touch the VM's libvirt network config.** Attempts at passt and
-  bridged networking and qemu `custom-argv` each broke Haiku's boot or made
-  gnome-boxes unable to open the VM. Plain user-NAT + the git-pull loop is
-  the working setup. SSH-into-the-VM was abandoned on purpose.
+  bridged networking and qemu `custom-argv` each broke Haiku's boot. Plain
+  user-NAT is the working setup, and SSH into the VM works over it (it is how
+  `scripts/vm.sh` and the functional tests drive the machine).
 - The VM decode failure was the missing media plugins (above), not the
   code — verified by MediaPlayer also failing and by `media_probe.sh`.
 
