@@ -52,15 +52,23 @@ int main() {
     Lv2Host& host = Lv2Host::Instance();
     host.ScanAll();
 
-    // Any installed plugin with parameters will do: the test asserts on the
-    // values it set, not on a particular plugin.
+    // The test asserts on the values it sets, not on a particular plugin, but
+    // it does need a CONTINUOUS parameter to set: every plugin here starts with
+    // toggles and enumerations (`Enabled` is port 0 on all of them), where a
+    // mid-range value rounds back to where it started and publishes nothing --
+    // correct behaviour, and nothing to assert on. So the search prefers a
+    // plugin that has one and falls back to any.
     const Lv2PluginInfo* pick = nullptr;
+    const Lv2PluginInfo* fallback = nullptr;
     for (const Lv2PluginInfo& p : host.Plugins()) {
         if (p.params.empty()) continue;
-        if (!MakeEffect(EffectDesc{}, 48000.0)) { /* factory probe, ignored */ }
-        pick = &p;
-        break;
+        if (!fallback) fallback = &p;
+        for (const Lv2ParamInfo& pi : p.params) {
+            if (!pi.isInteger && pi.mx > pi.mn) { pick = &p; break; }
+        }
+        if (pick) break;
     }
+    if (!pick) pick = fallback;
     if (!pick) {
         std::printf("lv2_live_editor_tests: SKIP -- no LV2 plugin with "
                     "parameters is installed\n");
