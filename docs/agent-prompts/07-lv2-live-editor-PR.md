@@ -267,6 +267,22 @@ deleting the RT-thread publish makes it fail. Its SKIPs exit 77 with
 `SKIP_RETURN_CODE` set, so "no plugin installed" or "no audio device" can no
 longer be reported as a pass.
 
+### The stale panel (found by the first review, fixed later)
+
+Review #1 flagged that the generic parameter panel holds a copy of the chain
+and commits by sending that whole copy back, so anything changed elsewhere in
+the meantime is rewritten from its snapshot. I fixed only the *open* path at the
+time (the panel asks MainWindow to open an editor rather than opening it from
+its stale copy), because the rest looked like package 03's ground.
+
+It is this package's business after all: with a native editor now committing to
+the model, a panel knob move would silently revert the parameter the editor had
+just written -- and, since the editor is live, undo it out of the audio too.
+MainWindow pushes the model's chain to an open panel whenever the chain changes,
+and the panel replaces its copy, except mid-drag (the indices a drag holds would
+move under it, and its own commit is the edit in progress). The chain's
+encode/decode now exists once, shared by both directions of that conversation.
+
 ### Third review
 
 Six findings, all fixed (a seventh, the UI-selection regression, was already
