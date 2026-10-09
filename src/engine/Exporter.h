@@ -104,8 +104,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
 // "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by
 // soloing it, in the format/window `opts` selects. Progress spans the whole
 // job (one stem is 1/N of it) and cancellation stops between stems and inside
-// the one in flight. Returns the number of stems written (0 on cancellation).
-// Kit-free, host-testable.
+// the one in flight. Returns the number of stems written -- a track with
+// nothing to render contributes no stem but does not fail the run, and a
+// cancelled run returns what it managed before the cancel (0 if none, which is
+// what a caller should read as "cancelled or failed"). Kit-free, host-testable.
 int ExportStems(const Project& project, const std::string& dir,
                 double outRate = 0.0, const ExportOptions& opts = {});
 

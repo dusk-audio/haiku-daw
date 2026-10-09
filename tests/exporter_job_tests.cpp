@@ -249,10 +249,33 @@ int main() {
         c2.notes.push_back(n2);
         t2.midiClips.push_back(c2);
         two.AddTrack(t2);
-
         const std::string dir = "/tmp/haiku_daw_stem_dir";
         std::string mk = "mkdir -p " + dir;
         if (system(mk.c_str()) != 0) return 1;
+
+        // Both stems render here, so the LAST one's own report reaches the end
+        // of its band: 1.0 must still arrive exactly once (the run's final
+        // report must not be a second one).
+        std::vector<float> full;
+        ExportJob jf;
+        jf.progress = [&](float f) { full.push_back(f); };
+        ExportOptions of;
+        of.job = &jf;
+        CHECK(ExportStems(two, dir, SR, of) == 2);
+        int fullOnes = 0;
+        for (float f : full) if (f == 1.0f) fullOnes++;
+        CHECK(!full.empty() && full.back() == 1.0f);
+        CHECK(fullOnes == 1);
+
+        // A LAST track with nothing to render: its stem attempt fails ("nothing
+        // to render"), which must not leave the job's progress short of 1.0 --
+        // the run as a whole still succeeded.
+        Track t3;
+        t3.id = two.NextTrackId();
+        t3.type = TrackType::Midi;
+        t3.name = "empty";
+        t3.gain = 1.0f;
+        two.AddTrack(t3);
 
         std::vector<float> seen;
         ExportJob job;
@@ -261,12 +284,18 @@ int main() {
         o.job = &job;
         o.format = ExportFormat{24};   // 24-bit must reach each stem's header
         const int wrote = ExportStems(two, dir, SR, o);
-        CHECK(wrote == 2);
+        CHECK(wrote == 2);   // the empty track wrote no stem
+        CHECK(!Exists(dir + "/03_empty.wav"));
         CHECK(!seen.empty() && seen.back() == 1.0f);
         bool mono = true;
         for (size_t i = 1; i < seen.size(); i++)
             if (seen[i] < seen[i - 1]) mono = false;
         CHECK(mono);
+        // ...and EXACTLY once: it is the caller's "done" signal, not a
+        // measurement that may arrive twice.
+        int ones = 0;
+        for (float f : seen) if (f == 1.0f) ones++;
+        CHECK(ones == 1);
 
         const std::string s1 = dir + "/01_synth.wav";
         CHECK(Exists(s1));
@@ -285,6 +314,27 @@ int main() {
         ExportOptions co;
         co.job = &cj;
         CHECK(ExportStems(two, dir, SR, co) == 0);
+
+        // ...and a cancel that lands AFTER a stem was written returns that
+        // count (the caller must still be able to tell it was cancelled: the
+        // progress stops where it stopped, short of 1.0).
+        std::string rm2 = "rm -f " + dir + "/0*.wav";
+        if (system(rm2.c_str()) != 0) return 1;
+        std::atomic<bool> cancel2{false};
+        std::vector<float> seen2;
+        ExportJob cj2;
+        cj2.cancel = &cancel2;
+        cj2.progress = [&](float f) {
+            seen2.push_back(f);
+            if (f > 0.34f) cancel2 = true;   // inside the SECOND stem
+        };
+        ExportOptions co2;
+        co2.job = &cj2;
+        const int partial = ExportStems(two, dir, SR, co2);
+        CHECK(partial == 1);
+        CHECK(!seen2.empty() && seen2.back() < 1.0f);
+        CHECK(Exists(dir + "/01_synth.wav"));
+        CHECK(!Exists(dir + "/02_second.wav"));
 
         std::string rm = "rm -rf " + dir;
         if (system(rm.c_str()) != 0) return 1;

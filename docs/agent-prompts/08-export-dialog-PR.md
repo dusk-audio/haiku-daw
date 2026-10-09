@@ -19,7 +19,7 @@ the honest split; the click list is at the end.
 | `src/ui/MainWindow.h/.cpp` | `OpenExportWindow`, `StartExport` (stop → flush → snapshot → worker), `FinishExport` (pulse: reap, report, alert on failure). The two menu items now open the dialog; the file panels are shown from the dialog's answer. |
 | `src/app/AppSettings.h/.cpp` | The dialog's last choices (nine fields) persist; an old settings file keeps the defaults. |
 | `src/ui/EffectsWindow.h/.cpp` | `kMsgFxPanelFlush`: the generic panel hands over a wheel edit still inside its 400 ms debounce, so a save/export/flush can apply it itself. |
-| `tests/exporter_job_tests.cpp` (new) | 44 checks: progress monotonicity and the exactly-1.0 contract, cancel before/during the render and inside the write, the destination-untouched and no-`.part` guarantees, dither on/off, the range slice equalling the full bounce, stems format forwarding. |
+| `tests/exporter_job_tests.cpp` (new) | 53 checks: progress monotonicity and the exactly-1.0 contract, cancel before/during the render and inside the write, the destination-untouched and no-`.part` guarantees, dither on/off, the range slice equalling the full bounce, stems format forwarding. |
 
 ## Semantics and decisions
 
@@ -79,7 +79,7 @@ the task allows ("if it is cheap; otherwise leave it and say so").
 ```
 cmake --build build-host                       # exit 0
 ctest --test-dir build-host                    # 50/50  (49 + exporter_job_tests)
-./build-host/exporter_job_tests                # 44 checks, 0 failures
+./build-host/exporter_job_tests                # 53 checks, 0 failures
 sh scripts/haiku_syntax_check.sh <changed UI>  # 0 FAIL
 # On the VM (the tip with all three commits); both configurations, the daw
 # binary links, configure and build exit 0:
@@ -99,6 +99,9 @@ ctest --test-dir build-off                     # 46/46   (-DDAW_LV2=OFF)
 | range: clip placement not shifted | caught (1) |
 | range: notes not shifted | caught (1) |
 | stems ignore the format | caught (2) |
+| stems: no final 1.0 report | caught (2) |
+| stems: 1.0 reported even after a cancel | caught (1) |
+| the monotone guard allows repeated values again | caught (1) |
 
 Two of these were the tests' own fault first: the "cancel during the write"
 case used a file that fitted in ONE write chunk (no middle to cancel in), and
@@ -108,6 +111,27 @@ Both fixed before the mutations were re-run.
 One mutation is deliberately left uncaught: removing the between-stems cancel
 check changes nothing observable (each stem's inner export refuses at its own
 first check), it only skips a deep copy per remaining stem. The comment says so.
+
+## The review finding on the stems' progress
+
+A reviewer caught the job contract's sharp edge: `ExportStems` maps each stem
+into its own band of 0..1, so when the LAST stem failed — an empty track has
+nothing to render, and its export returns false before reporting anything — the
+run finished with `written > 0` (a success for the caller) while the bar stopped
+short of 100 %. `ExportJob` says progress reaches 1.0 exactly once, on success,
+and that shape did not hold it.
+
+Fixed: `ExportStems` now has its own monotone guard (the same `ExportRun` the
+single export uses) and reports 1.0 after the loop when a stem was written and
+the run was not cancelled. The guard drops REPEATED values as well as backwards
+ones (`<=`, not `<`) — which is what keeps "exactly once" true in the common
+shape, where the last stem succeeded and its own report already reached the end
+of its band. Two test shapes came out of it, both mutation-checked; the first
+attempt had only the empty-last-track shape, which cannot see a doubled 1.0.
+
+The same finding reached into the UI: a stems run cancelled after some stems
+were written still returns a count, so `FinishExport` now checks the cancel flag
+BEFORE the written count — a cancel is a cancel, not "exported 2 stem(s)".
 
 ## What is NOT verified
 

@@ -147,7 +147,10 @@ public:
     explicit ExportRun(const ExportJob* job) : fJob(job) {}
     void Report(float f) {
         if (!fJob || !fJob->progress) return;
-        if (f < fLast) return;
+        // `<=` and not `<`: a repeated value is noise, and the contract is that
+        // 1.0 arrives exactly once -- the caller's "done" signal, not a
+        // measurement that can arrive twice.
+        if (f <= fLast) return;
         if (f > 1.0f) f = 1.0f;
         fLast = f;
         fJob->progress(f);
@@ -689,6 +692,10 @@ static std::string SanitizeName(const std::string& n) {
 
 int ExportStems(const Project& project, const std::string& dir, double outRate,
                 const ExportOptions& opts) {
+    // The stems report through the job's own guard: one stem's band must not be
+    // able to walk the whole job's progress backwards, and the final 1.0 below
+    // must not be a second one.
+    ExportRun run(opts.job);
     // Count the stems first so each one can own an equal slice of the job's
     // progress (one stem is a whole export of its own).
     int total = 0;
@@ -728,9 +735,8 @@ int ExportStems(const Project& project, const std::string& dir, double outRate,
             if (opts.job->progress && total > 0) {
                 const float s0 = (float)done / (float)total;
                 const float s1 = (float)(done + 1) / (float)total;
-                const std::function<void(float)> outer = opts.job->progress;
-                subJob.progress = [outer, s0, s1](float f) {
-                    outer(s0 + (s1 - s0) * f);
+                subJob.progress = [&run, s0, s1](float f) {
+                    run.Report(s0 + (s1 - s0) * f);
                 };
             }
             sub.job = &subJob;
@@ -738,6 +744,16 @@ int ExportStems(const Project& project, const std::string& dir, double outRate,
         if (ExportWav(copy, path, outRate, sub)) written++;
         done++;
     }
+    // A stem that renders nothing (an empty track has nothing to render) fails
+    // its own export but does not fail the RUN: the other stems were written,
+    // and the caller is told so. Its progress band therefore never reached its
+    // end, and without this the bar would stall short of 100% over a result the
+    // caller reports as success. (Not after a cancel: that run did not finish,
+    // and the bar should stop where it stopped.)
+    if (written > 0
+        && !(opts.job && opts.job->cancel
+             && opts.job->cancel->load(std::memory_order_relaxed)))
+        run.Report(1.0f);
     return written;
 }
 

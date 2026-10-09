@@ -2756,16 +2756,19 @@ void MainWindow::FinishExport() {
     if (fExportThread.joinable()) fExportThread.join();
     fExportSnapshot.reset();
 
-    if (fExportOk) {
+    // Cancellation is checked FIRST: a stems run that was stopped after some
+    // stems were written still reports a count, and that is a cancel, not a
+    // finished export.
+    if (fExportCancel.load()) {
+        std::fprintf(stderr, "MainWindow: export cancelled: %s\n",
+                     fExportPath.c_str());
+    } else if (fExportOk) {
         if (fExportIsStems)
             std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
                          fExportWritten, fExportPath.c_str());
         else
             std::fprintf(stderr, "MainWindow: exported %s\n",
                          fExportPath.c_str());
-    } else if (fExportCancel.load()) {
-        std::fprintf(stderr, "MainWindow: export cancelled: %s\n",
-                     fExportPath.c_str());
     } else {
         std::fprintf(stderr, "MainWindow: export failed: %s\n",
                      fExportPath.c_str());
