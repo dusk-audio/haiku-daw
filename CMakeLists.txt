@@ -113,6 +113,10 @@ add_executable(model_tests tests/model_tests.cpp)
 target_link_libraries(model_tests PRIVATE daw_model)
 add_test(NAME model_tests COMMAND model_tests)
 
+add_executable(commandstack_tests tests/commandstack_tests.cpp)
+target_link_libraries(commandstack_tests PRIVATE daw_model)
+add_test(NAME commandstack_tests COMMAND commandstack_tests)
+
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)
@@ -540,7 +544,11 @@ if(HAIKU)
     add_executable(ui_functional_tests tests/ui_functional_tests.cpp)
     target_link_libraries(ui_functional_tests PRIVATE daw_ui)
     add_test(NAME ui_functional_tests COMMAND ui_functional_tests)
-    set_tests_properties(ui_functional_tests PROPERTIES SKIP_RETURN_CODE 77)
+    # TIMEOUT: a window test that wedges (a prompt nobody answers, a lock held)
+    # must fail the suite rather than block ctest forever. The whole run is
+    # ~15 s normally; the longest single wait inside it is 60 s.
+    set_tests_properties(ui_functional_tests PROPERTIES SKIP_RETURN_CODE 77
+                         TIMEOUT 300)
 
     # --- Sample effect add-on (plugin ABI demo) -----------------------
     # A Haiku shared add-on (.so) the host loads at runtime. Only needs the
