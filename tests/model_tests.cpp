@@ -828,6 +828,60 @@ static void test_note_commands() {
     CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 1);
 }
 
+// A named MIDI transform (package 04): the piano roll computes the result and
+// the command records it. It must name the undo step, restore notes exactly,
+// and -- unlike the edit path -- never resize the region.
+static void test_apply_midi_op_command() {
+    std::printf("test_apply_midi_op_command\n");
+    Project p;
+    CommandStack stack;
+    stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Syn"), p);
+    TrackId id = p.Tracks().front().id;
+
+    MidiClip mc; mc.startFrame = 0; mc.lengthFrames = 8000;
+    auto add = std::make_unique<AddMidiClipCommand>(id, mc);
+    auto* addPtr = add.get();
+    stack.Execute(std::move(add), p);
+    const ClipId cid = addPtr->CreatedId();
+
+    MidiNote n; n.pitch = 64; n.velocity = 90; n.startFrame = 0; n.lengthFrames = 500;
+    stack.Execute(std::make_unique<SetMidiClipNotesCommand>(
+        id, cid, std::vector<MidiNote>{ n }), p);
+    MidiNote longNote = n;
+    longNote.startFrame = 7500; longNote.lengthFrames = 1000;   // ends at 8500
+    std::vector<MidiNote> stretched = { n, longNote };
+
+    // The EDIT path grows a region to cover a note drawn past its end ...
+    stack.Execute(std::make_unique<SetMidiClipNotesCommand>(id, cid, stretched), p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8500);
+    stack.Undo(p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8000);
+
+    // ... and the TRANSFORM path must not, even when handed the same list: a
+    // transform edits notes, not the region's length (the roll clamps, and this
+    // is the command's own guarantee underneath that).
+    auto cmd = std::make_unique<ApplyMidiOpCommand>(id, cid, stretched, "Quantize");
+    CHECK(cmd->Name() == "Quantize");
+    stack.Execute(std::move(cmd), p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 2);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].pitch == 64);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8000);
+
+    stack.Undo(p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 1);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes[0].startFrame == 0);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->lengthFrames == 8000);
+    stack.Redo(p);
+    CHECK(p.FindTrack(id)->FindMidiClip(cid)->notes.size() == 2);
+
+    // A vanished region fails Do() instead of throwing or half-applying.
+    stack.Execute(std::make_unique<RemoveMidiClipCommand>(id, cid), p);
+    CommandStack s2;
+    bool ok = s2.Execute(std::make_unique<ApplyMidiOpCommand>(
+        id, cid, std::vector<MidiNote>{ n }, "Legato"), p);
+    CHECK(!ok);
+}
+
 static void test_frame_seconds_roundtrip() {
     std::printf("test_frame_seconds_roundtrip\n");
     CHECK(SecondsToFrames(1.0, 48000.0) == 48000);
@@ -929,6 +983,7 @@ int main() {
     test_active_take();
     test_review_fixes();
     test_freeze_track();
+    test_apply_midi_op_command();
     test_frame_seconds_roundtrip();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

@@ -780,6 +780,32 @@ private:
     Frame                 fOldLen = 0;
 };
 
+// Replace one MIDI region's note list with the result of a named piano-roll
+// transform (quantize / humanize / legato / transpose / velocity). The
+// transform runs in the roll, on its snapshot, and the RESULT is what travels
+// (see MidiOps.h for why the parameters do not); this records it. `name` is
+// carried so Undo reads "Undo Quantize" rather than "Undo Edit Notes".
+//
+// Unlike SetMidiClipNotesCommand this does NOT grow the region. A transform
+// clamps its own output to the window, so growth could only come from content
+// that was already outside it — and a transform must not resize the region as
+// a side effect. Its Undo therefore restores notes only, never a length.
+class ApplyMidiOpCommand : public Command {
+public:
+    ApplyMidiOpCommand(TrackId track, ClipId clip, std::vector<MidiNote> notes,
+                       std::string name)
+        : fTrack(track), fClip(clip), fNew(std::move(notes)),
+          fName(std::move(name)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return fName; }
+private:
+    TrackId               fTrack;
+    ClipId                fClip;
+    std::vector<MidiNote> fNew, fOld;
+    std::string           fName;
+};
+
 // Replace a MIDI region's controller events (CC / pitch-bend / program /
 // pressure), leaving its notes untouched — the mirror of
 // SetMidiClipNotesCommand, which touches only `notes`. The piano roll's CC lane
