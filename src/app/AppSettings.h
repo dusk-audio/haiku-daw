@@ -18,6 +18,19 @@ struct AppSettings {
     std::string lastDir;                 // last Open/Save/Import directory
     float winL = 80, winT = 80, winR = 1280, winB = 820;   // window frame
 
+    // The export dialog's last choices, so a repeat bounce does not have to be
+    // re-specified. 0 sample rate = the project's own; range 0 = whole project,
+    // 1 = the loop range; stems 0 = mixdown, 1 = stems.
+    int   exportBitDepth  = 16;
+    bool  exportDither    = true;
+    int   exportSampleRate = 0;
+    bool  exportNormalize = false;
+    float exportTargetLufs = -14.0f;
+    float exportTruePeakCeil = -1.0f;
+    bool  exportLimiter   = false;
+    int   exportRange     = 0;
+    int   exportStems     = 0;
+
     // Serialize to / parse from the settings text. Deserialize leaves defaults
     // for missing keys and returns false only on empty/garbage input.
     std::string Serialize() const;
