@@ -307,6 +307,15 @@ int PianoRollView::NoteAt(BPoint where) const {
 }
 
 void PianoRollView::Apply() {
+    // The model grows the region to cover a note drawn past its end
+    // (SetMidiClipNotesCommand only ever grows), so the window a later
+    // transform clamps to has to grow with it: otherwise the note the user just
+    // drew past the end is the one a quantize skips, and a note near the old
+    // edge loses the tail the region now has room for.
+    for (const MidiNote& n : fNotes) {
+        const Frame e = n.startFrame + (n.lengthFrames > 0 ? n.lengthFrames : 1);
+        if (e > fClipLen) fClipLen = e;
+    }
     BMessage m(kMsgApplyNotes);
     m.AddInt64("track", (int64)fTrack);
     m.AddInt64("clip", (int64)fClip);
@@ -323,6 +332,11 @@ void PianoRollView::Apply() {
 // selection indices to re-resolve against a note list that may have moved under
 // it, and a transform that changed nothing never reaches the undo stack.
 void PianoRollView::RunMidiOp(MidiOp op, int param) {
+    // Never mid-gesture: a drag holds a pre-transform snapshot (fDragOrig) that
+    // the next MouseMoved replays, so a transform landing inside one would be
+    // silently undone for the dragged notes and kept for the rest -- a state no
+    // single action produced.
+    if (fDrag != Drag::None) return;
     const NoteSel sel = SelectedCount() > 0 ? NoteSel(fSel) : NoteSel();
     std::vector<MidiNote> out = fNotes;
     switch (op) {
@@ -964,12 +978,20 @@ void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
         case '5': fTool = Tool::Scissors; Invalidate(); break;
         case '6': fTool = Tool::Glue;     Invalidate(); break;
         case '7': fTool = Tool::Velocity; Invalidate(); break;
-        case 'q': case 'Q':
-            // Plain q runs the last-used quantize. Command-Q is left to the app
-            // (quit), the same way every other unclaimed letter passes through.
-            if (modifiers() & B_COMMAND_KEY) BView::KeyDown(bytes, numBytes);
+        case 'q': case 'Q': {
+            // Plain q runs the last-used quantize; an auto-repeat is ignored, or
+            // holding the key would stack one undo step per repeat (at strength
+            // < 1 each one moves the notes further, so nothing collapses them).
+            // Command-Q falls through as before -- the roll has no menu bar, so
+            // quitting from here has never worked and this does not change it.
+            int32 repeat = 0;
+            if (BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr)
+                cur->FindInt32("be:key_repeat", &repeat);
+            if ((modifiers() & B_COMMAND_KEY) || repeat > 1)
+                BView::KeyDown(bytes, numBytes);
             else RunMidiOp(MidiOp::Quantize);
             break;
+        }
         case 1: case 'a': case 'A':   // Command-A: select all
             if (modifiers() & B_COMMAND_KEY) {
                 fSel.assign(fNotes.size(), 1); Invalidate();
