@@ -619,6 +619,33 @@ private:
     TrackType               fSFreezeType = TrackType::Audio;
 };
 
+// Point clips at new source files: the Locate flow for media that was moved
+// while the project was closed. One command for the whole walk, so the whole
+// repair is one undo step. An entry whose clip (or track) is gone by the time
+// it runs is skipped, not a failure -- the command's job is repair, and a
+// partly-repairable project is still worth repairing.
+struct RelinkEntry {
+    TrackId     track = kInvalidTrackId;
+    ClipId      clip  = kInvalidClipId;
+    std::string newPath;
+};
+
+class RelinkMediaCommand : public Command {
+public:
+    explicit RelinkMediaCommand(std::vector<RelinkEntry> relinks)
+        : fNew(std::move(relinks)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Locate Missing Media"; }
+
+private:
+    std::vector<RelinkEntry> fNew;
+    // What Do actually changed: (track, clip, the path it had). Undo restores
+    // exactly these, so a skipped entry is never "undone" to a wrong path.
+    std::vector<RelinkEntry> fOld;
+};
+
 // Move a track up (-1) or down (+1) in the track list. Clamped; a no-op move
 // (already at the edge) reports failure so it doesn't hit the undo stack.
 class MoveTrackCommand : public Command {

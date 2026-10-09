@@ -350,8 +350,10 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     for (const Bus& b : fBuses)
         if (!b.streams.empty() || !b.notes.empty()) { anyContent = true; break; }
     if (!anyContent && minEndFrame <= 0) {
+        // Distinct from a device failure, so the UI can tell "there is nothing
+        // to play" (not worth an alert) from "the device did not open".
         fprintf(stderr, "Engine: nothing to play\n");
-        return B_ERROR;
+        return B_ENTRY_NOT_FOUND;
     }
 
     // Extend the play range past content for looping / a metronome-only run.

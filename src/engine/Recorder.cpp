@@ -104,6 +104,7 @@ void Recorder::DiskLoop() {
     // the take is recoverable; overwriting a take the project still uses is not.
     if (!fWriter.Open(fPath, rate, ch, /*exclusive*/ true)) {
         fprintf(stderr, "Recorder: cannot open '%s'\n", fPath.c_str());
+        fError.store(1, std::memory_order_relaxed);
         return;
     }
 
@@ -123,7 +124,8 @@ void Recorder::DiskLoop() {
             std::memset(ibuf, 0, sizeof(ibuf));
             while (drop > 0) {
                 const size_t chunk = drop > 4096 ? 4096 : (size_t)drop;
-                fWriter.WriteInt16(ibuf, chunk);
+                if (!fWriter.WriteInt16(ibuf, chunk))
+                    fError.store(2, std::memory_order_relaxed);
                 drop -= (int64_t)chunk;
             }
             // Advance the waveform envelope over the padded (silent) frames so
@@ -169,7 +171,8 @@ void Recorder::DiskLoop() {
                 }
             }
         }
-        fWriter.WriteInt16(ibuf, got);
+        if (!fWriter.WriteInt16(ibuf, got))
+            fError.store(2, std::memory_order_relaxed);
     }
 
     fWriter.Close();

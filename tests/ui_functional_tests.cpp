@@ -990,6 +990,88 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     std::remove(openPath);
 }
 
+// --- 10. M0.4: failures the user can see ------------------------------------
+
+// Two of the new reports, through the handlers that raise them: a save into a
+// path that cannot exist, and a load whose media is gone (one dialog, Skip,
+// and the clip is left exactly as it was). The recorder's failure report
+// cannot be driven here -- the harness has no capture device.
+static void TestErrorReports(MainWindow* win, Project& project,
+                             CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_error_reports\n");
+
+    // A save that cannot work: the report is the point (the prompt would
+    // already have refused to proceed).
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    BMessage bad(MSG_SAVE_REF);
+    bad.AddRef("directory", &dir);
+    bad.AddString("name", "no_such_dir_haiku_daw/x.dawproj");
+    win->PostMessage(&bad);
+    CHECK(WaitFor([&] { return AlertUp("Save Project"); }));
+    HideOtherWindows(win);                    // the alert, as its OK does
+    CHECK(WaitQuiet());
+
+    // Clean first: the fixture load below must not have to answer the
+    // unsaved-changes prompt (M0.1's own flow covers that).
+    const char* cleanPath = "/tmp/haiku_daw_ui_errors.dawproj";
+    std::remove(cleanPath);
+    BMessage save(MSG_SAVE_REF);
+    save.AddRef("directory", &dir);
+    save.AddString("name", "haiku_daw_ui_errors.dawproj");
+    win->PostMessage(&save);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool clean = !stack.IsDirty();
+        win->Unlock();
+        return clean;
+    }));
+
+    // A load whose clip file is gone: the load succeeds, and ONE dialog
+    // offers Locate… or Skip.
+    const char* projPath = "/tmp/haiku_daw_ui_missing.dawproj";
+    const char* gonePath = "/tmp/haiku_daw_ui_gone.wav";   // never created
+    std::remove(projPath);
+    std::remove(gonePath);
+    {
+        Project other;
+        other.sampleRate = project.sampleRate;
+        Track t;
+        t.id = other.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "gone-track";
+        Clip c;
+        c.id = other.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000;
+        c.sourcePath = gonePath;
+        t.clips.push_back(c);
+        CHECK(other.AddTrack(t));
+        CHECK(ProjectIO::Save(other, projPath));
+    }
+    entry_ref ref;
+    CHECK(BEntry(projPath).GetRef(&ref) == B_OK);
+    BMessage open(MSG_OPEN_REF);
+    open.AddRef("refs", &ref);
+    win->PostMessage(&open);
+    CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
+    CHECK(AnswerAlertWhenUp("Missing Media", 0));      // Skip
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        bool ok = false;
+        for (const Track& t : project.Tracks())
+            if (t.name == "gone-track" && t.clips.size() == 1
+                && t.clips[0].sourcePath == gonePath)
+                ok = true;
+        win->Unlock();
+        return ok;
+    }));
+    std::remove(projPath);
+    std::remove(cleanPath);
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1019,6 +1101,7 @@ static int32 TestThread(void*) {
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);
 #endif
+    TestErrorReports(win, project, stack);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);

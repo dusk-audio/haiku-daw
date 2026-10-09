@@ -10,6 +10,7 @@
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
 #include "../model/Commands.h"
+#include "../plugin/PluginHost.h"   // "is this insert loadable?" for the badge
 #include "../midi/MidiPort.h"
 
 #include <PopUpMenu.h>
@@ -48,6 +49,28 @@ void InspectorView::Refresh() {
 void InspectorView::RefreshFx() {
     Refresh();
     if (BWindow* w = Window()) w->PostMessage(kMsgFxChanged);
+}
+
+
+// Can this insert actually load right now? Built-ins are compiled in; an
+// add-on resolves by its registered id; an LV2 by the scan's plugin list (and
+// never in a build without LV2). A chain carrying a plugin that is not
+// installed instantiates nothing, and without this the row looked ordinary --
+// silence with no explanation.
+static bool InsertAvailable(const EffectDesc& d) {
+    if (d.type == EffectType::Plugin) {
+        for (const PluginInfo& p : PluginHost::Instance().Plugins())
+            if (p.name == d.pluginName) return true;
+        return false;
+    }
+    if (d.type == EffectType::Lv2) {
+#ifdef DAW_HAVE_LV2
+        return Lv2Host::Instance().Find(d.pluginName) != nullptr;
+#else
+        return false;
+#endif
+    }
+    return true;
 }
 
 // Insert-slot list metrics. Rows are compact because the strip is shared with
@@ -234,6 +257,8 @@ void InspectorView::Draw(BRect) {
         // A bypassed insert keeps its slot but reads as inactive.
         SetHighColor(d.bypassed ? ColTextDim() : ColText());
         BString nm(EffectDisplayName(d).c_str());
+        if (!InsertAvailable(d))
+            nm << "  (missing)";
         TruncateString(&nm, B_TRUNCATE_END, r.Width() - kFxDotW - 12.0f);
         DrawString(nm.String(), BPoint(r.left + 6, r.bottom - 5));
 

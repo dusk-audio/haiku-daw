@@ -973,6 +973,54 @@ static void test_undo_history_cap() {
     CHECK(p.markers.size() == extra);
 }
 
+// The Locate flow's command: point clips at new files, one undo step for the
+// whole walk, and a vanished clip is skipped rather than failing the repair.
+static void test_relink_media() {
+    std::printf("test_relink_media\n");
+    Project p;
+    CommandStack stack;
+    auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "A");
+    AddTrackCommand* raw = add.get();
+    CHECK(stack.Execute(std::move(add), p));
+    const TrackId tid = raw->CreatedId();
+
+    Clip c1;
+    c1.id = p.NextClipId();
+    c1.sourcePath = "/gone/one.wav";
+    c1.lengthFrames = 1000;
+    CHECK(stack.Execute(std::make_unique<AddClipCommand>(tid, c1), p));
+    const ClipId cid1 = c1.id;
+
+    Clip c2;
+    c2.id = p.NextClipId();
+    c2.sourcePath = "/gone/two.wav";
+    c2.startFrame = 2000;
+    c2.lengthFrames = 1000;
+    CHECK(stack.Execute(std::make_unique<AddClipCommand>(tid, c2), p));
+    const ClipId cid2 = c2.id;
+
+    std::vector<RelinkEntry> relinks = {
+        { tid, cid1, "/found/one.wav" },
+        { tid, cid2, "/found/two.wav" },
+        { tid, (ClipId)99999, "/found/ghost.wav" },   // gone: skipped
+    };
+    CHECK(stack.Execute(std::make_unique<RelinkMediaCommand>(relinks), p));
+    CHECK(stack.UndoName() == "Locate Missing Media");
+    CHECK(p.FindTrack(tid)->FindClip(cid1)->sourcePath == "/found/one.wav");
+    CHECK(p.FindTrack(tid)->FindClip(cid2)->sourcePath == "/found/two.wav");
+
+    // One undo restores BOTH (one command), and the skipped entry changed
+    // nothing to restore.
+    CHECK(stack.Undo(p));
+    CHECK(p.FindTrack(tid)->FindClip(cid1)->sourcePath == "/gone/one.wav");
+    CHECK(p.FindTrack(tid)->FindClip(cid2)->sourcePath == "/gone/two.wav");
+
+    // Redo re-applies only the applicable ones.
+    CHECK(stack.Redo(p));
+    CHECK(p.FindTrack(tid)->FindClip(cid1)->sourcePath == "/found/one.wav");
+    CHECK(p.FindTrack(tid)->FindClip(cid2)->sourcePath == "/found/two.wav");
+}
+
 int main() {
     test_undo_history_cap();
     test_add_and_undo_track();
@@ -995,6 +1043,7 @@ int main() {
     test_freeze_track();
     test_apply_midi_op_command();
     test_frame_seconds_roundtrip();
+    test_relink_media();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

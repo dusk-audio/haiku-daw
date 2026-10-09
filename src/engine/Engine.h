@@ -126,6 +126,9 @@ public:
     // so seeking is just a reload at a new start. `minEndFrame` extends the
     // playback end past the last clip/note (used for looping past content, so
     // the playhead keeps advancing through silence up to the loop point).
+    // Returns B_ENTRY_NOT_FOUND when there is nothing to play and the caller
+    // did not extend the range -- that is not an error to show anyone; every
+    // other failure is the output device.
     status_t Load(const Project& project, Frame startFrame = 0,
                   Frame minEndFrame = 0);
 

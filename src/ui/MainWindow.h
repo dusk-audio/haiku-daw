@@ -11,7 +11,7 @@
 
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
-#include "../model/Command.h"
+#include "../model/Commands.h"   // RelinkEntry (the Locate… walk)
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
 #include "../midi/MidiPort.h"
@@ -120,6 +120,12 @@ private:
     // File > New: ask, then a fresh empty project at the session's rate.
     void NewProject();
     void RememberProject(const std::string& path);  // recent list + menu
+    // After a load: one dialog for media that is gone, then either silence
+    // (Skip) or a walk to find each file (Locate…), applied as one command.
+    void CollectMissingMedia();
+    void StartRelinkWalk(std::vector<RelinkEntry> missing);
+    void RelinkNext();
+    void FinishRelink();
     void ForgetRecent(const std::string& path);     // ... a file that vanished
     void RebuildRecentMenu();
     // Ask about unsaved changes before an action that would drop them (Quit,
@@ -127,6 +133,9 @@ private:
     // first; with no path yet the save panel opens and the caller is refused.
     bool ConfirmDiscardChanges();
     void RemoveRecoveryFile();       // the recovery copy is no longer needed
+    // One visible report for a failure the user has to know about: an
+    // asynchronous alert, so a report can never hold the window thread.
+    void ReportError(const char* title, const std::string& detail);
     void UpdateTitle();              // "*name — Haiku DAW" while dirty
     // Decode the loaded project's soundfonts into the SoundfontCache before
     // the engine is built (it only ever looks them up). Warns about misses.
@@ -273,6 +282,8 @@ private:
     std::string               fLastDir;      // last Open/Save/Import directory
     std::string               fProjectPath;  // the project's file ("" until saved)
     std::vector<std::string>  fRecentProjects;  // File > Open Recent, newest first
+    std::vector<RelinkEntry>  fRelinkQueue;     // Locate… walk (newPath filled as picked)
+    BFilePanel*               fRelinkPanel = nullptr;
     BMenu*                    fRecentMenu = nullptr;
     std::string               fTitleShown;   // last title set (skip a redundant SetTitle)
     std::string               fTakeDir;      // where recorded takes are written
