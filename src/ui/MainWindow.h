@@ -16,15 +16,17 @@
 #include "../engine/Recorder.h"
 #include "../midi/MidiPort.h"
 #include "../midi/MidiRecorder.h"
+#include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 
 #include <Messenger.h>
 #include <Window.h>
 
 #include <map>
-#include <utility>
 #include <memory>
+#include <utility>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 class BButton;
 class BStringView;
@@ -155,24 +157,25 @@ private:
     // An open native LV2 editor watching one insert (engine -> editor values).
     // The watch lives in the engine, addressed by (track, master, fx), and is
     // cleared both by the editor saying so and by its messenger dying.
-    // One open native editor and the insert it is showing. The engine publishes
-    // a watched insert's live values into a slot; each editor owns one slot and
-    // is fed on the 60 Hz pulse. They are tracked (rather than a single watch)
-    // because several editors can be open at once, and because an editor
-    // addresses its insert by INDEX: a chain edit has to be checked against
-    // every one of them or an editor ends up driving a different effect.
-    struct FxWatch {
-        BMessenger  msgr;                     // the editor window
-        std::string uri;                      // the plugin it is showing
+    // One open native editor and the insert it is showing (see
+    // src/plugin/FxWatchTable.h -- the table, its rules and its slot allocation
+    // are kit-free and host-tested, because those rules are where the bugs
+    // were). Each entry owns one engine watch slot; the editor is fed on the
+    // 60 Hz pulse.
+    struct EditorHandle;
+    struct FxEntry {
+        std::shared_ptr<EditorHandle> editor;
+        std::string uri;
         TrackId     track = kInvalidTrackId;  // chain address (master sentinel ok)
         int         fx = -1;
         int         slot = -1;                // engine watch slot
         uint32_t    gen = 0;                  // last frame pushed to it
     };
-    std::vector<FxWatch> fFxWatches;
+    std::vector<FxEntry> fFxWatches;
+    std::vector<FxWatch> FxWatchSnapshot() const;   // for the kit-free rules
+    FxChainView FxChainFor(const FxWatch& w) const; // the chain one entry names
 
-    int  AllocFxWatchSlot() const;               // -1 when every slot is in use
-    void ApplyFxWatchToEngine(const FxWatch& w); // program the engine for one
+    void ApplyFxWatchToEngine(const FxEntry& w); // program the engine for one
     void ReapplyFxWatches();                     // after an engine rebuild
     void PublishFxParamsNow();                   // stopped transport: publish
     // Open a plugin's own editor for an insert, resolving it against the MODEL

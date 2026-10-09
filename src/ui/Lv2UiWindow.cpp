@@ -1,6 +1,8 @@
 #include "Lv2UiWindow.h"
 
 #include "EffectsWindow.h"   // kMsgFxLive / kMsgFxParamCommit: the editor->model channel
+#include "../plugin/Lv2Host.h"    // UiRequiresInstanceAccess: the direct-access question
+#include "../plugin/Lv2UiMap.h"   // port/slot numbering + the inbound apply policy
 #include "UiMetrics.h"
 
 #include <lilv/lilv.h>
@@ -371,65 +373,35 @@ void UiWriteDropped(LV2UI_Controller, uint32_t, uint32_t, uint32_t,
 void UiApplyInbound(UiLiveLink* link, const LV2UI_Descriptor* desc,
                     LV2UI_Handle ui) {
     if (!link || !desc || !desc->port_event) return;
-    std::map<int, float> in;
+    std::map<int, float> in, pending;
     {
         std::lock_guard<std::mutex> lock(link->inboundMutex);
         in.swap(link->inbound);
     }
-    for (const auto& e : in) {
-        const int slot = e.first;
-        if (slot < 0 || (size_t)slot >= link->portOfSlot.size()) continue;
-        const int port = link->portOfSlot[(size_t)slot];
-        if (port < 0) continue;
-        // A gesture on this parameter is still in flight: the user owns it, and
-        // the engine's frame is at best the value they have already moved past.
-        // Applying it here would snap their knob back mid-drag.
-        {
-            std::lock_guard<std::mutex> lock(link->mutex);
-            if (link->pending.count(slot)) continue;
-        }
-        const float v = e.second;
-        if ((size_t)slot < link->applied.size()) {
-            if (link->applied[(size_t)slot] == v) continue;   // already showing it
-            link->applied[(size_t)slot] = v;
-        }
-        if (link->ctl && (size_t)port < link->ctl->size())
-            (*link->ctl)[(size_t)port] = v;
-        // Not a user edit: without this the direct poll would immediately
-        // report the engine's own value back to the engine as a change.
-        if ((size_t)port < link->lastSeen.size()) link->lastSeen[(size_t)port] = v;
-        desc->port_event(ui, (uint32_t)port, sizeof(float), 0, &v);
+    {
+        std::lock_guard<std::mutex> lock(link->mutex);
+        pending = link->pending;
+    }
+    // The decision itself is kit-free and host-tested (Lv2UiMap.h) because the
+    // window that makes it cannot be built off Haiku.
+    std::vector<float> ctl;
+    if (link->ctl) ctl = *link->ctl;
+    const std::vector<Lv2UiPortEvent> events = Lv2UiPlanApply(
+        in, link->portOfSlot, pending, link->applied, ctl, link->lastSeen);
+    if (link->ctl) *link->ctl = ctl;
+    for (const Lv2UiPortEvent& e : events) {
+        const float v = e.value;
+        desc->port_event(ui, (uint32_t)e.port, sizeof(float), 0, &v);
     }
 }
 
 // Does this UI read the DSP instance directly rather than going through the
-// write_function? DPF/DAF plugins built WANT_DIRECT_ACCESS declare that as a
-// required feature (instance-access), which is what this reads -- the whole
-// difference between an editor that can be linked live and one that cannot.
-//
-// Conservative on every failure path: a UI whose RDF cannot be read is treated
-// as direct-access, because leaving an editor unlinked is the safe mistake and
-// poking a live instance by accident is not.
-bool UiWantsInstanceAccess(const LilvUI* ui) {
-    LilvWorld* w = UiWorld();
-    if (!w || !ui) return true;
-    LilvNode* pred = lilv_new_uri(w, LV2_CORE__requiredFeature);
-    LilvNode* want = lilv_new_uri(w, LV2_INSTANCE_ACCESS_URI);
-    bool wants = false;
-    if (pred && want) {
-        if (LilvNodes* found = lilv_world_find_nodes(
-                w, lilv_ui_get_uri(ui), pred, nullptr)) {
-            LILV_FOREACH(nodes, i, found)
-                if (lilv_node_equals(lilv_nodes_get(found, i), want)) {
-                    wants = true;
-                    break;
-                }
-            lilv_nodes_free(found);
-        }
-    }
-    lilv_node_free(pred);
-    lilv_node_free(want);
-    return wants;
+// write_function? The answer is a fact about the installed plugin, so it is
+// asked of the host layer, where it is host-testable -- the window cannot be
+// built (or tested) off Haiku, and this is the decision that says whether an
+// editor may be linked at all.
+bool UiWantsInstanceAccess(const std::string& uri) {
+    return Lv2Host::Instance().UiRequiresInstanceAccess(uri);
 }
 
 } // namespace
@@ -551,7 +523,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
         // Which of the two modes this editor gets, decided BEFORE the window
         // exists so the title can say so from its first frame.
-        directAccess = UiWantsInstanceAccess(ui);
+        directAccess = UiWantsInstanceAccess(pluginUri);
 
         // --- features -----------------------------------------------------
         d->map   = { nullptr, UridMap };
@@ -595,9 +567,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         d->link->fxIndex.store(fxIndex, std::memory_order_relaxed);
         d->link->apply   = apply;
         d->link->direct  = directAccess;
-        d->link->slotOfPort.assign(nPorts, -1);
         d->link->ctl     = &d->ctl;
-        size_t ctlInSlot = 0;
+        // Which ports are this insert's parameters, in port order. The numbering
+        // rule lives in Lv2UiMap.h (host-tested) so the slot a knob writes is
+        // the slot the insert stores.
+        std::vector<bool> isCtrlIn(nPorts, false);
         for (uint32_t i = 0; i < nPorts; i++) {
             const LilvPort* port = lilv_plugin_get_port_by_index(plugin, i);
             if (!port) continue;
@@ -615,14 +589,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                 // what the user actually set, not the plugin's factory default.
                 // Input control ports are in the same slot order
                 // EffectDesc.params uses.
-                if (isIn) {
-                    if (ctlInSlot < params.size()) d->ctl[i] = params[ctlInSlot];
-                    // The link translates the UI's port numbers back into this
-                    // same slot order, or a knob would move the wrong parameter
-                    // -- silently, since both are just ints.
-                    d->link->slotOfPort[i] = (int)ctlInSlot;
-                    ctlInSlot++;
-                }
+                if (isIn) isCtrlIn[i] = true;
                 lilv_instance_connect_port(d->dsp, i, &d->ctl[i]);
             } else if (lilv_port_is_a(plugin, port, nAtom)) {
                 d->atom[i].assign(kAtomBufBytes / sizeof(uint64_t), 0);
@@ -639,6 +606,15 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         lilv_node_free(nInput); lilv_node_free(nAtom);
         lilv_instance_activate(d->dsp);
 
+        d->link->slotOfPort = Lv2UiSlotsForPorts(isCtrlIn);
+        // Seed the insert's STORED values so the editor opens showing what the
+        // user actually set, not the plugin's factory defaults.
+        for (uint32_t i = 0; i < nPorts; i++) {
+            const int slot = d->link->slotOfPort[i];
+            if (slot >= 0 && (size_t)slot < params.size())
+                d->ctl[i] = params[(size_t)slot];
+        }
+
         // What the editor is about to open with is not an edit: seed the poll's
         // "last seen" from the port buffers, so a direct-access editor is quiet
         // until the user actually moves something.
@@ -647,13 +623,11 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         // The inverse map, for values arriving the other way (engine -> GUI).
         // Sized by the port count, not the slot count: a slot number can exceed
         // the number of control inputs on a plugin with other port kinds.
-        d->link->portOfSlot.assign(nPorts, -1);
+        d->link->portOfSlot = Lv2UiPortsForSlots(d->link->slotOfPort);
         d->link->applied.assign(nPorts, 0.0f);
         for (uint32_t i = 0; i < nPorts; i++) {
             const int slot = d->link->slotOfPort[i];
-            if (slot < 0) continue;
-            d->link->portOfSlot[(size_t)slot] = (int)i;
-            d->link->applied[(size_t)slot] = d->ctl[i];
+            if (slot >= 0) d->link->applied[(size_t)slot] = d->ctl[i];
         }
 
         // The UI binary's location. Plain strings, so nothing past this point

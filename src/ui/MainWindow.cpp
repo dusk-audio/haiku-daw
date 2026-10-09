@@ -140,6 +140,63 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
 static constexpr float kTransportH = 36.0f;
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
+// --- native editor watches -------------------------------------------------
+//
+// A real editor window, as the kit-free table (src/plugin/FxWatchTable.h) sees
+// it: whether it is still there, how to ask it to close, how to tell it its
+// insert moved, and how to hand it a frame. Keeping this behind that interface
+// is what lets the table's rules -- where the bugs were -- be tested on the
+// Linux host, where none of this can be built.
+struct MainWindow::EditorHandle : public FxWatchEditor {
+    BMessenger msgr;
+    explicit EditorHandle(const BMessenger& m) : msgr(m) {}
+    bool Alive() const override { return msgr.IsValid(); }
+    void AskToClose() override { msgr.SendMessage(B_QUIT_REQUESTED); }
+    void InsertMoved(TrackId track, int fx) override {
+        BMessage rebind(kMsgFxWatch);
+        rebind.AddInt64("track", (int64)track);
+        rebind.AddInt32("fx", fx);
+        msgr.SendMessage(&rebind);
+    }
+    void SendFrame(const float* values, int count) override {
+        BMessage m(kMsgFxParams);
+        for (int i = 0; i < count; i++) m.AddFloat("v", values[i]);
+        msgr.SendMessage(&m);
+    }
+};
+
+// The table's view of what is open, for the kit-free rules to read.
+std::vector<FxWatch> MainWindow::FxWatchSnapshot() const {
+    std::vector<FxWatch> out;
+    out.reserve(fFxWatches.size());
+    for (const FxEntry& e : fFxWatches) {
+        FxWatch w;
+        w.editor = e.editor.get();
+        w.uri    = e.uri;
+        w.track  = e.track;
+        w.fx     = e.fx;
+        w.slot   = e.slot;
+        w.gen    = e.gen;
+        out.push_back(w);
+    }
+    return out;
+}
+
+// The chain one entry names, as the model sees it.
+FxChainView MainWindow::FxChainFor(const FxWatch& w) const {
+    FxChainView v;
+    const std::vector<EffectDesc>* chain = nullptr;
+    if (w.track == kMasterFxTarget) {
+        chain = &fProject->masterFx;
+    } else if (const Track* t = fProject->FindTrack(w.track)) {
+        chain = &t->fx;
+    }
+    if (!chain) return v;
+    v.exists = true;
+    for (const EffectDesc& d : *chain) v.uris.push_back(d.pluginName);
+    return v;
+}
+
 MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                        PeakMap* peaks)
     : BWindow(frame, "Haiku DAW", B_TITLED_WINDOW,
@@ -887,9 +944,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case kMsgFxWatch: {
             // A native editor registering the insert it is showing, or (no
-            // messenger) saying it is closing. The registration is identified
-            // by (uri, track, fx) -- the editor's own address -- so one
-            // editor's close can never clear another's watch.
+            // messenger) saying it is closing. Identified by (uri, track, fx) --
+            // the address the editor itself writes through -- so one editor's
+            // close can never drop another's watch.
             int64 tid = 0; int32 fx = -1;
             msg->FindInt64("track", &tid);
             msg->FindInt32("fx", &fx);
@@ -898,34 +955,34 @@ void MainWindow::MessageReceived(BMessage* msg) {
             BMessenger msgr;
             msg->FindMessenger("msgr", &msgr);
 
+            // Drop this editor's entry on close, and any entry whose window died
+            // without saying so (closed by the window manager, or crashed).
             for (size_t i = fFxWatches.size(); i > 0; --i) {
-                const FxWatch& w = fFxWatches[i - 1];
+                const FxEntry& w = fFxWatches[i - 1];
                 const bool same = w.uri == uri.String()
                                && w.track == (TrackId)tid && w.fx == fx;
-                // Drop this editor's entry on close, and any entry whose window
-                // died (closed without saying so, or crashed).
-                if ((same && !msgr.IsValid()) || !w.msgr.IsValid()) {
+                if ((same && !msgr.IsValid())
+                    || (w.editor && !w.editor->Alive())) {
                     if (fEngine && w.slot >= 0)
                         fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
                     fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
-                    continue;
                 }
-                if (same) fFxWatches[i - 1].msgr = msgr;   // re-open same insert
             }
             if (msgr.IsValid() && fx >= 0) {
-                const int slot = AllocFxWatchSlot();
-                FxWatch w;
-                w.msgr  = msgr;
-                w.uri   = uri.String();
-                w.track = (TrackId)tid;
-                w.fx    = fx;
-                w.slot  = slot;
-                w.gen   = 0xFFFFFFFFu;   // impossible generation: forces a push
-                fFxWatches.push_back(w);
+                const std::vector<FxWatch> snapshot = FxWatchSnapshot();
+                const int slot = FxWatchFreeSlot(snapshot, Engine::kWatchSlots);
+                FxEntry e;
+                e.editor = std::make_shared<EditorHandle>(msgr);
+                e.uri    = uri.String();
+                e.track  = (TrackId)tid;
+                e.fx     = fx;
+                e.slot   = slot;
+                e.gen    = FxWatch::kForcePush;   // forces the first frame out
+                fFxWatches.push_back(e);
                 if (slot >= 0) ApplyFxWatchToEngine(fFxWatches.back());
                 else std::fprintf(stderr,
                     "daw: more than %d native editors open; '%s' will not "
-                    "follow automation\n", Engine::kWatchSlots, w.uri.c_str());
+                    "follow automation\n", Engine::kWatchSlots, e.uri.c_str());
             }
             UpdatePulse();
             break;
@@ -1341,8 +1398,8 @@ void MainWindow::UpdatePulse() {
     // transport is stopped: the generic parameter panel can move a value with
     // everything idle, and that has to reach the plugin's own editor too.
     bool watching = false;
-    for (const FxWatch& w : fFxWatches)
-        if (w.msgr.IsValid()) { watching = true; break; }
+    for (const FxEntry& w : fFxWatches)
+        if (w.editor && w.editor->Alive()) { watching = true; break; }
     const bool need = fPlaying || fRecMode || fMonitoring || watching
                    || (fRecorder && fRecorder->IsRecording());
     if (need && !fPulse) {
@@ -1716,59 +1773,40 @@ void MainWindow::SyncFxToEngine() {
 // insert is gone (the same thing the generic panel does when its insert
 // disappears).
 void MainWindow::ValidateFxWatch() {
-    for (size_t i = fFxWatches.size(); i > 0; --i) {
-        FxWatch& w = fFxWatches[i - 1];
-        const bool master = (w.track == kMasterFxTarget);
-        Track* t = master ? nullptr : fProject->FindTrack(w.track);
-        std::vector<EffectDesc>* chain = master ? &fProject->masterFx
-                                                : (t ? &t->fx : nullptr);
-        // The track (or an insert) is gone, or the window died. Either way this
-        // editor can no longer be pointed at anything: close it, as the generic
-        // panel does when its focused insert disappears. Closing rather than
-        // silently leaving it is the only honest option -- its every control
-        // would otherwise edit an insert that no longer exists.
-        bool keep = w.msgr.IsValid() && chain != nullptr;
-        if (keep && w.fx >= (int)chain->size()) keep = false;
-        if (keep) {
-            // Two inserts of the SAME plugin cannot be told apart by URI, and
-            // following the index after a reorder would as likely drive the
-            // other one as the right one. Say so by closing instead of
-            // guessing; a stable per-insert id in the model is the real fix.
-            int copies = 0;
-            for (const EffectDesc& d : *chain)
-                if (d.pluginName == w.uri) copies++;
-            if (copies > 1) {
-                std::fprintf(stderr, "daw: '%s' appears %d times in this chain; "
-                             "closing its editor rather than guessing which "
-                             "insert it was showing\n", w.uri.c_str(), copies);
-                keep = false;
-            }
-        }
-        if (keep && (*chain)[(size_t)w.fx].pluginName == w.uri) continue;
+    const std::vector<FxWatch> before = FxWatchSnapshot();
+    std::vector<FxChainView> chains;
+    chains.reserve(before.size());
+    for (const FxWatch& w : before) chains.push_back(FxChainFor(w));
 
-        // Moved within the chain: follow it, and tell the editor where it is
-        // now, or its next write would address the index it used to have.
-        int found = -1;
-        if (keep)
-            for (size_t k = 0; k < chain->size(); k++)
-                if ((*chain)[k].pluginName == w.uri) { found = (int)k; break; }
-        if (found >= 0) {
-            w.fx = found;
-            w.gen = 0xFFFFFFFFu;    // the change may be the only one it gets
+    // The rules live in FxWatchTable.h (host-tested): a dead window or a chain
+    // that is gone closes the editor; two inserts carrying the same plugin
+    // cannot be told apart by URI, so that closes it too rather than let it
+    // follow an index that may now be the other one; the same plugin elsewhere
+    // in the chain is a rebind; anything else leaves it alone.
+    const std::vector<FxWatchUpdate> updates = FxWatchValidate(before, chains);
+    for (const FxWatchUpdate& u : updates) {
+        FxEntry& w = fFxWatches[u.index];
+        switch (u.action) {
+        case FxWatchAction::Keep:
+            break;
+        case FxWatchAction::Rebind:
+            w.fx  = u.newFx;
+            w.gen = FxWatch::kForcePush;  // the change may be the only one it gets
             ApplyFxWatchToEngine(w);
-            BMessage rebind(kMsgFxWatch);
-            rebind.AddInt64("track", (int64)w.track);
-            rebind.AddInt32("fx", found);
-            w.msgr.SendMessage(&rebind);
-            continue;
+            w.editor->InsertMoved(w.track, u.newFx);
+            break;
+        case FxWatchAction::Close:
+            if (fEngine && w.slot >= 0)
+                fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
+            w.editor->AskToClose();
+            break;
         }
-
-        // Gone: stop publishing and close the editor.
-        if (fEngine && w.slot >= 0)
-            fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
-        w.msgr.SendMessage(B_QUIT_REQUESTED);
-        fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
     }
+    // Erase in reverse, so the indices the (parallel) update list carries stay
+    // valid for the entries that were kept.
+    for (size_t i = updates.size(); i > 0; --i)
+        if (updates[i - 1].action == FxWatchAction::Close)
+            fFxWatches.erase(fFxWatches.begin() + (long)(updates[i - 1].index));
     UpdatePulse();
 }
 
@@ -1779,11 +1817,12 @@ void MainWindow::ValidateFxWatch() {
 // timeout is short).
 void MainWindow::FlushFxEditors() {
     for (size_t i = fFxWatches.size(); i > 0; --i) {
-        const FxWatch w = fFxWatches[i - 1];
-        if (!w.msgr.IsValid()) continue;
+        const FxEntry& w = fFxWatches[i - 1];
+        if (!w.editor || !w.editor->Alive()) continue;
         BMessage flush(kMsgLv2UiFlush);
         BMessage reply;
-        if (w.msgr.SendMessage(&flush, &reply, 200000) != B_OK) continue;
+        if (static_cast<EditorHandle*>(w.editor.get())->msgr.SendMessage(
+                &flush, &reply, 200000) != B_OK) continue;
         std::vector<SetFxParamCommand::SlotValue> vals;
         for (int32 k = 0; ; k++) {
             int32 slot = 0;
@@ -1803,10 +1842,10 @@ void MainWindow::FlushFxEditors() {
 // (track id, index) belong to the project that is going away, and the loaded
 // project can reuse the same ids for entirely different effects.
 void MainWindow::CloseFxEditors() {
-    for (FxWatch& w : fFxWatches) {
+    for (FxEntry& w : fFxWatches) {
         if (fEngine && w.slot >= 0)
             fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
-        if (w.msgr.IsValid()) w.msgr.SendMessage(B_QUIT_REQUESTED);
+        if (w.editor && w.editor->Alive()) w.editor->AskToClose();
     }
     fFxWatches.clear();
     UpdatePulse();
@@ -2616,17 +2655,7 @@ void MainWindow::PushTrackPeaks() {
 // A free engine watch slot, or -1 when every one is taken. Four is already more
 // editors than anyone keeps open at once; past it the editor still works, it
 // just stops following automation (and says so on stderr once).
-int MainWindow::AllocFxWatchSlot() const {
-    for (int s = 0; s < Engine::kWatchSlots; s++) {
-        bool used = false;
-        for (const FxWatch& w : fFxWatches)
-            if (w.slot == s) { used = true; break; }
-        if (!used) return s;
-    }
-    return -1;
-}
-
-void MainWindow::ApplyFxWatchToEngine(const FxWatch& w) {
+void MainWindow::ApplyFxWatchToEngine(const FxEntry& w) {
     if (!fEngine || w.slot < 0) return;
     fEngine->SetFxWatch(w.slot, w.track, w.track == kMasterFxTarget, w.fx);
 }
@@ -2637,14 +2666,14 @@ void MainWindow::ApplyFxWatchToEngine(const FxWatch& w) {
 // presses play -- which is exactly when it matters.
 void MainWindow::ReapplyFxWatches() {
     for (size_t i = fFxWatches.size(); i > 0; --i) {
-        FxWatch& w = fFxWatches[i - 1];
-        if (!w.msgr.IsValid()) {
+        FxEntry& w = fFxWatches[i - 1];
+        if (!w.editor || !w.editor->Alive()) {
             if (fEngine && w.slot >= 0)
                 fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
             fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
             continue;
         }
-        w.gen = 0xFFFFFFFFu;    // a fresh engine's counter must not collide
+        w.gen = FxWatch::kForcePush;   // a fresh engine's counter must not collide
         ApplyFxWatchToEngine(w);
     }
 }
@@ -2654,8 +2683,8 @@ void MainWindow::ReapplyFxWatches() {
 // load per pulse.
 void MainWindow::PushFxParams() {
     for (size_t i = fFxWatches.size(); i > 0; --i) {
-        FxWatch& w = fFxWatches[i - 1];
-        if (!w.msgr.IsValid()) {
+        FxEntry& w = fFxWatches[i - 1];
+        if (!w.editor || !w.editor->Alive()) {
             if (fEngine && w.slot >= 0)
                 fEngine->SetFxWatch(w.slot, kInvalidTrackId, false, -1);
             fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
@@ -2668,9 +2697,7 @@ void MainWindow::PushFxParams() {
                                                &gen);
         if (n <= 0 || gen == w.gen) continue;    // nothing new since last push
         w.gen = gen;
-        BMessage m(kMsgFxParams);
-        for (int k = 0; k < n; k++) m.AddFloat("v", vals[k]);
-        w.msgr.SendMessage(&m);
+        w.editor->SendFrame(vals, n);
     }
 }
 

@@ -1,4 +1,5 @@
 @prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
 # Test-only LV2 bundle built by this repo (see tests/lv2fixture/). Never
@@ -13,6 +14,20 @@
     a lv2:Plugin ;
     lv2:binary <daw_test_plugins.so> ;
     rdfs:seeAlso <plugins.ttl> .
+
+# --- UIs, so the host's "may this editor write through the host?" question has
+# both answers in the same bundle. They point at the same binary; nothing loads
+# them, only the RDF is read (Lv2Host::UiRequiresInstanceAccess).
+<urn:haiku-daw:test:mono-gain#ui>
+    a ui:BeUI ;
+    ui:binary <daw_test_plugins.so> ;
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/instance-access> ,
+                        <http://lv2plug.in/ns/ext/data-access> .
+
+<urn:haiku-daw:test:stereo-latent#ui>
+    a ui:BeUI ;
+    ui:binary <daw_test_plugins.so> ;
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/urid#map> .
 
 <urn:haiku-daw:test:bad-topology>
     a lv2:Plugin ;

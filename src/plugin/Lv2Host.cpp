@@ -10,6 +10,7 @@
 #include <lv2/buf-size/buf-size.h>
 #include <lv2/core/lv2.h>
 #include <lv2/options/options.h>
+#include <lv2/instance-access/instance-access.h>
 #include <lv2/parameters/parameters.h>
 #include <lv2/urid/urid.h>
 
@@ -717,6 +718,49 @@ void Lv2Host::ScanAll() {
     // takes the same code path (and still degrades to a null effect) whether the
     // machine has plugins or not.
     SetLv2Factory(&Lv2Trampoline);
+}
+
+bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
+    ScanAll();   // idempotent: the world has to exist before it can be asked
+    LilvWorld* w = fImpl->world;
+    if (!w) return true;
+    LilvNode* uriNode = lilv_new_uri(w, uri.c_str());
+    if (!uriNode) return true;
+    const LilvPlugin* p = lilv_plugins_get_by_uri(lilv_world_get_all_plugins(w),
+                                                  uriNode);
+    lilv_node_free(uriNode);
+    if (!p) return true;
+
+    // Whichever embeddable UI it has; a plugin with none cannot be linked at
+    // all, and the caller only asks once it has found one.
+    LilvUIs* uis = lilv_plugin_get_uis(p);
+    if (!uis) return true;
+    const LilvUI* ui = nullptr;
+    LILV_FOREACH(uis, i, uis) {
+        const LilvUI* candidate = lilv_uis_get(uis, i);
+        if (candidate) { ui = candidate; break; }
+    }
+    if (!ui) { lilv_uis_free(uis); return true; }
+
+    LilvNode* pred = lilv_new_uri(w, LV2_CORE__requiredFeature);
+    LilvNode* want = lilv_new_uri(w, LV2_INSTANCE_ACCESS_URI);
+    bool needs = true;                 // conservative until proven otherwise
+    if (pred && want) {
+        needs = false;
+        if (LilvNodes* found = lilv_world_find_nodes(w, lilv_ui_get_uri(ui),
+                                                     pred, nullptr)) {
+            LILV_FOREACH(nodes, i, found)
+                if (lilv_node_equals(lilv_nodes_get(found, i), want)) {
+                    needs = true;
+                    break;
+                }
+            lilv_nodes_free(found);
+        }
+    }
+    lilv_node_free(pred);
+    lilv_node_free(want);
+    lilv_uis_free(uis);
+    return needs;
 }
 
 std::unique_ptr<IEffect> Lv2Host::Create(const std::string& uri,

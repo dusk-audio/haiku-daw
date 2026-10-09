@@ -470,6 +470,24 @@ int main() {
         }
     }
 
+    // --- UiRequiresInstanceAccess: which editors may be linked ------------
+    //
+    // This decides whether the host drives a plugin's own GUI through control
+    // ports or only mirrors values into it. Getting it wrong is silent in both
+    // directions: a direct-access UI linked through the write function looks
+    // live and is not, and one wrongly called direct-access looks view-only
+    // forever. The fixture bundle declares one of each, so both answers are
+    // pinned rather than assumed.
+    {
+        CHECK(host.UiRequiresInstanceAccess(kMonoGain) == true);
+        CHECK(host.UiRequiresInstanceAccess(kStereoLatent) == false);
+        // Not a plugin at all, and a plugin with no UI: conservative, because
+        // the safe mistake is leaving an editor unlinked.
+        CHECK(host.UiRequiresInstanceAccess("urn:haiku-daw:test:does-not-exist")
+              == true);
+        CHECK(host.UiRequiresInstanceAccess(kBadTopology) == true);
+    }
+
     std::printf("lv2_fixture_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

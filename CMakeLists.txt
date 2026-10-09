@@ -170,6 +170,22 @@ add_executable(lv2_portmap_tests tests/lv2_portmap_tests.cpp)
 target_link_libraries(lv2_portmap_tests PRIVATE daw_model)
 add_test(NAME lv2_portmap_tests COMMAND lv2_portmap_tests)
 
+# The native editor's port/slot numbering and its inbound-value policy. Both
+# live in a kit-free header (src/plugin/Lv2UiMap.h) precisely so they can be
+# tested here: the window that uses them is Haiku-only, and these are the rules
+# that decide whether a knob moves the parameter it is labelled with.
+add_executable(lv2_ui_map_tests tests/lv2_ui_map_tests.cpp)
+target_link_libraries(lv2_ui_map_tests PRIVATE daw_model)
+add_test(NAME lv2_ui_map_tests COMMAND lv2_ui_map_tests)
+
+# Which native plugin editors are open, and what a chain edit means for each.
+# Kit-free (src/plugin/FxWatchTable.h) because the MainWindow that owns one
+# cannot be built here, and these are the rules that decide whether an editor
+# keeps driving the insert it was opened on.
+add_executable(fx_watch_tests tests/fx_watch_tests.cpp)
+target_link_libraries(fx_watch_tests PRIVATE daw_model)
+add_test(NAME fx_watch_tests COMMAND fx_watch_tests)
+
 # The real thing against whatever LV2 plugins the machine has: scan, filter,
 # instantiate, process. Skips (and passes) when no hostable plugin is installed.
 if(DAW_LV2_ENABLED)
@@ -404,6 +420,17 @@ if(HAIKU)
         target_include_directories(lv2_ui_host PRIVATE ${LILV_INCLUDE_DIRS})
         target_link_directories(lv2_ui_host PRIVATE ${LILV_LIBRARY_DIRS})
         target_link_libraries(lv2_ui_host PRIVATE ${LILV_LIBRARIES} be root)
+    endif()
+
+    # --- The live LV2 editor, engine side ---------------------------------
+    # Engine.cpp links the Media Kit, so the publishing half of the
+    # engine -> editor path can only be built and run here. Needs lilv (the
+    # insert under test is a real plugin) and an audio output device; it says
+    # so and passes where there is none, like the other target-dependent tests.
+    if(DAW_LV2_ENABLED)
+        add_executable(lv2_live_editor_tests tests/lv2_live_editor_tests.cpp)
+        target_link_libraries(lv2_live_editor_tests PRIVATE daw_engine daw_lv2)
+        add_test(NAME lv2_live_editor_tests COMMAND lv2_live_editor_tests)
     endif()
 
     add_executable(play_clip prototypes/play_clip/main.cpp)

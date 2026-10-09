@@ -2,6 +2,7 @@
 @prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
 @prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix units: <http://lv2plug.in/ns/extensions/units#> .
+@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
 
 # Fixture plugins for the DAW's LV2 host tests. Trivial DSP with exactly-known
 # behaviour, so tests can assert on VALUES rather than on properties.
@@ -9,6 +10,7 @@
 # --- MonoDual: hosted as two instances, one per channel ---------------------
 <urn:haiku-daw:test:mono-gain>
     a lv2:Plugin ;
+    ui:ui <urn:haiku-daw:test:mono-gain#ui> ;
     doap:name "DAW Test Mono Gain" ;
     lv2:optionalFeature lv2:hardRTCapable ;
     lv2:port [
@@ -29,6 +31,7 @@
 # exercised against a real bundle and not only in the pure unit tests.
 <urn:haiku-daw:test:stereo-latent>
     a lv2:Plugin ;
+    ui:ui <urn:haiku-daw:test:stereo-latent#ui> ;
     doap:name "DAW Test Stereo Latent" ;
     lv2:optionalFeature lv2:hardRTCapable ;
     lv2:port [
