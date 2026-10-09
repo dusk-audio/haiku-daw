@@ -17,10 +17,11 @@ below say which parts are done and which are still design.
 | Host suite `build-host` | 46/46 (46 before this package's tests, 46+ added ones below) |
 | Plugin fixture on the VM | done — **4K EQ 2** (direct-access) and **Parameters** (control-port) |
 | Phase 0 — click the editor-close crash fix | **done, by the user** (see below) |
-| Phase 1 — link control-port UIs | code landed; click test pending |
+| Phase 1 — link control-port UIs | code landed; **click-tested clean, by the user** |
 | Phase 2 — the DIRECT_ACCESS decision | **decided: option C, by the user**; implemented |
 | Phase 3 — engine → UI direction | implemented (design below) |
 | Phase 4 — identity and teardown | implemented |
+| The whole R0 click list (A–D, 14 steps) | **passed, by the user, 2026-10-09** — merged to master the same day |
 
 ## The VM, and how the fixture was rebuilt
 
@@ -370,7 +371,7 @@ precisely so that what remains manual is wiring rather than logic.
 | Everything builds where it must | VM `build` 49/49, VM `build-off` 45/45, 0 warnings; host `build-host` 48/48 (the counts include the suites added here). Check the build's exit code, not only ctest: a failed build leaves the previous binaries in place and the suite still reports pass |
 | `SetFxParamCommand` touches only its slots, undoes exactly, honours the master flag, and refuses an index that addresses nothing | host tests, mutation-tested three ways (drop the old-value capture, restore the new value on Undo, ignore the master flag — each made the new assertions fail) |
 | `Lv2Effect::ControlValues` reports what actually took effect (clamped, per slot) and a built-in reports nothing | `lv2_fixture_tests`, mutation-tested twice (ignore `maxSlots`; publish nothing — each made the new assertions fail) |
-| A knob move in a live editor is audible during the drag | **NOT by test** — needs a real window and a real drag; waiting on the click test |
-| Automation moving a parameter shows up in the open editor | **NOT YET — waiting on a click test** |
-| Reordering/removing an insert redirects or closes its editor | **NOT YET — waiting on a click test** |
-| Close during playback is clean with a live editor | **NOT YET — waiting on a click test** (the Phase 0 test preceded any of this code) |
+| A knob move in a live editor is audible during the drag | **clicked 2026-10-09 (all steps passed)** — no automated test can reach it. The *audible* half of this one still belongs to the R5 pass on the real hardware: the VM has no usable audio, so "the sound changed" is a hardware check |
+| Automation moving a parameter shows up in the open editor | **clicked 2026-10-09 (all steps passed)** |
+| Reordering/removing an insert redirects or closes its editor | **clicked 2026-10-09 (all steps passed)** |
+| Close during playback is clean with a live editor | **clicked 2026-10-09 (all steps passed)** (the Phase 0 test preceded any of this code) |

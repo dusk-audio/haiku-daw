@@ -49,7 +49,7 @@ Merge in numeric order. 04 and 06 touch disjoint files from 01 except small `Eng
 | 01 fx-inserts-core | Merged to master |
 | 02 lv2-host | Merged to master (see `02-lv2-host-PR.md`) |
 | 03 inserts-ui | Merged to master 2026-07-20 (`5a09823`, host suite 46/46; see `03-inserts-ui-PR.md`) |
-| 07 lv2-live-editor | **In progress on branch `feature/lv2-live-editor`** — all four phases written and green on the new VM (`build` 49/49, `build-off` 45/45, host 48/48); click-testing of the live paths still owed. Entry prompt `07-session-entry-newvm.md`, task `07-lv2-live-editor.md`, record `07-lv2-live-editor-PR.md` |
+| 07 lv2-live-editor | **Merged to master 2026-10-09** (branch tip `4c9b2b6`) — all four phases green on the VM (`build` 49/49, `build-off` 45/45, host 48/48) and **click-tested by the user: every step of the R0 list passed**. See `07-lv2-live-editor-PR.md` |
 | 04 midi-tools | Next host-side, parallel-safe with 07 — entry prompt `04-midi-tools-HANDOFF.md`, task `04-midi-tools.md` |
 | 05 sidechain | Unstarted; hold until 07 merges (shared engine FX-loop regions) |
 | 06 timestretch | Unstarted, unblocked; DSP/exporter half host-testable, engine half wants the VM after 07 |
