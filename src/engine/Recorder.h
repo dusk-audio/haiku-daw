@@ -37,6 +37,12 @@ public:
 
     // Open the input, start the disk thread, begin capturing to `path`.
     status_t Start(const std::string& path);
+
+    // The disk thread's last failure: 0 = none, 1 = the take file could not be
+    // created, 2 = a write failed (disk full, device error). The UI polls this
+    // (the disk thread must not touch the UI), reports once and stops the take,
+    // which keeps whatever was written.
+    int ErrorCode() const { return fError.load(std::memory_order_relaxed); }
     void     Stop();   // stop capture, flush, finalize the WAV
 
     // Input monitoring: when on, the capture hook also pushes samples into a
@@ -89,6 +95,7 @@ private:
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
     std::atomic<bool>  fXrun{false}; // ring overflowed (disk not keeping up)
+    std::atomic<int>   fError{0};    // 0 none, 1 open, 2 write (see ErrorCode)
     std::atomic<int64_t> fDroppedFloats{0}; // xrun-dropped samples to pad w/ silence
 
     // Live waveform envelope (disk thread writes by index, UI reads < count).

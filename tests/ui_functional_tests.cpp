@@ -19,6 +19,7 @@
 #include "../src/model/Command.h"
 #include "../src/model/Commands.h"   // SetFxCommand
 #include "../src/engine/WavSource.h"   // reading a bounce back
+#include "../src/engine/WavWriter.h"   // ...and writing the Locate… fixture
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
@@ -90,6 +91,15 @@ static int CountWavs(const std::string& dir) {
 static bool FileExists(const std::string& p) {
     BEntry e(p.c_str());
     return e.Exists();
+}
+
+// The file-name part of a path. Media paths are canonicalised by the loader
+// (/tmp is a symlink to /boot/system/cache/tmp on Haiku) and stored relative to
+// the project, so an assertion that cares WHICH file a clip points at compares
+// base names, not the spelling of the path.
+static std::string PathBaseName(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
 // A MIDI track whose region starts at 0 and covers the notes it is given.
@@ -990,6 +1000,146 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     std::remove(openPath);
 }
 
+// --- 10. M0.4: failures the user can see ------------------------------------
+
+// Two of the new reports, through the handlers that raise them: a save into a
+// path that cannot exist, and a load whose media is gone (one dialog, Skip,
+// and the clip is left exactly as it was). The recorder's failure report
+// cannot be driven here -- the harness has no capture device.
+static void TestErrorReports(MainWindow* win, Project& project,
+                             CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_error_reports\n");
+
+    // A save that cannot work: the report is the point (the prompt would
+    // already have refused to proceed).
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    BMessage bad(MSG_SAVE_REF);
+    bad.AddRef("directory", &dir);
+    bad.AddString("name", "no_such_dir_haiku_daw/x.dawproj");
+    win->PostMessage(&bad);
+    CHECK(WaitFor([&] { return AlertUp("Save Project"); }));
+    HideOtherWindows(win);                    // the alert, as its OK does
+    CHECK(WaitQuiet());
+
+    // Clean first: the fixture load below must not have to answer the
+    // unsaved-changes prompt (M0.1's own flow covers that).
+    const char* cleanPath = "/tmp/haiku_daw_ui_errors.dawproj";
+    std::remove(cleanPath);
+    BMessage save(MSG_SAVE_REF);
+    save.AddRef("directory", &dir);
+    save.AddString("name", "haiku_daw_ui_errors.dawproj");
+    win->PostMessage(&save);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool clean = !stack.IsDirty();
+        win->Unlock();
+        return clean;
+    }));
+
+    // A load whose clip file is gone: the load succeeds, and ONE dialog
+    // offers Locate… or Skip.
+    const char* projPath = "/tmp/haiku_daw_ui_missing.dawproj";
+    const char* gonePath = "/tmp/haiku_daw_ui_gone.wav";   // never created
+    std::remove(projPath);
+    std::remove(gonePath);
+    {
+        Project other;
+        other.sampleRate = project.sampleRate;
+        Track t;
+        t.id = other.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "gone-track";
+        Clip c;
+        c.id = other.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000;
+        c.sourcePath = gonePath;
+        t.clips.push_back(c);
+        CHECK(other.AddTrack(t));
+        CHECK(ProjectIO::Save(other, projPath));
+    }
+    entry_ref ref;
+    CHECK(BEntry(projPath).GetRef(&ref) == B_OK);
+    BMessage open(MSG_OPEN_REF);
+    open.AddRef("refs", &ref);
+    win->PostMessage(&open);
+    CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
+    const bool skipAnswered = AnswerAlertWhenUp("Missing Media", 0);  // Skip
+    std::printf("  skip answered=%d, alert still up=%d, windows=%d\n",
+                (int)skipAnswered, (int)AlertUp("Missing Media"),
+                (int)VisibleWindows());
+    CHECK(skipAnswered);
+    const bool skipped = WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        bool ok = false;
+        for (const Track& t : project.Tracks())
+            if (t.name == "gone-track" && t.clips.size() == 1
+                && PathBaseName(t.clips[0].sourcePath) == "haiku_daw_ui_gone.wav")
+                ok = true;
+        win->Unlock();
+        return ok;
+    }, 30000000);
+    if (!skipped) {
+        const status_t locked = win->LockWithTimeout(1000000);
+        std::printf("  after Skip: lock=%d, windows=%d, alert up=%d\n",
+                    (int)locked, (int)VisibleWindows(),
+                    (int)AlertUp("Missing Media"));
+        if (locked == B_OK) {
+            std::printf("  tracks: %zu\n", project.Tracks().size());
+            for (const Track& t : project.Tracks()) {
+                std::printf("    '%s' (%zu clips)\n", t.name.c_str(),
+                            t.clips.size());
+                for (const Clip& c : t.clips)
+                    std::printf("      clip path '%s'\n",
+                                c.sourcePath.c_str());
+            }
+            win->Unlock();
+        }
+    }
+    CHECK(skipped);
+    // ...and Locate… walks the same fixture: the panel appears, its answer is
+    // posted here, and the repair lands as one named undo step.
+    const char* foundPath = "/tmp/haiku_daw_ui_found.wav";
+    std::remove(foundPath);
+    {
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 1000, -1000 };   // 2 stereo frames
+        CHECK(w.Open(foundPath, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+    }
+    win->PostMessage(&open);                       // the fixture again
+    CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
+    CHECK(AnswerAlertWhenUp("Missing Media", 1));  // Locate…
+    CHECK(WaitFor([&] { return VisibleWindows() == 2; }));   // the panel
+    entry_ref found;
+    CHECK(BEntry(foundPath).GetRef(&found) == B_OK);
+    BMessage picked(MSG_RELINK_REF);
+    picked.AddRef("refs", &found);
+    win->PostMessage(&picked);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        bool ok = false;
+        for (const Track& t : project.Tracks())
+            if (t.name == "gone-track" && t.clips.size() == 1
+                && PathBaseName(t.clips[0].sourcePath)
+                       == "haiku_daw_ui_found.wav")
+                ok = true;
+        win->Unlock();
+        return ok;
+    }, 30000000));
+    CHECK(stack.UndoName() == "Locate Missing Media");
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+
+    std::remove(projPath);
+    std::remove(foundPath);
+    std::remove(cleanPath);
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1019,6 +1169,7 @@ static int32 TestThread(void*) {
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);
 #endif
+    TestErrorReports(win, project, stack);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);

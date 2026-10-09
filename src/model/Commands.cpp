@@ -616,6 +616,32 @@ void SetClipGainCommand::Undo(Project& p) {
             c->gain = fOld;
 }
 
+// --- RelinkMediaCommand -----------------------------------------------
+
+bool RelinkMediaCommand::Do(Project& p) {
+    fOld.clear();
+    for (const RelinkEntry& e : fNew) {
+        Track* t = p.FindTrack(e.track);
+        if (!t) continue;
+        Clip* c = t->FindClip(e.clip);
+        if (!c) continue;
+        fOld.push_back(RelinkEntry{ e.track, e.clip, c->sourcePath });
+        c->sourcePath = e.newPath;
+    }
+    // Nothing applicable is still a "success": the stack entry is harmless and
+    // the caller has already reported what it could not do.
+    return true;
+}
+
+void RelinkMediaCommand::Undo(Project& p) {
+    for (const RelinkEntry& e : fOld) {
+        Track* t = p.FindTrack(e.track);
+        if (!t) continue;
+        if (Clip* c = t->FindClip(e.clip))
+            c->sourcePath = e.newPath;   // in fOld, newPath holds the OLD path
+    }
+}
+
 // --- SetSendsCommand --------------------------------------------------
 
 bool SetSendsCommand::Do(Project& p) {

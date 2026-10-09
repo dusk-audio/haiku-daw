@@ -1376,6 +1376,19 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             fSavePanel->Show();
             break;
+        case MSG_RELINK_REF: {
+            entry_ref ref;
+            if (msg->FindRef("refs", &ref) == B_OK) {
+                BPath p(&ref);
+                for (RelinkEntry& e : fRelinkQueue)
+                    if (e.newPath.empty()) {
+                        if (p.InitCheck() == B_OK) e.newPath = p.Path();
+                        break;
+                    }
+            }
+            RelinkNext();     // the next file, or the end of the walk
+            break;
+        }
         case MSG_CLOSE:
             // The window's own quit request: whatever Cmd-Q and the title-bar
             // button do (the prompt included) happens here too.
@@ -1472,6 +1485,23 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 const Transport& tr = fProject->transport;
 
                 if (fRecMode) {
+                    // The disk thread's failure, seen here (the pulse is the
+                    // only place that may touch the UI): report once and stop
+                    // the take -- FramesWritten lands what was written, so a
+                    // full disk costs the take's tail, not the take.
+                    if (fRecorder && fRecorder->ErrorCode() != 0) {
+                        const int code = fRecorder->ErrorCode();
+                        StopRecording();
+                        ReportError("Recording",
+                            code == 1
+                                ? std::string("The take file could not be "
+                                              "created. The take was stopped.")
+                                : std::string("Writing the take failed -- the "
+                                              "disk may be full. The take was "
+                                              "stopped; what was recorded is "
+                                              "kept."));
+                        break;
+                    }
                     // Count-in over: begin capture once we reach the record point.
                     if (fCapturePending && ph >= fRecPoint)
                         StartCapture();
@@ -1685,8 +1715,16 @@ void MainWindow::StartPlayback() {
     }
     fEngine.reset(new Engine());
     fEngine->SetBufferFrames(fBufferFrames);
-    if (fEngine->Load(*fProject, start, minEnd) != B_OK) {
-        std::fprintf(stderr, "MainWindow: nothing to play\n");
+    const status_t loadRc = fEngine->Load(*fProject, start, minEnd);
+    if (loadRc != B_OK) {
+        // B_ENTRY_NOT_FOUND is "nothing to play": a fact, not an alert.
+        if (loadRc != B_ENTRY_NOT_FOUND)
+            ReportError("Audio Device",
+                        "The audio output device could not be opened.\n\n"
+                        "Check the Audio menu's buffer size, and that no other "
+                        "application holds the device.");
+        std::fprintf(stderr, "MainWindow: engine load failed (%s)\n",
+                     strerror(loadRc));
         fEngine.reset();
         // Leave the transport genuinely stopped. ReloadActiveEngine calls this
         // while fPlaying is ALREADY true, and Load failing there is reachable —
@@ -1738,7 +1776,13 @@ bool MainWindow::StartRecordEngine(Frame engineStart) {
     const Frame tenMin = (Frame)(fProject->sampleRate * 600.0);
     fEngine.reset(new Engine());
     fEngine->SetBufferFrames(fBufferFrames);
-    if (fEngine->Load(*fProject, engineStart, engineStart + tenMin) != B_OK) {
+    const status_t recRc = fEngine->Load(*fProject, engineStart,
+                                         engineStart + tenMin);
+    if (recRc != B_OK) {
+        if (recRc != B_ENTRY_NOT_FOUND)
+            ReportError("Audio Device",
+                        "The audio device could not be opened, so the take "
+                        "was not started.");
         fEngine.reset();
         return false;
     }
@@ -1787,6 +1831,9 @@ void MainWindow::StartCapture() {
         fRecorder.reset(new Recorder());
         if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
             std::fprintf(stderr, "MainWindow: recording failed to start\n");
+            ReportError("Recording",
+                        std::string("The take could not be started:\n") +
+                        fTakePath);
             fRecorder.reset();
         } else {
             // Wire input monitoring: the engine mixes the recorder's live input
@@ -2189,7 +2236,14 @@ void MainWindow::UpdateMidiMonitor() {
     fEngine.reset(new Engine());
     fEngine->SetBufferFrames(fBufferFrames);
     fEngine->SetMonitorOnly(true);
-    if (fEngine->Load(*fProject, ph, ph + tenMin) != B_OK) {
+    const status_t monRc = fEngine->Load(*fProject, ph, ph + tenMin);
+    if (monRc != B_OK) {
+        // Monitoring is a convenience; say why the meters are dead once, and
+        // only when it is the device (not an empty project).
+        if (monRc != B_ENTRY_NOT_FOUND)
+            ReportError("Audio Device",
+                        "The audio device could not be opened, so input "
+                        "monitoring is off.");
         fEngine.reset();
         fMidiIn.reset();
         return;
@@ -2404,6 +2458,10 @@ bool MainWindow::SaveTo(const char* path) {
     FlushFxEditors();
     if (!ProjectIO::Save(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: save failed: %s\n", path);
+        ReportError("Save Project",
+                    std::string("Could not write:\n") + path +
+                    "\n\nThe project on disk is unchanged, and your work is "
+                    "still here.");
         return false;
     }
     fProjectPath = path;
@@ -2474,6 +2532,10 @@ void MainWindow::LoadFrom(const char* path) {
     CloseFxEditors();
     if (!ProjectIO::Load(*fProject, path)) {
         std::fprintf(stderr, "MainWindow: load failed: %s\n", path);
+        ReportError("Open Project",
+                    std::string("Could not read:\n") + path +
+                    "\n\nThe file may be truncated, or not a Haiku DAW "
+                    "project. The session you had is untouched.");
         return;
     }
     fProjectPath = path;
@@ -2483,6 +2545,7 @@ void MainWindow::LoadFrom(const char* path) {
     fStack->MarkSaved();      // the loaded file IS the saved state
     RememberProject(fProjectPath);
     UpdateTitle();
+    CollectMissingMedia();    // gone media: one dialog, Skip or Locate…
     PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine
     RebuildPeaks();           // waveform envelopes for the loaded clips
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
@@ -2517,6 +2580,94 @@ void MainWindow::UpdateTitle() {
 void MainWindow::RemoveRecoveryFile() {
     BPath p;
     if (RecoveryPath(p)) std::remove(p.Path());
+}
+
+void MainWindow::ReportError(const char* title, const std::string& detail) {
+    // Asynchronous (like the About box): a report must never block the looper,
+    // and nothing here decides anything -- it is only ever a message. M1 gives
+    // it the themed look; the stock alert is the honest placeholder.
+    BAlert* a = new BAlert(title, detail.c_str(), "OK", nullptr, nullptr,
+                           B_WIDTH_AS_USUAL, B_STOP_ALERT);
+    a->SetShortcut(0, B_ESCAPE);
+    a->Go(nullptr);
+}
+
+
+// Missing media, seen once after a load. One dialog lists what is gone; Skip
+// leaves those clips silent (which is what they have always been), Locate…
+// walks the files one at a time and applies the whole repair as one undo step.
+void MainWindow::CollectMissingMedia() {
+    std::vector<RelinkEntry> missing;
+    for (const Track& t : fProject->Tracks())
+        for (const Clip& c : t.clips) {
+            if (c.sourcePath.empty()) continue;
+            BEntry e(c.sourcePath.c_str());
+            if (!e.Exists()) missing.push_back(RelinkEntry{ t.id, c.id, "" });
+        }
+    if (missing.empty()) return;
+
+    std::string list = "These media files are missing:\n\n";
+    const size_t kShown = 8;
+    for (size_t i = 0; i < missing.size(); i++) {
+        if (i == kShown) { list += "  ...and more\n"; break; }
+        const Track* t = fProject->FindTrack(missing[i].track);
+        const Clip* c = t ? t->FindClip(missing[i].clip) : nullptr;
+        if (!c) continue;
+        const std::string& p = c->sourcePath;
+        const size_t slash = p.find_last_of('/');
+        list += "  " + (slash == std::string::npos ? p : p.substr(slash + 1))
+              + "\n";
+    }
+    list += "\nLocate them, or skip and leave those clips silent.";
+
+    BAlert* a = new BAlert("Missing Media", list.c_str(), "Skip",
+                           "Locate" B_UTF8_ELLIPSIS);
+    a->SetShortcut(0, B_ESCAPE);
+    if (a->Go() == 1) StartRelinkWalk(std::move(missing));
+}
+
+void MainWindow::StartRelinkWalk(std::vector<RelinkEntry> missing) {
+    fRelinkQueue = std::move(missing);
+    if (!fRelinkPanel) {
+        BMessenger to(this);
+        fRelinkPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0, false,
+                                      new BMessage(MSG_RELINK_REF));
+    }
+    RelinkNext();
+}
+
+// Ask for the next file that still needs a replacement. A cancelled panel
+// posts nothing and simply ends the walk; whatever was chosen is kept.
+void MainWindow::RelinkNext() {
+    for (const RelinkEntry& e : fRelinkQueue) {
+        if (!e.newPath.empty()) continue;      // already replaced
+        const Track* t = fProject->FindTrack(e.track);
+        const Clip* c = t ? t->FindClip(e.clip) : nullptr;
+        if (!c) continue;                      // the clip is gone: nothing to ask
+        // Start the panel where the file used to live -- that is where a moved
+        // file most likely went.
+        const size_t slash = c->sourcePath.find_last_of('/');
+        if (slash != std::string::npos) {
+            BPath dir(c->sourcePath.substr(0, slash).c_str());
+            fRelinkPanel->SetPanelDirectory(dir.Path());
+        }
+        fRelinkPanel->Show();
+        return;
+    }
+    FinishRelink();
+}
+
+void MainWindow::FinishRelink() {
+    std::vector<RelinkEntry> picked;
+    for (const RelinkEntry& e : fRelinkQueue)
+        if (!e.newPath.empty()) picked.push_back(e);
+    fRelinkQueue.clear();
+    if (picked.empty()) return;
+    fStack->Execute(std::make_unique<RelinkMediaCommand>(std::move(picked)),
+                    *fProject);
+    RebuildPeaks();        // the found files' waveforms
+    fTimeline->Invalidate();
+    UpdateTitle();         // a repair is an edit: the project is dirty now
 }
 
 // File > New: a fresh, empty session. The sample rate stays -- it belongs to
