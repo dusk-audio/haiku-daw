@@ -88,7 +88,6 @@ private:
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void PushFxParams();             // engine insert values -> native editor
-    void PushFxParamsFromModel(FxEntry& w);   // ... or the model, with no engine
     void LayoutTransportBar();       // fit the bar's controls to its width
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
@@ -184,6 +183,7 @@ private:
     };
     std::vector<FxEntry> fFxWatches;
     std::vector<FxWatch> FxWatchSnapshot() const;   // for the kit-free rules
+    void PushFxParamsFromModel(FxEntry& w);   // ... or the model, with no engine
     FxChainView FxChainFor(const FxWatch& w) const; // the chain one entry names
 
     void ApplyFxWatchToEngine(const FxEntry& w); // program the engine for one
