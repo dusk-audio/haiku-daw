@@ -63,6 +63,19 @@ constexpr uint32 kMsgFxWinClosed = 'fxwc';
 // gain reduction dB), float[] "spec" (EQ spectrum dB), int32 "specfx" (which fx
 // the spectrum belongs to), int32 "specn" (bin count).
 constexpr uint32 kMsgFxMeter     = 'fxmt';
+// Lv2UiWindow -> MainWindow: "this native editor is open on this insert, publish
+// its control values to me". Fields: int64 "track", int32 "fx", messenger
+// "msgr". The SAME message with no messenger means the editor closed and the
+// engine must stop watching -- MainWindow also clears the watch by itself if the
+// messenger dies, so a crash in an editor cannot leave the engine publishing to
+// nothing.
+constexpr uint32 kMsgFxWatch     = 'fxpw';
+// MainWindow -> Lv2UiWindow: the watched insert's values, one float "v" per
+// parameter in slot order. Absolute, not a delta, so a dropped frame costs
+// nothing. Sent only while a watch is registered, on the same 60 Hz pulse that
+// feeds the meters -- and only when the engine's change counter says something
+// actually moved.
+constexpr uint32 kMsgFxParams    = 'fxpv';
 
 class EffectsView : public BView {
 public:

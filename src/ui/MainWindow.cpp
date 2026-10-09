@@ -895,15 +895,44 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgFxWatch: {
+            // A native editor opened on an insert (messenger present) or closed
+            // (no messenger). While registered, the engine publishes that
+            // insert's live values and the pulse forwards them, so automation
+            // and the generic panel both show up in the plugin's own GUI.
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            BMessenger msgr;
+            msg->FindMessenger("msgr", &msgr);
+            if (msgr.IsValid() && fx >= 0) {
+                fFxParamMsgr = msgr;
+                fFxParamGen  = 0;      // nothing pushed to THIS editor yet
+                if (fEngine)
+                    fEngine->SetFxWatch((TrackId)tid,
+                                        (TrackId)tid == kMasterFxTarget, fx);
+            } else {
+                fFxParamMsgr = BMessenger();
+                if (fEngine) fEngine->SetFxWatch(kInvalidTrackId, false, -1);
+            }
+            UpdatePulse();
+            break;
+        }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
             int64 tid = 0; int32 fx = 0, slot = 0; float v = 0.0f;
             msg->FindInt64("track", &tid);
             msg->FindInt32("fx", &fx);
             msg->FindInt32("slot", &slot);
             msg->FindFloat("val", &v);
-            if (fEngine)
+            if (fEngine) {
                 fEngine->SetFxParamLive((TrackId)tid,
                     (TrackId)tid == kMasterFxTarget, fx, slot, v);
+                // With the transport stopped there is no audio block to publish
+                // the change, so an open native editor on this insert would
+                // keep showing the old value. While playing, this returns at
+                // once and the block publishes it.
+                fEngine->PublishFxWatchNow();
+            }
             break;
         }
         case kMsgToggleFxAuto: {
@@ -1181,6 +1210,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // Before any branch: an open native editor is fed on every pulse,
+            // including while stopped (see PushFxParams).
+            PushFxParams();
             if (fEngine && fMonitoring && !fPlaying && !fRecMode) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
@@ -1274,7 +1306,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
 }
 
 void MainWindow::UpdatePulse() {
-    const bool need = fPlaying || fRecMode || fMonitoring
+    // A native editor watching an insert keeps the pulse alive even when the
+    // transport is stopped: the generic parameter panel can move a value with
+    // everything idle, and that has to reach the plugin's own editor too.
+    const bool need = fPlaying || fRecMode || fMonitoring || fFxParamMsgr.IsValid()
                    || (fRecorder && fRecorder->IsRecording());
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -2416,6 +2451,30 @@ void MainWindow::PushTrackPeaks() {
         m.AddFloat("mpr", fEngine->PeakR());
         fMixerMsgr.SendMessage(&m);
     }
+}
+
+// Hand the watched insert's live parameter values to the native editor that
+// asked for them. The engine only bumps its generation when a value actually
+// changed, so an idle insert costs one atomic load per pulse.
+void MainWindow::PushFxParams() {
+    if (!fEngine) return;
+    if (!fFxParamMsgr.IsValid()) {
+        // The editor is gone (closed between pulses, or crashed). Stop the
+        // engine publishing rather than leaving a watch on for the session.
+        if (fFxParamMsgr != BMessenger()) {
+            fFxParamMsgr = BMessenger();
+            fEngine->SetFxWatch(kInvalidTrackId, false, -1);
+        }
+        return;
+    }
+    float vals[Engine::kWatchMax];
+    uint32_t gen = 0;
+    const int n = fEngine->WatchedFxParams(vals, Engine::kWatchMax, &gen);
+    if (n <= 0 || gen == fFxParamGen) return;    // nothing new since last push
+    fFxParamGen = gen;
+    BMessage m(kMsgFxParams);
+    for (int i = 0; i < n; i++) m.AddFloat("v", vals[i]);
+    fFxParamMsgr.SendMessage(&m);
 }
 
 void MainWindow::PushFxMeters() {

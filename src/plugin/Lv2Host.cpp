@@ -237,6 +237,18 @@ public:
                           m.isToggled, &m.scalePoints);
     }
 
+    // The control buffer IS the plugin's parameter state between blocks: this
+    // is what SetParam writes and what the plugin re-reads on every run(). The
+    // engine copies it (on this thread, inside the audio block) so an open
+    // native editor can be shown what automation did; nothing else can see it,
+    // since automation never passes through the model.
+    int ControlValues(float* out, int maxSlots) const override {
+        const int n = (int)fControlIn.size() < maxSlots ? (int)fControlIn.size()
+                                                        : maxSlots;
+        for (int i = 0; i < n; i++) out[i] = fControlIn[(size_t)i];
+        return n;
+    }
+
     int LatencySamples() const override { return fLatency; }
     const char* Name() const override { return fName.c_str(); }
 

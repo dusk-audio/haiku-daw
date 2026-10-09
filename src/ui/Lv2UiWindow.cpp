@@ -259,6 +259,18 @@ struct UiLiveLink {
     // the whole board every tick. Seeded from the values the editor opened
     // with, so opening an editor is not itself an edit.
     std::vector<float> lastSeen;
+    // Slot -> port index: the inverse of slotOfPort, needed to hand an inbound
+    // value back to the plugin as a port_event.
+    std::vector<int> portOfSlot;
+    // The value last APPLIED to the plugin's GUI, per slot, so a republish of
+    // unchanged values does not spam port_event.
+    std::vector<float> applied;
+
+    // Values MainWindow published for this insert, waiting for the editor
+    // thread to hand them to the plugin. Guarded because they arrive on the
+    // window's looper and are consumed on the editor's own thread.
+    std::mutex           inboundMutex;
+    std::map<int, float> inbound;
 
     // Port index -> the insert's parameter slot for that port, -1 for every
     // port that is not one of its control inputs. EffectDesc.params -- and so
@@ -334,6 +346,40 @@ void UiWrite(LV2UI_Controller controller, uint32_t port, uint32_t size,
 void UiWriteDropped(LV2UI_Controller, uint32_t, uint32_t, uint32_t,
                     const void*) {}
 
+// Hand the plugin's GUI the values the engine published since the last tick
+// (automation, or the generic parameter panel being dragged while this editor
+// is open). Runs on the editor's own thread, which is where a UI expects
+// port_event from -- never the window looper, where LockGL deadlocks.
+//
+// Applying a value also writes it into the port buffer and into the direct
+// poll's "last seen", so neither direction can echo the other into a loop.
+void UiApplyInbound(UiLiveLink* link, const LV2UI_Descriptor* desc,
+                    LV2UI_Handle ui) {
+    if (!link || !desc || !desc->port_event) return;
+    std::map<int, float> in;
+    {
+        std::lock_guard<std::mutex> lock(link->inboundMutex);
+        in.swap(link->inbound);
+    }
+    for (const auto& e : in) {
+        const int slot = e.first;
+        if (slot < 0 || (size_t)slot >= link->portOfSlot.size()) continue;
+        const int port = link->portOfSlot[(size_t)slot];
+        if (port < 0) continue;
+        const float v = e.second;
+        if ((size_t)slot < link->applied.size()) {
+            if (link->applied[(size_t)slot] == v) continue;   // already showing it
+            link->applied[(size_t)slot] = v;
+        }
+        if (link->ctl && (size_t)port < link->ctl->size())
+            (*link->ctl)[(size_t)port] = v;
+        // Not a user edit: without this the direct poll would immediately
+        // report the engine's own value back to the engine as a change.
+        if ((size_t)port < link->lastSeen.size()) link->lastSeen[(size_t)port] = v;
+        desc->port_event(ui, (uint32_t)port, sizeof(float), 0, &v);
+    }
+}
+
 // Does this UI read the DSP instance directly rather than going through the
 // write_function? DPF/DAF plugins built WANT_DIRECT_ACCESS declare that as a
 // required feature (instance-access), which is what this reads -- the whole
@@ -377,12 +423,10 @@ struct Lv2UiWindow::Impl {
     LV2UI_Handle  ui        = nullptr;
     const LV2UI_Idle_Interface* idle = nullptr;
     LilvUIs*      uis       = nullptr;
-    thread_id     idleThread = -1;
-    volatile bool idleRun   = false;
-    // Watches a direct-access UI's port buffers (see the poll in Open). One
-    // thread per window, running only for that kind of editor.
-    thread_id     pollThread = -1;
-    volatile bool pollRun    = false;
+    // The editor's own thread: idle + inbound values + direct-access poll (see
+    // Open). Never the window's looper.
+    thread_id     uiThread  = -1;
+    volatile bool uiRun     = false;
 
     // Non-null only for a control-port UI: the one this window is linked to the
     // playing insert through. Never a pointer to the engine's instance, and
@@ -567,6 +611,18 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         // until the user actually moves something.
         d->link->lastSeen = d->ctl;
 
+        // The inverse map, for values arriving the other way (engine -> GUI).
+        // Sized by the port count, not the slot count: a slot number can exceed
+        // the number of control inputs on a plugin with other port kinds.
+        d->link->portOfSlot.assign(nPorts, -1);
+        d->link->applied.assign(nPorts, 0.0f);
+        for (uint32_t i = 0; i < nPorts; i++) {
+            const int slot = d->link->slotOfPort[i];
+            if (slot < 0) continue;
+            d->link->portOfSlot[(size_t)slot] = (int)i;
+            d->link->applied[(size_t)slot] = d->ctl[i];
+        }
+
         // The UI binary's location. Plain strings, so nothing past this point
         // needs the world.
         binPath    = FileUriToPath(lilv_node_as_uri(lilv_ui_get_binary_uri(ui)));
@@ -658,40 +714,43 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         d->idle = (const LV2UI_Idle_Interface*)
                       d->desc->extension_data(LV2_UI__idleInterface);
 
-    // Idle on a thread that is NOT the window's looper. The UI renders from
-    // inside idle(), and a BGLView's LockGL() deadlocks on the looper thread,
-    // which already holds the window lock.
-    if (d->idle && d->idle->idle) {
-        d->idleRun = true;
-        d->idleThread = spawn_thread(
-            [](void* p) -> status_t {
-                Impl* im = (Impl*)p;
-                while (im->idleRun) {
-                    if (im->idle && im->idle->idle) im->idle->idle(im->ui);
-                    snooze(16000);   // ~60 Hz
-                }
-                return B_OK;
-            },
-            "lv2 ui idle", B_NORMAL_PRIORITY, d);
-        resume_thread(d->idleThread);
+    // Tell MainWindow to publish this insert's live values to us, and where to
+    // send them. The window's own messenger, so the registration dies with the
+    // window even if teardown never gets to say goodbye.
+    {
+        BMessage watch(kMsgFxWatch);
+        watch.AddInt64("track", (int64)track);
+        watch.AddInt32("fx", fxIndex);
+        watch.AddMessenger("msgr", BMessenger(win));
+        apply.SendMessage(&watch);
     }
 
-    // A direct-access UI writes into ITS instance's port buffers and never calls
-    // the write function, so the host has to watch those buffers to hear it.
-    // They are ours (`Impl::ctl`, connected to the instance we instantiated), so
-    // this reads memory we own while the plugin's UI thread writes it -- a
-    // word-sized float load, the same access the plugin itself makes.
+    // The editor's thread -- ONE thread, doing three jobs in a fixed order:
     //
-    // Independent of the plugin's idle interface on purpose: a UI that renders
-    // on its own timer would otherwise leave this poll with nothing to hang it
-    // on, and the editor would silently go back to being a display.
-    if (d->link && d->link->direct) {
-        d->pollRun = true;
-        d->pollThread = spawn_thread(
-            [](void* p) -> status_t {
-                Impl* im = (Impl*)p;
-                UiLiveLink* link = im->link.get();
-                while (im->pollRun) {
+    //   idle()            render a frame of the plugin's own GUI
+    //   apply inbound     port_event() for values the engine published
+    //   poll own buffers  (direct-access only) notice the user's edits
+    //
+    // It is not the window's looper: the UI renders from inside idle(), and a
+    // BGLView's LockGL() deadlocks on the looper thread, which already holds the
+    // window lock. port_event goes here rather than in MessageReceived for the
+    // same reason -- this is the thread a plugin's GUI considers its own.
+    d->uiRun = true;
+    d->uiThread = spawn_thread(
+        [](void* p) -> status_t {
+            Impl* im = (Impl*)p;
+            UiLiveLink* link = im->link.get();
+            while (im->uiRun) {
+                if (im->idle && im->idle->idle) im->idle->idle(im->ui);
+                UiApplyInbound(link, im->desc, im->ui);
+
+                // A direct-access UI writes into ITS instance's port buffers and
+                // never calls the write function, so the host watches those
+                // buffers to hear it. They are ours (connected to the instance
+                // we instantiated), so this reads memory we own while the
+                // plugin's UI thread writes it -- a word-sized float load, the
+                // same access the plugin makes itself.
+                if (link->direct) {
                     for (size_t i = 0; i < link->lastSeen.size(); i++) {
                         if (link->slotOfPort[i] < 0) continue;   // not a parameter
                         const float v = im->ctl[i];
@@ -699,13 +758,13 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                         link->lastSeen[i] = v;
                         LinkNoteValue(link, link->slotOfPort[i], v);
                     }
-                    snooze(16000);   // ~60 Hz, matching the idle thread
                 }
-                return B_OK;
-            },
-            "lv2 ui poll", B_NORMAL_PRIORITY, d);
-        resume_thread(d->pollThread);
-    }
+                snooze(16000);   // ~60 Hz
+            }
+            return B_OK;
+        },
+        "lv2 ui loop", B_NORMAL_PRIORITY, d);
+    resume_thread(d->uiThread);
     winLock.Unlock();
     return win;
 }
@@ -713,20 +772,25 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 Lv2UiWindow::~Lv2UiWindow() {
     Impl* d = fImpl;
     if (!d) return;
-    // Stop idling BEFORE tearing the UI down, and let the thread finish its
-    // current frame: killing it mid-render would leave the GL context locked.
-    if (d->idleThread >= 0) {
-        d->idleRun = false;
+    // Stop the editor's thread BEFORE tearing the UI down, and let it finish its
+    // current frame: killing it mid-render would leave the GL context locked,
+    // and it is also the last thing that can read this window's port buffers or
+    // post a live value.
+    if (d->uiThread >= 0) {
+        d->uiRun = false;
         status_t st = 0;
-        wait_for_thread(d->idleThread, &st);
+        wait_for_thread(d->uiThread, &st);
     }
-    // The poll thread too, and for the same reason: it is the last thing that
-    // can post a live value, and it must not still be reading this window's
-    // buffers (or posting through a dead messenger) while teardown runs.
-    if (d->pollThread >= 0) {
-        d->pollRun = false;
-        status_t st = 0;
-        wait_for_thread(d->pollThread, &st);
+    // Stop the engine publishing to it before its handles go away (the fifth
+    // teardown rule). The registration carries the window's own messenger, so
+    // this is belt and braces for an editor closed by a path that never got
+    // here -- but that is exactly the case that leaves the engine publishing
+    // into nothing.
+    if (d->link) {
+        BMessage watch(kMsgFxWatch);
+        watch.AddInt64("track", (int64)d->link->track);
+        watch.AddInt32("fx", d->link->fxIndex);
+        d->link->apply.SendMessage(&watch);      // no messenger = stop watching
     }
     // Fifth teardown rule: tell the model about anything the editor wrote and
     // did not get to commit, BEFORE the plugin's handles go away. A knob turned
@@ -794,6 +858,22 @@ bool Lv2UiWindow::QuitRequested() { return true; }
 void Lv2UiWindow::MessageReceived(BMessage* msg) {
     if (msg->what == kMsgLv2UiRaise) { Activate(true); return; }
     if (msg->what == kMsgLv2UiCommit) { CommitPending(); return; }
+    if (msg->what == kMsgFxParams) {
+        // Values the engine published for this insert (int32 "gen", then one
+        // float "v" per parameter in slot order). Queued for the editor's own
+        // thread: port_event belongs there, not on this looper.
+        Impl* d = fImpl;
+        if (!d || !d->link) return;
+        // Absolute values in slot order, so a dropped frame costs nothing: the
+        // next one carries the whole board.
+        std::lock_guard<std::mutex> lock(d->link->inboundMutex);
+        for (int32 i = 0; ; i++) {
+            float v = 0.0f;
+            if (msg->FindFloat("v", i, &v) != B_OK) break;
+            d->link->inbound[i] = v;
+        }
+        return;
+    }
     BWindow::MessageReceived(msg);
 }
 

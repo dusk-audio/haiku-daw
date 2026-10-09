@@ -418,6 +418,58 @@ int main() {
         }
     }
 
+    // --- ControlValues: what the engine publishes to an open editor --------
+    //
+    // Automation drives SetParam from the audio thread and never writes the
+    // model, so for a plugin insert the control buffer the engine holds IS the
+    // parameter state. An editor showing automation therefore depends on this
+    // reporting exactly what was set -- a stale or clamped-away value here is
+    // an editor that lies about what is playing.
+    {
+        std::unique_ptr<IEffect> fx = host.Create(kMonoGain, 48000.0);
+        CHECK(fx != nullptr);
+        if (fx) {
+            float vals[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+            CHECK(fx->ControlValues(vals, 4) == 1);        // exactly one parameter
+            CHECK(Near(vals[0], 1.0f));                    // its declared default
+
+            fx->SetParam(0, 2.5f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 2.5f));
+
+            // The port's declared maximum, because that is what the plugin will
+            // actually read on its next run() -- ControlValues must not report
+            // the value the caller asked for, only the one that took effect.
+            fx->SetParam(0, 99.0f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 4.0f));
+
+            // A slot the plugin does not have is not a parameter.
+            fx->SetParam(7, 1.0f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 4.0f));
+
+            // Fewer slots asked for than exist: writes what fits and says so.
+            vals[0] = -1.0f;
+            CHECK(fx->ControlValues(vals, 0) == 0);
+            CHECK(Near(vals[0], -1.0f));                   // buffer untouched
+        }
+
+        // A built-in effect has no control ports at all. It must report zero --
+        // the engine publishes nothing for it, rather than publishing whatever
+        // happened to be in an uninitialised buffer.
+        EffectDesc eq;
+        eq.type = EffectType::Eq;
+        eq.params = { 1000.0f, 0.0f, 1.0f };
+        std::unique_ptr<IEffect> builtin = MakeEffect(eq, 48000.0);
+        CHECK(builtin != nullptr);
+        if (builtin) {
+            float vals[2] = { -1.0f, -1.0f };
+            CHECK(builtin->ControlValues(vals, 2) == 0);
+            CHECK(Near(vals[0], -1.0f));
+        }
+    }
+
     std::printf("lv2_fixture_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

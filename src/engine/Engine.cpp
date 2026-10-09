@@ -672,6 +672,21 @@ void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
         (*chain)[(size_t)fxIndex]->SetParam(slot, value);
 }
 
+void Engine::PublishFxWatchNow() {
+    // The audio callback owns the published storage while it runs (it rewrites
+    // the same array every block); this exists for the stopped transport, where
+    // there is no block and no second writer.
+    if (fPlayerRunning.load(std::memory_order_acquire)) return;
+    if (fWatchFx.load(std::memory_order_relaxed) < 0) return;
+    if (fWatchMaster.load(std::memory_order_relaxed)) {
+        CaptureFxWatch(fMasterFx);
+        return;
+    }
+    const TrackId t = fWatchTrack.load(std::memory_order_relaxed);
+    for (Bus& b : fBuses)
+        if (b.id == t) { CaptureFxWatch(b.fx); return; }
+}
+
 void Engine::SetFxTempo(double bpm) {
     for (Bus& b : fBuses)
         for (auto& fx : b.fx)
@@ -1012,6 +1027,14 @@ void Engine::FillBuffer(float* out, size_t frames) {
         if (b.id == fMeterTrack.load(std::memory_order_relaxed))
             CaptureFxMeters(b.fx);
 
+        // Same for the insert an open native editor is watching: its parameter
+        // values, which automation has just written into the plugin's control
+        // ports on this thread. Published here for the same reason the meters
+        // are -- the UI must never touch an effect the audio thread runs.
+        if (!fWatchMaster.load(std::memory_order_relaxed)
+            && b.id == fWatchTrack.load(std::memory_order_relaxed))
+            CaptureFxWatch(b.fx);
+
         // Per-node peak (post-FX) for the track meter.
         {
             float pl = 0.0f, pr = 0.0f;
@@ -1050,6 +1073,9 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Effect metering for the master chain (UI focus sentinel = ~0).
     if (fMeterTrack.load(std::memory_order_relaxed) == ~(TrackId)0)
         CaptureFxMeters(fMasterFx);
+    // A native editor on a MASTER insert watches through the same publishing.
+    if (fWatchMaster.load(std::memory_order_relaxed))
+        CaptureFxWatch(fMasterFx);
 
     // Master gain on the summed output (before metering so the meter reflects
     // what actually leaves the engine).

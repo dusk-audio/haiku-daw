@@ -81,6 +81,7 @@ private:
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
+    void PushFxParams();             // engine insert values -> native editor
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     // Decode the loaded project's soundfonts into the SoundfontCache before
@@ -148,6 +149,11 @@ private:
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
+    // An open native LV2 editor watching one insert (engine -> editor values).
+    // The watch lives in the engine, addressed by (track, master, fx), and is
+    // cleared both by the editor saying so and by its messenger dying.
+    BMessenger                fFxParamMsgr;
+    uint32_t                  fFxParamGen = 0;   // last frame pushed to it
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;
