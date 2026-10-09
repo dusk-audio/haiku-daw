@@ -304,6 +304,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(LockedAddTrack(win, project, t));
 
+    std::printf("  export: posting options\n");
     const int32 windowsBefore = VisibleWindows();
     BMessage opts(kMsgExportOptions);
     opts.AddInt32("bits", 16);
@@ -319,9 +320,11 @@ static void TestExportFlow(MainWindow* win, Project& project) {
 
     // Exactly one window appears (the file panel) and nothing renders yet.
     CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    std::printf("  export: the panel is up\n");
     std::remove(kExportPath);
     CHECK(!FileExists(kExportPath));
     HideOtherWindows(win);
+    std::printf("  export: posting the path\n");
 
     // What that panel posts when a name is chosen.
     entry_ref dir;
@@ -333,6 +336,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
 
     // The window must keep answering while it renders: this track has to land.
     // (Under the lock: the looper is handling the export messages meanwhile.)
+    std::printf("  export: waiting for responsiveness\n");
     size_t before = 0;
     if (win->Lock()) { before = project.Tracks().size(); win->Unlock(); }
     win->PostMessage(MSG_NEW_MIDI);
@@ -344,9 +348,11 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     }));
 
     CHECK(WaitFor([&] { return FileExists(kExportPath); }, 60000000));
+    std::printf("  export: file written\n");
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
     CHECK(WaitQuiet());   // its bar closes on a pulse
+    std::printf("  export: done\n");
 }
 
 // --- 4. R1: cancel, stems, loop range --------------------------------------
