@@ -394,7 +394,25 @@ static void test_pitch_and_velocity() {
     CHECK(ScaleVelocity(notes, {}, 1.0f, 0.7f)[0].velocity == 101);    // rounds, not truncates
 }
 
+// A velocity magnitude wide enough to overflow int (Jitter's contract allows
+// it) must clamp into 1..127 rather than adding INT_MAX to a velocity.
+static void test_humanize_velocity_overflow() {
+    std::printf("test_humanize_velocity_overflow\n");
+    std::vector<MidiNote> in(4);
+    for (size_t i = 0; i < in.size(); i++) {
+        in[i].pitch = 60;
+        in[i].startFrame = (Frame)i * 480;
+        in[i].lengthFrames = 240;
+        in[i].velocity = 100;
+    }
+    const std::vector<MidiNote> out = Humanize(in, {}, 4800, 1000, 0x7fffffff,
+                                              0x1234);
+    for (const MidiNote& n : out)
+        CHECK(n.velocity >= 1 && n.velocity <= 127);
+}
+
 int main() {
+    test_humanize_velocity_overflow();
     test_grid_steps();
     test_quantize_strength();
     test_quantize_swing();

@@ -196,8 +196,11 @@ std::vector<MidiNote> Humanize(const std::vector<MidiNote>& notes,
             ^ (uint64_t)(uint32_t)orig.pitch);
         MidiNote n = orig;
         n.startFrame += (Frame)Jitter(h, mag);
-        n.velocity = std::clamp(orig.velocity + Jitter(Mix(h), velocityJitter),
-                                1, 127);
+        // Jitter takes a magnitude wide enough for INT_MAX (see its comment),
+        // and velocity + that would overflow int here: a velocity can only
+        // move within 1..127, so 127 is as much magnitude as means anything.
+        const int vmag = velocityJitter < 127 ? velocityJitter : 127;
+        n.velocity = std::clamp(orig.velocity + Jitter(Mix(h), vmag), 1, 127);
         ClampToWindow(n, orig, clipLen);
         out[i] = n;
     }
