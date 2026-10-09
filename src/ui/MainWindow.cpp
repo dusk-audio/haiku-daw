@@ -70,7 +70,6 @@ enum {
     MSG_REDO  = 'redo',
     MSG_SAVE  = 'save',
     MSG_OPEN  = 'open',
-    MSG_OPEN_REF = 'oprf',   // from the open file panel
     MSG_MASTER   = 'mvol',   // master volume slider moved
     MSG_ZOOM_IN  = 'zmin',
     MSG_ZOOM_OUT = 'zmot',

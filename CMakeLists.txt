@@ -1,12 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
 project(haiku_daw VERSION 1.0.0 LANGUAGES CXX)
 
+# The signature and the project-file type, for both the generated header and
+# the resource the binary carries (they must be set before the configure_file
+# calls below, which expand them).
+set(DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW")
+set(DAW_PROJECT_MIME "application/x-dawproj")
+
 # The version lives in one place (here) and reaches the code through a
 # generated header: the About box, --version and the packaging recipe all read
 # the same numbers, so they cannot drift.
 configure_file(cmake/Version.h.in ${CMAKE_BINARY_DIR}/generated/Version.h @ONLY)
-# The same signature, for the resource the binary carries.
-set(DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW")
 configure_file(haiku-daw.rdef.in ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef @ONLY)
 
 set(CMAKE_CXX_STANDARD 17)

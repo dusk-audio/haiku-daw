@@ -56,6 +56,7 @@ constexpr uint32 MSG_PULSE            = 'puls';   // the 60 Hz BMessageRunner
 constexpr uint32 MSG_NEW_AUDIO        = 'naud';
 constexpr uint32 MSG_NEW_MIDI         = 'nmid';
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
+constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
 constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';

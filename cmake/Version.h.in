@@ -10,3 +10,7 @@
 
 // The app's signature, which the .rdef and the Deskbar both use.
 #define DAW_APP_SIGNATURE "application/x-vnd.DuskAudio-HaikuDAW"
+
+// The .dawproj MIME type: registered with the MIME DB at startup and listed in
+// the .rdef's file_types.
+#define DAW_PROJECT_MIME "@DAW_PROJECT_MIME@"

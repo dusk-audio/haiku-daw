@@ -8,6 +8,17 @@
  */
 resource app_signature "@DAW_APP_SIGNATURE@";
 
+/* One instance: a second launch (a double-click on a project, `open`) hands
+ * its files to the running app as B_REFS_RECEIVED instead of starting a
+ * second DAW. */
+resource app_flags B_SINGLE_LAUNCH;
+
+/* What this app opens; the type itself is installed into the MIME DB on the
+ * first run (src/main.cpp), sniffer keyed on the "DAW 1 " header. */
+resource file_types message {
+	"types" = "@DAW_PROJECT_MIME@"
+};
+
 resource app_version {
 	major = @PROJECT_VERSION_MAJOR@,
 	middle = @PROJECT_VERSION_MINOR@,
