@@ -619,6 +619,64 @@ private:
     TrackType               fSFreezeType = TrackType::Audio;
 };
 
+// The project tempo, set from the transport bar's field. Do mirrors what that
+// handler always did (frame-0 tempo, step change); Undo also restores the ramp
+// flag it flattens and the tempoBPM mirror the engine and the meters read.
+class SetTempoCommand : public Command {
+public:
+    explicit SetTempoCommand(double bpm) : fBpm(bpm) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Tempo"; }
+
+private:
+    double      fBpm;
+    double      fOldBpm     = 120.0;
+    double      fOldMapBpm  = 120.0;
+    bool        fOldRamp    = false;
+    bool        fCaptured   = false;
+};
+
+// The master fader. Coalesces: a drag posts continuously and has to be ONE
+// undo step, exactly like a send-level drag (SetSendsCommand).
+class SetMasterGainCommand : public Command {
+public:
+    explicit SetMasterGainCommand(float gain) : fGain(gain) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Master Gain"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetMasterGainCommand*>(prev);
+        if (!p) return false;
+        p->fGain = fGain;   // absorb the latest position of the drag
+        return true;
+    }
+
+private:
+    float fGain;
+    float fOld      = 1.0f;
+    bool  fCaptured = false;
+};
+
+// Solo-safe: project state (it serializes) that used to be written directly
+// from the track menu and could not be undone.
+class SetSoloSafeCommand : public Command {
+public:
+    SetSoloSafeCommand(TrackId track, bool safe)
+        : fTrack(track), fSafe(safe) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Solo Safe"; }
+
+private:
+    TrackId fTrack;
+    bool    fSafe;
+    bool    fOld = false;
+};
+
 // Point clips at new source files: the Locate flow for media that was moved
 // while the project was closed. One command for the whole walk, so the whole
 // repair is one undo step. An entry whose clip (or track) is gone by the time

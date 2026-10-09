@@ -1021,6 +1021,68 @@ static void test_relink_media() {
     CHECK(p.FindTrack(tid)->FindClip(cid2)->sourcePath == "/found/two.wav");
 }
 
+// The four edits that used to bypass the stack (M0.5): tempo, master gain
+// (coalescing), solo-safe, and the mixer strip's one-macro undo.
+static void test_undo_gaps() {
+    std::printf("test_undo_gaps\n");
+    Project p;
+    CommandStack stack;
+    auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "A");
+    AddTrackCommand* raw = add.get();
+    CHECK(stack.Execute(std::move(add), p));
+    const TrackId tid = raw->CreatedId();
+
+    // Tempo: both mirrors move, and undo puts both back (ramp included).
+    CHECK(p.tempoBPM == 120.0);
+    CHECK(stack.Execute(std::make_unique<SetTempoCommand>(140.0), p));
+    CHECK(p.tempoBPM == 140.0);
+    CHECK(p.tempoMap.Tempos().front().bpm == 140.0);
+    CHECK(stack.Undo(p));
+    CHECK(p.tempoBPM == 120.0);
+    CHECK(p.tempoMap.Tempos().front().bpm == 120.0);
+
+    // Master gain: a drag's posts are ONE undo step back to the origin.
+    const float origin = p.masterGain;
+    CHECK(stack.Execute(std::make_unique<SetMasterGainCommand>(0.8f), p));
+    CHECK(stack.Execute(std::make_unique<SetMasterGainCommand>(0.5f), p));
+    CHECK(stack.Execute(std::make_unique<SetMasterGainCommand>(0.3f), p));
+    CHECK(p.masterGain == 0.3f);
+    CHECK(stack.UndoName() == "Set Master Gain");
+    CHECK(stack.Undo(p));                       // ONE undo: back to the origin
+    CHECK(p.masterGain == origin);
+    CHECK(stack.Redo(p));
+    CHECK(p.masterGain == 0.3f);
+
+    // Solo-safe.
+    CHECK(!p.FindTrack(tid)->soloSafe);
+    CHECK(stack.Execute(std::make_unique<SetSoloSafeCommand>(tid, true), p));
+    CHECK(p.FindTrack(tid)->soloSafe);
+    CHECK(stack.Undo(p));
+    CHECK(!p.FindTrack(tid)->soloSafe);
+
+    // The mixer strip: one macro undoes gain, pan, mute and the group cascade.
+    CHECK(stack.Execute(std::make_unique<SetTrackMuteGroupCommand>(tid, 2), p));
+    auto add2 = std::make_unique<AddTrackCommand>(TrackType::Audio, "B");
+    AddTrackCommand* raw2 = add2.get();
+    CHECK(stack.Execute(std::move(add2), p));
+    const TrackId tid2 = raw2->CreatedId();
+    CHECK(stack.Execute(std::make_unique<SetTrackMuteGroupCommand>(tid2, 2), p));
+
+    auto macro = std::make_unique<MacroCommand>("Mixer Strip");
+    macro->Add(std::make_unique<SetTrackGainCommand>(tid, 0.25f));
+    macro->Add(std::make_unique<SetTrackPanCommand>(tid, -0.5f));
+    macro->Add(std::make_unique<SetTrackMuteCommand>(tid, true));
+    macro->Add(std::make_unique<SetTrackMuteCommand>(tid2, true));  // cascade
+    CHECK(stack.Execute(std::move(macro), p));
+    CHECK(p.FindTrack(tid)->gain == 0.25f);
+    CHECK(p.FindTrack(tid)->muted && p.FindTrack(tid2)->muted);
+    CHECK(stack.UndoName() == "Mixer Strip");
+    CHECK(stack.Undo(p));                       // ONE undo for all four
+    CHECK(p.FindTrack(tid)->gain == 1.0f);
+    CHECK(p.FindTrack(tid)->pan == 0.0f);
+    CHECK(!p.FindTrack(tid)->muted && !p.FindTrack(tid2)->muted);
+}
+
 int main() {
     test_undo_history_cap();
     test_add_and_undo_track();
@@ -1044,6 +1106,7 @@ int main() {
     test_apply_midi_op_command();
     test_frame_seconds_roundtrip();
     test_relink_media();
+    test_undo_gaps();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
