@@ -442,6 +442,26 @@ MainWindow::~MainWindow() {
     // fEngine / fRecorder destructors stop their threads.
 }
 
+void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
+    if (message->what == B_KEY_DOWN && fTimeline) {
+        // A text field keeps its keys: a space is a space while the tempo
+        // field (or any other text view) is being edited.
+        BView* focus = CurrentFocus();
+        const bool editing = dynamic_cast<BTextView*>(focus) != nullptr
+                          || dynamic_cast<BTextControl*>(focus) != nullptr;
+        int32 mods = 0;
+        message->FindInt32("modifiers", &mods);
+        if (!(mods & B_COMMAND_KEY) && !editing) {
+            // Hand it straight to the timeline: a BMessage carries no
+            // retarget verb (Haiku's BMessage has no SetTarget), and this is
+            // precisely "the timeline gets the key instead of the focus view".
+            fTimeline->MessageReceived(message);
+            return;
+        }
+    }
+    BWindow::DispatchMessage(message, handler);
+}
+
 void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_PLAY:  StartPlayback(); break;

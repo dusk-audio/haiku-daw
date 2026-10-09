@@ -14,9 +14,12 @@
 #include "../model/PeakCache.h"
 #include "../model/Commands.h"
 #include "../model/Grid.h"
+#include "../model/Crossfade.h"   // ClipFades (the per-track fade cache)
+#include "UiMetrics.h"             // kHeaderWidth (the peak invalidation)
 
 #include <View.h>
 
+#include <array>
 #include <functional>
 
 #include <map>
@@ -80,7 +83,11 @@ public:
     // Paste the clipboard clip/note at the playhead (Edit > Paste).
     void  PasteAtPlayhead();
 
-    void SetProject(Project* p) { fProject = p; Invalidate(); }
+    void SetProject(Project* p) {
+        fProject = p;
+        fFadeCache.clear();   // a different project, different clips
+        Invalidate();
+    }
 
     // Waveform envelopes, keyed by clip source path. Non-owning; built once
     // on import (M4c) and shared across clips that reference the same file.
@@ -99,10 +106,17 @@ public:
 
     // Per-track output peaks (from the engine) for the header meters. Cleared
     // when playback stops. Keyed by TrackId -> (peakL, peakR) in [0, 1+].
+    // The peaks are drawn in the header column only (the per-track meters), so
+    // invalidate THAT -- at 60 Hz while playing, a full-timeline invalidate was
+    // repainting every lane for a meter tick.
     void SetTrackPeaks(const std::map<TrackId, std::pair<float, float>>& peaks) {
-        fTrackPeaks = peaks; Invalidate();
+        fTrackPeaks = peaks;
+        Invalidate(BRect(0, 0, kHeaderWidth, Bounds().bottom));
     }
-    void ClearTrackPeaks() { fTrackPeaks.clear(); Invalidate(); }
+    void ClearTrackPeaks() {
+        fTrackPeaks.clear();
+        Invalidate(BRect(0, 0, kHeaderWidth, Bounds().bottom));
+    }
 
     // Live recording region drawn as a growing block on every armed track
     // while a take is being captured (before the real clips exist). Pass
@@ -137,8 +151,19 @@ private:
     // any auto-crossfade from overlapping a neighbour), so the drawing matches
     // what the engine and exporter render. See model/Crossfade.h.
     void DrawClip(const Clip& c, BRect lane, rgb_color base,
-                  Frame fadeIn, Frame fadeOut);
-    void DrawClipWave(const Clip& c, BRect block);
+                  Frame fadeIn, Frame fadeOut, BRect update);
+    void DrawClipWave(const Clip& c, BRect block, BRect update);
+
+    // Effective fades per track, cached: ComputeCrossfades allocates, and it
+    // changes only when the clips do. The cache holds the tuples it was built
+    // from, so the common case is an exact O(n) comparison with no allocation
+    // instead of one allocation per lane per draw.
+    struct FadeCache {
+        std::vector<std::array<long long, 5>> key;
+        std::vector<ClipFades>                fades;
+    };
+    std::map<TrackId, FadeCache> fFadeCache;
+    const std::vector<ClipFades>& FadesFor(const Track& t);
     // Overlap X + tint, drawn after a lane's clips so the earlier clip's ramp is
     // not buried under the later clip's block.
     void DrawCrossfades(const Track& t, BRect lane);

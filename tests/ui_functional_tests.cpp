@@ -11,6 +11,7 @@
 // model is read under a window's lock, the way any other looper-external reader
 // has to.
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/model/MidiOps.h"       // QuantGrid
@@ -1140,6 +1141,123 @@ static void TestErrorReports(MainWindow* win, Project& project,
     std::remove(cleanPath);
 }
 
+// --- 12. M0.7: the transport keys and the timeline's focus ------------------
+
+// Space reaches the timeline without clicking it first; a text field keeps its
+// own keys (a space is a space there); a click on the timeline takes the focus.
+// Needs a project with content: an empty one has nothing to play (StartPlayback
+// stops again), which is a different behaviour entirely.
+static void TestKeyboardFocus(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_keyboard_focus\n");
+
+    // Something the engine can actually PLAY: the previous test's fixture
+    // points at a file it removes on the way out, and a project whose only clip
+    // is gone makes StartPlayback fail (correctly) -- which the first version
+    // of this test read as "the key did nothing".
+    {
+        const char* wav = "/tmp/haiku_daw_ui_key.wav";
+        std::remove(wav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 4000, -4000 };
+        CHECK(w.Open(wav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "keys-track";
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000;
+        c.sourcePath = wav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+    }
+
+    auto playing = [&] {
+        bool p = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            p = win->IsPlaying();
+            win->Unlock();
+        }
+        return p;
+    };
+    auto sendKey = [&](const char* bytes) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    };
+
+    // A click on the timeline takes the focus (and with it the keys). The
+    // message goes to the view itself -- the way this harness posts everything
+    // -- because a window-level posted mouse message is not hit-tested onto
+    // the view under its "where" (the focus stayed on the tempo field's
+    // _input_ text view when it was posted to the window).
+    BView* timeline = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        timeline = win->FindView("timeline");
+        win->Unlock();
+    }
+    CHECK(timeline != nullptr);
+    BMessage down(B_MOUSE_DOWN);
+    down.AddInt32("buttons", 1);
+    down.AddPoint("where", BPoint(220, 14));   // the ruler, in view coordinates
+    if (timeline) BMessenger(timeline).SendMessage(&down);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus())
+                            != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    // Space toggles the transport...
+    CHECK(!playing());
+    sendKey(" ");
+    CHECK(WaitFor([&] { return playing(); }, 15000));
+    sendKey(" ");
+    CHECK(WaitFor([&] { return !playing(); }, 15000));
+
+    // ...but with the tempo field focused it is text, not transport.
+    BView* tempo = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tempo = win->FindView("tempo");
+        if (tempo) tempo->MakeFocus(true);
+        win->Unlock();
+    }
+    CHECK(tempo != nullptr);
+    sendKey(" ");
+    snooze(400000);
+    CHECK(!playing());
+
+    // Clicking the timeline again takes the focus back from the field.
+    if (timeline) BMessenger(timeline).SendMessage(&down);
+    bool focused = WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus())
+                            != nullptr;
+        win->Unlock();
+        return ok;
+    });
+    if (!focused && win->LockWithTimeout(1000000) == B_OK) {
+        BView* f = win->CurrentFocus();
+        BView* tl = win->FindView("timeline");
+        std::printf("  focus after click: '%s' (timeline '%s' at %p)\n",
+                    f && f->Name() ? f->Name() : "(null)",
+                    tl && tl->Name() ? tl->Name() : "(null)", (void*)tl);
+        win->Unlock();
+    }
+    CHECK(focused);
+    sendKey(" ");
+    CHECK(WaitFor([&] { return playing(); }, 15000));
+    sendKey(" ");                              // leave the transport stopped
+    CHECK(WaitFor([&] { return !playing(); }, 15000));
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1170,6 +1288,7 @@ static int32 TestThread(void*) {
     TestLv2EditorWiring(win, project, stack);
 #endif
     TestErrorReports(win, project, stack);
+    TestKeyboardFocus(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
