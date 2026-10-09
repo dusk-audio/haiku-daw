@@ -1218,9 +1218,9 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     // Space toggles the transport...
     CHECK(!playing());
     sendKey(" ");
-    CHECK(WaitFor([&] { return playing(); }, 15000));
+    CHECK(WaitFor([&] { return playing(); }));
     sendKey(" ");
-    CHECK(WaitFor([&] { return !playing(); }, 15000));
+    CHECK(WaitFor([&] { return !playing(); }));
 
     // ...but with the tempo field focused it is text, not transport.
     BView* tempo = nullptr;
@@ -1253,9 +1253,9 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     }
     CHECK(focused);
     sendKey(" ");
-    CHECK(WaitFor([&] { return playing(); }, 15000));
+    CHECK(WaitFor([&] { return playing(); }));
     sendKey(" ");                              // leave the transport stopped
-    CHECK(WaitFor([&] { return !playing(); }, 15000));
+    CHECK(WaitFor([&] { return !playing(); }));
 }
 
 // --- driver ----------------------------------------------------------------

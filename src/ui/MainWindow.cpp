@@ -1038,6 +1038,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // values -- they arrived live before this message did -- and
                 // SyncFxToEngine rebuilds the chain, which would cut reverb
                 // tails and restart the insert to re-apply what it is playing.
+                // An OPEN generic panel, though, still holds the chain from
+                // before this commit: left stale, its next Apply() would write
+                // the old values back and silently undo this edit.
+                PushChainToFxWindow((TrackId)tid);
                 fTimeline->Invalidate();
             }
             break;
@@ -1260,7 +1264,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BAlert* a = new BAlert("Recover",
                     "Unsaved work from a previous session was found. Recover it?",
                     "Discard", "Recover");
-                if (a->Go() == 1) LoadFrom(p.Path());
+                if (a->Go() == 1) LoadFrom(p.Path(), /*asRecovery*/ true);
                 else              RemoveRecoveryFile();
             }
             break;
@@ -1353,6 +1357,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 ValidateFxWatch();
                 ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
+                // Same staleness rule as a native commit: an undo rewrites the
+                // chain under an open panel's copy.
+                PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
                 UpdateTitle();
             }
@@ -1363,6 +1370,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 ValidateFxWatch();
                 ReloadActiveEngine();   // brings the engine to the model's state
                 PublishFxParamsNow();   // ... and only then republish
+                PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
                 UpdateTitle();
             }
@@ -2178,8 +2186,12 @@ void MainWindow::FlushFxEditors() {
         }
         if (vals.empty()) continue;
         const bool master = (w.track == kMasterFxTarget);
-        fStack->Execute(std::make_unique<SetFxParamCommand>(
-            w.track, master, w.fx, std::move(vals)), *fProject);
+        if (fStack->Execute(std::make_unique<SetFxParamCommand>(
+                w.track, master, w.fx, std::move(vals)), *fProject)) {
+            // A flush happens before a save/render; the panel's copy is stale
+            // from this moment on (same rule as the commit path).
+            PushChainToFxWindow(w.track);
+        }
     }
 
     // ...and the GENERIC panel, which this loop does not reach: it folds wheel
@@ -2551,7 +2563,7 @@ void MainWindow::PrimeSoundfonts() {
     a->Go(nullptr);   // async: don't block the load
 }
 
-void MainWindow::LoadFrom(const char* path) {
+void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     // Ask first, before stopping anything or touching the open editors: a
     // Cancel must leave the session exactly as it was. (The Save answer goes
     // through SaveTo, which flushes the editors itself.)
@@ -2574,12 +2586,22 @@ void MainWindow::LoadFrom(const char* path) {
                     "project. The session you had is untouched.");
         return;
     }
-    fProjectPath = path;
-    fTakeDir = DirOfPath(path);
-    fLastDir = fTakeDir;
     fStack->Clear();          // history from the previous project is invalid
-    fStack->MarkSaved();      // the loaded file IS the saved state
-    RememberProject(fProjectPath);
+    if (asRecovery) {
+        // A recovered session is UNSAVED, nameless work: the recovery file is
+        // a rescue copy, not the project. Treating it as an opened document
+        // made the next Quit (clean -> no prompt) delete the only copy, and a
+        // Cmd-S save it to the recovery path and then delete that same path.
+        fProjectPath.clear();
+        fTakeDir.clear();
+        fStack->MarkUnsaved();
+    } else {
+        fProjectPath = path;
+        fTakeDir = DirOfPath(path);
+        fLastDir = fTakeDir;
+        fStack->MarkSaved();  // the loaded file IS the saved state
+        RememberProject(fProjectPath);
+    }
     UpdateTitle();
     CollectMissingMedia();    // gone media: one dialog, Skip or Locate…
     PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine

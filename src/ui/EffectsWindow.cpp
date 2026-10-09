@@ -365,8 +365,11 @@ void EffectsView::Apply() {
 void EffectsView::SetChain(std::vector<EffectDesc> chain) {
     // A drag works from indices into the copy it started with; moving them
     // under it would edit the wrong insert. Its own mouse-up posts the commit
-    // that makes this refresh unnecessary.
-    if (fDragEffect >= 0) return;
+    // that makes this refresh unnecessary. A pending wheel commit is the same
+    // kind of in-flight edit: it will Apply() THIS copy when its timer fires,
+    // so a refresh that replaced the copy would commit values from before
+    // whatever prompted the refresh.
+    if (fDragEffect >= 0 || fCommit) return;
     fChain = std::move(chain);
     if (fFocus >= (int)fChain.size()) {
         // The insert this window exists to edit is gone; the same rule the

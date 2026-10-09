@@ -164,12 +164,31 @@ static void test_saved_entry_trimmed_away_is_still_the_saved_state() {
     CHECK(!s.IsDirty());
 }
 
+// A recovered session is unsaved work: the recovery file is not the project,
+// so MarkUnsaved() must read dirty from ANY position (including an empty
+// stack), and only a real save or load clears it.
+static void test_mark_unsaved() {
+    std::printf("test_mark_unsaved\n");
+    Project p;
+    CommandStack s;
+    CHECK(!s.IsDirty());
+    s.MarkUnsaved();
+    CHECK(s.IsDirty());              // nowhere on disk
+    AddAudioTrack(p, s, "A");
+    CHECK(s.IsDirty());
+    CHECK(s.Undo(p));
+    CHECK(s.IsDirty());              // still nowhere, even empty
+    s.MarkSaved();                   // the user picks a path and saves
+    CHECK(!s.IsDirty());
+}
+
 int main() {
     test_dirty_across_undo_redo();
     test_coalesced_drag_after_save_is_dirty();
     test_undo_to_empty_after_a_trim_is_not_the_saved_original();
     test_save_at_the_trimmed_empty_state_then_cycle();
     test_saved_entry_trimmed_away_is_still_the_saved_state();
+    test_mark_unsaved();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
