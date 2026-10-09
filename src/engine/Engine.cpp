@@ -672,6 +672,16 @@ void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
         (*chain)[(size_t)fxIndex]->SetParam(slot, value);
 }
 
+void Engine::PublishFxWatchNow() {
+    // The audio callback owns the published storage while it runs (it rewrites
+    // the same arrays every block); this exists for the stopped transport, where
+    // there is no block and no second writer.
+    if (fPlayerRunning.load(std::memory_order_acquire)) return;
+    CaptureFxWatches(kInvalidTrackId, true, fMasterFx);
+    for (Bus& b : fBuses)
+        CaptureFxWatches(b.id, false, b.fx);
+}
+
 void Engine::SetFxTempo(double bpm) {
     for (Bus& b : fBuses)
         for (auto& fx : b.fx)
@@ -890,6 +900,12 @@ void Engine::FillBuffer(float* out, size_t frames) {
             const float a = std::fabs(out[i]);
             if (i & 1) { if (a > pr) pr = a; } else { if (a > pl) pl = a; }
         }
+        // Watched inserts publish here too, or an editor open while monitoring
+        // would stop hearing about the generic panel: this branch is the only
+        // block running then, and PublishFxWatchNow deliberately stands aside
+        // whenever a callback is running.
+        CaptureFxWatches(kInvalidTrackId, true, fMasterFx);
+        for (Bus& b2 : fBuses) CaptureFxWatches(b2.id, false, b2.fx);
         fPeakL.store(pl); fPeakR.store(pr);
         return;
     }
@@ -927,8 +943,15 @@ void Engine::FillBuffer(float* out, size_t frames) {
     for (size_t oi = 0; oi < fOrder.size(); oi++) {
         const size_t idx = fOrder[oi];
         Bus& b = fBuses[idx];
-        if (!b.audible.load(std::memory_order_relaxed))
-            continue;                       // muted / solo'd out: route nothing
+        if (!b.audible.load(std::memory_order_relaxed)) {
+            // Muted / solo'd out: route nothing, but a watched insert in this
+            // chain still publishes. Its editor is open on screen either way,
+            // and a knob turned there -- or automation running under the mute,
+            // which the main thread keeps writing -- would otherwise not show
+            // up until the track was unmuted.
+            CaptureFxWatches(b.id, false, b.fx);
+            continue;
+        }
         float* nb = fNodeBufs[idx].data();
 
         // Automation: drive this node's gain/pan from its lanes at the block
@@ -1012,6 +1035,12 @@ void Engine::FillBuffer(float* out, size_t frames) {
         if (b.id == fMeterTrack.load(std::memory_order_relaxed))
             CaptureFxMeters(b.fx);
 
+        // Same for the inserts open native editors are watching: their
+        // parameter values, which automation has just written into the plugin's
+        // control ports on this thread. Published here for the same reason the
+        // meters are -- the UI must never touch an effect the audio thread runs.
+        CaptureFxWatches(b.id, false, b.fx);
+
         // Per-node peak (post-FX) for the track meter.
         {
             float pl = 0.0f, pr = 0.0f;
@@ -1050,6 +1079,8 @@ void Engine::FillBuffer(float* out, size_t frames) {
     // Effect metering for the master chain (UI focus sentinel = ~0).
     if (fMeterTrack.load(std::memory_order_relaxed) == ~(TrackId)0)
         CaptureFxMeters(fMasterFx);
+    // Native editors on MASTER inserts watch through the same publishing.
+    CaptureFxWatches(kInvalidTrackId, true, fMasterFx);
 
     // Master gain on the summed output (before metering so the meter reflects
     // what actually leaves the engine).

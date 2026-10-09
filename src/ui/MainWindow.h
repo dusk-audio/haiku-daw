@@ -16,15 +16,17 @@
 #include "../engine/Recorder.h"
 #include "../midi/MidiPort.h"
 #include "../midi/MidiRecorder.h"
+#include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 
 #include <Messenger.h>
 #include <Window.h>
 
 #include <map>
-#include <utility>
 #include <memory>
+#include <utility>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 class BButton;
 class BStringView;
@@ -48,6 +50,10 @@ public:
     using Frame = daw::Frame;
 
     using PeakMap = std::map<std::string, PeakCache>;
+
+    // The transport bar's controls are pinned offsets, not a flow, so the
+    // window fits them to the bar's new width itself (see LayoutTransportBar).
+    void FrameResized(float newWidth, float newHeight) override;
     MainWindow(BRect frame, Project* project, CommandStack* stack,
                PeakMap* peaks);
     ~MainWindow() override;
@@ -81,6 +87,12 @@ private:
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
+    void PushChainToFxWindow(TrackId tid);   // model's chain -> open panel
+    void PushFxParams();             // engine insert values -> native editor
+    void LayoutTransportBar();       // fit the bar's controls to its width
+    void ValidateFxWatch();          // keep a live editor pointed at ITS insert
+    void CloseFxEditors();           // project is going away: close them all
+    void FlushFxEditors();           // before a save: commit what they wrote
     void SaveTo(const char* path);
     void LoadFrom(const char* path);
     // Decode the loaded project's soundfonts into the SoundfontCache before
@@ -119,6 +131,14 @@ private:
     class TransportBar* fTransport = nullptr;
     BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
+    BStringView*    fVolLbl = nullptr;     // labels + readouts the bar hides
+    BStringView*    fBpmLbl = nullptr;     // when there is no room for them
+    // Whether each is currently shown, so the layout only calls Show()/Hide()
+    // on a transition (both are counted, not idempotent, and the layout runs on
+    // every resize).
+    bool fLoudShown = true;
+    bool fBpmShown  = true;
+    bool fVolShown  = true;
     MeterView*      fMeter;
     BSlider*        fMaster;
     BTextControl*   fTempo;
@@ -148,6 +168,37 @@ private:
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
+    // An open native LV2 editor watching one insert (engine -> editor values).
+    // The watch lives in the engine, addressed by (track, master, fx), and is
+    // cleared both by the editor saying so and by its messenger dying.
+    // One open native editor and the insert it is showing (see
+    // src/plugin/FxWatchTable.h -- the table, its rules and its slot allocation
+    // are kit-free and host-tested, because those rules are where the bugs
+    // were). Each entry owns one engine watch slot; the editor is fed on the
+    // 60 Hz pulse.
+    struct EditorHandle;
+    struct FxEntry {
+        std::shared_ptr<EditorHandle> editor;
+        std::string uri;
+        TrackId     track = kInvalidTrackId;  // chain address (master sentinel ok)
+        int         fx = -1;
+        int         slot = -1;                // engine watch slot
+        uint32_t    gen = 0;                  // last frame pushed to it
+        // Last frame pushed from the MODEL, for the case with no engine at all
+        // (nothing played yet): then the model is the only source of truth.
+        std::vector<float> pushed;
+    };
+    std::vector<FxEntry> fFxWatches;
+    std::vector<FxWatch> FxWatchSnapshot() const;   // for the kit-free rules
+    void PushFxParamsFromModel(FxEntry& w);   // ... or the model, with no engine
+    FxChainView FxChainFor(const FxWatch& w) const; // the chain one entry names
+
+    void ApplyFxWatchToEngine(const FxEntry& w); // program the engine for one
+    void ReapplyFxWatches();                     // after an engine rebuild
+    void PublishFxParamsNow();                   // stopped transport: publish
+    // Open a plugin's own editor for an insert, resolving it against the MODEL
+    // (callers may hold a stale chain snapshot). False if it has no editor.
+    bool OpenNativeEditor(TrackId tid, int fx);
     BFilePanel*               fSavePanel = nullptr;
     BFilePanel*               fOpenPanel = nullptr;
     BFilePanel*               fExportPanel = nullptr;

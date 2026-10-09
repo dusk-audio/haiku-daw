@@ -303,10 +303,12 @@ float EffectsView::ContentHeight() const {
     return y;
 }
 
-void EffectsView::Apply() {
-    BMessage m(kMsgApplyFx);
-    m.AddInt64("track", (int64)fTrack);
-    for (const EffectDesc& d : fChain) {
+// One encoding of an insert chain, for the two conversations that carry one:
+// the panel's commit (kMsgApplyFx) and MainWindow pushing the model's current
+// chain back (kMsgFxChain). They have to agree field for field, so they are
+// written once.
+void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain) {
+    for (const EffectDesc& d : chain) {
         m.AddInt32("et", (int32)(int)d.type);
         m.AddInt32("ec", (int32)d.params.size());
         m.AddString("en", d.pluginName.c_str());   // empty for built-ins
@@ -318,7 +320,57 @@ void EffectsView::Apply() {
         m.AddFloat("em", d.mix);
         for (float v : d.params) m.AddFloat("ep", v);
     }
+}
+
+std::vector<EffectDesc> DecodeFxChain(const BMessage& m) {
+    std::vector<EffectDesc> chain;
+    int32 type = 0, epIdx = 0;
+    for (int32 i = 0; m.FindInt32("et", i, &type) == B_OK; i++) {
+        EffectDesc d;
+        d.type = (type >= 0 && type <= kMaxEffectTypeId) ? (EffectType)type
+                                                         : EffectType::Biquad;
+        BString pn;
+        if (m.FindString("en", i, &pn) == B_OK) d.pluginName = pn.String();
+        // Absent fields keep EffectDesc's defaults (not bypassed, fully wet);
+        // mix is clamped the same way ProjectIO clamps it on load, since this
+        // crosses a thread boundary from a window that may not own a slot UI.
+        int32 byp = 0;
+        if (m.FindInt32("eb", i, &byp) == B_OK) d.bypassed = (byp != 0);
+        float mix = 1.0f;
+        if (m.FindFloat("em", i, &mix) == B_OK) d.mix = ClampFxMix(mix);
+        int32 count = 0;
+        m.FindInt32("ec", i, &count);
+        for (int32 j = 0; j < count; j++) {
+            float v = 0.0f;
+            m.FindFloat("ep", epIdx++, &v);
+            d.params.push_back(v);
+        }
+        chain.push_back(d);
+    }
+    return chain;
+}
+
+void EffectsView::Apply() {
+    BMessage m(kMsgApplyFx);
+    m.AddInt64("track", (int64)fTrack);
+    EncodeFxChain(m, fChain);
     fApply.SendMessage(&m);
+}
+
+void EffectsView::SetChain(std::vector<EffectDesc> chain) {
+    // A drag works from indices into the copy it started with; moving them
+    // under it would edit the wrong insert. Its own mouse-up posts the commit
+    // that makes this refresh unnecessary.
+    if (fDragEffect >= 0) return;
+    fChain = std::move(chain);
+    if (fFocus >= (int)fChain.size()) {
+        // The insert this window exists to edit is gone; the same rule the
+        // apply path uses, for the same reason.
+        if (BWindow* w = Window()) w->PostMessage(B_QUIT_REQUESTED);
+        return;
+    }
+    UpdateScrollRange();
+    Invalidate();
 }
 
 // --- drawing --------------------------------------------------------------
@@ -946,15 +998,16 @@ void EffectsView::MouseDown(BPoint where) {
 #ifdef DAW_HAVE_LV2
         case 10: {   // open the plugin's own editor
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
-            const EffectDesc& d = fChain[(size_t)h.effect];
-            BRect wr(140, 140, 140 + 960, 140 + 680);
-            if (BWindow* w = Window()) {
-                BRect f = w->Frame();
-                wr.OffsetTo(f.left + 30, f.top + 30);
-            }
-            // Null return = the plugin has no embeddable UI or its editor
-            // refused to instantiate; the generic panel stays as it is.
-            Lv2UiWindow::Open(wr, d.pluginName, EffectDisplayName(d), d.params);
+            // Asked for by INDEX, and opened by MainWindow: this view's fChain
+            // is a snapshot taken when it opened, so the insert at this index
+            // here need not be the one at this index in the model -- and a live
+            // editor writes to its insert by index. MainWindow resolves it
+            // against the model, which also decides whether there is a native
+            // editor at all. If not, this panel simply stays as it is.
+            BMessage open(kMsgOpenFxEditor);
+            open.AddInt64("track", (int64)fTrack);
+            open.AddInt32("fx", h.effect);
+            fApply.SendMessage(&open);
             break;
         }
 #endif
@@ -1179,6 +1232,13 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
         msg->FindInt32("specn", &specN);
         fView->SetMeters(gr, gr ? (int)(grBytes / sizeof(float)) : 0,
                          sp, specN, specFx);
+        return;
+    }
+    if (msg->what == kMsgFxChain) {
+        // The model's chain, which this panel's copy was taken before: without
+        // this its next commit would rewrite every insert from a stale
+        // snapshot, reverting whatever happened elsewhere in the meantime.
+        fView->SetChain(DecodeFxChain(*msg));
         return;
     }
     BWindow::MessageReceived(msg);

@@ -448,6 +448,89 @@ int main() {
             std::make_unique<SetFxBypassCommand>((TrackId)9999, 0, true), p));
     }
 
+    // SetFxParamCommand: the narrow, undoable parameter edit a native plugin
+    // editor commits. It must touch ONLY the named slots -- SetFxCommand (the
+    // whole-chain replace) would pass a test that overwrote the chain too.
+    {
+        Project p;
+        CommandStack stack;
+        stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "T"), p);
+        const TrackId id = p.Tracks().front().id;
+        stack.Execute(std::make_unique<SetFxCommand>(
+            id, false, std::vector<EffectDesc>{ EqDesc(), DelayDesc() }), p);
+
+        std::vector<float> before = p.FindTrack(id)->fx[0].params;
+        const size_t slot = 2;
+        const float oldValue = before[slot];
+
+        CHECK(stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, 0, std::vector<SetFxParamCommand::SlotValue>{
+                              { (int)slot, oldValue + 1.0f } }), p));
+        CHECK(p.FindTrack(id)->fx[0].params[slot] == oldValue + 1.0f);
+        // Every other parameter, and every other insert, is untouched.
+        bool othersSame = p.FindTrack(id)->fx[0].params.size() == before.size();
+        for (size_t i = 0; othersSame && i < before.size(); i++)
+            if (i != slot && p.FindTrack(id)->fx[0].params[i] != before[i])
+                othersSame = false;
+        CHECK(othersSame);
+        CHECK(p.FindTrack(id)->fx[1].params == DelayDesc().params);
+
+        // Undo restores exactly the old value, not the whole descriptor.
+        stack.Undo(p);
+        CHECK(p.FindTrack(id)->fx[0].params[slot] == oldValue);
+        stack.Redo(p);
+        CHECK(p.FindTrack(id)->fx[0].params[slot] == oldValue + 1.0f);
+
+        // Several slots in one command (a plugin's own preset load).
+        const float a0 = p.FindTrack(id)->fx[0].params[0];
+        const float a1 = p.FindTrack(id)->fx[0].params[1];
+        CHECK(stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, 0, std::vector<SetFxParamCommand::SlotValue>{
+                              { 0, a0 + 2.0f }, { 1, a1 + 3.0f } }), p));
+        CHECK(p.FindTrack(id)->fx[0].params[0] == a0 + 2.0f);
+        CHECK(p.FindTrack(id)->fx[0].params[1] == a1 + 3.0f);
+        stack.Undo(p);
+        CHECK(p.FindTrack(id)->fx[0].params[0] == a0);
+        CHECK(p.FindTrack(id)->fx[0].params[1] == a1);
+
+        // The master chain is reached through the same flag SetFxLive uses.
+        stack.Execute(std::make_unique<SetFxCommand>(
+            id, true, std::vector<EffectDesc>{ LimiterDesc() }), p);
+        const float mOld = p.masterFx[0].params[0];
+        CHECK(stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, true, 0, std::vector<SetFxParamCommand::SlotValue>{
+                              { 0, mOld + 0.5f } }), p));
+        CHECK(p.masterFx[0].params[0] == mOld + 0.5f);
+        CHECK(p.FindTrack(id)->fx[0].params[0] == a0);   // track chain untouched
+        stack.Undo(p);
+        CHECK(p.masterFx[0].params[0] == mOld);
+
+        // Nothing in range is not an edit: no Do, so nothing on the undo stack.
+        // A slot past the end is a plugin whose port count changed under a saved
+        // project -- it must not take the whole command down with it either.
+        CHECK(!stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, 9, std::vector<SetFxParamCommand::SlotValue>{ { 0, 1.0f } }), p));
+        CHECK(!stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, -1, std::vector<SetFxParamCommand::SlotValue>{ { 0, 1.0f } }), p));
+        CHECK(!stack.Execute(std::make_unique<SetFxParamCommand>(
+            (TrackId)9999, false, 0,
+            std::vector<SetFxParamCommand::SlotValue>{ { 0, 1.0f } }), p));
+        const float keep = p.FindTrack(id)->fx[0].params[0];
+        CHECK(!stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, 0,
+            std::vector<SetFxParamCommand::SlotValue>{ { 9999, 1.0f } }), p));
+        CHECK(p.FindTrack(id)->fx[0].params[0] == keep);
+
+        // One out-of-range slot alongside a good one: the good one still lands,
+        // and the undo restores only it.
+        CHECK(stack.Execute(std::make_unique<SetFxParamCommand>(
+            id, false, 0, std::vector<SetFxParamCommand::SlotValue>{
+                              { 0, keep + 4.0f }, { 9999, 1.0f } }), p));
+        CHECK(p.FindTrack(id)->fx[0].params[0] == keep + 4.0f);
+        stack.Undo(p);
+        CHECK(p.FindTrack(id)->fx[0].params[0] == keep);
+    }
+
     std::remove(kPath);
     std::printf("fx_insert_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

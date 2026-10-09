@@ -133,33 +133,14 @@ that needs someone at the machine.
   conclude the app is running twice.
 - Run with `DEBUG_SERVER_DISABLE_GUI=1` and capture to a log.
 
-## Environment, exactly as it works today
+## Environment
 
-- **VM**: `ssh user@192.168.122.232`, repo at `~/haiku-daw`. This is the only
-  machine that can build `src/ui/`. Real hardware (192.168.1.186) is powered off.
-- **The VM is a working copy, not a git remote.** It sits at `cf2e1df` with
-  later changes applied as loose files. Sync edited files with:
-  ```sh
-  tar cf - <paths> | ssh user@192.168.122.232 'cd ~/haiku-daw && tar xf -'
-  ```
-- **The VM clock is ~4 h behind the host**, so make floods the log with "modification
-  time in the future" and "Clock skew detected", and may skip rebuilding. `touch`
-  the synced files on the VM, then filter the noise:
-  ```sh
-  ssh user@192.168.122.232 'cd ~/haiku-daw && touch <paths> && cd build &&
-      cmake --build . -j4 2>&1 | grep -Ev "^make\[|Clock skew|modification time"'
-  ```
-  Always confirm the files you changed appear as `Building CXX object` lines. A
-  silent "Built target" after a sync means make skipped them.
-- **VM build dirs**: `build` (LV2 on), `build-lv2`, `build-off` (`-DDAW_LV2=OFF`).
-- **Host build dirs**: `build-host` (plain), `build` (`-DDAW_SANITIZE=ON`).
-- `scripts/serve.sh` defaults to **port 9090**: the host's firewalld drops 8000,
-  so a clone from another machine *hangs* rather than being refused, which reads
-  as a fault on the Haiku end. `scripts/hw_setup.sh` bootstraps a fresh Haiku
-  install on real hardware.
-- Screenshots of the running VM come from the user's GNOME session (the VM window
-  is on the left of the screen). `screenshot` over SSH fails with exit 69 —
-  app_server is unreachable from a non-login session.
+**Superseded.** The VM described here (192.168.122.232, a working copy at
+`cf2e1df`, `-j4`, the clock-skew workaround) is gone. Marc replaced it on
+2026-10-08 with a fresh Haiku install: **section 3 of
+`07-session-entry-newvm.md`** is the current environment guide — new address,
+real git clone, 2 vCPU (`-j2`), how to sync a feature branch, screenshots, and
+what is installed. Everything else in this file still applies.
 
 ## Rules this branch has already paid for
 

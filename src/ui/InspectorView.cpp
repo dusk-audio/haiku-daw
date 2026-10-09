@@ -558,8 +558,14 @@ void InspectorView::MouseUp(BPoint) {
             // this plugin is already up and was raised instead, which is also
             // "done", so neither case falls through to the generic panel.
             if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName)) {
-                BRect uw(160, 160, 160 + 960, 160 + 680);
-                Lv2UiWindow::Open(uw, d.pluginName, EffectDisplayName(d), d.params);
+                // Opened through this view's window (the MainWindow), which
+                // resolves the insert against the model and runs the editor.
+                // The editor then posts its live and committed parameter edits
+                // back there, exactly as the generic panel does.
+                BMessage open(kMsgOpenFxEditor);
+                open.AddInt64("track", (int64)t->id);
+                open.AddInt32("fx", from);
+                Window()->PostMessage(&open);
                 Refresh();
                 return;
             }

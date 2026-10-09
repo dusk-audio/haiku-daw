@@ -77,6 +77,20 @@ public:
     // which needs param names/ranges to draw knobs for a chain slot.
     const Lv2PluginInfo* Find(const std::string& uri) const;
 
+    // Does this plugin's UI read the DSP instance DIRECTLY, instead of writing
+    // through the host's write function? DPF/DAF plugins built with
+    // WANT_DIRECT_ACCESS say so by requiring instance-access -- which is the
+    // whole difference between an editor the host can drive through control
+    // ports and one it can only mirror values into.
+    //
+    // Lives here rather than in the editor window because it is a fact about the
+    // installed plugin, not about the window, and because the window cannot be
+    // built (or tested) off Haiku. Conservative on every failure path: a plugin
+    // whose RDF cannot be read is reported as direct-access, since leaving an
+    // editor unlinked is the safe mistake and poking a live instance is not.
+    // Non-const because asking it makes sure the scan has run (idempotent).
+    bool UiRequiresInstanceAccess(const std::string& uri);
+
     // Instantiate `uri` bound to `sampleRate`, or null if the URI is unknown,
     // unhostable, or the plugin's own instantiation failed. The caller owns the
     // result. Control ports start at their port defaults; MakeEffect applies any

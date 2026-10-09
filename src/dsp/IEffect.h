@@ -65,6 +65,19 @@ public:
     virtual float MeterDb() const { return 0.0f; }
     virtual int   Spectrum(float* /*magDb*/, int /*maxBins*/) const { return 0; }
 
+    // Current values of this effect's parameters, in slot order, up to
+    // `maxSlots`; returns how many were written. 0 (the default) means the
+    // effect has no such notion -- a built-in whose parameters the model
+    // already holds exactly.
+    //
+    // For a plugin this is the ONLY place its live parameter state exists:
+    // automation drives SetParam from the audio thread and nothing tells the
+    // model, so a native editor can learn what automation did only from here.
+    // The engine's own audio thread is what reads it (see
+    // Engine::WatchedFxParams); a UI must never call this on a playing
+    // instance, which is the whole reason the engine publishes a copy.
+    virtual int ControlValues(float* /*out*/, int /*maxSlots*/) const { return 0; }
+
     virtual const char* Name() const = 0;
 };
 

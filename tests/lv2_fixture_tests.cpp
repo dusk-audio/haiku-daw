@@ -43,6 +43,7 @@ using namespace daw;
 namespace {
 
 const char* kMonoGain    = "urn:haiku-daw:test:mono-gain";
+const char* kTwoUi       = "urn:haiku-daw:test:two-ui";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
@@ -94,7 +95,9 @@ int main() {
     }
 
     // Exactly two of our five are hostable; the other three are refused.
-    CHECK(mineHosted == 2);
+    // Six fixtures: three hostable now that the two-UI one is here, three
+    // deliberately refused.
+    CHECK(mineHosted == 3);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
@@ -416,6 +419,81 @@ int main() {
             fx2->Process(buf.data(), 1);
             CHECK(Near(buf[0], 2.0f));
         }
+    }
+
+    // --- ControlValues: what the engine publishes to an open editor --------
+    //
+    // Automation drives SetParam from the audio thread and never writes the
+    // model, so for a plugin insert the control buffer the engine holds IS the
+    // parameter state. An editor showing automation therefore depends on this
+    // reporting exactly what was set -- a stale or clamped-away value here is
+    // an editor that lies about what is playing.
+    {
+        std::unique_ptr<IEffect> fx = host.Create(kMonoGain, 48000.0);
+        CHECK(fx != nullptr);
+        if (fx) {
+            float vals[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+            CHECK(fx->ControlValues(vals, 4) == 1);        // exactly one parameter
+            CHECK(Near(vals[0], 1.0f));                    // its declared default
+
+            fx->SetParam(0, 2.5f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 2.5f));
+
+            // The port's declared maximum, because that is what the plugin will
+            // actually read on its next run() -- ControlValues must not report
+            // the value the caller asked for, only the one that took effect.
+            fx->SetParam(0, 99.0f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 4.0f));
+
+            // A slot the plugin does not have is not a parameter.
+            fx->SetParam(7, 1.0f);
+            CHECK(fx->ControlValues(vals, 4) == 1);
+            CHECK(Near(vals[0], 4.0f));
+
+            // Fewer slots asked for than exist: writes what fits and says so.
+            vals[0] = -1.0f;
+            CHECK(fx->ControlValues(vals, 0) == 0);
+            CHECK(Near(vals[0], -1.0f));                   // buffer untouched
+        }
+
+        // A built-in effect has no control ports at all. It must report zero --
+        // the engine publishes nothing for it, rather than publishing whatever
+        // happened to be in an uninitialised buffer.
+        EffectDesc eq;
+        eq.type = EffectType::Eq;
+        eq.params = { 1000.0f, 0.0f, 1.0f };
+        std::unique_ptr<IEffect> builtin = MakeEffect(eq, 48000.0);
+        CHECK(builtin != nullptr);
+        if (builtin) {
+            float vals[2] = { -1.0f, -1.0f };
+            CHECK(builtin->ControlValues(vals, 2) == 0);
+            CHECK(Near(vals[0], -1.0f));
+        }
+    }
+
+    // --- UiRequiresInstanceAccess: which editors may be linked ------------
+    //
+    // This decides whether the host drives a plugin's own GUI through control
+    // ports or only mirrors values into it. Getting it wrong is silent in both
+    // directions: a direct-access UI linked through the write function looks
+    // live and is not, and one wrongly called direct-access looks view-only
+    // forever. The fixture bundle declares one of each, so both answers are
+    // pinned rather than assumed.
+    {
+        CHECK(host.UiRequiresInstanceAccess(kMonoGain) == true);
+        CHECK(host.UiRequiresInstanceAccess(kStereoLatent) == false);
+        // Two UIs, the disagreeing one listed FIRST: only the BeUI is the one
+        // this host can embed, so only its answer counts. Asking the first UI
+        // listed would call this a direct-access editor -- no poll, controls
+        // that drive nothing, and a title claiming the opposite.
+        CHECK(host.UiRequiresInstanceAccess(kTwoUi) == false);
+        // Not a plugin at all, and a plugin with no UI: conservative, because
+        // the safe mistake is leaving an editor unlinked.
+        CHECK(host.UiRequiresInstanceAccess("urn:haiku-daw:test:does-not-exist")
+              == true);
+        CHECK(host.UiRequiresInstanceAccess(kBadTopology) == true);
     }
 
     std::printf("lv2_fixture_tests: %d checks, %d failures\n", g_checks, g_fails);

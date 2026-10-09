@@ -2,13 +2,19 @@
 @prefix lv2:   <http://lv2plug.in/ns/lv2core#> .
 @prefix rdfs:  <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix units: <http://lv2plug.in/ns/extensions/units#> .
+@prefix ui:    <http://lv2plug.in/ns/extensions/ui#> .
 
-# Fixture plugins for the DAW's LV2 host tests. Trivial DSP with exactly-known
+# Fixture plugins for the DAW's LV2 host tests.
+#
+# `urn:haiku-daw:test:two-ui` (declared in manifest.ttl beside its two UIs) is a
+# second hostable plugin: stereo in/out with one control port, so the UI-choice
+# question can be asked about a plugin the host actually accepts. Trivial DSP with exactly-known
 # behaviour, so tests can assert on VALUES rather than on properties.
 
 # --- MonoDual: hosted as two instances, one per channel ---------------------
 <urn:haiku-daw:test:mono-gain>
     a lv2:Plugin ;
+    ui:ui <urn:haiku-daw:test:mono-gain#ui> ;
     doap:name "DAW Test Mono Gain" ;
     lv2:optionalFeature lv2:hardRTCapable ;
     lv2:port [
@@ -29,6 +35,7 @@
 # exercised against a real bundle and not only in the pure unit tests.
 <urn:haiku-daw:test:stereo-latent>
     a lv2:Plugin ;
+    ui:ui <urn:haiku-daw:test:stereo-latent#ui> ;
     doap:name "DAW Test Stereo Latent" ;
     lv2:optionalFeature lv2:hardRTCapable ;
     lv2:port [
@@ -120,4 +127,27 @@
     ] , [
         a lv2:CVPort , lv2:InputPort ;
         lv2:index 4 ; lv2:symbol "cv" ; lv2:name "CV In"
+    ] .
+
+# --- Stereo, one control port, two disagreeing UIs (see manifest.ttl) -------
+<urn:haiku-daw:test:two-ui>
+    a lv2:Plugin ;
+    doap:name "DAW Test Two UIs" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "in_l" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "in_r" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "out_l" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "out_r" ; lv2:name "Out R"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
     ] .

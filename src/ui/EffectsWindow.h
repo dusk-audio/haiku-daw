@@ -45,6 +45,15 @@ constexpr uint32 kMsgApplyFx = 'fxap';
 // the effect responds while you drag; the undoable commit is kMsgApplyFx on
 // mouse-up.
 constexpr uint32 kMsgFxLive = 'fxlv';
+// A native plugin editor's COMMITTED parameter writes: what kMsgFxLive previewed
+// while the control moved, made permanent in the model once the gesture goes
+// quiet (one undo step per gesture). Sent by Lv2UiWindow on a debounce; fields
+// are int64 "track", int32 "fx", then one int32 "slot" and one float "val" per
+// changed parameter, in matching order, plus string "uri" naming the plugin
+// they belong to -- the address alone is not identity enough, since the commit
+// is applied asynchronously and the editor's insert may be gone (or replaced by
+// a different plugin at the same index) by the time it arrives.
+constexpr uint32 kMsgFxParamCommit = 'fxpc';
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';
@@ -53,10 +62,46 @@ constexpr uint32 kMsgToggleFxAuto = 'fxat';
 // focus and pushes kMsgFxMeter here while playing.
 constexpr uint32 kMsgFxWinOpen   = 'fxwo';
 constexpr uint32 kMsgFxWinClosed = 'fxwc';
+// MainWindow -> EffectsWindow: the track's chain as the MODEL now has it. A
+// panel holds a copy taken when it opened, and it commits by sending that whole
+// copy back (see EffectsView::Apply), so without this its next knob move
+// rewrites every OTHER insert from a stale snapshot -- reverting, for instance,
+// what a native plugin editor committed in the meantime. Fields are the same
+// ones kMsgApplyFx carries, encoded by EncodeFxChain.
+constexpr uint32 kMsgFxChain = 'fxch';
 // MainWindow -> EffectsWindow: live effect meters. Fields: float[] "gr" (per-fx
 // gain reduction dB), float[] "spec" (EQ spectrum dB), int32 "specfx" (which fx
 // the spectrum belongs to), int32 "specn" (bin count).
 constexpr uint32 kMsgFxMeter     = 'fxmt';
+// An editor view -> MainWindow: "open the plugin's own editor for the insert at
+// this address". Fields: int64 "track", int32 "fx". It is a request rather than
+// a direct call because the view's copy of the chain can be stale, and a live
+// editor addresses its insert by INDEX -- only MainWindow sees the model, so
+// only it can say what is at that index now.
+constexpr uint32 kMsgOpenFxEditor = 'fxoe';
+// MainWindow -> Lv2UiWindow: "hand me the values you have written but not yet
+// committed" (sent before a save). Answered with the REPLY message itself, one
+// int32 "slot" and one float "val" per pending change.
+constexpr uint32 kMsgLv2UiFlush   = 'fxfl';
+// Lv2UiWindow -> MainWindow: "this native editor is open on this insert, publish
+// its control values to me". Fields: int64 "track", int32 "fx", messenger
+// "msgr". The SAME message with no messenger means the editor closed and the
+// engine must stop watching -- MainWindow also clears the watch by itself if the
+// messenger dies, so a crash in an editor cannot leave the engine publishing to
+// nothing.
+constexpr uint32 kMsgFxWatch     = 'fxpw';
+// MainWindow -> Lv2UiWindow: the watched insert's values, one float "v" per
+// parameter in slot order. Absolute, not a delta, so a dropped frame costs
+// nothing. Sent only while a watch is registered, on the same 60 Hz pulse that
+// feeds the meters -- and only when the engine's change counter says something
+// actually moved.
+constexpr uint32 kMsgFxParams    = 'fxpv';
+
+// Serialize / parse a chain of insert descriptors into a message: the same
+// layout kMsgApplyFx and kMsgFxChain carry, in ONE place so the two ends of
+// that conversation cannot drift apart.
+void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain);
+std::vector<EffectDesc> DecodeFxChain(const BMessage& m);
 
 class EffectsView : public BView {
 public:
@@ -80,6 +125,11 @@ public:
     // Live meters from the engine (per-fx gain reduction + one EQ spectrum).
     void SetMeters(const float* gr, int grN,
                    const float* spec, int specN, int specFx);
+
+    // Replace the copy of the chain taken when this view opened with the model's
+    // current one. Ignored while a drag is in flight: the indices the drag holds
+    // would move under it, and its own mouse-up commit is the edit in progress.
+    void SetChain(std::vector<EffectDesc> chain);
 
     // Commit a wheel edit whose debounce timer has not fired yet. The window
     // calls this on close: the engine already heard the change (kMsgFxLive), so

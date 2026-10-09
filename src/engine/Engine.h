@@ -113,6 +113,11 @@ public:
     Engine() {
         for (int i = 0; i < kMeterFxMax; i++)
             fMeterGr[i].store(0.0f, std::memory_order_relaxed);
+        // A watch slot that has published nothing yet -- which is what
+        // WatchedFxParams reports as "0 values, generation untouched" rather
+        // than "0 values, generation 0".
+        for (int s = 0; s < kWatchSlots; s++)
+            fWatchN[s].store(-1, std::memory_order_relaxed);
     }
     ~Engine();
 
@@ -149,6 +154,74 @@ public:
     // SetParam; `master` targets the master chain, else the track's node.
     void SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
                         float value);
+
+    // Publish a watched insert's live parameter values for its open native
+    // editor. Addressed exactly like SetFxParamLive (same track/master/fxIndex),
+    // and resolved against the RUNNING chain on every block, so a rebuild cannot
+    // leave it pointing at a freed instance. fxIndex < 0 stops watching `slot`.
+    //
+    // Several editors can be open at once (one per insert, in different
+    // windows), so watches are slots the caller allocates: the same insert may
+    // not be watched twice, and a slot is reusable once stopped.
+    //
+    // This exists because automation drives the plugin's control ports from the
+    // audio thread and never touches the model, so the engine's copy is the only
+    // place those values can be read from -- and a UI must not read them off the
+    // instance the audio thread is running.
+    static constexpr int kWatchSlots = 4;
+    void SetFxWatch(int slot, TrackId track, bool master, int fxIndex) {
+        if (slot < 0 || slot >= kWatchSlots) return;
+        // Forget what was published: a NEW watched insert whose values happen to
+        // match the old one's would otherwise change nothing and never publish,
+        // leaving the freshly opened editor with no frame at all.
+        fWatchN[slot].store(-1, std::memory_order_relaxed);
+        fWatchMaster[slot].store(master, std::memory_order_relaxed);
+        fWatchFx[slot].store(fxIndex, std::memory_order_relaxed);
+        fWatchTrack[slot].store(fxIndex < 0 ? kInvalidTrackId : track,
+                                std::memory_order_relaxed);
+    }
+
+    // Publish every watched insert's values NOW, from the calling thread, for
+    // when there is no audio block to do it: the transport is stopped and a
+    // live parameter write just changed something (the generic panel with a
+    // native editor open). Returns immediately while the audio callback runs --
+    // then the block publishes on its own, and this must not race it.
+    void PublishFxWatchNow();
+
+    static constexpr int kWatchMax = 64;
+    // One watched insert's parameter values as of the last audio block. Written
+    // by the RT thread, read here; the array is bracketed by a seqlock
+    // generation (odd = mid-write) so a reader cannot see a torn frame. Returns
+    // the count copied and the generation, which the caller compares against its
+    // previous call: the same value means nothing changed and the caller can
+    // skip the frame entirely. 0 values means this slot is not watching, or the
+    // watched insert is not in the running chain.
+    int WatchedFxParams(int slot, float* out, int maxSlots,
+                        uint32_t* generation) const {
+        if (slot < 0 || slot >= kWatchSlots) return 0;
+        uint32_t g0 = 0, g1 = 0;
+        int c = 0;
+        do {
+            g0 = fWatchGen[slot].load(std::memory_order_acquire);
+            if (g0 & 1u) continue;              // mid-write; retry
+            const int n = fWatchN[slot].load(std::memory_order_relaxed);
+            // Nothing has ever been published for this slot (no watch, or the
+            // watched insert is not in the running chain). 0 values, and the
+            // caller's generation is left alone rather than clobbered.
+            if (n < 0) return 0;
+            c = n < maxSlots ? n : maxSlots;
+            for (int i = 0; i < c; i++) out[i] = fWatchValues[slot][i];
+            // The fence goes AFTER the copy. The closing load is an acquire, and
+            // acquire orders nothing before it -- so without this the value
+            // loads may sit above it, and the g0 == g1 test would then accept a
+            // torn frame (visible on a weakly-ordered machine only, which is
+            // exactly why it must not be left to a reader to notice).
+            std::atomic_thread_fence(std::memory_order_acquire);
+            g1 = fWatchGen[slot].load(std::memory_order_acquire);
+        } while ((g0 & 1u) || g0 != g1);
+        if (generation) *generation = g0;
+        return c;
+    }
 
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
@@ -276,6 +349,35 @@ private:
         fMeterSpecN.store(specN, std::memory_order_relaxed);
         fMeterSpecFx.store(specFx, std::memory_order_relaxed);
         fMeterSpecGen.fetch_add(1, std::memory_order_acq_rel);   // -> even
+    }
+
+    // RT helper: publish the values of every watch slot that addresses THIS
+    // chain. Skipped per slot when nothing changed, so the generation the UI
+    // compares is a CHANGE counter and a still insert costs it nothing.
+    template <class Chain>
+    void CaptureFxWatches(TrackId track, bool masterChain, const Chain& fx) {
+        for (int s = 0; s < kWatchSlots; s++) {
+            if (fWatchMaster[s].load(std::memory_order_relaxed) != masterChain)
+                continue;
+            if (!masterChain
+                && fWatchTrack[s].load(std::memory_order_relaxed) != track)
+                continue;
+            const int idx = fWatchFx[s].load(std::memory_order_relaxed);
+            if (idx < 0 || idx >= (int)fx.size() || !fx[(size_t)idx]) continue;
+            float tmp[kWatchMax];
+            const int n = fx[(size_t)idx]->ControlValues(tmp, kWatchMax);
+            if (n <= 0) continue;
+            if (n == fWatchN[s].load(std::memory_order_relaxed)) {
+                bool same = true;
+                for (int i = 0; i < n; i++)
+                    if (tmp[i] != fWatchValues[s][i]) { same = false; break; }
+                if (same) continue;
+            }
+            fWatchGen[s].fetch_add(1, std::memory_order_acq_rel);   // -> odd
+            for (int i = 0; i < n; i++) fWatchValues[s][i] = tmp[i];
+            fWatchN[s].store(n, std::memory_order_relaxed);
+            fWatchGen[s].fetch_add(1, std::memory_order_acq_rel);   // -> even
+        }
     }
 
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
@@ -511,6 +613,20 @@ private:
     std::atomic<int>     fMeterSpecN{0};
     std::atomic<int>     fMeterSpecFx{-1};
     std::atomic<uint32_t> fMeterSpecGen{0};   // seqlock generation (odd = writing)
+
+    // Watched inserts (the open native editors' inserts) -- see SetFxWatch.
+    // fWatchN < 0 means nothing has been published yet, so the first block
+    // after a watch is set always publishes and the editor is never left
+    // showing a value the engine does not have.
+    // Zero-initialised, which is already "no watch": fWatchTrack 0 is
+    // kInvalidTrackId (no bus has it) and fWatchMaster false (the master chain
+    // is not scanned for it). SetFxWatch is what puts a real watch in a slot.
+    std::atomic<TrackId>  fWatchTrack[kWatchSlots] {};
+    std::atomic<bool>     fWatchMaster[kWatchSlots] {};
+    std::atomic<int>      fWatchFx[kWatchSlots] {};
+    float                 fWatchValues[kWatchSlots][kWatchMax] = {};
+    std::atomic<int>      fWatchN[kWatchSlots] {};
+    std::atomic<uint32_t> fWatchGen[kWatchSlots] {};   // seqlock (odd = writing)
     Frame  fStartFrame = 0;   // playhead position playback begins at
     Frame  fEndFrame   = 0;
     float  fOutputRate = 48000.0f;

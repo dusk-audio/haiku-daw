@@ -10,6 +10,7 @@
 #include <lv2/buf-size/buf-size.h>
 #include <lv2/core/lv2.h>
 #include <lv2/options/options.h>
+#include <lv2/instance-access/instance-access.h>
 #include <lv2/parameters/parameters.h>
 #include <lv2/urid/urid.h>
 
@@ -235,6 +236,18 @@ public:
         fControlIn[(size_t)slot] =
             ClampLv2Param(value, m.mn, m.mx, m.hasMin, m.hasMax, m.isInteger,
                           m.isToggled, &m.scalePoints);
+    }
+
+    // The control buffer IS the plugin's parameter state between blocks: this
+    // is what SetParam writes and what the plugin re-reads on every run(). The
+    // engine copies it (on this thread, inside the audio block) so an open
+    // native editor can be shown what automation did; nothing else can see it,
+    // since automation never passes through the model.
+    int ControlValues(float* out, int maxSlots) const override {
+        const int n = (int)fControlIn.size() < maxSlots ? (int)fControlIn.size()
+                                                        : maxSlots;
+        for (int i = 0; i < n; i++) out[i] = fControlIn[(size_t)i];
+        return n;
     }
 
     int LatencySamples() const override { return fLatency; }
@@ -705,6 +718,58 @@ void Lv2Host::ScanAll() {
     // takes the same code path (and still degrades to a null effect) whether the
     // machine has plugins or not.
     SetLv2Factory(&Lv2Trampoline);
+}
+
+bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
+    ScanAll();   // idempotent: the world has to exist before it can be asked
+    LilvWorld* w = fImpl->world;
+    if (!w) return true;
+    LilvNode* uriNode = lilv_new_uri(w, uri.c_str());
+    if (!uriNode) return true;
+    const LilvPlugin* p = lilv_plugins_get_by_uri(lilv_world_get_all_plugins(w),
+                                                  uriNode);
+    lilv_node_free(uriNode);
+    if (!p) return true;
+
+    // The BeUI the editor window would actually embed -- not merely the first
+    // UI listed. A bundle may carry several (an X11UI and a BeUI, or a GtkUI
+    // for another platform), they need not agree about instance-access, and
+    // answering from the wrong one would call a direct-access editor
+    // control-port: it would get no poll, its controls would drive nothing, and
+    // its title would say the opposite. Same test Lv2UiWindow::FindNativeUi
+    // uses to pick the UI it embeds.
+    LilvUIs* uis = lilv_plugin_get_uis(p);
+    if (!uis) return true;
+    LilvNode* beui = lilv_new_uri(w, "http://lv2plug.in/ns/extensions/ui#BeUI");
+    const LilvUI* ui = nullptr;
+    if (beui) {
+        LILV_FOREACH(uis, i, uis) {
+            const LilvUI* candidate = lilv_uis_get(uis, i);
+            if (candidate && lilv_ui_is_a(candidate, beui)) { ui = candidate; break; }
+        }
+    }
+    lilv_node_free(beui);
+    if (!ui) { lilv_uis_free(uis); return true; }
+
+    LilvNode* pred = lilv_new_uri(w, LV2_CORE__requiredFeature);
+    LilvNode* want = lilv_new_uri(w, LV2_INSTANCE_ACCESS_URI);
+    bool needs = true;                 // conservative until proven otherwise
+    if (pred && want) {
+        needs = false;
+        if (LilvNodes* found = lilv_world_find_nodes(w, lilv_ui_get_uri(ui),
+                                                     pred, nullptr)) {
+            LILV_FOREACH(nodes, i, found)
+                if (lilv_node_equals(lilv_nodes_get(found, i), want)) {
+                    needs = true;
+                    break;
+                }
+            lilv_nodes_free(found);
+        }
+    }
+    lilv_node_free(pred);
+    lilv_node_free(want);
+    lilv_uis_free(uis);
+    return needs;
 }
 
 std::unique_ptr<IEffect> Lv2Host::Create(const std::string& uri,
