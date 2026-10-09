@@ -46,6 +46,20 @@ class TimelineView;
 class InspectorView;
 class MeterView;
 
+// Message ids that are part of the app's wiring rather than MainWindow's
+// private business: the menus, the file panels and the pulse post them, and so
+// do the functional tests (tests/ui_functional_tests.cpp), which drive the real
+// window by posting exactly what a widget posts. The rest of the ids stay
+// private to MainWindow.cpp.
+constexpr uint32 MSG_PULSE            = 'puls';   // the 60 Hz BMessageRunner
+constexpr uint32 MSG_NEW_AUDIO        = 'naud';
+constexpr uint32 MSG_NEW_MIDI         = 'nmid';
+constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
+constexpr uint32 MSG_EXPORT           = 'expt';
+constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
+constexpr uint32 MSG_EXPORT_STEMS     = 'stem';
+constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
+
 class MainWindow : public BWindow {
 public:
     // Like TimelineView: BWindow::Frame() would shadow the model's frame type
