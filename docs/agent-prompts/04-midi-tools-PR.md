@@ -16,7 +16,7 @@ record; "What is NOT verified" is the honest list.
 | `src/ui/QuantizeWindow.h/.cpp` (new) | The quantize settings dialog (grid / strength / swing / note ends), in the `RenameWindow` idiom: it never touches the model, it posts the settings to the roll. |
 | `src/ui/PianoRoll.h/.cpp` | A `MIDI` toolbar button + popup (the window has no menu bar), the `q` shortcut, and the commit path `kMsgApplyMidiOp`. |
 | `src/ui/MainWindow.cpp` | The `kMsgApplyMidiOp` handler; the two note-list messages now share one decode (`ParseNoteList`). |
-| `tests/midiops_tests.cpp` (new) | 100 checks: strength/swing/triplets/tempo changes, humanize determinism, legato, clamps, window rules, idempotency. |
+| `tests/midiops_tests.cpp` (new) | 128 checks: strength/swing/triplets/tempo changes, humanize determinism, legato, clamps, window rules, idempotency. |
 | `tests/model_tests.cpp` | `test_apply_midi_op_command`: names, restores exactly, and never resizes the region. |
 
 ## Semantics chosen
