@@ -110,6 +110,13 @@ static int VisibleWindows() {
     return n;
 }
 
+// Wait until only the main window is up: the previous test's export bar closes
+// on a pulse, and a stale bar would shift every window count that follows (and
+// make a later "the bar appeared" assertion pass vacuously).
+static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
+    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
+}
+
 // Put a window that is not the one under test away -- the panel, as its own
 // Cancel button does: HIDE it, never Quit it.
 static void HideOtherWindows(BWindow* keep) {
@@ -154,6 +161,7 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
 // hand) starts the worker; the window keeps answering while it renders; the
 // file appears and the temp does not survive.
 static void TestExportFlow(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
     std::printf("test_export_flow\n");
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(project.AddTrack(t));
@@ -198,6 +206,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return FileExists(kExportPath); }, 60000000));
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
+    CHECK(WaitQuiet());   // its bar closes on a pulse
 }
 
 // --- 4. R1: cancel, stems, loop range --------------------------------------
@@ -205,6 +214,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
 // Cancel is a flag the worker polls: the run stops, and NOTHING is left where
 // a finished file is expected.
 static void TestExportCancel(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
     std::printf("test_export_cancel\n");
     const char* path = "/tmp/haiku_daw_ui_cancel.wav";
     std::remove(path);
@@ -235,6 +245,7 @@ static void TestExportCancel(MainWindow* win, Project& project) {
 // Stems: the dialog's answer opens the folder panel, and its answer writes one
 // file per non-bus track.
 static void TestExportStems(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
     std::printf("test_export_stems\n");
     const std::string dir = "/tmp/haiku_daw_ui_stems";
     const std::string rm = "rm -rf " + dir;
@@ -279,6 +290,7 @@ static void TestExportStems(MainWindow* win, Project& project) {
 
 // The loop range bounces what the loop covers, not the whole timeline.
 static void TestExportLoopRange(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
     std::printf("test_export_loop_range\n");
     const char* path = "/tmp/haiku_daw_ui_loop.wav";
     std::remove(path);
@@ -316,6 +328,7 @@ static void TestExportLoopRange(MainWindow* win, Project& project) {
     CHECK(src.TotalFrames() > 0);
     // One second of loop, not the whole project (a frame of slack).
     CHECK(src.TotalFrames() >= 48000 - 2 && src.TotalFrames() <= 48000 + 2);
+    CHECK(WaitQuiet());
     std::remove(path);
     project.transport.loopEnabled = false;
 }
