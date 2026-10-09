@@ -933,15 +933,27 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindBool("mute", &mu);
             msg->FindBool("solo", &so);
             if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                t->gain = g; t->pan = p; t->muted = mu; t->soloed = so;
-                // Mute-group: cascade the mute to every member of the group,
-                // then refresh the other strips/panes to show the change live.
-                if (t->muteGroup > 0) {
+                // One macro, so the whole strip -- gain, pan, mute, solo and the
+                // mute-group cascade -- is one undo step. Unchanged fields get
+                // no sub-command at all.
+                auto macro = std::make_unique<MacroCommand>("Mixer Strip");
+                if (t->gain   != g)  macro->Add(std::make_unique<SetTrackGainCommand>((TrackId)tid, g));
+                if (t->pan    != p)  macro->Add(std::make_unique<SetTrackPanCommand>((TrackId)tid, p));
+                if (t->muted  != mu) macro->Add(std::make_unique<SetTrackMuteCommand>((TrackId)tid, mu));
+                if (t->soloed != so) macro->Add(std::make_unique<SetTrackSoloCommand>((TrackId)tid, so));
+                if (t->muteGroup > 0 && t->muted != mu) {
                     const int grp = t->muteGroup;
-                    for (Track& o : fProject->Tracks())
-                        if (o.muteGroup == grp) o.muted = mu;
-                    PostMessage(kMsgUiRefresh);
+                    for (const Track& o : fProject->Tracks())
+                        if (o.muteGroup == grp && o.id != t->id && o.muted != mu)
+                            macro->Add(std::make_unique<SetTrackMuteCommand>(o.id, mu));
                 }
+                if (!macro->Empty()) {
+                    fStack->Execute(std::move(macro), *fProject);
+                    UpdateTitle();
+                }
+                // Refresh the other strips/panes so the change shows live.
+                if (t->muteGroup > 0)
+                    PostMessage(kMsgUiRefresh);
                 fTimeline->Invalidate();
             }
             break;
@@ -1301,8 +1313,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_MASTER:
-            // Live; the engine reads project.masterGain each poll (and at Load).
-            fProject->masterGain = fMaster->Value() / 100.0f;
+            // Through the stack like every other edit: a drag's posts coalesce
+            // into one undo step. The engine still reads project.masterGain
+            // each poll, so the move is heard while the slider moves.
+            fStack->Execute(std::make_unique<SetMasterGainCommand>(
+                                (float)(fMaster->Value() / 100.0)), *fProject);
+            UpdateTitle();
             break;
         // Undo/redo can change anything the running engine was built from — an
         // instrument, an fx chain, a clip, the tempo. The forward paths reload
@@ -1344,10 +1360,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             double bpm = atof(fTempo->Text());
             if (bpm < 20.0)  bpm = 20.0;
             if (bpm > 300.0) bpm = 300.0;
-            fProject->tempoBPM = bpm;
-            // The BPM field edits the tempo map's frame-0 (initial) tempo.
-            fProject->tempoMap.sampleRate = fProject->sampleRate;
-            fProject->tempoMap.SetTempoAt(0, bpm);
+            // The BPM field edits the tempo map's frame-0 (initial) tempo, now
+            // as an undoable step (the command sets both the map and tempoBPM).
+            fStack->Execute(std::make_unique<SetTempoCommand>(bpm), *fProject);
+            UpdateTitle();
             char buf[16];
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);

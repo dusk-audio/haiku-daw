@@ -807,9 +807,12 @@ void TimelineView::MouseDown(BPoint where) {
                             t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
                             *fProject);
                 } else if (pick == "Solo Safe") {
-                    // Transient mix state (like arm); toggle directly + refresh.
+                    // Project state -- it serializes -- so through the stack like
+                    // every other edit: it undoes now, and it marks the project
+                    // dirty, which the old direct write never did.
                     if (Track* tr = fProject->FindTrack(t.id))
-                        tr->soloSafe = !tr->soloSafe;
+                        fStack->Execute(std::make_unique<SetSoloSafeCommand>(
+                            t.id, !tr->soloSafe), *fProject);
                     if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
                 } else if (pick == "None" || pick.rfind("Group ", 0) == 0) {
                     const int g = pick == "None" ? 0 : std::atoi(pick.c_str() + 6);

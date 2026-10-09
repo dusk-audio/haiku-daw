@@ -616,6 +616,56 @@ void SetClipGainCommand::Undo(Project& p) {
             c->gain = fOld;
 }
 
+// --- SetTempoCommand / SetMasterGainCommand / SetSoloSafeCommand -------
+
+bool SetTempoCommand::Do(Project& p) {
+    if (!fCaptured) {
+        fOldBpm    = p.tempoBPM;
+        const TempoChange& t0 = p.tempoMap.Tempos().front();
+        fOldMapBpm = t0.bpm;
+        fOldRamp   = t0.ramp;
+        fCaptured  = true;
+    }
+    p.tempoBPM = fBpm;
+    p.tempoMap.sampleRate = p.sampleRate;   // the map's rate follows the project
+    p.tempoMap.SetTempoAt(0, fBpm);
+    return true;
+}
+
+void SetTempoCommand::Undo(Project& p) {
+    p.tempoBPM = fOldBpm;
+    p.tempoMap.SetTempoAt(0, fOldMapBpm, fOldRamp);
+}
+
+bool SetMasterGainCommand::Do(Project& p) {
+    // Captured once: Do re-runs on redo, and Undo must return to the ORIGIN of
+    // the drag (the value before the first post), which the coalescing above
+    // keeps referring to.
+    if (!fCaptured) {
+        fOld = p.masterGain;
+        fCaptured = true;
+    }
+    p.masterGain = fGain;
+    return true;
+}
+
+void SetMasterGainCommand::Undo(Project& p) {
+    p.masterGain = fOld;
+}
+
+bool SetSoloSafeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->soloSafe;
+    t->soloSafe = fSafe;
+    return true;
+}
+
+void SetSoloSafeCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->soloSafe = fOld;
+}
+
 // --- RelinkMediaCommand -----------------------------------------------
 
 bool RelinkMediaCommand::Do(Project& p) {
