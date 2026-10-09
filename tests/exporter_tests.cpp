@@ -227,7 +227,7 @@ int main() {
         pr.AddTrack(m);
         const std::string p = "/tmp/haiku_daw_export_cc7.wav";
         std::remove(p.c_str());
-        if (!ExportWav(pr, p, SR, 32)) return -1.0f;   // 32-bit float: exact
+        if (!ExportWav(pr, p, SR, {ExportFormat{32}})) return -1.0f;   // 32-bit float: exact
         WavSource s; if (!s.Open(p)) return -1.0f;
         float pk = 0.0f; const float* c = nullptr; size_t f = 0;
         while (s.ReadChunk(&c, &f))
@@ -257,7 +257,7 @@ int main() {
         const std::string p = "/tmp/haiku_daw_export_cc10.wav";
         std::remove(p.c_str());
         *outL = *outR = -1.0f;
-        if (!ExportWav(pr, p, SR, 32)) return;
+        if (!ExportWav(pr, p, SR, {ExportFormat{32}})) return;
         WavSource s; if (!s.Open(p)) return;
         float pkL = 0.0f, pkR = 0.0f; const float* c = nullptr; size_t f = 0;
         while (s.ReadChunk(&c, &f))
@@ -301,7 +301,7 @@ int main() {
         pr.AddTrack(m);
         const std::string p = "/tmp/haiku_daw_export_ccramp.wav";
         std::remove(p.c_str());
-        CHECK(ExportWav(pr, p, SR, 32));
+        CHECK(ExportWav(pr, p, SR, {ExportFormat{32}}));
         std::vector<float> d;
         { WavSource s;
           if (s.Open(p)) { const float* c = nullptr; size_t f = 0;
@@ -486,7 +486,7 @@ int main() {
         for (int depth : { 24, 32 }) {
             const std::string path = "/tmp/haiku_daw_depth.wav";
             std::remove(path.c_str());
-            CHECK(ExportWav(p, path, SR, depth));
+            CHECK(ExportWav(p, path, SR, {ExportFormat{depth}}));
             uint16_t fmt = 0, bits = 0;
             fmtOf(path, &fmt, &bits);
             CHECK(bits == depth);                          // encoded at requested depth
@@ -553,7 +553,7 @@ int main() {
         // clamp NaN/Inf), so the only thing that can keep them out of the file is
         // the Exporter's own finite sweep. A 16-bit bounce would mask it (the
         // PCM quantizer sanitizes too), so this isolates the export guard.
-        CHECK(ExportWav(p, out, SR, 32));
+        CHECK(ExportWav(p, out, SR, {ExportFormat{32}}));
         WavSource s2; CHECK(s2.Open(out));
         bool allFinite = true; float pk = 0.0f;
         const float* c2 = nullptr; size_t f2 = 0;
@@ -607,7 +607,7 @@ int main() {
             ExportNormalize nz; nz.enabled = true;
             nz.targetLufs = -16.0f; nz.truePeakCeil = -1.0f;
             std::remove(path.c_str());
-            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            CHECK(ExportWav(p, path, 48000.0, {ExportFormat{32}, nz}));
             float lufs = 0, tp = 0;
             CHECK(measure(path, &lufs, &tp));
             CHECK(std::fabs(lufs - (-16.0f)) < 1.5f);   // hit the loudness target
@@ -622,7 +622,7 @@ int main() {
             ExportNormalize nz; nz.enabled = true;
             nz.targetLufs = -3.0f; nz.truePeakCeil = -1.0f;
             std::remove(path.c_str());
-            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            CHECK(ExportWav(p, path, 48000.0, {ExportFormat{32}, nz}));
             float lufs = 0, tp = 0;
             CHECK(measure(path, &lufs, &tp));
             CHECK(tp <= -1.0f + 0.3f);                  // ceiling respected
@@ -638,7 +638,7 @@ int main() {
             ExportNormalize nz; nz.enabled = true; nz.limiter = true;
             nz.targetLufs = -3.0f; nz.truePeakCeil = -1.0f;
             std::remove(path.c_str());
-            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            CHECK(ExportWav(p, path, 48000.0, {ExportFormat{32}, nz}));
             float lufs = 0, tp = 0;
             CHECK(measure(path, &lufs, &tp));
             CHECK(tp <= -1.0f + 0.3f);                  // ceiling still respected
@@ -655,7 +655,7 @@ int main() {
             ExportNormalize nz; nz.enabled = false; nz.limiter = true;
             nz.truePeakCeil = -1.0f;
             std::remove(path.c_str());
-            CHECK(ExportWav(p, path, 48000.0, 32, nz));
+            CHECK(ExportWav(p, path, 48000.0, {ExportFormat{32}, nz}));
             float lufs = 0, tp = 0;
             CHECK(measure(path, &lufs, &tp));
             CHECK(tp <= -1.0f + 0.3f);                  // limiter held the ceiling

@@ -14,26 +14,47 @@
 
 #include "../model/Project.h"
 
+#include <atomic>
+#include <functional>
 #include <string>
 
 namespace daw {
 
-// Render `project` to a stereo WAV at `outPath`, sampled at `outRate` Hz, in the
-// format chosen by `bitDepth` (see below). If `outRate <= 0` the project's own
-// sample rate is used.
+// The output sample format of a bounce.
+struct ExportFormat {
+    // 16 or 24 = PCM, 32 = IEEE float; anything else falls back to 16.
+    int  bitDepth = 16;
+    // TPDF dither at the 16-bit LSB. Ignored at 24/32, which have ample
+    // headroom (the quantizer's own error is ~-144 dBFS there).
+    bool dither   = true;
+};
+
+// The timeline window to bounce, in PROJECT frames. The default is the whole
+// project; `end < 0` means "to the project's own end", so an explicit
+// `start` alone bounces from there to the end.
+struct ExportRange {
+    Frame start = 0;
+    Frame end   = -1;
+};
+
+// Progress + cancellation for a long bounce. Both parts are optional.
 //
-// The timeline is laid out in *output* frames: a project-frame position p maps
-// to output frame round(p * outRate / project.sampleRate), so clip/note
-// placement and fade lengths stay correct at any target rate. Solo overrides
-// mute (any soloed non-muted track mutes the rest). Returns false if there is
-// nothing to render or the output file cannot be written.
+// `progress` is called ON THE EXPORTING THREAD with a fraction in [0,1] that
+// never decreases and reaches 1.0 exactly once, on success. It must be cheap
+// and must not touch the model or any Haiku object — a UI hands in something
+// that stores the value for its own looper to read.
 //
-// `bitDepth` selects the output sample format: 16 or 24 = PCM (16-bit is
-// TPDF-dithered), 32 = IEEE float. Any other value falls back to 16.
-//
-// `norm` optionally loudness-normalizes the finished master to a target
-// integrated loudness (ITU-R BS.1770 / EBU R128) and/or true-peak-limits it to
-// a ceiling (dBTP):
+// `cancel` is polled between blocks. When it reads true the export stops
+// early, deletes what it had written (nothing lands at the destination path)
+// and returns false.
+struct ExportJob {
+    std::function<void(float)> progress;
+    const std::atomic<bool>*   cancel = nullptr;
+};
+
+// Loudness normalization / true-peak limiting of the finished master, to a
+// target integrated loudness (ITU-R BS.1770 / EBU R128) and/or a ceiling
+// (dBTP):
 //   - `enabled` alone: gain-based normalization with true-peak safety — when
 //     the target can't be reached without exceeding the ceiling, the gain is
 //     backed off so the whole program lands below target rather than clipping.
@@ -51,14 +72,41 @@ struct ExportNormalize {
                                    // instead of gain-backoff (lets it hit target)
 };
 
+// Everything an export needs beyond the project and a destination. The default
+// is the historical bounce: 16-bit dithered PCM, project rate, whole project,
+// no normalization, no progress, no cancellation.
+struct ExportOptions {
+    ExportFormat     format{};
+    ExportNormalize  normalize{};
+    ExportRange      range{};
+    const ExportJob* job = nullptr;
+};
+
+// Render `project` to a stereo WAV at `outPath`, sampled at `outRate` Hz, in
+// the format and window `opts` selects. If `outRate <= 0` the project's own
+// sample rate is used.
+//
+// The timeline is laid out in *output* frames: a project-frame position p maps
+// to output frame round((p - range.start) * outRate / project.sampleRate), so
+// clip/note placement and fade lengths stay correct at any target rate and any
+// window. Solo overrides mute (any soloed non-muted track mutes the rest).
+// Returns false if there is nothing to render, the output file cannot be
+// written, or the job's cancel flag was raised (in which case nothing is left
+// at `outPath`: the file is written to `outPath.part` and renamed on success).
+//
+// Runs with no real-time constraints and may be called from any thread; it
+// reads the project and never mutates it, so a caller that exports off the UI
+// thread hands in a snapshot (see Project's copy semantics).
 bool ExportWav(const Project& project, const std::string& outPath,
-               double outRate = 0.0, int bitDepth = 16,
-               ExportNormalize norm = {});
+               double outRate = 0.0, const ExportOptions& opts = {});
 
 // Bounce each non-bus track to its own WAV stem under `dir` (named
 // "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by
-// soloing it. Returns the number of stems written. Kit-free, host-testable.
+// soloing it, in the format/window `opts` selects. Progress spans the whole
+// job (one stem is 1/N of it) and cancellation stops between stems and inside
+// the one in flight. Returns the number of stems written (0 on cancellation).
+// Kit-free, host-testable.
 int ExportStems(const Project& project, const std::string& dir,
-                double outRate = 0.0);
+                double outRate = 0.0, const ExportOptions& opts = {});
 
 } // namespace daw
