@@ -1,0 +1,39 @@
+SUMMARY="A native digital audio workstation for Haiku"
+DESCRIPTION="Multitrack audio and MIDI recording, editing and mixing on a \
+timeline, with buses and aux sends, automation, built-in effects and LV2 \
+plugins, a sampler and synth, and offline export to WAV (16/24-bit or 32-bit \
+float, dithered, loudness-normalized)."
+HOMEPAGE="https://github.com/dusk-audio/haiku-daw"
+COPYRIGHT="2026 Marc Korte"
+LICENSE="MIT"
+REVISION="1"
+# DRAFT: the source tarball exists only once the release is tagged. Fill the
+# checksum from `sha256sum` of the v$portVersion tarball before building.
+SOURCE_URI="https://github.com/dusk-audio/haiku-daw/archive/refs/tags/v$portVersion.tar.gz"
+CHECKSUM_SHA256="TODO-fill-from-the-tag-tarball"
+SOURCE_DIR="haiku-daw-$portVersion"
+
+ARCHITECTURES="?x86_64"
+
+PROVIDES="haiku_daw = $portVersion"
+REQUIRES="haiku lilv"
+# LV2 support is optional at build time; naming lilv here is what makes
+# the packaged build have it. Drop it from both lines to package without.
+BUILD_REQUIRES="cmake gcc lilv_devel"
+BUILD_PREREQUIRES="cmd:cmake cmd:gcc cmd:make"
+
+BUILD()
+{
+	cmake -B build -S . \
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_INSTALL_PREFIX=$prefix
+	make -C build $jobArgs
+}
+
+INSTALL()
+{
+	# The app is one binary: its signature and version ride inside it as a
+	# resource (haiku-daw.rdef), so there is nothing beside it to install.
+	mkdir -p "$appsDir/HaikuDAW"
+	cp build/daw "$appsDir/HaikuDAW/HaikuDAW"
+}
