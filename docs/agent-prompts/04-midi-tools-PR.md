@@ -103,13 +103,19 @@ listed under "Not done" below rather than smuggled into this package.
 
 ## What is verified, and how
 
+The branch was rebased onto master after package 07 merged (2026-10-09), so
+every count below is the rebased branch — master + 07 + this package:
+
 ```
 cmake --build build-host                       # exit 0
-ctest --test-dir build-host                    # 47/47  (46 on master + midiops_tests)
+ctest --test-dir build-host                    # 49/49  (48 on merged master + midiops_tests)
 ./build-host/midiops_tests                     # 128 checks, 0 failures
 ./build-host/model_tests                       # 237 checks, 0 failures
-cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # 47/47, clean
+cmake -B b-asan -DDAW_SANITIZE=ON && ctest --test-dir b-asan   # 49/49, clean
 sh scripts/haiku_syntax_check.sh <all Haiku-only sources>      # 0 FAIL (see below)
+# On the VM (2 vCPU, -j2), both configurations, configure and build exit 0:
+ctest --test-dir build                         # 50/50   (LV2 on)
+ctest --test-dir build-off                     # 46/46   (-DDAW_LV2=OFF)
 ```
 
 **Mutation testing** — every mutation was applied, the test run, and the code
@@ -223,7 +229,7 @@ the feature, not the bug the idempotency requirement is about.
 | Claim | State |
 | --- | --- |
 | Everything in `src/ui/` | **Compiles (cross-compiler); never clicked.** The popup menu, the settings dialog, the `q` key and the commit path need a window. Click list below. |
-| VM `build` + `build-off` + ctest | **NOT RUN YET, deliberately**: the VM's `~/haiku-daw` is the working checkout for Marc's package-07 click test, and `vm.sh sync` hard-resets it. Nothing in this package touches the engine or the Media Kit, so the host suite plus the cross-compile check is the whole verification available until the VM frees up. **Queue this before merging.** |
+| VM `build` + `build-off` + ctest | **DONE 2026-10-09**: configure and build exit 0 in both configurations, 50/50 (LV2 on) and 46/46 (`-DDAW_LV2=OFF`) — the rebased branch, i.e. master + package 07 + this package. |
 
 ### Click list (piano roll window)
 
