@@ -94,14 +94,8 @@ static void CloseOtherWindows(BWindow* keep) {
 
 // A real MainWindow exists and a posted message is handled on its looper: the
 // model gains a track. Everything else here rests on this round trip.
-static void TestMessageRoundTrip(Project& project, CommandStack& stack,
-                                 MainWindow::PeakMap& peaks) {
+static void TestMessageRoundTrip(MainWindow* win, Project& project) {
     std::printf("test_message_round_trip\n");
-    MainWindow* win = new MainWindow(BRect(60, 60, 900, 660), &project, &stack,
-                                     &peaks);
-    win->Show();
-    snooze(300000);
-
     const size_t before = project.Tracks().size();
     win->PostMessage(MSG_NEW_MIDI);
     CHECK(WaitFor([&] {
@@ -110,10 +104,6 @@ static void TestMessageRoundTrip(Project& project, CommandStack& stack,
         win->Unlock();
         return now == before + 1;
     }));
-
-    win->Lock();
-    win->Quit();
-    snooze(200000);
 }
 
 // --- 2. package 04's path lives on its own branch ---------------------------
@@ -129,16 +119,10 @@ static void TestMessageRoundTrip(Project& project, CommandStack& stack,
 // The dialog's answer opens the panel; the panel's answer (posted here by
 // hand) starts the worker; the window keeps answering while it renders; the
 // file appears and the temp does not survive.
-static void TestExportFlow(Project& project, CommandStack& stack,
-                           MainWindow::PeakMap& peaks) {
+static void TestExportFlow(MainWindow* win, Project& project) {
     std::printf("test_export_flow\n");
     Track t = MakeMidiTrack(project, { { 69, 110, 0, 24000 } }, "bounce-synth");
     CHECK(project.AddTrack(t));
-
-    MainWindow* win = new MainWindow(BRect(60, 60, 900, 660), &project, &stack,
-                                     &peaks);
-    win->Show();
-    snooze(300000);
 
     const int32 windowsBefore = be_app->CountWindows();
     BMessage opts(kMsgExportOptions);
@@ -180,10 +164,6 @@ static void TestExportFlow(Project& project, CommandStack& stack,
     CHECK(WaitFor([&] { return FileExists(kExportPath); }, 60000000));
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
-
-    win->Lock();
-    win->Quit();
-    snooze(200000);
 }
 
 // --- driver ----------------------------------------------------------------
@@ -196,12 +176,21 @@ static int32 TestThread(void*) {
     CommandStack stack;
     MainWindow::PeakMap peaks;
 
-    TestMessageRoundTrip(project, stack, peaks);
-    TestExportFlow(project, stack, peaks);
+    // ONE window for the run: closing the main window quits the app (that is
+    // what QuitRequested does), so a per-test window would end the run early.
+    MainWindow* win = new MainWindow(BRect(60, 60, 900, 660), &project, &stack,
+                                     &peaks);
+    win->Show();
+    snooze(300000);
+
+    TestMessageRoundTrip(win, project);
+    TestExportFlow(win, project);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
-    be_app->PostMessage(B_QUIT_REQUESTED);
+    std::fflush(stdout);
+    win->Lock();
+    win->Quit();   // and with it the application
     return 0;
 }
 
