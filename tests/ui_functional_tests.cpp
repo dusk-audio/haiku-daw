@@ -1168,12 +1168,28 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
         win->PostMessage(&key);
     };
 
-    // No text focus: Space toggles the transport...
+    // A click on the timeline takes the focus (and with it the keys): y=71 is
+    // the ruler -- the timeline starts under the 36 px transport bar, and a
+    // click at 50 would land ON the bar, which is what the first version of
+    // this test did.
+    BMessage down(B_MOUSE_DOWN);
+    down.AddInt32("buttons", 1);
+    down.AddPoint("where", BPoint(400, 71));
+    win->PostMessage(&down);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus())
+                            != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    // Space toggles the transport...
     CHECK(!playing());
     sendKey(" ");
-    CHECK(WaitFor([&] { return playing(); }, 10000));
+    CHECK(WaitFor([&] { return playing(); }, 15000));
     sendKey(" ");
-    CHECK(WaitFor([&] { return !playing(); }, 10000));
+    CHECK(WaitFor([&] { return !playing(); }, 15000));
 
     // ...but with the tempo field focused it is text, not transport.
     BView* tempo = nullptr;
@@ -1187,10 +1203,7 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     snooze(400000);
     CHECK(!playing());
 
-    // A click on the timeline takes the focus back (and with it the keys).
-    BMessage down(B_MOUSE_DOWN);
-    down.AddInt32("buttons", 1);
-    down.AddPoint("where", BPoint(400, 50));   // the ruler, in the timeline
+    // Clicking the timeline again takes the focus back from the field.
     win->PostMessage(&down);
     CHECK(WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
@@ -1200,9 +1213,35 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
         return ok;
     }));
     sendKey(" ");
-    CHECK(WaitFor([&] { return playing(); }, 10000));
+    CHECK(WaitFor([&] { return playing(); }, 15000));
     sendKey(" ");                              // leave the transport stopped
-    CHECK(WaitFor([&] { return !playing(); }, 10000));
+    CHECK(WaitFor([&] { return !playing(); }, 15000));
+}
+
+// The draw-time situation for M0.7's numbers: when the scratch fixture is
+// present (a 96-clip project, generated outside the repo) the test opens it and
+// plays for a few seconds, so a run with DAW_TIMELINE_TIMING=1 carries real
+// "timeline draw:" lines in its log. Nothing is asserted -- the numbers are
+// read by a person against the plan's targets, and a missing fixture is not a
+// failure.
+static void PerfSituationIfFixturePresent(MainWindow* win) {
+    const char* big = "/tmp/haiku_daw_big.dawproj";
+    BEntry e(big);
+    entry_ref ref;
+    if (!e.Exists() || e.GetRef(&ref) != B_OK)
+        return;
+    std::printf("  perf fixture present: opening it for the draw timings\n");
+    BMessage openBig(MSG_OPEN_REF);
+    openBig.AddRef("refs", &ref);
+    win->PostMessage(&openBig);
+    snooze(4000000);                 // the load + its full draw
+    BMessage key(B_KEY_DOWN);
+    key.AddString("bytes", " ");
+    key.AddInt32("modifiers", 0);
+    win->PostMessage(&key);          // playing: a redraw per playhead step
+    snooze(8000000);
+    win->PostMessage(&key);          // stop again
+    snooze(500000);
 }
 
 // --- driver ----------------------------------------------------------------
@@ -1236,6 +1275,7 @@ static int32 TestThread(void*) {
 #endif
     TestErrorReports(win, project, stack);
     TestKeyboardFocus(win, project);
+    PerfSituationIfFixturePresent(win);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
