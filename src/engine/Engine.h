@@ -204,11 +204,6 @@ public:
         do {
             g0 = fWatchGen[slot].load(std::memory_order_acquire);
             if (g0 & 1u) continue;              // mid-write; retry
-            // Acquire orders nothing BEFORE it, so the value loads need the
-            // fence to be guaranteed not to float above the generation check:
-            // without it the g0 == g1 test can pass on a torn frame (visible on
-            // a weakly-ordered machine, never on x86).
-            std::atomic_thread_fence(std::memory_order_acquire);
             const int n = fWatchN[slot].load(std::memory_order_relaxed);
             // Nothing has ever been published for this slot (no watch, or the
             // watched insert is not in the running chain). 0 values, and the
@@ -216,6 +211,12 @@ public:
             if (n < 0) return 0;
             c = n < maxSlots ? n : maxSlots;
             for (int i = 0; i < c; i++) out[i] = fWatchValues[slot][i];
+            // The fence goes AFTER the copy. The closing load is an acquire, and
+            // acquire orders nothing before it -- so without this the value
+            // loads may sit above it, and the g0 == g1 test would then accept a
+            // torn frame (visible on a weakly-ordered machine only, which is
+            // exactly why it must not be left to a reader to notice).
+            std::atomic_thread_fence(std::memory_order_acquire);
             g1 = fWatchGen[slot].load(std::memory_order_acquire);
         } while ((g0 & 1u) || g0 != g1);
         if (generation) *generation = g0;

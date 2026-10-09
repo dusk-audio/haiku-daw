@@ -943,8 +943,15 @@ void Engine::FillBuffer(float* out, size_t frames) {
     for (size_t oi = 0; oi < fOrder.size(); oi++) {
         const size_t idx = fOrder[oi];
         Bus& b = fBuses[idx];
-        if (!b.audible.load(std::memory_order_relaxed))
-            continue;                       // muted / solo'd out: route nothing
+        if (!b.audible.load(std::memory_order_relaxed)) {
+            // Muted / solo'd out: route nothing, but a watched insert in this
+            // chain still publishes. Its editor is open on screen either way,
+            // and a knob turned there -- or automation running under the mute,
+            // which the main thread keeps writing -- would otherwise not show
+            // up until the track was unmuted.
+            CaptureFxWatches(b.id, false, b.fx);
+            continue;
+        }
         float* nb = fNodeBufs[idx].data();
 
         // Automation: drive this node's gain/pan from its lanes at the block

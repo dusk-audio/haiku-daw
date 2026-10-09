@@ -431,6 +431,10 @@ if(HAIKU)
         add_executable(lv2_live_editor_tests tests/lv2_live_editor_tests.cpp)
         target_link_libraries(lv2_live_editor_tests PRIVATE daw_engine daw_lv2)
         add_test(NAME lv2_live_editor_tests COMMAND lv2_live_editor_tests)
+        # It skips (exit 77) without a plugin to host or an audio device to open;
+        # without this, "the engine could not open an output" would be reported
+        # as a pass.
+        set_tests_properties(lv2_live_editor_tests PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
     add_executable(play_clip prototypes/play_clip/main.cpp)

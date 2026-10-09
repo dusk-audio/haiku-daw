@@ -29,6 +29,31 @@
     ui:binary <daw_test_plugins.so> ;
     lv2:requiredFeature <http://lv2plug.in/ns/ext/urid#map> .
 
+# --- A plugin with TWO UIs that disagree -----------------------------------
+# The X11UI is listed first AND named so it sorts first, so it is the "first UI"
+# under whichever order lilv happens to walk its UI list in. It requires
+# instance-access; the BeUI does not.
+# Only the BeUI is the one this host can embed, so the answer must come from
+# it -- asking the first UI listed would call this editor direct-access and
+# leave it driving nothing.
+<urn:haiku-daw:test:two-ui>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    ui:ui <urn:haiku-daw:test:two-ui#aaa-x11ui> ,
+          <urn:haiku-daw:test:two-ui#zzz-beui> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:two-ui#aaa-x11ui>
+    a ui:X11UI ;
+    ui:binary <daw_test_plugins.so> ;
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/instance-access> .
+
+<urn:haiku-daw:test:two-ui#zzz-beui>
+    a ui:BeUI ;
+    ui:binary <daw_test_plugins.so> ;
+    lv2:requiredFeature <http://lv2plug.in/ns/ext/urid#map> .
+
 <urn:haiku-daw:test:bad-topology>
     a lv2:Plugin ;
     lv2:binary <daw_test_plugins.so> ;

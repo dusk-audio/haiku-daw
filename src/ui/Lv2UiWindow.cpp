@@ -143,6 +143,16 @@ const LilvUI* FindNativeUi(const LilvPlugin* plugin, LilvUIs** owned) {
     return found;
 }
 
+// The one-editor-per-INSERT key: the plugin URI plus the address the editor
+// writes through. Two inserts of the same plugin are different editors; the
+// same insert twice is the duplicate this refuses. An editor that MOVES keeps
+// this key in step (see the kMsgFxWatch handler), or reopening the insert it
+// moved to would slip past the claim and open a second window on it.
+std::string InsertKey(const std::string& uri, TrackId track, int fxIndex) {
+    return uri + "|" + std::to_string((unsigned long long)track)
+               + "|" + std::to_string(fxIndex);
+}
+
 // One editor per plugin.
 //
 // Opening a second window for the same plugin gives two editors that each
@@ -485,9 +495,7 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     // live and addresses its insert by index, so this is what tells them apart.
     // Two windows for the SAME insert would still be two editors claiming one
     // address, which is what this refuses.
-    const std::string claimKey =
-        pluginUri + "|" + std::to_string((unsigned long long)track)
-                  + "|" + std::to_string(fxIndex);
+    const std::string claimKey = InsertKey(pluginUri, track, fxIndex);
 
     // Already showing this insert -- or already building one? Bring the existing
     // editor forward rather than opening a rival. The claim is what makes that
@@ -924,6 +932,19 @@ void Lv2UiWindow::MessageReceived(BMessage* msg) {
             if (fx >= 0) {
                 d->link->track.store((int64_t)tid, std::memory_order_relaxed);
                 d->link->fxIndex.store(fx, std::memory_order_relaxed);
+
+                // Move the claim with it. The claim IS this editor's address,
+                // so leaving it behind means opening the insert it just moved
+                // to is judged "free" and a second window opens on the same
+                // insert -- two editors, one address, and closing either drops
+                // the other's registration (which is keyed the same way).
+                const std::string next = InsertKey(d->uri, (TrackId)tid, fx);
+                if (next != d->claimKey) {
+                    std::lock_guard<std::mutex> lock(gOpenMutex);
+                    for (auto& e : gOpen)
+                        if (e.first == d->claimKey) e.first = next;
+                    d->claimKey = next;
+                }
             }
         }
         return;

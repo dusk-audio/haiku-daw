@@ -127,6 +127,18 @@ inline std::vector<FxWatchUpdate> FxWatchValidate(
     return out;
 }
 
+// Is this engine frame worth sending to the editor? `count` is what the engine
+// published for that watch slot (0 or less means there is nothing to publish)
+// and the generation is its change counter, which only moves when a value
+// actually changed -- comparing it is what makes a still insert free.
+//
+// A pure function because it is the one decision on the push path that can be
+// got wrong invisibly: skip too eagerly and an editor silently stops following
+// automation, push regardless and every editor redraws 60 times a second.
+inline bool FxWatchFrameIsNew(int count, uint32_t frameGen, uint32_t lastGen) {
+    return count > 0 && frameGen != lastGen;
+}
+
 // The lowest engine watch slot no live entry is using, or -1 when they are all
 // taken. Past that an editor still works and still writes -- it just stops
 // following the engine, which the caller says once rather than silently.

@@ -808,9 +808,16 @@ void SetFxParamCommand::Undo(Project& p) {
     std::vector<EffectDesc>* chain = FxChainFor(p, fTrack, fMaster);
     if (!chain || fIndex < 0 || fIndex >= (int)chain->size()) return;
     EffectDesc& d = (*chain)[(size_t)fIndex];
-    for (const SlotValue& sv : fOld)
+    // Reverse: a command may carry the same slot twice (no sender does today,
+    // but nothing prevents it), and fOld then holds the value from before the
+    // FIRST write followed by the one from before the second. Undoing in order
+    // would leave the first entry's value behind; undoing in reverse restores
+    // what the slot held before the command ran.
+    for (size_t i = fOld.size(); i > 0; --i) {
+        const SlotValue& sv = fOld[i - 1];
         if (sv.slot >= 0 && (size_t)sv.slot < d.params.size())
             d.params[(size_t)sv.slot] = sv.value;
+    }
 }
 
 bool SetInstrumentCommand::Do(Project& p) {

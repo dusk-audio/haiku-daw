@@ -196,14 +196,22 @@ int main() {
         if (!u.empty()) CHECK(u[0].newFx == 1);
     }
 
-    // --- the forced frame --------------------------------------------------
+    // --- the push decision --------------------------------------------------
     {
-        // An editor that re-registers or is rebound may be looking at values
-        // that did not change, so its cached generation is made unreachable --
-        // the engine's counter only ever takes even values.
-        FxWatch w;
+        // What decides whether an engine frame reaches an editor. Both halves
+        // matter and both are invisible when wrong: skip too eagerly and an
+        // editor silently stops following automation; push regardless and one
+        // redraws 60 times a second for nothing.
+        CHECK(FxWatchFrameIsNew(4, 10, 8) == true);    // changed
+        CHECK(FxWatchFrameIsNew(4, 8, 8) == false);    // same generation
+        CHECK(FxWatchFrameIsNew(0, 10, 8) == false);   // nothing published
+        CHECK(FxWatchFrameIsNew(-1, 10, 8) == false);  // never published
+        // A re-registered or rebound editor has never seen a frame, so its
+        // cached generation is made unreachable -- the engine's counter only
+        // ever takes even values, and this one is odd.
         CHECK(FxWatch::kForcePush == 0xFFFFFFFFu);
         CHECK((FxWatch::kForcePush & 1u) == 1u);
+        CHECK(FxWatchFrameIsNew(4, 2, FxWatch::kForcePush) == true);
     }
 
     std::printf("fx_watch_tests: %d checks, %d failures\n", g_checks, g_fails);

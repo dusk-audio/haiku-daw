@@ -43,6 +43,7 @@ using namespace daw;
 namespace {
 
 const char* kMonoGain    = "urn:haiku-daw:test:mono-gain";
+const char* kTwoUi       = "urn:haiku-daw:test:two-ui";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
@@ -94,7 +95,9 @@ int main() {
     }
 
     // Exactly two of our five are hostable; the other three are refused.
-    CHECK(mineHosted == 2);
+    // Six fixtures: three hostable now that the two-UI one is here, three
+    // deliberately refused.
+    CHECK(mineHosted == 3);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
@@ -481,6 +484,11 @@ int main() {
     {
         CHECK(host.UiRequiresInstanceAccess(kMonoGain) == true);
         CHECK(host.UiRequiresInstanceAccess(kStereoLatent) == false);
+        // Two UIs, the disagreeing one listed FIRST: only the BeUI is the one
+        // this host can embed, so only its answer counts. Asking the first UI
+        // listed would call this a direct-access editor -- no poll, controls
+        // that drive nothing, and a title claiming the opposite.
+        CHECK(host.UiRequiresInstanceAccess(kTwoUi) == false);
         // Not a plugin at all, and a plugin with no UI: conservative, because
         // the safe mistake is leaving an editor unlinked.
         CHECK(host.UiRequiresInstanceAccess("urn:haiku-daw:test:does-not-exist")

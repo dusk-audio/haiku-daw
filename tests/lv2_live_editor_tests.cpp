@@ -18,6 +18,7 @@
 #include "../src/model/Project.h"
 #include "../src/dsp/EffectFactory.h"
 #include "../src/engine/Engine.h"
+#include "../src/plugin/FxWatchTable.h"   // FxWatchFrameIsNew
 
 #include <cstdio>
 #include <memory>
@@ -72,7 +73,7 @@ int main() {
     if (!pick) {
         std::printf("lv2_live_editor_tests: SKIP -- no LV2 plugin with "
                     "parameters is installed\n");
-        return 0;
+        return 77;   // ctest SKIP_RETURN_CODE: a skip must not read as a pass
     }
     std::printf("lv2_live_editor_tests: using %s (%zu parameters)\n",
                 pick->name.c_str(), pick->params.size());
@@ -87,7 +88,7 @@ int main() {
     {
         Track& t = const_cast<Track&>(p.Tracks().front());
         EffectDesc d;
-        if (!MakeLv2Desc(*pick, d)) return 0;
+        if (!MakeLv2Desc(*pick, d)) return 77;
         t.fx.push_back(d);
         MidiClip mc;
         mc.id = 1;
@@ -106,7 +107,7 @@ int main() {
     if (e.Load(p, 0, 96000) != B_OK) {
         std::printf("lv2_live_editor_tests: SKIP -- no audio output device "
                     "(Engine::Load failed)\n");
-        return 0;
+        return 77;   // ctest SKIP_RETURN_CODE: a skip must not read as a pass
     }
 
     const int nParams = (int)pick->params.size();
@@ -222,6 +223,35 @@ int main() {
         uint32_t b = 0;
         CHECK(e.WatchedFxParams(0, vals, Engine::kWatchMax, &b) == nParams);
         CHECK(b != a);
+    }
+
+    // --- the audio thread publishes too -------------------------------------
+    //
+    // Everything above went through PublishFxWatchNow, the stopped-transport
+    // path. While PLAYING the values come from the RT thread copying inside the
+    // audio block, which no other test on any machine can reach -- and if that
+    // copy were deleted, an editor would stop following automation the moment
+    // the user pressed play, which is precisely when it matters.
+    {
+        e.SetFxWatch(0, tid, false, 0);
+        e.Start();
+        // Let a few blocks run: opening the output is not instant, and the
+        // first block is the one that publishes (the slot is marked unpublished
+        // by SetFxWatch).
+        snooze(200000);                      // 200 ms, ~ dozens of blocks
+        e.SetFxParamLive(tid, false, 0, moveSlot,
+                         0.25f * (pick->params[(size_t)moveSlot].mn
+                                  + pick->params[(size_t)moveSlot].mx));
+        snooze(200000);
+        uint32_t rtGen = 0;
+        const int rtN = e.WatchedFxParams(0, vals, Engine::kWatchMax, &rtGen);
+        CHECK(rtN == nParams);
+        CHECK(FxWatchFrameIsNew(rtN, rtGen, 0));
+        if (rtN == nParams && moveSlot >= 0) {
+            const Lv2ParamInfo& pi = pick->params[(size_t)moveSlot];
+            CHECK(vals[(size_t)moveSlot] == 0.25f * (pi.mn + pi.mx));
+        }
+        e.Stop();
     }
 
     std::printf("lv2_live_editor_tests: %d checks, %d failures\n",

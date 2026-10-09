@@ -731,15 +731,24 @@ bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
     lilv_node_free(uriNode);
     if (!p) return true;
 
-    // Whichever embeddable UI it has; a plugin with none cannot be linked at
-    // all, and the caller only asks once it has found one.
+    // The BeUI the editor window would actually embed -- not merely the first
+    // UI listed. A bundle may carry several (an X11UI and a BeUI, or a GtkUI
+    // for another platform), they need not agree about instance-access, and
+    // answering from the wrong one would call a direct-access editor
+    // control-port: it would get no poll, its controls would drive nothing, and
+    // its title would say the opposite. Same test Lv2UiWindow::FindNativeUi
+    // uses to pick the UI it embeds.
     LilvUIs* uis = lilv_plugin_get_uis(p);
     if (!uis) return true;
+    LilvNode* beui = lilv_new_uri(w, "http://lv2plug.in/ns/extensions/ui#BeUI");
     const LilvUI* ui = nullptr;
-    LILV_FOREACH(uis, i, uis) {
-        const LilvUI* candidate = lilv_uis_get(uis, i);
-        if (candidate) { ui = candidate; break; }
+    if (beui) {
+        LILV_FOREACH(uis, i, uis) {
+            const LilvUI* candidate = lilv_uis_get(uis, i);
+            if (candidate && lilv_ui_is_a(candidate, beui)) { ui = candidate; break; }
+        }
     }
+    lilv_node_free(beui);
     if (!ui) { lilv_uis_free(uis); return true; }
 
     LilvNode* pred = lilv_new_uri(w, LV2_CORE__requiredFeature);

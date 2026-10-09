@@ -521,6 +521,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BPath path(&dir);
                 path.Append(name);
                 StopPlayback();
+                // The exporter reads the model directly, so a knob still inside
+                // an editor's commit debounce has to land before it renders.
+                FlushFxEditors();
                 if (!ExportWav(*fProject, path.Path(), fProject->sampleRate))
                     std::fprintf(stderr, "MainWindow: export failed: %s\n",
                                  path.Path());
@@ -544,6 +547,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BPath stemDir(base.Path(), name && name[0] ? name : "stems");
                 create_directory(stemDir.Path(), 0755);
                 StopPlayback();
+                // Renders read the model directly: commit any gesture still
+                // inside an editor's debounce first, or the stem is missing it.
+                FlushFxEditors();
                 const int n = ExportStems(*fProject, stemDir.Path(),
                                           fProject->sampleRate);
                 std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
@@ -963,11 +969,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindMessenger("msgr", &msgr);
 
             // Drop this editor's entry on close, and any entry whose window died
-            // without saying so (closed by the window manager, or crashed).
+            // without saying so (closed by the window manager, or crashed). The
+            // match itself is the table's rule (FxWatchFind), so the identity an
+            // editor registers under and the identity a close is matched by
+            // cannot drift apart.
+            const std::vector<FxWatch> snapshot = FxWatchSnapshot();
+            const int match = FxWatchFind(snapshot, uri.String(), (TrackId)tid, fx);
             for (size_t i = fFxWatches.size(); i > 0; --i) {
                 const FxEntry& w = fFxWatches[i - 1];
-                const bool same = w.uri == uri.String()
-                               && w.track == (TrackId)tid && w.fx == fx;
+                const bool same = (match >= 0 && (size_t)match == i - 1);
                 if ((same && !msgr.IsValid())
                     || (w.editor && !w.editor->Alive())) {
                     if (fEngine && w.slot >= 0)
@@ -976,8 +986,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 }
             }
             if (msgr.IsValid() && fx >= 0) {
-                const std::vector<FxWatch> snapshot = FxWatchSnapshot();
-                const int slot = FxWatchFreeSlot(snapshot, Engine::kWatchSlots);
+                const int slot = FxWatchFreeSlot(FxWatchSnapshot(),
+                                                 Engine::kWatchSlots);
                 FxEntry e;
                 e.editor = std::make_shared<EditorHandle>(msgr);
                 e.uri    = uri.String();
@@ -1118,6 +1128,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_AUTOSAVE: {
             // Save a recovery copy while there's content and we're not mid-take.
             if (!fRecMode && !fProject->Tracks().empty()) {
+                // A knob moved in a native editor is audible at once but reaches
+                // the model only when its debounce goes quiet, so recover from
+                // what is PLAYING, not from a value the user has already moved
+                // past (the same reason SaveTo flushes).
+                FlushFxEditors();
                 BPath p;
                 if (RecoveryPath(p)) ProjectIO::Save(*fProject, p.Path());
             }
@@ -1214,8 +1229,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // showing, and with the transport stopped ReloadActiveEngine
                 // does nothing at all -- so this cannot wait for a rebuild.
                 ValidateFxWatch();
-                ReloadActiveEngine();
-                PublishFxParamsNow();
+                ReloadActiveEngine();   // brings the engine to the model's state
+                PublishFxParamsNow();   // ... and only then republish
                 fTimeline->Invalidate();
             }
             break;
@@ -1223,8 +1238,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fStack->CanRedo()) {
                 fStack->Redo(*fProject);
                 ValidateFxWatch();
-                ReloadActiveEngine();
-                PublishFxParamsNow();
+                ReloadActiveEngine();   // brings the engine to the model's state
+                PublishFxParamsNow();   // ... and only then republish
                 fTimeline->Invalidate();
             }
             break;
@@ -1829,12 +1844,14 @@ void MainWindow::ReloadActiveEngine() {
 // something else happened to rebuild the engine.
 void MainWindow::SyncFxToEngine() {
     ValidateFxWatch();
-    // Any chain change is also a republish point: with the transport stopped no
-    // audio block is coming, and a rebuilt chain reads its parameters from the
-    // model, so an editor should be shown what the engine now holds.
-    PublishFxParamsNow();
     if (fEngine && !fEngine->SyncFx(*fProject))
         ReloadActiveEngine();
+    // Publish AFTER the engine has been brought up to date, not before. With
+    // the transport stopped the sync fails and the rebuild is a no-op, so the
+    // engine still holds the OLD chain: publishing first would read the
+    // previous insert at the new index and show the editor another plugin's
+    // values until the next Play.
+    PublishFxParamsNow();
 }
 
 // A native editor addresses its insert by INDEX (track, fx, slot) -- that is
@@ -2556,6 +2573,11 @@ void MainWindow::FreezeTrack(TrackId track, bool freeze) {
     Track* t = fProject->FindTrack(track);
     if (!t) return;
 
+    // Freezing renders this track from the model, so an editor gesture still
+    // inside its debounce has to land first -- otherwise the frozen audio is
+    // missing the change the user just heard (unfreezing only checks the flag).
+    if (freeze) FlushFxEditors();
+
     if (!freeze) {                     // unfreeze: pure model restore
         if (!t->frozen) return;
         fStack->Execute(std::make_unique<FreezeTrackCommand>(track, false),
@@ -2762,12 +2784,23 @@ void MainWindow::PushFxParams() {
             fFxWatches.erase(fFxWatches.begin() + (long)(i - 1));
             continue;
         }
-        if (!fEngine || w.slot < 0) continue;
+        if (!fEngine) continue;
+        if (w.slot < 0) {
+            // Registered while every slot was taken. Now that one may have
+            // freed, take it: the alternative is an editor that never follows
+            // automation again, with the claim blocking a close-and-reopen.
+            const int freed = FxWatchFreeSlot(FxWatchSnapshot(),
+                                              Engine::kWatchSlots);
+            if (freed < 0) continue;
+            w.slot = freed;
+            w.gen  = FxWatch::kForcePush;   // it has never had a frame
+            ApplyFxWatchToEngine(w);
+        }
         float vals[Engine::kWatchMax];
         uint32_t gen = 0;
         const int n = fEngine->WatchedFxParams(w.slot, vals, Engine::kWatchMax,
                                                &gen);
-        if (n <= 0 || gen == w.gen) continue;    // nothing new since last push
+        if (!FxWatchFrameIsNew(n, gen, w.gen)) continue;
         w.gen = gen;
         w.editor->SendFrame(vals, n);
     }
@@ -2796,6 +2829,22 @@ bool MainWindow::OpenNativeEditor(TrackId tid, int fx) {
     const EffectDesc& d = (*chain)[(size_t)fx];
     if (d.type != EffectType::Lv2 || !Lv2UiWindow::HasNativeUi(d.pluginName))
         return false;
+
+    // Two copies of one plugin in a chain cannot be told apart by anything the
+    // model carries: an editor opened on one of them would follow the index to
+    // the other the moment the chain changed, and would be driving a plugin it
+    // is not showing. Refuse rather than open it wrong -- the generic parameter
+    // list is still there, and it edits by index against the model, which is
+    // exactly right for whichever insert the user picked.
+    int copies = 0;
+    for (const EffectDesc& e : *chain)
+        if (e.pluginName == d.pluginName) copies++;
+    if (copies > 1) {
+        std::fprintf(stderr, "daw: '%s' is in this chain %d times; its own "
+                     "editor cannot tell the copies apart, so it is not opened "
+                     "(use the parameter list)\n", d.pluginName.c_str(), copies);
+        return false;
+    }
 
     // The title names the track: two tracks can hold the same plugin, and with
     // both editors open the plugin's name alone would not say which is which.
