@@ -976,12 +976,17 @@ const BCursor* TimelineView::CursorObject(Pointer p) {
                 default: break;
             }
             if (glyph < 0 && p != Pointer::Slip) return nullptr;
-            BBitmap* bm = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32);
-            if (!bm->IsValid()) { delete bm; return nullptr; }
+            // B_BITMAP_ACCEPTS_VIEWS is what gives the drawing view an owner:
+            // a bitmap without an off-screen window has no fWindow, so AddChild
+            // silently does nothing and EVERY BView call the glyph makes then
+            // hits "View method requires owner and doesn't have one" -- a crash
+            // dialog on the target, not a failed check. The bitmap's window must
+            // be locked before the child is added.
+            BBitmap* bm = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32, true);
+            if (!bm->IsValid() || !bm->Lock()) { delete bm; return nullptr; }
             memset(bm->Bits(), 0, (size_t)bm->BitsLength());
             BView* v = new BView(bm->Bounds(), "cur", 0, 0);
             bm->AddChild(v);
-            bm->Lock();
             v->SetDrawingMode(B_OP_COPY);
             auto paint = [&](rgb_color c) {
                 if (p == Pointer::Slip) icons::DrawSlipGlyph(v, bm->Bounds(), c);

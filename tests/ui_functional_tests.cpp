@@ -1501,7 +1501,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
             BMessenger(tv).SendMessage(&m);
         }
     };
-    auto postMouse = [&](uint32 what, BPoint at) {
+    auto postMouse = [&](uint32 what, BPoint at, uint32 mods = 0) {
         BPoint screen = at;
         if (win->LockWithTimeout(1000000) == B_OK) {
             screen = tv->ConvertToScreen(at);
@@ -1510,6 +1510,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         BMessage m(what);
         m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
         m.AddInt32("clicks", 1);
+        m.AddInt32("modifiers", (int32)mods);
         m.AddPoint("where", at);
         m.AddPoint("screen_where", screen);
         BMessenger(tv).SendMessage(&m);
@@ -1683,8 +1684,44 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
                 v->SetTool(TimelineView::Tool::Pointer);
             win->Unlock();
         }
-        // The hover highlight is drawn for exactly this state: park the pointer
-        // on the left edge and let the view repaint.
+        // APPLYING a cursor is a different path from mapping one, and it is
+        // where this feature first crashed: the tool glyphs are drawn into a
+        // bitmap, and a bitmap made without B_BITMAP_ACCEPTS_VIEWS has no
+        // off-screen window, so its drawing view has no owner and every BView
+        // call debuggers ("View method requires owner and doesn't have one") --
+        // a crash dialog on the target, not a failed check. Hover, then switch
+        // to each tool, so every glyph cursor is really applied.
+        for (int tool = 1; tool <= 5; tool++) {      // pencil..fade
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (TimelineView* v =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                    v->SetTool((TimelineView::Tool)tool);
+                win->Unlock();
+            }
+            postMouse(B_MOUSE_MOVED, BPoint(mid.x, mid.y));
+            snooze(100000);
+        }
+        // ...and the slip cursor, which is the pointer tool with Alt held.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                v->SetTool(TimelineView::Tool::Pointer);
+            win->Unlock();
+        }
+        postMouse(B_MOUSE_MOVED, BPoint(mid.x, mid.y), B_OPTION_KEY);
+        snooze(120000);
+        {
+            int tool = -1;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (TimelineView* v =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                    tool = (int)v->ActiveTool();
+                win->Unlock();
+            }
+            CHECK(tool == (int)TimelineView::Tool::Pointer);   // still alive
+        }
+        // The hover highlight is drawn for this state: park the pointer on the
+        // clip's left edge and let the view repaint.
         postMouse(B_MOUSE_MOVED, left);
         snooze(150000);
         Shot("arrange-hover");
