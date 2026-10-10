@@ -14,7 +14,7 @@ enum { MSG_OK = 'rnok' };
 RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
                            BMessenger apply, uint32 what)
     : BWindow(frame, what == kMsgRenameMarker ? "Rename Marker" : "Rename Track",
-              B_TITLED_WINDOW,
+              B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fTrack(track), fApply(apply), fWhat(what),
       fOldName(current ? current : "") {

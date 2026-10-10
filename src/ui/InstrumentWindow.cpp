@@ -71,7 +71,7 @@ std::string LeafOf(const std::string& p) {
 
 InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
                                    TrackId track, BMessenger apply)
-    : BWindow(frame, "Instrument", B_TITLED_WINDOW,
+    : BWindow(frame, "Instrument", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fDesc(std::move(inst)), fTrack(track), fApply(apply) {
     BGroupView* root = new BGroupView(B_VERTICAL, Themed(6.0f));

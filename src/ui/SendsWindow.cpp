@@ -31,7 +31,7 @@ static constexpr float kLevelMax = 2.0f;   // sends can exceed unity
 SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
                          std::vector<std::pair<TrackId, std::string>> buses,
                          TrackId track, BMessenger apply)
-    : BWindow(frame, "Sends", B_TITLED_WINDOW,
+    : BWindow(frame, "Sends", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fSends(std::move(sends)), fBuses(std::move(buses)),
       fTrack(track), fApply(apply) {

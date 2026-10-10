@@ -66,7 +66,7 @@ int MarkedIndex(BPopUpMenu* menu) {
 
 ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
                            bool stems, BMessenger apply)
-    : BWindow(frame, "Export", B_TITLED_WINDOW,
+    : BWindow(frame, "Export", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fCur(current), fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.

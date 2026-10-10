@@ -11,6 +11,7 @@
 // model is read under a window's lock, the way any other looper-external reader
 // has to.
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/ProjectDocument.h"   // SettingsPath (the recovery file)
 #include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
@@ -1670,6 +1671,21 @@ static void TestDockedEditor(MainWindow* win, Project& project,
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
+    // A leftover recovery file makes the window open its "Recover?" alert at
+    // startup, and that alert BLOCKS the window thread until someone answers
+    // it -- every check that needs the lock then times out, which reads
+    // exactly like a hang (the same shape as M1.1's crash-dialog lesson).
+    // The recovery prompt has its own coverage elsewhere; a test run starts
+    // from a clean slate.
+    {
+        BPath settings;
+        if (ProjectDocument::SettingsPath(settings) == B_OK) {
+            BPath recovery(settings);
+            if (recovery.Append("recovery.dawproj") == B_OK)
+                BEntry(recovery.Path()).Remove();
+        }
+    }
+
     // One project for the whole run: windows come and go, the model stays, and
     // nothing is freed while a looper could still be reading it.
     Project project;

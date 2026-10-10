@@ -98,7 +98,33 @@ MixerStripsView::MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips
 }
 
 float MixerStripsView::StripX(int i) const {
-    return 8.0f + i * (kStripW + kGap);
+    return 8.0f + i * (kStripW + kGap) - fScrollX;
+}
+
+// Every strip, the master, and the margins -- what the rack needs to be shown
+// whole. Used to clamp the horizontal pan.
+float MixerStripsView::ContentWidth() const {
+    return 8.0f + ((float)fStrips.size() + 1.0f) * (kStripW + kGap) + 8.0f;
+}
+
+// The wheel pans the rack sideways when it is wider than the view (M1.4): a
+// console with more strips than fit is the normal case on a small screen, and
+// a mixer that silently cuts the last strips off is worse than one that moves.
+void MixerStripsView::MessageReceived(BMessage* msg) {
+    if (msg->what == B_MOUSE_WHEEL_CHANGED) {
+        float dy = 0.0f, dx = 0.0f;
+        msg->FindFloat("be:wheel_delta_y", &dy);
+        msg->FindFloat("be:wheel_delta_x", &dx);
+        const float move = (dx != 0.0f ? dx : dy) * 40.0f;
+        const float maxScroll = ContentWidth() - Bounds().Width();
+        if (maxScroll <= 0.0f) { fScrollX = 0.0f; return; }
+        fScrollX += move;
+        if (fScrollX < 0.0f) fScrollX = 0.0f;
+        if (fScrollX > maxScroll) fScrollX = maxScroll;
+        Invalidate();
+        return;
+    }
+    BView::MessageReceived(msg);
 }
 
 void MixerStripsView::SetPeaks(
@@ -443,6 +469,11 @@ void MixerWindow::DispatchMessage(BMessage* m, BHandler* h) {
 }
 
 void MixerWindow::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgMixerActivate) {   // already open: come to the front
+        Activate(true);
+        SetWorkspaces(B_CURRENT_WORKSPACE);
+        return;
+    }
     if (msg->what == kMsgMixPeaks) {
         std::map<uint64, std::pair<float, float>> peaks;
         int64 tid = 0; float pl = 0, pr = 0;

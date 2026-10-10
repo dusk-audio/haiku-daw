@@ -787,6 +787,35 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject);
+            // One mixer (M1.4): asking again brings the open one forward with
+            // the current strips rather than stacking a second rack.
+            if (fMixerMsgr.IsValid()) {
+                BMessage r(kMsgMixStrips);
+                r.AddFloat("mg", fProject->masterGain);
+                for (const MixerStripInfo& st : strips) {
+                    r.AddInt64("tid", (int64)st.trackId);
+                    r.AddFloat("gain", st.gain);
+                    r.AddFloat("pan", st.pan);
+                    r.AddBool("mute", st.muted);
+                    r.AddBool("solo", st.soloed);
+                    r.AddBool("arm", st.armed);
+                    r.AddBool("mon", st.inputMonitor);
+                    r.AddInt32("color", st.colorIndex);
+                    r.AddInt32("type", st.type);
+                    r.AddInt32("fx", (int32)st.fx.size());
+                    for (const MixerInsertInfo& in : st.fx) {
+                        r.AddString("fxn", in.name.c_str());
+                        r.AddBool("fxb", in.bypassed);
+                    }
+                }
+                if (fMixerMsgr.SendMessage(&r) == B_OK) {
+                    BMessage act(kMsgMixerActivate);   // bring it to the front
+                    fMixerMsgr.SendMessage(&act);
+                    break;
+                }
+                // The window is gone (its messenger is dead): fall through and
+                // make a new one.
+            }
             const float ww = 24 + (strips.size() + 1) * (96 + 4);   // + master
             // Tall enough for the strip, including the insert block: four insert
             // rows cost ~60 px that the old single "FX n" button did not.

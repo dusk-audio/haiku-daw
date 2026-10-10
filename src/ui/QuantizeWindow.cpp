@@ -44,7 +44,7 @@ BSlider* PercentRow(const char* name, const char* label, int value,
 
 QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
                                BMessenger apply)
-    : BWindow(frame, "Quantize", B_TITLED_WINDOW,
+    : BWindow(frame, "Quantize", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.

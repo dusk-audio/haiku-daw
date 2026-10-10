@@ -12,7 +12,7 @@ namespace daw {
 
 ExportProgressWindow::ExportProgressWindow(BRect frame, BMessenger main,
                                            const char* label)
-    : BWindow(frame, "Exporting", B_TITLED_WINDOW,
+    : BWindow(frame, "Exporting", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_NOT_CLOSABLE
               | B_ASYNCHRONOUS_CONTROLS),
       fMain(main) {
