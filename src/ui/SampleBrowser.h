@@ -7,6 +7,8 @@
 // can be built up. Haiku-only (Storage + Interface Kits).
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware + the well colours (T1)
 #include <Messenger.h>
 #include <Window.h>
 
@@ -14,6 +16,7 @@
 #include <vector>
 
 class BListView;
+class BScrollView;
 class BTextControl;
 
 namespace daw {
@@ -25,7 +28,12 @@ constexpr uint32 kMsgBrowserImport = 'bimp';
 // drop. Field: string "path".
 constexpr uint32 kMsgSampleDrag = 'bsdg';
 
-class SampleBrowser : public BWindow {
+class SampleBrowser : public BWindow, public ThemeAware {
+public:
+    // The list is a stock BListView subclass: without this it keeps the
+    // system's list colour in Dark mode (T1).
+    void ApplyTheme() override;
+
 public:
     SampleBrowser(BRect frame, BMessenger target);
 
@@ -37,6 +45,7 @@ private:
 
     BMessenger                fTarget;      // -> main window (import)
     BListView*                fList;
+    BScrollView*              fScroll = nullptr;
     BTextControl*             fFilter;      // name filter
     BTextControl*             fBpm;         // BPM to tag onto the selection
     std::vector<std::string>  fPaths;       // parallel to list items

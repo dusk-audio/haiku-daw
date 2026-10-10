@@ -50,12 +50,17 @@ static bool IsAudioPath(const char* p) {
         || strcasecmp(dot, ".aiff") == 0;
 }
 
+void SampleBrowser::ApplyTheme() {
+    ApplyWellColors(fList);
+    ApplyWellColors(fScroll);
+}
+
 SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
     : BWindow(frame, "Sample Browser", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTarget(target) {
-    BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView(Bounds(), "root", B_FOLLOW_ALL_SIDES,
+                                 B_WILL_DRAW);
     AddChild(root);
 
     const float w = Bounds().Width();
@@ -73,9 +78,9 @@ SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
     dlv->fPaths = &fPaths;   // stable member; drag rows carry their path
     fList = dlv;
     fList->SetInvocationMessage(new BMessage(MSG_PICK));
-    BScrollView* sv = new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0,
-                                      false, true);
-    root->AddChild(sv);
+    fScroll = new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0, false, true);
+    root->AddChild(fScroll);
+    ApplyTheme();   // the list is a well: the theme's colour, not the stock one
 
     const float by = Bounds().Height() - 34;
     fBpm = new DawTextField(BRect(8, by, 150, by + 22), "bpm", "BPM:", "",

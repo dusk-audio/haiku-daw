@@ -8,6 +8,7 @@
 // owns: the prompts, the file panels, the menus and the timeline.
 #pragma once
 
+#include "../app/AppSettings.h"   // ReadSettings returns one
 #include "../model/Command.h"
 
 #include <Path.h>
@@ -50,6 +51,11 @@ public:
 
     // Where settings live (the window's own preferences use it too).
     static bool SettingsPath(BPath& out);
+
+    // The settings file as data (defaults when it is missing or garbage).
+    // DawApplication reads the theme mode through this before any window
+    // exists; MainWindow reads the rest on top of its own defaults.
+    static AppSettings ReadSettings();
 
     // --- File > Open Recent ------------------------------------------------
     const std::vector<std::string>& Recent() const { return fRecent; }

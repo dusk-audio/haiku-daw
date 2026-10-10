@@ -8,6 +8,8 @@
 // breaks this file loudly (which is what we want).
 #pragma once
 
+#include "../Theme.h"   // ThemeMode (T1)
+
 #include <ControlLook.h>
 
 namespace daw {
@@ -144,5 +146,25 @@ private:
                           const rgb_color& color);
     static void DrawPopupIndicator(BView* view, const BRect& rect, bool on);
 };
+
+
+// Install the look the mode calls for (T1): the stock Haiku look in System
+// mode, DawControlLook in Dark mode. The kit's own pointer is remembered the
+// first time, so switching back is putting it back — never constructing a
+// private Haiku class of our own.
+//
+// be_control_look is per-process (ControlLook.h): nothing here can leak into
+// another application.
+inline void InstallControlLookForMode(ThemeMode mode) {
+    static BControlLook* stock = nullptr;
+    static DawControlLook* dark = nullptr;
+    if (stock == nullptr) stock = be_control_look;
+    if (mode == ThemeMode::Dark) {
+        if (dark == nullptr) dark = new DawControlLook();
+        be_control_look = dark;
+    } else {
+        be_control_look = stock;
+    }
+}
 
 } // namespace daw

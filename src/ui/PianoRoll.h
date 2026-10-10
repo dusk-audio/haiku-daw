@@ -11,6 +11,8 @@
 // delete act on the whole selection.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Project.h"
 #include "../model/MidiOps.h"
 #include "../model/TempoMap.h"
@@ -49,7 +51,9 @@ constexpr uint32 kMsgRollPlayhead = 'rlph';
 // main window can push the playhead to it during transport.
 constexpr uint32 kMsgRollOpened = 'rlop';
 
-class PianoRollView : public BView {
+class PianoRollView : public BView, public ThemeAware {
+public:
+    void ApplyTheme() override;   // T1: the cached panel colour
 public:
     using Frame = daw::Frame;
     // `playhead` is the transport position when the editor opened (absolute

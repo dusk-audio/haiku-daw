@@ -93,8 +93,12 @@ MixerStripsView::MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips
                                  float masterGain, BMessenger apply)
     : BView(frame, "strips", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
       fStrips(std::move(strips)), fMasterGain(masterGain), fApply(apply) {
-    SetViewColor(ColBackground());
+    ApplyTheme();
     RecomputeFxRows();
+}
+
+void MixerStripsView::ApplyTheme() {
+    SetViewColor(ColBackground());
 }
 
 float MixerStripsView::StripX(int i) const {
@@ -255,8 +259,7 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
     // Colored name label along the bottom (Logic channel-strip signature).
     SetHighColor(tc);
     FillRect(L.name);
-    const int lum = (tc.red * 30 + tc.green * 59 + tc.blue * 11) / 100;
-    SetHighColor(lum > 140 ? Rgb(20, 20, 22) : Rgb(245, 246, 248));
+    SetHighColor(LabelOn(tc));   // the theme's rule: whichever of the two reads
     DrawString(info ? info->name.c_str() : "Master",
                BPoint(L.name.left + 5, L.name.bottom - 6));
 

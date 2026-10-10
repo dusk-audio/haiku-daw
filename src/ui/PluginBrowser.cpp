@@ -49,13 +49,18 @@ const BuiltIn kBuiltIns[] = {
 
 } // namespace
 
+void PluginBrowser::ApplyTheme() {
+    ApplyWellColors(fList);
+    ApplyWellColors(fScroll);
+}
+
 PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
                              BMessenger main)
     : BWindow(frame, "Add Effect", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTarget(target), fMain(main), fTrack(track) {
-    BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView(Bounds(), "root", B_FOLLOW_ALL_SIDES,
+                                 B_WILL_DRAW);
     AddChild(root);
 
     const float w = Bounds().Width();
@@ -71,8 +76,9 @@ PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
     fList = new BListView(lr, "list", B_SINGLE_SELECTION_LIST,
                           B_FOLLOW_ALL_SIDES);
     fList->SetInvocationMessage(new BMessage(MSG_PICK));
-    root->AddChild(new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0,
-                                   false, true));
+    fScroll = new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0, false, true);
+    root->AddChild(fScroll);
+    ApplyTheme();   // the list is a well: the theme's colour, not the stock one
 
     // Build the full catalogue once. The hosts scan at startup and their
     // listings do not change while the app runs, so re-reading them per

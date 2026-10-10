@@ -664,9 +664,8 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
     RegisterOpen(claimKey, win);   // the window's ForgetOpen releases it now
     claim.Handoff();
 
-    d->container = new BView(win->Bounds(), "container", B_FOLLOW_ALL_SIDES,
-                             B_WILL_DRAW);
-    d->container->SetViewColor(ColHeader());
+    d->container = new ThemedView(win->Bounds(), "container", B_FOLLOW_ALL_SIDES,
+                                  B_WILL_DRAW);
     win->AddChild(d->container);
     win->Show();          // the parent must be attached and visible first
 

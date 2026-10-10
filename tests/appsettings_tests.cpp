@@ -59,6 +59,27 @@ int main() {
     CHECK(b.bottomVisible == true);
     CHECK(std::fabs(b.bottomHeight - 300.0f) < 1e-3);
 
+    // The look (T1): the mode survives, and a file that has no theme line --
+    // or a hand-edited one -- stays on System, which is the mode the app is
+    // allowed to draw anywhere.
+    {
+        AppSettings t;
+        t.themeMode = ThemeMode::Dark;
+        AppSettings t2;
+        CHECK(t2.Deserialize(t.Serialize()));
+        CHECK(t2.themeMode == ThemeMode::Dark);
+
+        AppSettings plain;
+        CHECK(plain.Deserialize("buffer 512\n"));
+        CHECK(plain.themeMode == ThemeMode::System);
+
+        AppSettings odd;
+        CHECK(odd.Deserialize("theme midnight\n"));
+        CHECK(odd.themeMode == ThemeMode::System);
+        CHECK(odd.Deserialize("theme dark\n"));
+        CHECK(odd.themeMode == ThemeMode::Dark);
+    }
+
     // An old settings file (no export keys at all) keeps the dialog defaults.
     AppSettings old;
     CHECK(old.Deserialize("buffer 512\nmetronome 0\n"));

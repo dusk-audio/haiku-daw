@@ -20,6 +20,10 @@ TransportBar::TransportBar(BRect frame, BMessenger target,
             B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat),
       fZoomOut(zoomOutWhat), fZoomIn(zoomInWhat) {
+    ApplyTheme();
+}
+
+void TransportBar::ApplyTheme() {
     SetViewColor(ColChrome());
 }
 

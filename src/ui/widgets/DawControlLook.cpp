@@ -42,6 +42,10 @@ void DawControlLook::DrawFrame(BView* view, BRect& rect, float radius,
     rgb_color fill = background;
     if ((flags & B_DISABLED) != 0)      fill = ColGrid();
     else if ((flags & B_CLICKED) != 0)  fill = ColHeaderHi();
+    // Hover: the kit's controls hand the look every state they know, so the
+    // look is where the state has to show (a control that no longer paints
+    // itself cannot paint its own hover either).
+    else if ((flags & B_HOVER) != 0)    fill = TintColor(fill, 1.3f);
 
     FillRounded(view, rect, radius, fill);
 

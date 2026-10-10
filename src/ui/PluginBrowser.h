@@ -13,6 +13,8 @@
 // Haiku-only (Interface Kit).
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware + the well colours (T1)
 #include "../model/Effect.h"   // EffectType
 #include "../model/types.h"    // TrackId
 
@@ -23,6 +25,7 @@
 #include <vector>
 
 class BListView;
+class BScrollView;
 class BTextControl;
 
 namespace daw {
@@ -36,7 +39,12 @@ namespace daw {
 // touches the model.
 constexpr uint32 kMsgPluginChosen = 'pbch';
 
-class PluginBrowser : public BWindow {
+class PluginBrowser : public BWindow, public ThemeAware {
+public:
+    // The list is a stock BListView: it reads the system colour table unless
+    // the theme's document colour is put on it (T1).
+    void ApplyTheme() override;
+
 public:
     // `target` is the effects editor the choice is posted back to; `main` is
     // MainWindow, which is the only handler for the transport toggle. They are
@@ -67,6 +75,7 @@ private:
     BMessenger         fMain;     // -> MainWindow (spacebar transport only)
     TrackId            fTrack;
     BListView*         fList   = nullptr;
+    BScrollView*       fScroll = nullptr;
     BTextControl*      fFilter = nullptr;
     std::vector<Entry> fAll;    // every entry, built once at construction
     std::vector<Entry> fShown;  // the filtered subset, parallel to the list rows
