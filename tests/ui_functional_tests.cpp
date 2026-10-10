@@ -210,6 +210,18 @@ static bool WindowUp(const char* title) {
     return false;
 }
 
+// Is a window with this title still in the application's list AT ALL --
+// hidden ones included? A window that is quitting stops being drawn before it
+// leaves the list, so WindowUp() says "gone" while the object is still there.
+// Waiting for THIS to go false is what makes it safe to touch afterwards.
+static bool WindowListed(const char* title) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && std::strcmp(WindowTitle(w), title) == 0) return true;
+    }
+    return false;
+}
+
 // Wait until only the main window is up: the previous test's export bar closes
 // on a pulse, and a stale bar would shift every window count that follows (and
 // make a later "the bar appeared" assertion pass vacuously).
@@ -256,9 +268,15 @@ static void HideOtherWindows(BWindow* keep) {
     for (int32 i = be_app->CountWindows() - 1; i >= 0; i--) {
         BWindow* w = be_app->WindowAt(i);
         if (w && w != keep && !w->IsHidden()) {
-            w->Lock();
-            w->Hide();
-            w->Unlock();
+            // LockWithTimeout, never Lock. A window whose looper is quitting
+            // can still be listed, and an unbounded Lock() on one blocks
+            // forever -- which is a hang in a suite that has a five-minute
+            // ctest timeout, not a failure anyone can read. Skipping it is
+            // right: it is on its way out.
+            if (w->LockWithTimeout(2000000) == B_OK) {
+                w->Hide();
+                w->Unlock();
+            }
         }
     }
     snooze(200000);
@@ -569,11 +587,12 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
 
     // The dialog applies by posting its own go-ahead to itself; it then quits.
     dlg->PostMessage('exok');
-    // Wait for the save panel AND for the dialog itself to be gone. A window
-    // that is still quitting must not be touched: HideOtherWindows locks what
-    // it finds, and locking a looper that is being destroyed is a crash.
+    // Wait for the save panel AND for the dialog to have left the application's
+    // window list entirely. "Not visible" is not enough: a window that is
+    // quitting stops being DRAWN before it is removed, and touching one in that
+    // state is how this suite used to hang and, before that, crash.
     CHECK(WaitFor([&] {
-        return !WindowUp("Export") && VisibleWindows() >= windowsBefore + 1;
+        return !WindowListed("Export") && VisibleWindows() >= windowsBefore + 1;
     }));
     HideOtherWindows(win);
     CHECK(WaitQuiet());
