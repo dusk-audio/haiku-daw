@@ -16,6 +16,7 @@
 #include <Window.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 class BMessageRunner;
@@ -37,7 +38,9 @@ std::string EffectDisplayName(const EffectDesc& d);
 EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId);
 
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
-// float[] "ep" (all params concatenated).
+// string "en" (plugin id/URI), int32 "eb" (bypassed), float "em" (wet/dry mix),
+// int64 "es" (external sidechain source track, 0 = none), float[] "ep" (all
+// params concatenated).
 constexpr uint32 kMsgApplyFx = 'fxap';
 
 // Live single-param preview during a knob/handle drag (int64 "track",
@@ -118,8 +121,13 @@ public:
     // editor on the slot that was clicked). The view still holds the WHOLE
     // chain: Apply() posts every descriptor, so filtering the data instead of
     // the drawing would delete the other inserts on the first edit.
+    //
+    // `keySources` are the tracks an insert may take an external sidechain key
+    // FROM (id + display name), snapshotted when the window opened — the same
+    // contract SendsWindow has for its bus list. Empty offers only "None".
     EffectsView(BRect frame, std::vector<EffectDesc> chain, TrackId track,
-                BMessenger apply, int focusSlot = -1);
+                BMessenger apply, int focusSlot = -1,
+                std::vector<std::pair<TrackId, std::string>> keySources = {});
     ~EffectsView() override;
 
     void Draw(BRect update) override;
@@ -167,8 +175,12 @@ private:
     //   9 plugin parameter slider (vertical generic list)
     //  10 open the plugin's own (native) editor
     //  11 per-insert bypass toggle  12 per-insert wet/dry slider
+    //  13 external sidechain source picker
     struct Hit { int effect; int kind; int slot; BRect rect;
                  float min; float max; };
+    // Name of the insert's current key source, for the picker row.
+    const char* KeySourceName(TrackId id) const;
+    void  PickKeySource(int effect, BPoint where);
     void  DrawKnob(BRect r, const char* label, float value, float mn, float mx);
     void  DrawEqGraph(BRect r, const EffectDesc& d, int effIdx);
     void  DrawCompCurve(BRect r, const EffectDesc& d, int effIdx);
@@ -183,6 +195,8 @@ private:
     std::vector<EffectDesc> fChain;
     TrackId    fTrack;
     BMessenger fApply;
+    // Tracks a sidechain picker may offer (see the constructor).
+    std::vector<std::pair<TrackId, std::string>> fKeySources;
     // Show only this chain index, or -1 for the whole chain. The chain itself is
     // always complete -- see the constructor comment.
     int        fFocus = -1;
@@ -225,8 +239,10 @@ private:
 class EffectsWindow : public BWindow {
 public:
     // focusSlot >= 0 opens on one insert alone; -1 shows the whole chain.
+    // `keySources`: see EffectsView's constructor.
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
-                  BMessenger apply, int focusSlot = -1);
+                  BMessenger apply, int focusSlot = -1,
+                  std::vector<std::pair<TrackId, std::string>> keySources = {});
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
     bool QuitRequested() override;

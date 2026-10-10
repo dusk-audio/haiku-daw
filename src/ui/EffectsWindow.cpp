@@ -3,6 +3,7 @@
 #include "UiMetrics.h"
 #include "../dsp/Eq.h"
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
+#include "../dsp/SidechainKey.h"   // kExtKeySlot (the picker writes it)
 #include "../plugin/PluginHost.h"
 #include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
@@ -231,9 +232,11 @@ static std::vector<KnobDef> KnobsForDesc(const EffectDesc& d) {
 }
 
 EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
-                         TrackId track, BMessenger apply, int focusSlot)
+                         TrackId track, BMessenger apply, int focusSlot,
+                         std::vector<std::pair<TrackId, std::string>> keySources)
     : BView(frame, "fx", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
       fChain(std::move(chain)), fTrack(track), fApply(apply),
+      fKeySources(std::move(keySources)),
       fFocus(focusSlot >= 0 && focusSlot < (int)fChain.size() ? focusSlot : -1) {
     SetViewColor(ColBackground());
 }
@@ -284,8 +287,21 @@ float EffectsView::PanelHeight(const EffectDesc& d) const {
         h += kGraphH;
     if (d.type == EffectType::Reverb || d.type == EffectType::Delay)
         h += kSelH;   // type / sync selector row
+    if (EffectSupportsSidechain(d.type))
+        h += kSelH;   // "Key:" external-sidechain source row
     h += kKnobH;   // one knob row (all built-ins have <= 5 knobs)
     return h + 8;
+}
+
+// The insert's current key source, as the picker row shows it. An id that is
+// not in the candidate list (the model changed under a stale snapshot, or the
+// source track was deleted) still names "something" — showing "None" there
+// would invite a click that silently drops the routing.
+const char* EffectsView::KeySourceName(TrackId id) const {
+    if (id == kInvalidTrackId) return "None";
+    for (const auto& ks : fKeySources)
+        if (ks.first == id) return ks.second.c_str();
+    return "(missing track)";
 }
 
 float EffectsView::PanelTop(size_t i) const {
@@ -324,6 +340,9 @@ void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain) {
         // un-bypassed / fully wet on the next knob move.
         m.AddInt32("eb", d.bypassed ? 1 : 0);
         m.AddFloat("em", d.mix);
+        // The external sidechain source travels too: the picker commits it, and
+        // flattening without it would drop the routing on the next knob move.
+        m.AddInt64("es", (int64)d.sidechainSource);
         for (float v : d.params) m.AddFloat("ep", v);
     }
 }
@@ -344,6 +363,10 @@ std::vector<EffectDesc> DecodeFxChain(const BMessage& m) {
         if (m.FindInt32("eb", i, &byp) == B_OK) d.bypassed = (byp != 0);
         float mix = 1.0f;
         if (m.FindFloat("em", i, &mix) == B_OK) d.mix = ClampFxMix(mix);
+        // Absent (an older sender) keeps the descriptor's default: no key.
+        int64 src = 0;
+        if (m.FindInt64("es", i, &src) == B_OK && src > 0)
+            d.sidechainSource = (TrackId)src;
         int32 count = 0;
         m.FindInt32("ec", i, &count);
         for (int32 j = 0; j < count; j++) {
@@ -725,6 +748,28 @@ void EffectsView::Draw(BRect) {
             DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));
             fHits.push_back({ (int)i, 8, 0, sel, 0, 0 });   // kind 8 = delay sync
             knobTop += kSelH;
+        } else if (EffectSupportsSidechain(d.type)) {
+            // External sidechain source (package 05). Shown only for the types
+            // that consume a key, so the row is never a control that does
+            // nothing. The dot marks a ROUTED key: the menu is the same
+            // "None"/track choice whether or not extKey is set, and while no
+            // source is picked the insert detects its own input as it always
+            // has.
+            const char* nm = KeySourceName(d.sidechainSource);
+            BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
+            SetHighColor(ColHeaderHi()); FillRect(sel);
+            SetHighColor(ColGrid());     StrokeRect(sel);
+            SetHighColor(ColTextDim());
+            DrawString("Key:", BPoint(sel.left + 8, sel.bottom - 6));
+            SetHighColor(d.sidechainSource == kInvalidTrackId ? ColTextDim()
+                                                             : ColAccent());
+            BString keyLbl(nm);
+            TruncateString(&keyLbl, B_TRUNCATE_END, sel.Width() - 72.0f);
+            DrawString(keyLbl.String(), BPoint(sel.left + 52, sel.bottom - 6));
+            SetHighColor(ColText());
+            DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));   // dropdown
+            fHits.push_back({ (int)i, 13, 0, sel, 0, 0 });   // kind 13 = key source
+            knobTop += kSelH;
         }
 
         if (UsesParamList(d)) {
@@ -839,6 +884,42 @@ EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId) {
     return d;
 }
 
+// The external-sidechain source menu: "None" plus every candidate track. The
+// choice sets BOTH the descriptor's source and its appended extKey slot (the
+// toggle the detector reads), then commits through the normal kMsgApplyFx
+// snapshot — the same path a knob takes, so the edit is one undoable change.
+// The engine treats a source change as STRUCTURAL (the graph edges move), so
+// this is one of the edits that legitimately rebuilds rather than pushing.
+void EffectsView::PickKeySource(int effect, BPoint where) {
+    if (effect < 0 || effect >= (int)fChain.size()) return;
+    EffectDesc& d = fChain[(size_t)effect];
+    if (!EffectSupportsSidechain(d.type)) return;
+
+    BPopUpMenu* menu = new BPopUpMenu("key", false, false);
+    BMenuItem* none = new BMenuItem("None", nullptr);
+    if (d.sidechainSource == kInvalidTrackId) none->SetMarked(true);
+    menu->AddItem(none);
+    for (const auto& ks : fKeySources) {
+        BMenuItem* it = new BMenuItem(ks.second.c_str(), nullptr);
+        if (ks.first == d.sidechainSource) it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    if (sel) {
+        const int idx = menu->IndexOf(sel);
+        EnsureParamSlot(d, kExtKeySlot);
+        if (idx == 0) {
+            d.sidechainSource = kInvalidTrackId;
+            d.params[(size_t)kExtKeySlot] = 0.0f;
+        } else if (idx > 0 && idx <= (int)fKeySources.size()) {
+            d.sidechainSource = fKeySources[(size_t)idx - 1].first;
+            d.params[(size_t)kExtKeySlot] = 1.0f;
+        }
+        Apply(); Invalidate();
+    }
+    delete menu;
+}
+
 void EffectsView::MouseDown(BPoint where) {
     Hit h;
     const int kind = HitTest(where, &h);
@@ -933,6 +1014,9 @@ void EffectsView::MouseDown(BPoint where) {
         case 6:   // FFT analyzer on/off
             fFftOn = !fFftOn;
             Invalidate();
+            break;
+        case 13:  // external sidechain source
+            PickKeySource(h.effect, where);
             break;
         case 7: {   // reverb type dropdown
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
@@ -1203,7 +1287,9 @@ void EffectsView::MessageReceived(BMessage* msg) {
 // --- window ---------------------------------------------------------------
 
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
-                             TrackId track, BMessenger apply, int focusSlot)
+                             TrackId track, BMessenger apply, int focusSlot,
+                             std::vector<std::pair<TrackId, std::string>>
+                                 keySources)
     : BWindow(frame, "Effects", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTrack(track), fApply(apply) {
@@ -1214,7 +1300,8 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
 
     BRect b = Bounds();
     BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
-    fView = new EffectsView(vr, std::move(chain), track, apply, focusSlot);
+    fView = new EffectsView(vr, std::move(chain), track, apply, focusSlot,
+                            std::move(keySources));
     BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);
     AddChild(sv);

@@ -72,6 +72,20 @@
 
 namespace daw {
 
+// The tracks an insert's external-sidechain picker offers: every track except
+// the one the editor belongs to. A self-key is deliberately not offered —
+// "key this insert from the track it is on" has no order the hosts could read
+// (the source has to render before the consumer), and the model/hosts treat it
+// as unrouted, so offering it would be a click that silently does nothing.
+// kMasterFxTarget names no track, so the master chain's picker offers them all.
+static std::vector<std::pair<TrackId, std::string>>
+SidechainCandidates(const Project& p, TrackId except) {
+    std::vector<std::pair<TrackId, std::string>> v;
+    for (const Track& t : p.Tracks())
+        if (t.id != except) v.push_back({t.id, t.name});
+    return v;
+}
+
 enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
@@ -854,7 +868,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_MASTER_FX: {
             BRect wr(120, 120, 600, 740);
             (new EffectsWindow(wr, fProject->masterFx, kMasterFxTarget,
-                               BMessenger(this)))->Show();
+                               BMessenger(this), -1,
+                               SidechainCandidates(*fProject, kMasterFxTarget)))
+                ->Show();
             break;
         }
         case kMsgFxWinOpen: {   // an effects editor opened: meter its track
@@ -961,8 +977,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 break;
 #endif
             (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                               (TrackId)tid, BMessenger(this),
-                               (int)slot))->Show();
+                               (TrackId)tid, BMessenger(this), (int)slot,
+                               SidechainCandidates(*fProject, (TrackId)tid)))
+                ->Show();
             break;
         }
         case kMsgMixFxBypass: {
@@ -1310,7 +1327,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (!t) break;
             if (fx >= (int32)t->fx.size()) fx = -1;   // stale index: whole chain
             (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                               (TrackId)tid, BMessenger(this), fx))->Show();
+                               (TrackId)tid, BMessenger(this), fx,
+                               SidechainCandidates(*fProject, (TrackId)tid)))
+                ->Show();
             break;
         }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
