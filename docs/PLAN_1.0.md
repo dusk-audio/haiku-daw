@@ -8,6 +8,12 @@
 > app/file icon. M2–M8 are not started. Per-item records and the live status
 > table: `docs/agent-prompts/README.md`. Where to start:
 > `docs/agent-prompts/24-continue-1.0-ENTRY.md`.
+>
+> **Decided 2026-10-10 (Marc), overriding M1.2/M1.3 below where they differ:**
+> the app never recolours the OS (`set_ui_color` goes); the default look is
+> native Haiku with an optional dark mode in Preferences for the DAW's windows
+> only; M1.5 offscreen drawing waits for a hardware draw-time measurement;
+> M1.6 icons are HVIF in the BeOS/Haiku icon style.
 
 # Haiku DAW → 1.0: commercial look, feel and behaviour
 

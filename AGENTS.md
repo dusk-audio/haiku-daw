@@ -19,6 +19,9 @@ Non-negotiable:
   you changed, and fix what is wrong. Passing tests do not prove the screen is
   right — a milestone once merged at 172 green checks with the main window
   visibly broken.
+- **Never change the operating system's settings** — no `set_ui_color`, no
+  system preferences. The DAW themes its own windows only; the default look
+  is native Haiku, with an optional dark mode (`docs/UI_GUIDELINES.md` §5).
 - Kit-free code is host-tested (`ctest --test-dir build-host`); Haiku-only code
   is verified on the VM (`sh scripts/vm.sh build`, then the suites there).
 - Every P0/P1 fix ships a regression test.

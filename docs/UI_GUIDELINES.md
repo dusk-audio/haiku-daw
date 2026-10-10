@@ -117,3 +117,19 @@ alt-j'`, and capture with `virsh -c qemu:///system screenshot haiku-beta6 x.ppm`
 - **File panels** go through `ShowPanel()`: a title naming the action and, for
   save panels, a prefilled name.
 - New geometry uses `Themed()` metrics (M1.2) and kit widgets (M1.3).
+
+## 5. Colour and theme (decided by Marc, 2026-10-10)
+
+- **The app never changes the operating system.** No `set_ui_color`, no
+  writing system preferences of any kind. Haiku saves `set_ui_color` changes:
+  the first dark theme recoloured Tracker and every other app, and they stayed
+  recoloured after the DAW quit. Everything a theme does stays inside this
+  process (`be_control_look`, view colours, the theme tokens).
+- **Default look is native Haiku** — the user's system colours and the stock
+  control look. A **dark mode** is an option in Preferences and styles the
+  DAW's own windows only.
+- Colours come from `Theme.h` tokens, never literals in a view: in System
+  mode the tokens derive from `ui_color()`, so a hard-coded dark grey that
+  looked fine in the dark theme is a bug on a light panel.
+- Review screenshots **in both modes**, and in System mode with both a light
+  and a dark Appearance setting if you touched colour derivation.
