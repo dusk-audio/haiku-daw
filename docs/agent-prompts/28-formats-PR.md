@@ -94,7 +94,8 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 | `ctest --test-dir build-host` | 53/53 (was 52/52; +`formats_tests`) |
 | `ctest --test-dir b-asan` (`-DDAW_SANITIZE=ON`) | 53/53 |
 | `ctest --test-dir b-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) | 53/53; `formats_tests` reports "157 checks, 0 failures (built without FLAC) (built without Ogg Vorbis)" |
-| `sh scripts/haiku_syntax_check.sh` | 0 FAIL |
+| `sh scripts/haiku_syntax_check.sh` | 0 FAIL (10 files) |
+| the same check with `-DDAW_HAVE_FLAC=1 -DDAW_HAVE_VORBIS=1 -DDAW_HAVE_LV2=1` | 0 FAIL (23 files: every Haiku-only source) |
 | VM `build` (LV2/FLAC/Vorbis ON) ctest | _pending_ |
 | VM `build-off` (`-DDAW_LV2=OFF`) ctest | _pending_ |
 | VM `build-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) ctest | _pending_ |
@@ -148,6 +149,29 @@ Each one was applied, the failing check watched, and the tree restored (a
 `tests/formats_tests.cpp` is host-only in one leg: the `/dev/full` write-failure
 check is `#if defined(__linux__)` (Haiku has no such device, and filling the VM
 disk is not an option), so the VM run exercises every other leg.
+
+### The syntax check, and its two blind spots
+
+`scripts/haiku_syntax_check.sh` on `master` compiled the `#ifdef DAW_HAVE_LV2`
+branches of `src/ui/` and `tests/` OUT (the define comes from the `daw_lv2`
+target, which the check does not link), so its "0 FAIL" did not cover them.
+This branch touches six UI sources and `ui_functional_tests.cpp`, all of which
+have such branches.
+
+T3 fixed that in `origin/feature/lv2-state` (`33d6f05`). **Not cherry-picked**:
+that commit's context shows its branch also carries a lilv/pkg-config include
+block `master` does not have, so importing it would pull a larger change into
+this branch's copy of a shared script and widen the merge surface for no gain.
+Instead the check was run with the same defines added on the command line —
+`-DDAW_HAVE_FLAC=1 -DDAW_HAVE_VORBIS=1 -DDAW_HAVE_LV2=1` — and reports 0 FAIL
+over 23 Haiku-only sources. The VM `build` run (which has all three on, from
+the real CMake targets) is the second, stronger proof, since it links.
+
+This branch's own change to that script is one line: `os/add-ons/graphics`
+was missing from its include path, so any source including `Screen.h` — e.g.
+`EffectsWindow.cpp`, byte-identical to `master`'s — reported FAIL for
+`Accelerant.h`. (T3's copy fixes the same thing with `os/add-ons/*/`; the two
+touch the same region, so expect one trivial conflict there.)
 
 ## Screenshots reviewed
 
