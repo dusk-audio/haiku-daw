@@ -307,6 +307,20 @@ add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
 add_test(NAME projectio_tests COMMAND projectio_tests)
 
+# Plugin state in the project: the base64 codec and the append-only `fxstate` /
+# `masterfxstate` lines, including the patched-file compat both directions. No
+# lilv here on purpose — the format is the model layer's, and this is where a
+# byte lost in it would show up.
+add_executable(fx_state_io_tests tests/fx_state_io_tests.cpp)
+target_link_libraries(fx_state_io_tests PRIVATE daw_model)
+add_test(NAME fx_state_io_tests COMMAND fx_state_io_tests)
+
+# The DAW's own preset files (kit-free header): format, directory-per-plugin
+# isolation, path-hostile names, and the torn/foreign-file policy.
+add_executable(preset_store_tests tests/preset_store_tests.cpp)
+target_link_libraries(preset_store_tests PRIVATE daw_model)
+add_test(NAME preset_store_tests COMMAND preset_store_tests)
+
 add_executable(grid_tests tests/grid_tests.cpp)
 target_link_libraries(grid_tests PRIVATE daw_model)
 add_test(NAME grid_tests COMMAND grid_tests)
