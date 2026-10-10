@@ -15,6 +15,8 @@
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
+#include "../src/ui/widgets/DawCheckBox.h"
+#include "../src/ui/widgets/DawSlider.h"
 #include "../src/model/MidiOps.h"       // QuantGrid
 #include "../src/model/Project.h"
 #include "../src/model/ProjectIO.h"   // the Open flow's fixture file
@@ -1391,15 +1393,18 @@ namespace {
 
 constexpr uint32 kMsgKitButton = 'kbt1';
 constexpr uint32 kMsgKitToggle = 'ktg1';
+constexpr uint32 kMsgKitCheck  = 'kck1';
+constexpr uint32 kMsgKitSlider = 'ksl1';
 
 class KitProbeWindow : public BWindow {
 public:
     KitProbeWindow()
-        : BWindow(BRect(300, 300, 500, 400), "kit-probe", B_TITLED_WINDOW_LOOK,
+        : BWindow(BRect(300, 300, 560, 460), "kit-probe", B_TITLED_WINDOW_LOOK,
                   B_NORMAL_WINDOW_FEEL, B_AVOID_FOCUS) {}
 
     void MessageReceived(BMessage* msg) override {
-        if (msg->what == kMsgKitButton || msg->what == kMsgKitToggle) {
+        if (msg->what == kMsgKitButton || msg->what == kMsgKitToggle
+            || msg->what == kMsgKitCheck || msg->what == kMsgKitSlider) {
             fLast = msg->what;
             int32 v = -1;
             msg->FindInt32("be:value", &v);
@@ -1427,8 +1432,15 @@ static void TestWidgetKit(MainWindow* win) {
                                       "Press", new BMessage(kMsgKitButton));
     DawToggle* toggle = new DawToggle(BRect(10, 40, 100, 62), "kit-tog",
                                       "Latch", new BMessage(kMsgKitToggle));
+    DawCheckBox* check = new DawCheckBox(BRect(10, 70, 170, 90), "kit-chk",
+                                         "Tick", new BMessage(kMsgKitCheck));
+    DawSlider* slider = new DawSlider(BRect(10, 100, 240, 130), "kit-sld",
+                                      "Level", new BMessage(kMsgKitSlider),
+                                      0, 100);
     root->AddChild(button);
     root->AddChild(toggle);
+    root->AddChild(check);
+    root->AddChild(slider);
     probe->Show();
     snooze(250000);
 
@@ -1467,6 +1479,30 @@ static void TestWidgetKit(MainWindow* win) {
     CHECK(probeState(kMsgKitToggle, B_CONTROL_ON));
     click(toggle, BPoint(45, 11));
     CHECK(probeState(kMsgKitToggle, B_CONTROL_OFF));
+
+    // The tick box: the click flips it and the message carries the new value.
+    click(check, BPoint(40, 10));
+    CHECK(probeState(kMsgKitCheck, B_CONTROL_ON));
+    click(check, BPoint(40, 10));
+    CHECK(probeState(kMsgKitCheck, B_CONTROL_OFF));
+
+    // The slider: a click near its right end moves the value there. The value
+    // is read back from the control as well as off the message, so a control
+    // that reports one thing and holds another is caught.
+    click(slider, BPoint(220, 15));
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->fLast == kMsgKitSlider && probe->fValue > 50;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    int32 sliderValue = -1;
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        if (BSlider* sl = dynamic_cast<BSlider*>(probe->FindView("kit-sld")))
+            sliderValue = sl->Value();
+        probe->Unlock();
+    }
+    CHECK(sliderValue > 50);
 
     // Pressed, then released outside the control: no invocation. The point is
     // outside the button but inside the window, so the message is dispatched.
