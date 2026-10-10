@@ -106,6 +106,32 @@ public:
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
+    // For the functional tests (M4.1): what the engine has done, so a test can
+    // prove that a rebuild during playback swapped the graph WITHOUT re-creating
+    // the BSoundPlayer (the counters must not move) and without stopping the
+    // transport. All read the engine's atomics; 0 before one exists.
+    uint64_t EngineGraphsPublished() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->GraphsPublished() : 0;
+    }
+    uint64_t EnginePlayersOpened() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->PlayersOpened() : 0;
+    }
+    uint64_t EnginePlayerStarts() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->PlayerStarts() : 0;
+    }
+    // Is a graph in place for the RT side (i.e. has the last rebuild landed)?
+    bool EngineGraphReady() const {
+        return fTransportCtl.fEngine && fTransportCtl.fEngine->HasGraph();
+    }
+    bool EngineLoadPending() const {
+        return fTransportCtl.fEngine && fTransportCtl.fEngine->GraphPending();
+    }
+    Frame EnginePlayhead() const {
+        return fTransportCtl.fEngine ? fTransportCtl.fEngine->Playhead() : 0;
+    }
 
 private:
     // Feed one live event to every armed track whose route accepts it.

@@ -53,6 +53,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1682,6 +1683,109 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 
+// M4.1: a rebuild during playback builds the graph on the engine's worker
+// thread and swaps it in — the transport must not stop, the device must not be
+// re-opened (no BSoundPlayer re-create) and the playhead must keep advancing
+// across the swap. The plan asks for exactly this check ("an engine swap during
+// playback with no BSoundPlayer re-create (an engine counter is exposed for
+// tests)").
+static void TestEngineGraphSwap(MainWindow* win, Project& project,
+                                CommandStack& stack) {
+    std::printf("engine graph swap ...\n");
+
+    // A real (short) WAV for the clips, so the engine really opens a stream.
+    const char* wav = "/tmp/haiku_daw_ui_swap.wav";
+    {
+        WavWriter w;
+        if (w.Open(wav, 48000, 2)) {
+            std::vector<int16_t> frames(48000 * 2 * 5, 0);   // 5 s of silence
+            CHECK(w.WriteInt16(frames.data(), frames.size()));
+            CHECK(w.Close());
+        }
+    }
+
+    // Two tracks with a clip each — enough to have a graph worth rebuilding,
+    // small enough that the rebuild is quick.
+    TrackId first = kInvalidTrackId;
+    for (int t = 0; t < 2; t++) {
+        Track track;
+        track.id = project.NextTrackId();
+        track.type = TrackType::Audio;
+        track.name = "swap-" + std::to_string(t);
+        track.gain = 1.0f;
+        Clip clip;
+        clip.id = project.NextClipId();
+        clip.sourcePath = wav;
+        clip.startFrame = 0;
+        clip.lengthFrames = 48000 * 5;
+        track.clips.push_back(clip);
+        CHECK(LockedAddTrack(win, project, track));
+        if (t == 0) first = track.id;
+    }
+
+    // Play from the top with no loop: the rebuild under test must not depend on
+    // what an earlier flow left the transport in.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 0;
+        project.transport.loopEnabled = false;
+        win->Unlock();
+    }
+    {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
+    // The first graph for this project may still be building: the counters below
+    // describe the state before the rebuild, and the swap counter must move on
+    // its own.
+    CHECK(WaitFor([&] { return win->EngineGraphReady(); }, 20000000));
+
+    const uint64_t swaps0   = win->EngineGraphsPublished();
+    const uint64_t players0 = win->EnginePlayersOpened();
+    const uint64_t starts0  = win->EnginePlayerStarts();
+    const Frame    ph0      = win->EnginePlayhead();
+
+    // A structural edit while playing: an insert added to the first track,
+    // through the command stack, then the message a chain edit posts. SyncFx
+    // reports the structural mismatch, so this is the "rebuild the engine now"
+    // path (ReloadActiveEngine) under test.
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            std::vector<EffectDesc> chain;
+            if (const Track* t = project.FindTrack(first)) chain = t->fx;
+            EffectDesc d;
+            d.type = EffectType::Delay;   // a built-in, always available
+            chain.push_back(d);
+            stack.Execute(std::make_unique<SetFxCommand>(first, false,
+                                                         std::move(chain)),
+                          project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgFxChanged);
+        win->PostMessage(kMsgUiRefresh);
+    }
+
+    CHECK(WaitFor([&] { return win->EngineGraphsPublished() > swaps0; },
+                  20000000));
+    CHECK(win->EnginePlayersOpened() == players0);   // device NOT re-opened
+    CHECK(win->EnginePlayerStarts() == starts0);     // transport NOT restarted
+    CHECK(win->IsPlaying());
+    // The old graph kept rolling while the new one was built, so the playhead
+    // moved straight through the swap (this is the "no gap" half of M4.1).
+    CHECK(win->EnginePlayhead() > ph0);
+    Shot("engine-graph-swap");
+
+    {
+        BMessage key(B_KEY_DOWN);   // space again: stop
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+}
+
 // M1.5's measurement: a project the size the plan names (32 tracks, ~300
 // clips) must start playing quickly, and the timeline must draw it in under
 // 4 ms a frame. The draw time is reported by TimelineView itself under
@@ -1732,7 +1836,14 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
 
     // Play: the window must roll promptly (the plan's 300 ms budget). Space
     // is the transport toggle -- the same route the keyboard test uses.
+    //
+    // M4.1: the graph (one stream per clip, 320 of them) is no longer built on
+    // the window thread. The window only queues the rebuild and starts the
+    // player, so what is timed here is the WINDOW's response; the graph then
+    // lands on the worker thread, and that second number is the one the 300 ms
+    // audio budget still measures against (the disk-stream pool is M4.3's).
     auto playing = [&] { return win->IsPlaying(); };
+    const uint64_t swaps0 = win->EngineGraphsPublished();
     const bigtime_t t0 = system_time();
     {
         BMessage key(B_KEY_DOWN);
@@ -1741,17 +1852,25 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
         win->PostMessage(&key);
     }
     CHECK(WaitFor([&] { return playing(); }, 5000000));
-    const bigtime_t elapsed = system_time() - t0;
-    std::printf("  big project: %zu tracks, %zu clips, play in %.0f ms\n",
+    const bigtime_t uiMs = system_time() - t0;
+    CHECK(WaitFor([&] { return win->EngineGraphsPublished() > swaps0; },
+                  60000000));
+    const bigtime_t readyMs = system_time() - t0;
+    std::printf("  big project: %zu tracks, %zu clips, window rolls in %.0f ms, "
+                "graph swapped in %.0f ms\n",
                 tracksBefore + 32, (size_t)(32 * 10),
-                (double)elapsed / 1000.0);
-    // MEASURED 2026-10-09, VM (beta6, 2 vCPU): 3.1 s for this project. The
-    // plan's budget is 300 ms, and the fix is M4.1 (build the graph off the
-    // window thread) -- 320 clip streams are opened on it today. Until then
-    // this is a smoke bound: it catches a collapse, not a regression against
-    // a budget the app does not meet yet. The number is in the M1.4/M1.5
-    // records.
-    CHECK(elapsed < 10000000);
+                (double)uiMs / 1000.0, (double)readyMs / 1000.0);
+    // MEASURED 2026-10-09, before M4.1 (VM, beta6, 2 vCPU): 3.1 s — the window
+    // thread built all 320 streams itself. M4.1 moves that to the worker, so the
+    // WINDOW budget below is the one it fixes: the transport rolls without
+    // waiting for a single file open.
+    CHECK(uiMs < 300000);
+    // The graph still lands (an upper bound, not a budget): MEASURED 2026-10-10,
+    // VM, 39 tracks / 320 clips: 2592 ms — the same disk work as before, now
+    // off the window thread. M4.3's stream pool is what brings the AUDIO start
+    // under 300 ms; a bound near the measurement would be a flake on a VM two
+    // agents share, not a regression guard.
+    CHECK(readyMs < 12000000);
     snooze(2000000);            // let the timeline draw it for a while
     Shot("big-project-playing");
     {
@@ -1813,6 +1932,7 @@ static int32 TestThread(void*) {
     TestThemeScale(win, project);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
+    TestEngineGraphSwap(win, project, stack);
     TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.

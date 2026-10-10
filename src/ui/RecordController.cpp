@@ -383,13 +383,19 @@ void RecordController::UpdateMidiMonitor() {
     }
 
     // A monitor-only engine: renders live voices through the armed instruments,
-    // no clip playback, no playhead advance.
+    // no clip playback, no playhead advance. The engine object is reused (M4.1
+    // keeps the device open across every rebuild); the monitor-only flag says
+    // what this graph is for, and the playback paths clear it again.
     const Frame ph = fWin->fProject->transport.playhead;
     const Frame tenMin = (Frame)(fWin->fProject->sampleRate * 600.0);
-    fWin->fTransportCtl.fEngine.reset(new Engine());
-    fWin->fTransportCtl.fEngine->SetBufferFrames(fWin->fTransportCtl.fBufferFrames);
-    fWin->fTransportCtl.fEngine->SetMonitorOnly(true);
-    const status_t monRc = fWin->fTransportCtl.fEngine->Load(*fWin->fProject, ph, ph + tenMin);
+    Engine* e = fWin->fTransportCtl.EnsureEngine();
+    e->SetBufferFrames(fWin->fTransportCtl.fBufferFrames);
+    e->SetMonitorOnly(true);
+    // Synchronous on purpose: starting the monitor is a user action with an
+    // immediate answer (the meters either come alive or the reason is shown),
+    // and the monitor graph carries no clips — there is nothing for the async
+    // path to win here.
+    const status_t monRc = e->Load(*fWin->fProject, ph, ph + tenMin);
     if (monRc != B_OK) {
         // Monitoring is a convenience; say why the meters are dead once, and
         // only when it is the device (not an empty project).
@@ -397,16 +403,16 @@ void RecordController::UpdateMidiMonitor() {
             fWin->ReportError("Audio Device",
                         "The audio device could not be opened, so input "
                         "monitoring is off.");
-        fWin->fTransportCtl.fEngine.reset();
+        e->SetMonitorOnly(false);
         fMidiIn.reset();
         return;
     }
     ResolveMidiRoutes(eps);   // demux: each track hears only its own endpoint
     MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
     while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
-    fWin->fTransportCtl.fEngine->SetLiveMidi(fMidiIn->MonitorInput());
-    fWin->fTransportCtl.fEngine->Start();
-    fWin->ReapplyFxWatches();   // brand-new engine: the watches live in the old one
+    e->SetLiveMidi(fMidiIn->MonitorInput());
+    e->Start();
+    fWin->ReapplyFxWatches();   // the watch slots live on the engine, re-addressed
     fWin->fTransportCtl.fMonitoring = true;
     fWin->UpdatePulse();   // poll the meters while monitoring
 }
@@ -416,7 +422,9 @@ void RecordController::StopMidiMonitor() {
     if (fWin->fTransportCtl.fEngine) {
         fWin->fTransportCtl.fEngine->SetLiveMidi(nullptr);
         fWin->fTransportCtl.fEngine->Stop();
-        fWin->fTransportCtl.fEngine.reset();
+        // The engine — and with it the open device — is KEPT (M4.1: the player
+        // outlives every rebuild). A play or a take re-arms it with
+        // SetMonitorOnly(false) and loads its own graph.
     }
     fMidiIn.reset();
     fWin->fTransportCtl.fMonitoring = false;
