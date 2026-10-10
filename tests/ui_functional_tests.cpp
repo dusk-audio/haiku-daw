@@ -1640,6 +1640,81 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 
+// M1.5's measurement: a project the size the plan names (32 tracks, ~300
+// clips) must start playing quickly, and the timeline must draw it in under
+// 4 ms a frame. The draw time is reported by TimelineView itself under
+// DAW_TIMELINE_TIMING (see the DrawTimer); this check builds the project,
+// starts the transport, and asserts what the test can see -- that playback
+// started, and started promptly.
+static void TestBigProjectPlayback(MainWindow* win, Project& project) {
+    std::printf("big project playback ...\n");
+
+    // One real (if short) WAV for every clip: the point is the count.
+    const char* wav = "/tmp/haiku_daw_ui_big.wav";
+    {
+        WavWriter w;
+        if (w.Open(wav, 48000, 2)) {
+            std::vector<int16_t> frames(48000 * 2, 0);   // 1 s of silence
+            CHECK(w.WriteInt16(frames.data(), frames.size()));
+            CHECK(w.Close());
+        }
+    }
+
+    size_t tracksBefore = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tracksBefore = project.Tracks().size();
+        win->Unlock();
+    }
+    for (int t = 0; t < 32; t++) {
+        Track track;
+        track.id = project.NextTrackId();
+        track.type = TrackType::Audio;
+        track.name = "big-" + std::to_string(t);
+        track.gain = 1.0f;
+        for (int c = 0; c < 10; c++) {          // 320 clips
+            Clip clip;
+            clip.id = project.NextClipId();
+            clip.sourcePath = wav;
+            clip.startFrame = (Frame)c * 96000;   // 2 s apart
+            clip.lengthFrames = 48000;
+            clip.sourceOffset = 0;
+            track.clips.push_back(clip);
+        }
+        CHECK(LockedAddTrack(win, project, track));
+    }
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        CHECK(project.Tracks().size() == tracksBefore + 32);
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+
+    // Play: the window must roll promptly (the plan's 300 ms budget). Space
+    // is the transport toggle -- the same route the keyboard test uses.
+    auto playing = [&] { return win->IsPlaying(); };
+    const bigtime_t t0 = system_time();
+    {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return playing(); }, 5000000));
+    const bigtime_t elapsed = system_time() - t0;
+    std::printf("  big project: %zu tracks, %zu clips, play in %.0f ms\n",
+                tracksBefore + 32, (size_t)(32 * 10),
+                (double)elapsed / 1000.0);
+    CHECK(elapsed < 3000000);   // 3 s, generously over the 300 ms budget:
+                                // this is a smoke check, not a benchmark
+    snooze(2000000);            // let the timeline draw it for a while
+    {
+        BMessage key(B_KEY_DOWN);   // space again: stop
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return !playing(); }));
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1689,6 +1764,7 @@ static int32 TestThread(void*) {
     TestThemeScale(win, project);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
+    TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
