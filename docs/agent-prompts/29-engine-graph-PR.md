@@ -96,7 +96,10 @@ this VM, not a regression guard.
 
 ## Verification
 
-All on the branch tip (`ea4fe2c` unless noted); commands as run:
+Every row below was run from this worktree, under the shared VM lock
+(`flock -w 5400 /tmp/haiku-daw-vm.lock ...`). The *code* under test is the same
+in `298c636` … `b56a585` (the commits after it are this record, a comment and
+the cherry-picked script fix — none of them compile into the targets):
 
 | suite | command | result |
 |---|---|---|
@@ -105,8 +108,8 @@ All on the branch tip (`ea4fe2c` unless noted); commands as run:
 | ASan build | `cmake -B b-asan -DDAW_SANITIZE=ON && cmake --build b-asan -j8` | exit 0 |
 | ASan ctest | `ctest --test-dir b-asan` | **53/53 passed** |
 | new host target | `./build-host/engine_graph_tests` | 47 checks, 0 failures |
-| cross-check | `sh scripts/haiku_syntax_check.sh` | **0 FAIL** (10 files OK) |
-| VM build | `flock /tmp/haiku-daw-vm.lock sh scripts/vm.sh build` | exit 0 |
+| cross-check | `sh scripts/haiku_syntax_check.sh` (+ the LV2 files) | **0 FAIL** |
+| VM build | `sh scripts/vm.sh build` (sync + `cmake --build build -j2`) | exit 0 |
 | VM ctest (`build`, LV2 on) | `ctest --test-dir build` | **55/55 passed** |
 | VM `ui_functional_tests` | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | **224 checks, 0 failures** |
 | VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | **51/51 passed** |
@@ -114,6 +117,14 @@ All on the branch tip (`ea4fe2c` unless noted); commands as run:
 
 `ui_functional_tests` was 210 checks on master; the new `TestEngineGraphSwap`
 adds 14.
+
+One VM caveat, stated because it cost time and will bite the next agent:
+`~/haiku-daw/build` is **shared mutable state**. It holds whatever a sibling
+agent's sync+build last produced, so a `ctest`/`./ui_functional_tests` run
+against it without your own sync+build in the same lock hold silently tests
+*someone else's* binary. One run here did exactly that (253 checks with a
+different test's output) before it was caught; the sync, the build and the
+tests must be one uninterrupted lock hold.
 
 ## Mutation checks
 
