@@ -153,7 +153,7 @@ static std::vector<MidiNote> ParseNoteList(const BMessage* msg) {
     return notes;
 }
 
-static constexpr float kTransportH = 36.0f;
+static constexpr float kTransportH = 36.0f;   // design px; use Themed()
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
 // --- native editor watches -------------------------------------------------
@@ -330,7 +330,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
     // --- Transport bar (below the menu) ---
     const float barTop = menuH + 1;
-    BRect barRect(0, barTop, bounds.right, barTop + kTransportH);
+    BRect barRect(0, barTop, bounds.right, barTop + Themed(kTransportH));
     fTransport = new TransportBar(barRect, BMessenger(this),
                                   MSG_PLAY, MSG_STOP, MSG_REC,
                                   MSG_ZOOM_OUT, MSG_ZOOM_IN);
@@ -338,8 +338,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     AddChild(bar);
 
     BFont lcdFont(be_bold_font);
-    lcdFont.SetSize(15.0f);
-    fTimeView = new BStringView(BRect(218, 6, 354, kTransportH - 5),
+    lcdFont.SetSize(Themed(15.0f));
+    fTimeView = new BStringView(BRect(Themed(218), Themed(6), Themed(354),
+                                        Themed(kTransportH) - Themed(5)),
                                 "time", "1.1   0:00.000");
     fTimeView->SetViewColor(ColLcd());
     fTimeView->SetHighColor(ColLcdText());
@@ -349,12 +350,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // (Zoom -/+ buttons are drawn by the TransportBar at x366..420.)
 
     // "Vol" label + master volume slider (0..150% -> gain 0..1.5).
-    fVolLbl = new BStringView(BRect(430, 8, 460, kTransportH - 6),
+    fVolLbl = new BStringView(BRect(Themed(430), Themed(8), Themed(460),
+                                    Themed(kTransportH) - Themed(6)),
                               "vollbl", "Vol");
     fVolLbl->SetViewColor(ColChrome());
     fVolLbl->SetHighColor(ColText());
     bar->AddChild(fVolLbl);
-    fMaster = new BSlider(BRect(462, 4, 588, kTransportH - 4),
+    fMaster = new BSlider(BRect(Themed(462), Themed(4), Themed(588),
+                                Themed(kTransportH) - Themed(4)),
                           "master", NULL, new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
@@ -368,37 +371,41 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
     // "BPM" label + tempo field (light field for legibility; affects grid/snap
     // + metronome on the next Play).
-    fBpmLbl = new BStringView(BRect(602, 8, 636, kTransportH - 6),
+    fBpmLbl = new BStringView(BRect(Themed(602), Themed(8), Themed(636),
+                                    Themed(kTransportH) - Themed(6)),
                                           "bpmlbl", "BPM");
     fBpmLbl->SetViewColor(ColChrome());
     fBpmLbl->SetHighColor(ColText());
     bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
-    fTempo = new BTextControl(BRect(638, 6, 704, kTransportH - 6),
+    fTempo = new BTextControl(BRect(Themed(638), Themed(6), Themed(704),
+                                    Themed(kTransportH) - Themed(6)),
                               "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
     fTempo->SetDivider(0.0f);
     bar->AddChild(fTempo);
 
     // Loudness readout (momentary / short-term LUFS + true peak dBTP).
-    fLoudView = new BStringView(BRect(722, 8, 858, kTransportH - 6),
+    fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
+                                      Themed(kTransportH) - Themed(6)),
                                 "loud", "M -- S -- TP --");
     fLoudView->SetViewColor(ColChrome());
     fLoudView->SetHighColor(ColText());
     bar->AddChild(fLoudView);
 
     // Master output meter, pinned to the right of the transport bar.
-    fMeter = new MeterView(BRect(bounds.right - 130, 5, bounds.right - 6,
-                                 kTransportH - 5));
+    fMeter = new MeterView(BRect(bounds.right - Themed(130), Themed(5),
+                                 bounds.right - Themed(6),
+                                 Themed(kTransportH) - Themed(5)));
     bar->AddChild(fMeter);
 
     // --- Inspector column (left) + timeline (fills the rest) ---
-    const float contentTop = barTop + kTransportH + 1;
-    BRect inspRect(0, contentTop, kInspectorWidth, bounds.bottom);
+    const float contentTop = barTop + Themed(kTransportH) + 1;
+    BRect inspRect(0, contentTop, InspectorWidth(), bounds.bottom);
     fInspector = new InspectorView(inspRect, project, stack);
     AddChild(fInspector);
 
-    BRect tlRect(kInspectorWidth + 1, contentTop, bounds.right, bounds.bottom);
+    BRect tlRect(InspectorWidth() + 1, contentTop, bounds.right, bounds.bottom);
     fTimeline = new TimelineView(tlRect, project, stack);
     fTimeline->SetPeaks(peaks);
     AddChild(fTimeline);
@@ -1653,16 +1660,16 @@ void MainWindow::LayoutTransportBar() {
 
     // Design offsets, from the original 1000-wide layout: meter 130 from the
     // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
-    const float kGap     = 12.0f;
-    const float kMeterW  = 124.0f;
-    const float kLoudW   = 136.0f;
-    const float kBpmR    = 704.0f;   // right edge of the tempo field
-    const float kSliderR = 588.0f;   // right edge of the master slider
-    const float kVolR    = 460.0f;   // right edge of the "Vol" label
+    const float kGap     = Themed(12.0f);
+    const float kMeterW  = Themed(124.0f);
+    const float kLoudW   = Themed(136.0f);
+    const float kBpmR    = Themed(704.0f);   // right edge of the tempo field
+    const float kSliderR = Themed(588.0f);   // right edge of the master slider
+    const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
 
-    if (fMeter) fMeter->MoveTo(W - 6.0f - kMeterW, 5.0f);
+    if (fMeter) fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
 
-    const float rightEdge = W - 6.0f - kMeterW - kGap;   // what the meter leaves
+    const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
 
     // Show()/Hide() are counted, not idempotent: each Hide() adds a level and
     // each Show() removes one. Calling them on every resize -- which is exactly
@@ -1680,7 +1687,7 @@ void MainWindow::LayoutTransportBar() {
 
     // The loudness readout only fits beside the tempo field.
     const bool showLoud = rightEdge - kLoudW >= kBpmR + kGap;
-    if (fLoudView && showLoud) fLoudView->MoveTo(W - 278.0f, 8.0f);
+    if (fLoudView && showLoud) fLoudView->MoveTo(W - Themed(278.0f), Themed(8.0f));
     setVisible(fLoudShown, showLoud, { fLoudView });
 
     // The tempo field only fits when the meter leaves room for the field

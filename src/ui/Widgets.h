@@ -24,13 +24,13 @@ inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent) {
     if (val > 1.0f) val = 1.0f;
     const float cx = (r.left + r.right) * 0.5f;
     const float cy = (r.top + r.bottom) * 0.5f;
-    const float rad = std::min(r.Width(), r.Height()) * 0.5f - 3.0f;
-    if (rad < 2.0f) return;
-    const float ringR = rad + 2.0f;
+    const float rad = std::min(r.Width(), r.Height()) * 0.5f - Themed(3.0f);
+    if (rad < Themed(2.0f)) return;
+    const float ringR = rad + Themed(2.0f);
 
     // Value-ring track (dim full sweep) then the lit value portion. BeAPI arc
     // angles: degrees CCW, 0 = 3 o'clock, 90 = 12 o'clock (top).
-    v->SetPenSize(2.5f);
+    v->SetPenSize(Themed(2.5f));
     v->SetHighColor(ColGrid());
     v->StrokeArc(BPoint(cx, cy), ringR, ringR, -50.0f, 280.0f);   // full track
     v->SetHighColor(accent);
@@ -46,7 +46,7 @@ inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent) {
     // Pointer (standard math angle; screen y is down, so subtract sin).
     const double ang = (90.0 - val * 140.0) * M_PI / 180.0;
     v->SetHighColor(Rgb(235, 235, 240));
-    v->SetPenSize(2.0f);
+    v->SetPenSize(Themed(2.0f));
     v->StrokeLine(BPoint(cx, cy),
                   BPoint(cx + std::cos(ang) * rad * 0.78f,
                          cy - std::sin(ang) * rad * 0.78f));
@@ -63,12 +63,12 @@ inline void DrawButton(BView* v, BRect r, const char* label, bool active,
                        rgb_color onColor = ColAccent()) {
     if (active) {
         v->SetHighColor(onColor);
-        v->FillRoundRect(r, 3.0f, 3.0f);
+        v->FillRoundRect(r, Themed(3.0f), Themed(3.0f));
     } else {
         v->SetHighColor(ColBtnOff());
-        v->FillRoundRect(r, 3.0f, 3.0f);
+        v->FillRoundRect(r, Themed(3.0f), Themed(3.0f));
         v->SetHighColor(ColBtnBorder());
-        v->StrokeRoundRect(r, 3.0f, 3.0f);
+        v->StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
     }
     rgb_color txt = ColBtnText();
     if (active) {
@@ -79,7 +79,7 @@ inline void DrawButton(BView* v, BRect r, const char* label, bool active,
     v->SetHighColor(txt);
     const float tw = v->StringWidth(label);
     v->DrawString(label, BPoint((r.left + r.right) * 0.5f - tw * 0.5f,
-                                r.bottom - 6.0f));
+                                r.bottom - Themed(6.0f)));
 }
 
 // A vertical channel fader in `r`: a narrow dark trough with a unity tick and a
@@ -89,31 +89,33 @@ inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
     if (!(frac > 0)) frac = 0; if (frac > 1) frac = 1;
     const float cx = (r.left + r.right) * 0.5f;
 
-    // Trough (4px, recessed near-black).
-    BRect trough(cx - 2, r.top, cx + 2, r.bottom);
+    // Trough (recessed near-black).
+    BRect trough(cx - Themed(2.0f), r.top, cx + Themed(2.0f), r.bottom);
     v->SetHighColor(ColGrid());
     v->FillRect(trough);
     v->SetHighColor(Rgb(10, 10, 13));
-    v->StrokeLine(BPoint(cx - 2, r.top), BPoint(cx - 2, r.bottom));
+    v->StrokeLine(BPoint(trough.left, r.top), BPoint(trough.left, r.bottom));
 
     // Unity (0 dB) tick.
     const float uy = r.bottom - r.Height() * unityFrac;
     v->SetHighColor(ColTextDim());
-    v->StrokeLine(BPoint(cx - 8, uy), BPoint(cx - 4, uy));
-    v->StrokeLine(BPoint(cx + 4, uy), BPoint(cx + 8, uy));
+    v->StrokeLine(BPoint(cx - Themed(8.0f), uy), BPoint(cx - Themed(4.0f), uy));
+    v->StrokeLine(BPoint(cx + Themed(4.0f), uy), BPoint(cx + Themed(8.0f), uy));
 
     // Cap: metallic vertical gradient, rounded, white indicator line.
     const float cy = r.bottom - r.Height() * frac;
-    BRect cap(cx - 12, cy - 6, cx + 12, cy + 6);
+    BRect cap(cx - Themed(12.0f), cy - Themed(6.0f),
+              cx + Themed(12.0f), cy + Themed(6.0f));
     BGradientLinear grad(BPoint(cap.left, cap.top), BPoint(cap.left, cap.bottom));
     grad.AddColor(Rgb(96, 96, 106), 0);
     grad.AddColor(Rgb(62, 62, 70), 128);
     grad.AddColor(Rgb(44, 44, 52), 255);
-    v->FillRoundRect(cap, 2.0f, 2.0f, grad);
+    v->FillRoundRect(cap, Themed(2.0f), Themed(2.0f), grad);
     v->SetHighColor(ColKnobOutline());
-    v->StrokeRoundRect(cap, 2.0f, 2.0f);
+    v->StrokeRoundRect(cap, Themed(2.0f), Themed(2.0f));
     v->SetHighColor(Rgb(232, 232, 238));
-    v->StrokeLine(BPoint(cap.left + 3, cy), BPoint(cap.right - 3, cy));
+    v->StrokeLine(BPoint(cap.left + Themed(3.0f), cy),
+                  BPoint(cap.right - Themed(3.0f), cy));
 }
 
 // A vertical VU meter in `r`: recessed well filled bottom-up with a green ->

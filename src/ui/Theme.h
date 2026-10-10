@@ -36,7 +36,18 @@ inline float ThemeFontSize() {
     return size;
 }
 
-inline float ThemeScale() { return ThemeFontSize() / kDesignFontSize; }
+// Test hook (ui_functional_tests): force the scale, so a 150% layout can be
+// exercised on the VM where the font size cannot change mid-run. 0 = derive
+// from the font. The font tokens stay the real font: this scales METRICS, and
+// its job is to prove that layout and hit-testing agree at a non-100% scale.
+inline float& ThemeScaleOverride() { static float s = 0.0f; return s; }
+inline void SetThemeScaleOverride(float s) { ThemeScaleOverride() = s; }
+
+inline float ThemeScale() {
+    const float forced = ThemeScaleOverride();
+    if (forced > 0.0f) return forced;
+    return ThemeFontSize() / kDesignFontSize;
+}
 
 // A design metric in device pixels.
 inline float Themed(float v) { return v * ThemeScale(); }

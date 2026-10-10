@@ -6,7 +6,7 @@
 // snapshot of the Project it is given (non-owning pointer).
 //
 // Coordinate model: a frame maps to x via FrameToX(); horizontal scroll is a
-// frame offset, zoom is frames-per-pixel. The header column (kHeaderWidth) is
+// frame offset, zoom is frames-per-pixel. The header column (HeaderWidth()) is
 // a fixed gutter on the left; time content starts after it.
 #pragma once
 
@@ -15,7 +15,7 @@
 #include "../model/Commands.h"
 #include "../model/Grid.h"
 #include "../model/Crossfade.h"   // ClipFades (the per-track fade cache)
-#include "UiMetrics.h"             // kHeaderWidth (the peak invalidation)
+#include "UiMetrics.h"             // HeaderWidth() (the peak invalidation)
 
 #include <View.h>
 
@@ -111,11 +111,11 @@ public:
     // repainting every lane for a meter tick.
     void SetTrackPeaks(const std::map<TrackId, std::pair<float, float>>& peaks) {
         fTrackPeaks = peaks;
-        Invalidate(BRect(0, 0, kHeaderWidth, Bounds().bottom));
+        Invalidate(BRect(0, 0, HeaderWidth(), Bounds().bottom));
     }
     void ClearTrackPeaks() {
         fTrackPeaks.clear();
-        Invalidate(BRect(0, 0, kHeaderWidth, Bounds().bottom));
+        Invalidate(BRect(0, 0, HeaderWidth(), Bounds().bottom));
     }
 
     // Live recording region drawn as a growing block on every armed track

@@ -42,6 +42,7 @@
 #include <MediaRoster.h>
 #include <Window.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -1264,6 +1265,123 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return !playing(); }));
 }
 
+// M1.2 slice B: every shared layout metric is a function of the theme scale
+// (which follows the user's font size), and the view's hit-testing follows the
+// geometry it draws. The boundary check drives that through a real window: a
+// click just below the 150% ruler bottom must seek, and the SAME y at 100% is
+// lane content and must not -- one of the two answers flips if any part of the
+// chain keeps a fixed 28 instead of asking RulerHeight().
+static void TestThemeScale(MainWindow* win, Project& project) {
+    std::printf("theme scale ...\n");
+
+    // Two empty audio lanes at the end, so selection can be read back.
+    Track a, b;
+    a.id = project.NextTrackId(); a.type = TrackType::Audio;
+    a.name = "scale-a"; a.gain = 1.0f;
+    b.id = project.NextTrackId(); b.type = TrackType::Audio;
+    b.name = "scale-b"; b.gain = 1.0f;
+    CHECK(LockedAddTrack(win, project, a));
+    CHECK(LockedAddTrack(win, project, b));
+
+    BView* tlView = nullptr;
+    size_t iA = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tlView = win->FindView("timeline");
+        iA = project.Tracks().size() - 2;
+        win->Unlock();
+    }
+    CHECK(tlView != nullptr);
+    if (!tlView) return;
+
+    // Top of the lane stack, whatever the earlier flows scrolled to (the
+    // scroll clamps at 0).
+    BMessage wheel(B_MOUSE_WHEEL_CHANGED);
+    wheel.AddFloat("be:wheel_delta_y", -100000.0f);
+    BMessenger(tlView).SendMessage(&wheel);
+    snooze(120000);
+
+    // A synthetic mouse message needs BOTH points: the window derives the
+    // view-relative point it hands to MouseDown from "screen_where" (a message
+    // posted to the view with only "where" arrives as (0,0)).
+    auto click = [&](float x, float y) {
+        BPoint screen(x, y);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tlView->ConvertToScreen(BPoint(x, y));
+            win->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddPoint("where", BPoint(x, y));
+            m.AddPoint("screen_where", screen);
+            BMessenger(tlView).SendMessage(&m);
+        }
+    };
+    auto selected = [&] {
+        TrackId id = kInvalidTrackId;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* tv =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                id = tv->SelectedTrack();
+            win->Unlock();
+        }
+        return id;
+    };
+    auto playhead = [&] {
+        Frame f = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            f = project.transport.playhead;
+            win->Unlock();
+        }
+        return f;
+    };
+
+    // --- 150%: the metrics scale ...
+    SetThemeScaleOverride(1.5f);
+    CHECK(std::fabs(TrackHeight()    - 111.0f) < 0.01f);
+    CHECK(std::fabs(RulerHeight()    -  42.0f) < 0.01f);
+    CHECK(std::fabs(TrackGap()       -   1.5f) < 0.01f);
+    CHECK(std::fabs(HeaderWidth()    - 225.0f) < 0.01f);
+    CHECK(std::fabs(InspectorWidth() - 285.0f) < 0.01f);
+
+    // ... and the view draws and hit-tests with them: a click 7 design-pixels
+    // below the DESIGN ruler (y = 35, inside the 150% ruler) seeks.
+    const float x = HeaderWidth() + Themed(50.0f);
+    const float yRuler = kDesignRulerHeight + 7.0f;         // 35
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+    click(x, yRuler);
+    CHECK(WaitFor([&] { return playhead() > 0; }));
+
+    // A lane click at the scaled geometry selects that lane (the click target
+    // and the drawn lane are one computation).
+    const float yLaneA = RulerHeight()
+                       + (float)iA * (TrackHeight() + TrackGap())
+                       + TrackHeight() * 0.5f;
+    click(Themed(2.0f), yLaneA);   // header gutter, left of the M/S/R buttons
+    CHECK(WaitFor([&] { return selected() == a.id; }));
+    const float yLaneB = yLaneA + TrackHeight() + TrackGap();
+    click(Themed(2.0f), yLaneB);
+    CHECK(WaitFor([&] { return selected() == b.id; }));
+
+    // --- back at 100% the same y is lane content, not ruler: no seek.
+    SetThemeScaleOverride(1.0f);
+    CHECK(std::fabs(TrackHeight() - 74.0f) < 0.01f);
+    CHECK(std::fabs(RulerHeight() - 28.0f) < 0.01f);
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+    click(x, yRuler);
+    snooze(200000);
+    CHECK(playhead() == 0);
+
+    SetThemeScaleOverride(0.0f);   // back to the real font
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1295,6 +1413,7 @@ static int32 TestThread(void*) {
 #endif
     TestErrorReports(win, project, stack);
     TestKeyboardFocus(win, project);
+    TestThemeScale(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);

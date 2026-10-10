@@ -14,12 +14,23 @@
 
 namespace daw {
 
-// Vertical layout (pixels).
-constexpr float kRulerHeight  = 28.0f;   // top time-ruler strip
-constexpr float kTrackHeight  = 74.0f;   // one track lane
-constexpr float kTrackGap     = 1.0f;    // divider between lanes
-constexpr float kHeaderWidth  = 150.0f;  // slim per-lane header (full controls in the inspector)
-constexpr float kHdrMeterW    = 16.0f;   // per-track meter strip width (right edge)
+// Vertical layout. The values are DESIGN pixels, authored at
+// kDesignFontSize (Theme.h); every accessor goes through Themed(), so the
+// user's font size scales the whole arrangement view. Accessors, not
+// constants: an unscaled copy is the bug this exists to prevent.
+constexpr float kDesignRulerHeight = 28.0f;  // top time-ruler strip
+constexpr float kDesignTrackHeight = 74.0f;  // one track lane
+constexpr float kDesignTrackGap    = 1.0f;   // divider between lanes
+constexpr float kDesignHeaderWidth = 150.0f; // slim per-lane header
+constexpr float kDesignHdrMeterW   = 16.0f;  // per-track meter strip (right edge)
+constexpr float kDesignInspectorW  = 190.0f; // left inspector column
+
+inline float RulerHeight()    { return Themed(kDesignRulerHeight); }
+inline float TrackHeight()    { return Themed(kDesignTrackHeight); }
+inline float TrackGap()       { return Themed(kDesignTrackGap); }
+inline float HeaderWidth()    { return Themed(kDesignHeaderWidth); }
+inline float HdrMeterW()      { return Themed(kDesignHdrMeterW); }
+inline float InspectorWidth() { return Themed(kDesignInspectorW); }
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.
 constexpr double kDefaultFramesPerPixel = 512.0;
@@ -69,9 +80,6 @@ constexpr uint32 kMsgUiRefresh = 'uref';
 // that have nothing to do with effects. The editor window does not need it
 // either -- kMsgApplyFx carries a chain and syncs on the way past.
 constexpr uint32 kMsgFxChanged = 'fxch';
-
-// Left inspector column width (Logic-style track inspector).
-constexpr float kInspectorWidth = 190.0f;
 
 // Inspector -> MainWindow: toggle the global input monitor (same as the View
 // menu item; shares the fourcc so the existing handler catches it).
