@@ -478,6 +478,16 @@ static void TestExportStems(MainWindow* win, Project& project) {
 
 // --- 4b. the export dialog's format row (M6) -------------------------------
 
+// Pick a row the way a click in a radio menu does: exactly one marked, so the
+// dialog's FindMarked() reads back what was chosen. (BMenuItem::SetMarked does
+// not unmark the siblings -- that happens in BMenu's own click handling.)
+static void SelectMenuRow(BMenu* menu, int index) {
+    if (!menu || index < 0 || index >= menu->CountItems()) return;
+    for (int i = 0; i < menu->CountItems(); i++)
+        if (BMenuItem* it = menu->ItemAt(i)) it->SetMarked(false);
+    if (BMenuItem* it = menu->ItemAt(index)) it->SetMarked(true);
+}
+
 // The dialog itself: its Format menu must offer exactly what this build can
 // write (AudioFormats' tables), and applying it must reach MainWindow as a
 // container. Ends by putting the remembered choice back to plain WAV, so a
@@ -521,14 +531,14 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
             if (it) CHECK(std::strcmp(it->Label(),
                                       ExportFormatChoiceAt(i).label) == 0);
         }
-        // What a click does: mark a row. (The items carry no message, so the
-        // menu field's own label follows the mark, which is what the label
-        // under the arrows reads.)
-        fmt->Menu()->ItemAt(1)->SetMarked(true);
+        // What a click does in a radio menu: exactly one row marked. (The
+        // items carry no message -- applying is the button's job -- so the
+        // mark is what the dialog reads back.)
+        SelectMenuRow(fmt->Menu(), 1);
     }
     if (qual && qual->Menu()) {
         CHECK(qual->Menu()->CountItems() == VorbisQualityChoiceCount());
-        qual->Menu()->ItemAt(VorbisQualityChoiceCount() - 1)->SetMarked(true);
+        SelectMenuRow(qual->Menu(), VorbisQualityChoiceCount() - 1);
     }
     dlg->Unlock();
 
