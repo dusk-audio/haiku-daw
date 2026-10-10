@@ -148,10 +148,17 @@ tests must be one uninterrupted lock hold.
    `engine_graph_tests` fail. Restored.
 3. **The pre-M4.1 rebuild shape** (`ReloadActiveEngine` → `fEngine.reset(new
    Engine())` + `StartPlayback()`, i.e. throw the engine away instead of
-   swapping): `ui_functional_tests` / `TestEngineGraphSwap` fails —
-   `EnginePlayersOpened() == players0` and `EnginePlayerStarts() == starts0`.
-   Restored (the mutation was run from a throwaway commit, `refs/heads/_vmwt`,
-   deleted afterwards).
+   swapping the graph): `ui_functional_tests` / `TestEngineGraphSwap` fails
+   **3 checks** — the graph-swap counter never advances, `EnginePlayerStarts()
+   == starts0`, and the transport is no longer playing once the edit has
+   landed. The counter checks fail because the test then re-reads them from a
+   *different* engine object, which is exactly the "the engine was replaced"
+   fact it exists to catch. (One of its four checks, `EnginePlayersOpened() ==
+   players0`, passes under this mutation by coincidence: each engine creates one
+   player, so both counts read 1 — the other three are what catch it.)
+   Restored. The mutation ran from a throwaway commit (`refs/heads/_vmwt`,
+   deleted afterwards) applied by a script whose `trap` reverts the working tree
+   on any exit, so a half-run cannot leave it behind.
 
 ## Not verified / for Marc
 
