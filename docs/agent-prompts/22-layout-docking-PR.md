@@ -84,6 +84,19 @@ The suite now deletes that file before it creates the window, so a test run
 starts from a clean slate. Nothing else changed: the recovery prompt itself was
 never driven by the functional suite (the release checklist covers it).
 
+## M1.5 and M1.6, measured in passing
+
+- **Play start on 32 tracks / 320 clips: 3.1 s** on the VM. The plan's budget is
+  300 ms. This is M4.1's job (the graph and 320 clip streams are built on the
+  window thread); the number is now in `23-offscreen-and-icons.md` and in a
+  smoke check in `ui_functional_tests`.
+- **The timeline draw time could not be measured here**: the VM's screen is
+  locked, so the app_server never asks the window to draw and M0.7's instrument
+  printed nothing. Needs the hardware box.
+- **The tool palette's icons are done** (`widgets/DawIcons.h`); the HVIF app
+  icon is not, because nothing on this machine can author one — see the same
+  file.
+
 ## Verification
 
 - Host suite: **52/52**, including the new `AppSettings` pane round-trip.
