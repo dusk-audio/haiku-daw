@@ -127,13 +127,8 @@ public:
 
     virtual float GetScrollBarWidth( orientation orientation) override;
 
-    virtual void _ReservedControlLook7() override;
 
-    virtual void _ReservedControlLook8() override;
 
-    virtual void _ReservedControlLook9() override;
-
-    virtual void _ReservedControlLook10() override;
 
 private:
     // Shared pieces: a filled rounded rect, a stroked one, and the frame the
