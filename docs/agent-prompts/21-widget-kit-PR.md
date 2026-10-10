@@ -89,6 +89,15 @@ there — checked against the control's own `Value()`, not only the message.
   dark sliders with hash marks, a dark tick box and a dark grid field; the
   Sends window the same, with the accent arrow on each `To:` field.
 
+## Process note
+
+Slice 2's two commits were made while HEAD was on `master` (the branch was left
+behind after slice 1's merge), so they landed on master directly instead of on
+`feature/widget-kit` with a `--no-ff` merge. The content is identical and the
+history is still linear; it was already pushed when noticed, so it was left
+alone rather than rewriting published history. The branch pointer is moved to
+master, and slice 3 continues on the branch as the plan's rule says.
+
 ## Still to come
 
 Slices 2+ per the spec: `DawSlider`/`DawFader`/`DawKnob`/`DawCheckBox`/
