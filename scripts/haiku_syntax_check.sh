@@ -10,7 +10,11 @@ INCS="-idirafter $H -idirafter $H/posix"
 for g in build/generated build-off/generated build-host/generated; do
   [ -d "$g" ] && INCS="$INCS -I$g"
 done
-for d in "$H"/os "$H"/os/*/; do INCS="$INCS -I$d"; done
+# The glob is one level deep, but some public headers live two levels down and
+# are included bare: Screen.h -> <Accelerant.h>, which is in
+# os/add-ons/graphics. Without that directory every file that includes Screen.h
+# fails the check for a reason that has nothing to do with the file.
+for d in "$H"/os "$H"/os/*/ "$H"/os/add-ons/*/; do INCS="$INCS -I$d"; done
 FILES="$*"
 [ -z "$FILES" ] && FILES="src/main.cpp src/ui/TimelineView.cpp src/ui/MainWindow.cpp \
   src/ui/MeterView.cpp src/ui/EffectsWindow.cpp src/ui/SendsWindow.cpp \

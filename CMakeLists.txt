@@ -322,6 +322,13 @@ add_executable(exporter_pdc_tests tests/exporter_pdc_tests.cpp)
 target_link_libraries(exporter_pdc_tests PRIVATE daw_model)
 add_test(NAME exporter_pdc_tests COMMAND exporter_pdc_tests)
 
+# External sidechain keys (package 05): a track's post-fader output keying
+# another track's compressor/gate insert — the routing, the PDC alignment, the
+# post-fader mute/fader semantics, and the fxsc serialization.
+add_executable(sidechain_tests tests/sidechain_tests.cpp)
+target_link_libraries(sidechain_tests PRIVATE daw_model)
+add_test(NAME sidechain_tests COMMAND sidechain_tests)
+
 add_executable(metronome_tests tests/metronome_tests.cpp)
 target_link_libraries(metronome_tests PRIVATE daw_model)
 add_test(NAME metronome_tests COMMAND metronome_tests)

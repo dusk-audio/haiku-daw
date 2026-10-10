@@ -90,10 +90,13 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
 
 // Place a decoded clip into a track buffer at its timeline position, applying
 // linear fade-in/out (both measured in output frames) and per-channel gain.
+// `nodeIn` is the destination node's PDC input latency in output frames: its
+// material is written at that offset so it lands where every delay-aligned
+// input to the same node lands (0 for an ordinary source track).
 void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
                int64_t totalOut, const float* gainLR,
                std::vector<float>& trackBuf,
-               Frame effFadeIn, Frame effFadeOut) {
+               Frame effFadeIn, Frame effFadeOut, int64_t nodeIn = 0) {
     // A clip that starts before the window lands at a negative offset: the loop
     // below skips those frames (they are outside the bounce), which is exactly
     // what a range export wants from a clip straddling the range start.
@@ -118,9 +121,13 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
     const int64_t fadeOut = ToOut(effFadeOut, scale);
 
     for (int64_t i = 0; i < playFrames; ++i) {
+        // `dst` stays the clip's own output-frame position (the bounds below
+        // are about the render window); `w` is where it lands in the node's
+        // buffer, shifted by the node's input latency.
         const int64_t dst = startOut + i;
         if (dst < 0) continue;
         if (dst >= totalOut) break;
+        const int64_t w = dst + nodeIn;
 
         float env = 1.0f;
         if (fadeIn > 0 && i < fadeIn)
@@ -133,8 +140,8 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
         }
         env *= c.gain;   // per-clip gain, after the [0,1] fade envelope
 
-        trackBuf[dst * 2 + 0] += decoded[i * 2 + 0] * gainLR[0] * env;
-        trackBuf[dst * 2 + 1] += decoded[i * 2 + 1] * gainLR[1] * env;
+        trackBuf[w * 2 + 0] += decoded[i * 2 + 0] * gainLR[0] * env;
+        trackBuf[w * 2 + 1] += decoded[i * 2 + 1] * gainLR[1] * env;
     }
 }
 
@@ -222,10 +229,11 @@ bool ExportWav(const Project& project, const std::string& outPath,
     for (size_t i = 0; i < tracks.size(); i++)
         idx[tracks[i].id] = i;
 
-    // Processing order: a node before every node it feeds — its output AND
-    // every aux-send destination. Sends add extra edges, so use the general
-    // edge topo (single-output ResolveRoutingOrder can't express them). The same
-    // edge set drives the PDC latency solve below.
+    // Processing order: a node before every node it feeds — its output, every
+    // aux-send destination, AND every insert that keys off it. Sends and keys
+    // add extra edges, so use the general edge topo (single-output
+    // ResolveRoutingOrder can't express them). The same edge set drives the PDC
+    // latency solve below.
     std::vector<TrackId> nodeIds;
     std::vector<std::pair<TrackId, TrackId>> edges;
     for (const Track& t : tracks) {
@@ -235,6 +243,18 @@ bool ExportWav(const Project& project, const std::string& outPath,
             if (s.dest != kInvalidTrackId && s.dest != t.id)
                 edges.push_back({t.id, s.dest});   // skip self-send edge
     }
+    // External sidechain edges: a keyed insert's source must render BEFORE the
+    // consumer (the key is tapped from the source's post-fader buffer, exactly
+    // like a post-fader send), and the key's path latency must participate in
+    // the PDC solve so it arrives aligned with the consumer's input. A
+    // self-key adds no edge — and is treated as unrouted below — because
+    // "source feeds its own detector" has no order in which it can be read.
+    for (const Track& t : tracks)
+        for (const EffectDesc& d : t.fx)
+            if (EffectSupportsSidechain(d.type)
+                && d.sidechainSource != kInvalidTrackId
+                && d.sidechainSource != t.id)
+                edges.push_back({d.sidechainSource, t.id});
     std::vector<TrackId> order;
     const bool routingOk = ResolveOrderWithEdges(nodeIds, edges, order);
     if (!routingOk)    // cycle / bad graph: fall back to flat (all to master)
@@ -317,6 +337,64 @@ bool ExportWav(const Project& project, const std::string& outPath,
         return bufSlot[i] >= 0 ? persist[bufSlot[i]] : scratch;
     };
 
+    // --- External sidechain keys (package 05) ------------------------------
+    // One route per insert that names a key source: the source NODE the key is
+    // tapped from and the consumer it feeds (a track's chain, or the master
+    // chain). The tap is the same post-fader point a send taps — the source's
+    // post-fx, post-fader output — and the delay is the same PDC EdgeDelay a
+    // send to that consumer would use, so the key lands on the consumer's chain
+    // input ALIGNED, frame for frame, with the consumer's own signal. That
+    // alignment is the whole feature: without it a latent effect on the key
+    // path (a look-ahead limiter) would move the ducking by its latency.
+    //
+    // The buffer is filled at the SOURCE's turn, not read at the consumer's: a
+    // leaf node's output buffer is the shared scratch, which the next leaf
+    // processed overwrites, so by the time the consumer runs its source may be
+    // gone. Filling it where the post-fader sends are added also makes it
+    // exactly the same tap.
+    //
+    // A route exists only when the graph solved AND the named track is here. A
+    // cycle therefore abandons keys the same way it abandons sends, and a
+    // missing source leaves the key unrouted — the insert then detects
+    // internally, IEffect::SetSidechain's fail-soft rule.
+    struct KeyRoute {
+        TrackId    src      = kInvalidTrackId;
+        TrackId    consumer = kRoutingMaster;
+        int64_t    edge     = 0;    // PDC delay = EdgeDelay(src, consumer)
+        bool       routed   = false;
+        std::vector<float> buf;     // the aligned key, filled at src's turn
+    };
+    std::vector<KeyRoute> keyRoutes;
+    // Per-insert index into keyRoutes, in descriptor order: one list per track,
+    // plus one for the master chain.
+    std::vector<std::vector<int>> trackKey(tracks.size());
+    std::vector<int>              masterKey(project.masterFx.size(), -1);
+    const bool keysSolvable = routingOk && pdcOk;
+    auto addKeyRoute = [&](const EffectDesc& d, TrackId consumer, int* out) {
+        *out = -1;
+        if (!keysSolvable || !EffectSupportsSidechain(d.type)) return;
+        if (d.sidechainSource == kInvalidTrackId) return;          // none
+        if (consumer != kRoutingMaster && d.sidechainSource == consumer)
+            return;   // self-key: no order can read a node's own output first
+        if (idx.find(d.sidechainSource) == idx.end())
+            return;   // names a track this project does not have
+        KeyRoute kr;
+        kr.src      = d.sidechainSource;
+        kr.consumer = consumer;
+        kr.edge     = (int64_t)pdc.EdgeDelay(d.sidechainSource, consumer);
+        kr.routed   = true;
+        kr.buf.assign(nfloatsPadded, 0.0f);
+        keyRoutes.push_back(std::move(kr));
+        *out = (int)keyRoutes.size() - 1;
+    };
+    for (size_t ti = 0; ti < tracks.size(); ti++) {
+        trackKey[ti].assign(tracks[ti].fx.size(), -1);
+        for (size_t fi = 0; fi < tracks[ti].fx.size(); fi++)
+            addKeyRoute(tracks[ti].fx[fi], tracks[ti].id, &trackKey[ti][fi]);
+    }
+    for (size_t fi = 0; fi < project.masterFx.size(); fi++)
+        addKeyRoute(project.masterFx[fi], kRoutingMaster, &masterKey[fi]);
+
     // Sum `src`'s content into `dst`, shifted `delay` frames later (PDC). Both
     // buffers are nfloatsPadded long; content always fits (pad bounds the max
     // shift). delay == 0 is the plain accumulate; a negative delay is clamped to
@@ -364,11 +442,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // inLat frames + flushing the plugin's own latency tail) and fx-param
     // automation maps buffer offset -> timeline frame as (off - inLat)/scale.
     // `p0`/`p1` are the progress band this chain's blocks report inside (the
-    // caller owns the phase weights). Returns false when the job was
-    // cancelled mid-chain.
+    // caller owns the phase weights). `keyIdx` is the caller's per-insert index
+    // into `keyRoutes` (empty/null = this chain has no keyed inserts). Returns
+    // false when the job was cancelled mid-chain.
     auto applyFx = [&](const std::vector<EffectDesc>& fxDescs, float* buf,
                        const std::vector<FxAutoLane>& fxAuto, int64_t inLat,
-                       float p0, float p1) -> bool {
+                       float p0, float p1,
+                       const std::vector<int>* keyIdx = nullptr) -> bool {
         // Chain kept index-aligned with fxDescs (nullptr for any skipped) so
         // effect-parameter automation can address chain[fxIndex].
         std::vector<std::unique_ptr<IEffect>> chain;
@@ -414,10 +494,20 @@ bool ExportWav(const Project& project, const std::string& outPath,
             }
             float* p = buf + off * 2;
             // The identical call the RT engine makes per block, so the bounce
-            // cannot drift from playback.
-            for (size_t i = 0; i < chain.size(); i++)
+            // cannot drift from playback. An insert with a routed key is handed
+            // this block of it immediately before its Process (the same
+            // same-block contract the RT engine honors); the key buffer is
+            // already delay-aligned to this chain's input position `off`.
+            for (size_t i = 0; i < chain.size(); i++) {
+                if (chain[i] && keyIdx && i < keyIdx->size()
+                    && (*keyIdx)[i] >= 0) {
+                    const KeyRoute& kr = keyRoutes[(size_t)(*keyIdx)[i]];
+                    if (kr.routed)
+                        chain[i]->SetSidechain(kr.buf.data() + off * 2, (int)n);
+                }
                 RunInsertSlot(chain[i].get(), dryDelay[i], bypassed[i] != 0,
                               mixes[i], p, (size_t)n, dryBlock.data());
+            }
             if (p1 > p0 && totalOutPadded > 0)
                 run.Report(p0 + (p1 - p0)
                     * (float)((double)off / (double)totalOutPadded));
@@ -459,6 +549,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
         float* nb = nodeVec(it->second).data();
         const float kUnity[2] = { 1.0f, 1.0f };
 
+        // This node's PDC input latency: where its own material must be placed,
+        // because every OTHER input to it was delay-aligned to that position
+        // (see the PDC note). Zero for every ordinary source track — nothing
+        // feeds it — and non-zero exactly when it takes an external key whose
+        // path is slower than its own, which is the one case where "own
+        // material at offset 0" would put the audio the detector sees L frames
+        // away from the key driving it.
+        const int64_t nodeIn = pdcOk ? pdc.InLat(t.id) : 0;
+
         // Build the node's OWN material only when audible; a solo-excluded dest
         // still runs (below) to pass its accumulated upstream through its fader.
         // Build the node DRY (no pan / gain yet), so a pre-fader send taps the
@@ -470,7 +569,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 if (c.sourcePath.empty()) continue;
                 if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
                 PlaceClip(c, scale, winStart, outRate, totalOut, kUnity,
-                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
+                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut,
+                          nodeIn);
             }
         } else if (audible && t.type == TrackType::Midi) {
             // One voice per track, built at the OUTPUT rate. The sampler is
@@ -508,16 +608,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (lastL < 0.0f) ? to
                                                        : StereoGain{lastL, lastR};
-                inst->Render(notes, nb + off * 2, (size_t)nn, off, from, to);
+                // The block's own timeline position (`off`) is the instrument's
+                // clock; only where it lands in the node's buffer moves.
+                inst->Render(notes, nb + (off + nodeIn) * 2, (size_t)nn, off,
+                             from, to);
                 lastL = cgl; lastR = cgr;
             }
         }   // Bus: nb already holds the summed upstream (dry).
-
-        // PDC: this node's own material (sources) is at buffer offset 0, but a
-        // dest/bus's accumulated inputs already sit at its input latency, so the
-        // fader/fx run in buffer-position space offset by inLat. Sources are
-        // leaves with inLat == 0, so they are unaffected.
-        const int64_t nodeIn = pdcOk ? pdc.InLat(t.id) : 0;
 
         addSends(t, /*pre=*/true, nb);          // pre-fader taps (dry)
 
@@ -547,8 +644,28 @@ bool ExportWav(const Project& project, const std::string& outPath,
             }
         }
 
-        if (!applyFx(t.fx, nb, t.fxAuto, nodeIn, nodeP0, nodeP1)) return false;
+        if (!applyFx(t.fx, nb, t.fxAuto, nodeIn, nodeP0, nodeP1,
+                     &trackKey[it->second])) return false;
         addSends(t, /*pre=*/false, nb);         // post-fader taps
+
+        // Sidechain key tap: the SAME post-fader point the post-fader sends
+        // above tap. Each consumer that keys off this node gets the source's
+        // signal shifted into its already-aligned key buffer (buf[q + edge] =
+        // source[q]); everything ahead of `edge` stays zero, which is the
+        // source's silence before the render window. A muted node never reaches
+        // here (the loop above skipped it), so a muted key source keys with
+        // SILENCE — the post-fader semantic: the key track's mute silences the
+        // key, and a keyed compressor then holds its reduction. The live engine
+        // zeroes every node buffer per block and skips the same nodes, so it
+        // keys the same way.
+        for (KeyRoute& kr : keyRoutes) {
+            if (kr.src != t.id || !kr.routed) continue;
+            const int64_t lim = totalOutPadded - kr.edge;
+            for (int64_t q = 0; q < lim; q++) {
+                kr.buf[(q + kr.edge) * 2 + 0] = nb[q * 2 + 0];
+                kr.buf[(q + kr.edge) * 2 + 1] = nb[q * 2 + 1];
+            }
+        }
 
         // Route this node into its output (a bus) or the master mix, delay-
         // aligned to that destination (PDC). EdgeDelay is 0 when nothing is
@@ -568,8 +685,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // through the same applyFx as a track chain so per-insert bypass / wet-dry
     // behave identically on the master. It has no fx automation, and its content
     // needs no input-latency offset (the mix already sits at buffer offset 0),
-    // hence the empty lane list and inLat 0.
-    if (!applyFx(project.masterFx, master.data(), {}, 0, kNodesP1, 0.70f))
+    // hence the empty lane list and inLat 0. A master insert CAN take a key
+    // (the key is a track either way) — the master chain runs after every node,
+    // so its sources are all rendered and their key buffers filled by now, and
+    // EdgeDelay(src, kRoutingMaster) is the same delay the source's own path
+    // into the master uses.
+    if (!applyFx(project.masterFx, master.data(), {}, 0, kNodesP1, 0.70f,
+                 &masterKey))
         return false;
 
     // PDC trim: the whole mix lags the timeline by `pad` frames (node graph +

@@ -57,9 +57,17 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d, double sampleRate) {
                 rv->SetParam((int)i, d.params[i]);
             return rv;
         }
-        case EffectType::Compressor:
-            return std::unique_ptr<IEffect>(
+        case EffectType::Compressor: {
+            auto c = std::unique_ptr<Compressor>(
                 new Compressor(d.p(0), d.p(1), d.p(2), d.p(3), d.p(4)));
+            // The constructor takes the effect's OWN params only; the appended
+            // extKey slot (sidechain) is applied the same way automation and
+            // the editor apply it, so the descriptor is the one source of truth
+            // for it. Missing slot = 0 = internal detection, which is what
+            // every pre-sidechain project means.
+            c->SetParam(kExtKeySlot, d.p(kExtKeySlot));
+            return c;
+        }
         case EffectType::Eq: {
             auto eq = std::unique_ptr<Eq>(new Eq());
             for (int b = 0; b < Eq::kBands; b++)
@@ -68,9 +76,12 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d, double sampleRate) {
         }
         case EffectType::Saturator:
             return std::unique_ptr<IEffect>(new Saturator(d.p(0), d.p(1), d.p(2)));
-        case EffectType::Gate:
-            return std::unique_ptr<IEffect>(
+        case EffectType::Gate: {
+            auto g = std::unique_ptr<Gate>(
                 new Gate(d.p(0), d.p(1), d.p(2), d.p(3), d.p(4)));
+            g->SetParam(kExtKeySlot, d.p(kExtKeySlot));   // appended slot; see above
+            return g;
+        }
         case EffectType::Widener:
             return std::unique_ptr<IEffect>(new Widener(d.p(0), d.p(1), d.p(2)));
         case EffectType::Limiter:

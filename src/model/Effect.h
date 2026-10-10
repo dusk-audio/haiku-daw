@@ -8,6 +8,8 @@
 // they need (e.g. the parametric EQ's 15).
 #pragma once
 
+#include "types.h"   // TrackId — kit-free, like this header
+
 #include <initializer_list>
 #include <utility>
 
@@ -39,13 +41,23 @@ struct EffectDesc {
     //   Biquad:     [mode(0 LP,1 HP,2 Peak), freq Hz, Q, gain dB]
     //   Delay:      [time s, feedback [0,1), mix [0,1], sync 0/1, division idx]
     //   Reverb:     [roomSize [0,1], mix [0,1]]
-    //   Compressor: [threshold dB, ratio, attack ms, release ms, makeup dB]
+    //   Compressor: [threshold dB, ratio, attack ms, release ms, makeup dB,
+    //                extKey 0/1]  (extKey = appended slot 5)
     //   Eq:         5 bands of [freq Hz, gain dB, Q] (band 0 = low shelf,
     //               bands 1-3 = peaks, band 4 = high shelf)
     //   Saturator:  [drive [0,1], mix [0,1], output trim dB]
-    //   Gate:       [threshold dB, ratio, attack ms, release ms, range dB]
+    //   Gate:       [threshold dB, ratio, attack ms, release ms, range dB,
+    //                extKey 0/1]  (extKey = appended slot 5)
     //   Widener:    [width [0,2], pan [-1,1], gain]
     //   Limiter:    [ceiling dB, lookahead ms, release ms, input gain dB]
+    //
+    // `extKey` is 1 when the detector runs on the external sidechain key
+    // (`sidechainSource`) instead of the effect's own input, and 0 (the
+    // default) for internal detection. With extKey on and no key routed the
+    // effect detects internally, so an unroutable source fails soft rather than
+    // silencing the signal. Appended AFTER the effect's own params, so every
+    // older project's stored slots keep their meaning: see
+    // dsp/SidechainKey.h (kExtKeySlot) for the slot the effects themselves use.
 
     // Insert-slot controls, shared by every effect type and applied by the host
     // (engine / Exporter) AROUND Process, not by the effect itself.
@@ -63,9 +75,30 @@ struct EffectDesc {
     bool               bypassed = false;
     float              mix      = 1.0f;
 
+    // External sidechain key source, for the effect types that consume one
+    // (EffectSupportsSidechain): the id of the track whose post-fader output
+    // drives this insert's detector. kInvalidTrackId (0) = none, i.e. the
+    // ordinary internal-detection behavior. It lives on the descriptor rather
+    // than in the flat param vector because it is a reference to another track
+    // -- a value the hosts have to resolve against the graph before an effect
+    // can see anything (the engine/Exporter turn it into a node + a PDC delay;
+    // the effect itself only ever gets the resolved audio via
+    // IEffect::SetSidechain). Declared last for the same reason as the two
+    // fields above: existing brace-inits keep compiling.
+    TrackId            sidechainSource = kInvalidTrackId;
+
     // Read a param with a safe default for missing slots.
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
 };
+
+// Does this effect type consume an external sidechain key? ONE list, read by
+// the model (which stores the source), both hosts (which resolve, tap and
+// delay-align it) and the editor's source picker -- so adding a keyed effect
+// later is a change in one place, and a type that does not take a key can
+// never be handed one. Today: the two dynamics processors.
+inline bool EffectSupportsSidechain(EffectType t) {
+    return t == EffectType::Compressor || t == EffectType::Gate;
+}
 
 // Does this type carry an identifier in `pluginName`? True for the native
 // add-ons (Plugin, whose name is the add-on id) and for LV2 (whose name is the
@@ -163,9 +196,11 @@ inline void FxParamRange(EffectType t, int slot, float* mn, float* mx) {
     switch (t) {
         case EffectType::Delay:      pick({{0.01f,1},{0,0.95f},{0,1},{0,1},{0,6}}); break;
         case EffectType::Reverb:     pick({{0,1},{0,1},{0,3},{0.2f,12},{0,1}}); break;
-        case EffectType::Compressor: pick({{-60,0},{1,20},{0.1f,100},{5,1000},{0,24}}); break;
+        // Slot 5 (appended) is extKey, 0/1: the range a sidechain on/off lane
+        // (and the editor's picker) writes. See EffectDesc's layout comment.
+        case EffectType::Compressor: pick({{-60,0},{1,20},{0.1f,100},{5,1000},{0,24},{0,1}}); break;
         case EffectType::Saturator:  pick({{0,1},{0,1},{-24,24}}); break;
-        case EffectType::Gate:       pick({{-80,0},{1,20},{0.1f,100},{5,1000},{0,80}}); break;
+        case EffectType::Gate:       pick({{-80,0},{1,20},{0.1f,100},{5,1000},{0,80},{0,1}}); break;
         case EffectType::Widener:    pick({{0,2},{-1,1},{0,2}}); break;
         case EffectType::Limiter:    pick({{-24,0},{0.1f,20},{1,2000},{0,24}}); break;
         case EffectType::Eq: {

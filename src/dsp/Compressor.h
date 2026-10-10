@@ -10,10 +10,18 @@
 // (exp(-1/(t*Fs))) are derived from the sample rate in Prepare(); Process() is
 // pure arithmetic on preallocated state.
 //
+// External sidechain (package 05): param slot 5 (`extKey`, 0/1) makes the
+// detector run on the block's external key instead of the effect's own input
+// while the gain is still applied to the main signal — the classic
+// kick-ducks-bass routing. With extKey on and no key routed the effect detects
+// internally, so an unroutable source fails soft. The detector itself is the
+// same reduction both paths run (see dsp/SidechainKey.h).
+//
 // Kit-free (STL only), host-testable.
 #pragma once
 
 #include "IEffect.h"
+#include "SidechainKey.h"
 
 #include <atomic>
 
@@ -37,6 +45,11 @@ public:
     void Process(float* stereo, int frames) override;
     void Reset() override;
     void SetParam(int slot, float value) override;
+    // This block's external key (see IEffect::SetSidechain). Only ONE block
+    // long: Process() consumes it.
+    void SetSidechain(const float* stereo, int frames) override {
+        fKey.Set(stereo, frames);
+    }
     // Current gain reduction in dB (<= 0), smoothed for the meter. RT-writer,
     // UI-reader.
     float MeterDb() const override { return fGrDb.load(std::memory_order_relaxed); }
@@ -61,6 +74,11 @@ private:
 
     // Stereo-linked smoothed GAIN envelope (linear, 1 = no reduction).
     double fEnv = 1.0;
+
+    // External sidechain: the `extKey` toggle (param slot 5) and this block's
+    // key, both only consulted by Process().
+    bool         fExtKey = false;
+    SidechainKey fKey;
 
     // Gain-reduction meter (dB, <= 0), peak-held over each block then decayed
     // toward 0 so the editor can show live reduction.
