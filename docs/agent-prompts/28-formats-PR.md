@@ -172,6 +172,18 @@ anyway.
   (`SampleBank::LoadWavToMemory`) still read WAV only — that path needs
   `ReadChunkNative`, which only `WavSource` implements.
 
+## Click list for Marc (ears / hardware, not the screen)
+
+`docs/RELEASE_CHECKLIST.md` already asks for "FLAC/Ogg export played back in
+MediaPlayer". On the hardware box:
+
+1. Bounce a mix to FLAC (File ▸ Export, Format: FLAC 24-bit) and to Ogg Vorbis,
+   and play both in MediaPlayer — they should sound like the WAV bounce.
+2. Import a FLAC and an AIFF onto the timeline; the waveform lane should be
+   drawn and playback should be in time with the rest.
+3. Seek into the middle of a FLAC clip while playing: no wrong-pitch blip (the
+   codec's own seek should land on the sample the timeline shows).
+
 ## Needs Marc
 
 - Nothing blocking. Two notes:
