@@ -6,7 +6,6 @@
 #include "../plugin/PluginHost.h"
 #include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
-#include "RenameWindow.h"           // the "Save Preset..." name prompt
 
 // Only linked when CMake found lilv; DAW_HAVE_LV2 comes from the daw_lv2 target.
 // Without it every LV2 branch below compiles out and an Lv2 insert simply shows
@@ -1109,15 +1108,13 @@ void EffectsView::MouseDown(BPoint where) {
 
             BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
             if (sel == save) {
-                // The name prompt. It posts kMsgSaveFxPreset to MainWindow,
-                // which is where the model and the live instance are; the
-                // insert is named by its INDEX, and MainWindow re-resolves it.
-                BRect wf = Window() ? Window()->Frame() : BRect(200, 200, 480, 240);
-                BRect pr(0, 0, 300, 0);
-                pr.OffsetTo(wf.left + (wf.Width() - pr.Width()) * 0.5f,
-                            wf.top + 60);
-                (new RenameWindow(pr, fTrack, "", fApply, kMsgSaveFxPreset,
-                                  (int64)h.effect, "Save Preset"))->Show();
+                // The name prompt is MainWindow's to open (windows belong to
+                // its thread), and its answer names the insert by INDEX so
+                // MainWindow resolves it against the model.
+                BMessage ask(kMsgFxPresetPrompt);
+                ask.AddInt64("track", (int64)fTrack);
+                ask.AddInt64("aux", (int64)h.effect);
+                fApply.SendMessage(&ask);
             } else if (sel) {
                 size_t which = presetItems.size();
                 for (size_t k = 0; k < presetItems.size(); k++)

@@ -114,10 +114,16 @@ constexpr uint32 kMsgFxWatch     = 'fxpw';
 // actually moved.
 constexpr uint32 kMsgFxParams    = 'fxpv';
 
-// The "Save Preset..." prompt's answer, posted to MainWindow (RenameWindow is
-// the prompt, and it knows nothing about inserts): int64 "track", int64 "aux"
-// (the insert index), string "name". MainWindow applies it because only it can
-// reach the live instance whose patch the preset is.
+// EffectsView -> MainWindow: "ask for a preset name for this insert". Fields:
+// int64 "track", int64 "aux" (the insert index). The view asks rather than
+// opening the prompt itself for the same reason it asks for a native editor:
+// windows belong to the main window's thread here, and only MainWindow can
+// resolve the index against the model when the answer comes back.
+constexpr uint32 kMsgFxPresetPrompt = 'fxpp';
+// The prompt's answer, posted to MainWindow (the prompt knows nothing about
+// inserts): int64 "track", int64 "aux" (the insert index), string "name".
+// MainWindow applies it because only it can reach the live instance whose patch
+// is being saved.
 constexpr uint32 kMsgSaveFxPreset = 'fxps';
 
 // Serialize / parse a chain of insert descriptors into a message: the same

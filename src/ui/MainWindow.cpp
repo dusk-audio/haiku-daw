@@ -1392,6 +1392,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             ShowFxWindow((TrackId)tid, fx);
             break;
         }
+        case kMsgFxPresetPrompt: {
+            // An insert panel asking for a preset name: the prompt for it is
+            // opened here (windows belong to this thread) and answers with
+            // kMsgSaveFxPreset below.
+            int64 tid = 0, fx = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("aux", &fx);
+            BMessenger self(this);
+            (new RenameWindow(BRect(120, 120, 420, 164), (TrackId)tid, "",
+                              self, kMsgSaveFxPreset, fx, "Save Preset"))->Show();
+            break;
+        }
         case kMsgSaveFxPreset: {
             // An insert panel's "Save Preset..." prompt answered. The prompt
             // (RenameWindow) knows only the track and the insert index it was
