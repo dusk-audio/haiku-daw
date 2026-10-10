@@ -152,9 +152,13 @@ file list is all of `src/**.cpp` plus `tests/ui_functional_tests.cpp`
 ## For Marc
 
 - The shots are in `docs/agent-prompts/shots-25/{light,dark}/` (26 each, same
-  order as the tests). The `system` pair from the earlier round was dropped: the
-  VM's Appearance changed under the run at 08:59 (and its wallpaper with it),
-  which is exactly the kind of thing System mode is now at the mercy of.
+  order as the tests), committed so the pass can be checked rather than taken on
+  trust — say the word and they come back out of the branch (2.6 MB). The
+  earlier `system` pass was dropped: the VM's Appearance changed under that run
+  (dark palette, and the wallpaper with it), which is exactly the kind of thing
+  System mode is at the mercy of.
+- `DAW_UI_THEME=light` exists for the pass, and uses Haiku's shipped colours as
+  the System base; it writes nothing.
 - **This VM's system colours already hold the DAW's old dark palette** — written
   by the pre-T1 build's `set_ui_color` and saved by Haiku. That is the bug this
   task fixes; nothing in the new code writes them. To put the VM (or the
