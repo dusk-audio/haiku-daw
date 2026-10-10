@@ -47,6 +47,11 @@ private:
     bool fDspInit   = false;
     bool fBlockInit = false;
     bool fOggInit   = false;
+    // A page that would not write (a full disk, most likely) poisons the
+    // stream: every later page is missing from a file that claims to be whole.
+    // Close() must report that, or the exporter would rename a truncated file
+    // into place and call it a successful bounce.
+    bool fFailed    = false;
     int  fChannels  = 2;
 };
 

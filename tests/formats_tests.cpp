@@ -925,6 +925,45 @@ static void TestExportContainers() {
         CHECK(!std::ifstream(std::string(path) + ".part").good());
     }
 
+    // A sink that cannot write must SAY so, so the exporter removes its temp
+    // instead of renaming a truncated file into place. /dev/full is the cheap
+    // way to make every write fail without filling a disk -- Linux only, so
+    // this leg is host-only and the record says so.
+#if defined(__linux__)
+    {
+        struct SinkCase { AudioFileFormat fmt; const char* what; };
+        const SinkCase ks[] = {
+            { AudioFileFormat::Wav, "WAV" },
+#if defined(DAW_HAVE_FLAC)
+            { AudioFileFormat::Flac, "FLAC" },
+#endif
+#if defined(DAW_HAVE_VORBIS)
+            { AudioFileFormat::Ogg, "Ogg Vorbis" },
+#endif
+        };
+        for (const SinkCase& k : ks) {
+            std::unique_ptr<IAudioSink> sink = MakeAudioSink(k.fmt);
+            CHECK(sink != nullptr);
+            if (!sink) continue;
+            SinkFormat f;
+            f.sampleRate = 48000; f.channels = 2; f.bitDepth = 16;
+            f.dither = false; f.quality = 0.5f;
+            // fopen succeeds on /dev/full; every write then fails with ENOSPC.
+            // Whether a sink gives up at open, at the first block or at close
+            // is its own business -- what it must NEVER do is report success.
+            bool ok = sink->Open("/dev/full", f);
+            if (ok) {
+                std::vector<float> block(65536, 0.25f);
+                for (int i = 0; i < 4 && ok; i++)
+                    ok = sink->WriteFloat(block.data(), block.size());
+                ok = sink->Close() && ok;
+            }
+            CHECK(!ok);
+            (void)k.what;
+        }
+    }
+#endif
+
     // Stems carry the container's own extension: a FLAC stems run must not
     // leave files named ".wav".
     {

@@ -15,12 +15,12 @@ bool VorbisSink::WritePage(const ogg_page& page) {
     if (page.header_len > 0
         && fwrite(page.header, 1, (size_t)page.header_len, fFile)
            != (size_t)page.header_len)
-        return false;
-    if (page.body_len > 0
-        && fwrite(page.body, 1, (size_t)page.body_len, fFile)
-           != (size_t)page.body_len)
-        return false;
-    return true;
+        fFailed = true;
+    else if (page.body_len > 0
+             && fwrite(page.body, 1, (size_t)page.body_len, fFile)
+                != (size_t)page.body_len)
+        fFailed = true;
+    return !fFailed;
 }
 
 bool VorbisSink::Open(const std::string& path, const SinkFormat& fmt) {
@@ -102,7 +102,7 @@ void VorbisSink::Drain() {
 }
 
 bool VorbisSink::WriteFloat(const float* interleaved, size_t sampleCount) {
-    if (!fFile || interleaved == nullptr) return false;
+    if (!fFile || fFailed || interleaved == nullptr) return false;
     const long frames = (long)(sampleCount / (size_t)fChannels);
     if (frames <= 0) return true;
 
@@ -119,7 +119,7 @@ bool VorbisSink::WriteFloat(const float* interleaved, size_t sampleCount) {
         }
     vorbis_analysis_wrote(&fVd, frames);
     Drain();
-    return true;
+    return !fFailed;
 }
 
 bool VorbisSink::Close() {
@@ -139,7 +139,11 @@ bool VorbisSink::Close() {
     if (fDspInit)   { vorbis_dsp_clear(&fVd);     fDspInit = false; }
     if (fCommInit)  { vorbis_comment_clear(&fVc); fCommInit = false; }
     if (fInfoInit)  { vorbis_info_clear(&fVi);    fInfoInit = false; }
-    return true;
+    // The exporter removes its temp when this says false, so a stream that
+    // lost a page must not be renamed into place as a finished file.
+    const bool ok = !fFailed;
+    fFailed = !ok;   // stays true: a failed sink is failed for good
+    return ok;
 }
 
 } // namespace daw
