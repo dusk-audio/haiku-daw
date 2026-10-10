@@ -3,6 +3,7 @@
 #include "UiMetrics.h"
 #include "Widgets.h"
 #include "EffectsWindow.h"
+#include "MixerWindow.h"   // kMsgMixFxAdd (the docked plugin page, T2)
 #include "PluginBrowser.h"
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
@@ -451,16 +452,20 @@ void InspectorView::MouseDown(BPoint where) {
             const bool empty    = !overflow && (size_t)i >= nfx;
 
             if (overflow) {              // the rest of the chain: open the editor
-                BPoint p = ConvertToScreen(where);
-                BRect wr(p.x, p.y, p.x + 480, p.y + 620);
-                (new EffectsWindow(wr, t->fx, id, BMessenger(Window())))->Show();
+                BMessage show(kMsgShowFx);
+                show.AddInt64("track", (int64)id);
+                show.AddInt32("focus", -1);
+                Window()->PostMessage(&show);
                 return;
             }
             if (empty) {                 // add into the free slot
-                BPoint p = ConvertToScreen(where);
-                BRect wr(p.x, p.y, p.x + 460, p.y + 400);
-                (new PluginBrowser(wr, id, BMessenger(this),
-                                   BMessenger(Window())))->Show();
+                // The browser lives in the dock's Plugins page now (T2); the
+                // window is still there behind Pop out. The window owns the
+                // choice handler, so ask it -- the docked page posts to this
+                // view exactly as the window does.
+                BMessage add(kMsgMixFxAdd);
+                add.AddInt64("track", (int64)id);
+                Window()->PostMessage(&add);
                 return;
             }
 
@@ -610,10 +615,12 @@ void InspectorView::MouseUp(BPoint) {
             }
 #endif
             // The generic panel: built-ins, add-ons, and plugins with no
-            // embeddable editor. Shows only the insert that was clicked.
-            BRect wr(120, 120, 600, 740);
-            (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window()),
-                               from))->Show();
+            // embeddable editor. Shows only the insert that was clicked -- and
+            // it is the SAME window every time (T2), retargeted.
+            BMessage show(kMsgShowFx);
+            show.AddInt64("track", (int64)t->id);
+            show.AddInt32("focus", from);
+            Window()->PostMessage(&show);
             Refresh();
             return;
         }

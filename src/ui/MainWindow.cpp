@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include "widgets/DawControlLook.h"   // InstallControlLookForMode
+#include "widgets/DawSegments.h"
 #include "widgets/DawTextField.h"
 
 #include "TimelineView.h"
@@ -59,6 +60,7 @@
 #include <Menu.h>
 #include <MenuBar.h>
 #include <MenuItem.h>
+#include <Screen.h>
 #include <MessageRunner.h>
 #include <Path.h>
 #include <Slider.h>
@@ -490,6 +492,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                    project, stack);
     fTimeline = new TimelineView(BRect(0, 0, 400, 100), project, stack);
     fTimeline->SetPeaks(peaks);
+    // Both panes can be made narrow (the timeline culls to its visible rect,
+    // the inspector stacks its rows), and SAYING so matters: a layout view
+    // without an explicit minimum reports its current frame as one, so the
+    // timeline's width became the window's floor -- the window could not be
+    // made narrower again once it had been wide, and on a small screen its
+    // right end (the dock's own Pop out and x) sat off the screen entirely.
+    fInspector->SetExplicitMinSize(BSize(Themed(120.0f), Themed(80.0f)));
+    fTimeline->SetExplicitMinSize(BSize(Themed(240.0f), Themed(80.0f)));
     fPaneSplit->AddChild(fInspector, 0.0f);   // keeps its width...
     fPaneSplit->AddChild(fTimeline, 1.0f);    // ...the timeline takes the rest
     fPaneSplit->SetCollapsible(0, true);
@@ -502,6 +512,24 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fDock = new BGroupView("dock", B_VERTICAL, 0.0f);
     {
         PaneHeader* head = new PaneHeader("dockhead");
+        // The page switch lives in the strip (UI_GUIDELINES §4: no tab bar for
+        // this) -- the pages are Editor, Samples and Plugins, and the title
+        // beside it names what the current one holds.
+        static const char* const kPages[] = { "Editor", "Samples", "Plugins" };
+        fDockSegments = new DawSegments("dockpages", kPages, 3,
+                                        new BMessage(MSG_DOCK_PAGE));
+        fDockSegments->SetSelected(fDockPage);
+        // Exactly as wide as its labels need: the strip's other controls (the
+        // title, Pop out, the x) come first in the layout's list of things that
+        // must fit, and a segmented control that stretched pushed them off the
+        // right edge entirely.
+        {
+            float sw = 0.0f, sh = 0.0f;
+            fDockSegments->GetPreferredSize(&sw, &sh);
+            fDockSegments->SetExplicitMinSize(BSize(sw, sh));
+            fDockSegments->SetExplicitMaxSize(BSize(sw, sh));
+        }
+        head->GetLayout()->AddView(fDockSegments);
         fDockTitle = new BStringView("edtitle", "Editor");
         BFont bold(be_bold_font);
         bold.SetSize(Themed(11.5f));
@@ -637,6 +665,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0;
             msg->FindInt64("track", &tid);
             if (fInspector) fInspector->SetTrack((TrackId)tid);
+            // ... and the plugin page, which adds to whichever chain the
+            // inspector is showing (T2).
+            fSelTrack = (TrackId)tid;
+            // Showing the plugins page re-points it (and re-names it) through
+            // the same code the page switch uses, so the two cannot disagree.
+            if (fDockPage == kDockPlugins) SetDockPage(kDockPlugins);
             break;
         }
         case kMsgUiRefresh: {      // a track edit: keep the panes + mixer consistent
@@ -729,7 +763,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_POP_OUT_EDITOR:
-            PopOutEditor();
+            PopOutDockPage();
             break;
         case B_COLORS_UPDATED:
             // The user changed the Appearance while the app is running. Haiku
@@ -744,6 +778,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
 
+        case MSG_DOCK_PAGE: {
+            int32 index = 0;
+            msg->FindInt32("index", &index);
+            SetDockPage(index);
+            break;
+        }
         case MSG_THEME_STOCK:
             // A stock window (a file panel) finished building its views after
             // Show() returned: one more pass over them.
@@ -884,12 +924,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();
             break;
         }
-        case MSG_MASTER_FX: {
-            BRect wr(120, 120, 600, 740);
-            (new EffectsWindow(wr, fProject->masterFx, kMasterFxTarget,
-                               BMessenger(this)))->Show();
+        case MSG_MASTER_FX:
+            // One window (T2): the master chain, whole.
+            ShowFxWindow(kMasterFxTarget, -1);
             break;
-        }
         case kMsgFxWinOpen: {   // an effects editor opened: meter its track
             int64 tid = 0; BMessenger m;
             msg->FindInt64("track", &tid);
@@ -1044,8 +1082,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // there beats a second copy of the same handler.
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (!fInspector || !fProject->FindTrack((TrackId)tid)) break;
-            (new PluginBrowser(BRect(240, 190, 700, 590), (TrackId)tid,
-                               BMessenger(fInspector), BMessenger(this)))->Show();
+            ShowDockBrowser(kDockPlugins, (TrackId)tid);
             break;
         }
         case kMsgMixSends: {
@@ -1321,6 +1358,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             UpdatePulse();
             break;
         }
+        case kMsgShowFx: {
+            // A view asking for the chain editor (the inspector's slot list):
+            // the window owns the single effects window, so the view asks.
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("focus", &fx);
+            ShowFxWindow((TrackId)tid, fx);
+            break;
+        }
         case kMsgOpenFxEditor: {
             // An editor view asking for the plugin's own GUI. It posts rather
             // than opening the window itself because the view's copy of the
@@ -1342,8 +1388,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             Track* t = fProject->FindTrack((TrackId)tid);
             if (!t) break;
             if (fx >= (int32)t->fx.size()) fx = -1;   // stale index: whole chain
-            (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                               (TrackId)tid, BMessenger(this), fx))->Show();
+            ShowFxWindow((TrackId)tid, fx);
             break;
         }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
@@ -1498,13 +1543,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_TITLE:
             UpdateTitle();   // cheap; SetTitle only fires on an actual change
             break;
-        case MSG_BROWSER: {
-            BRect wr = BWindow::Frame();
-            wr.OffsetBy(40, 40);
-            wr.right = wr.left + 420; wr.bottom = wr.top + 380;
-            (new SampleBrowser(wr, BMessenger(this)))->Show();
+        case MSG_BROWSER:
+            // The docked page is the browser's home now (T2); Pop out in the
+            // dock's strip gives the window back.
+            ShowDockBrowser(kDockSamples);
             break;
-        }
         case kMsgBrowserImport: {
             const char* path = nullptr;
             if (msg->FindString("path", &path) == B_OK && path) {
@@ -1948,6 +1991,123 @@ void MainWindow::SetDockShown(bool shown) {
     if (fDockItem != nullptr) fDockItem->SetMarked(shown);
 }
 
+// Show the effects window on a track's chain (T2, single instance).
+//
+// The window survives being pointed at a different chain: it is told the new
+// chain, the track and the focus slot, shows itself and activates. Creating a
+// second one is what happened before -- four call sites, four windows, and no
+// way to tell which chain was in which.
+void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
+    const std::vector<EffectDesc>* chain = nullptr;
+    std::string trackName;
+    if (track == kMasterFxTarget) {
+        chain = &fProject->masterFx;
+        trackName = "Master";
+    } else if (Track* t = fProject->FindTrack(track)) {
+        chain = &t->fx;
+        trackName = t->name;
+    } else {
+        return;
+    }
+
+    const std::string title = EffectsWindow::WindowTitleFor(*chain, focusSlot,
+                                                            trackName.c_str());
+    if (fFxMsgr.IsValid()) {
+        BMessage retarget(kMsgFxRetarget);
+        retarget.AddInt64("track", (int64)track);
+        retarget.AddInt32("focus", focusSlot);
+        retarget.AddString("title", title.c_str());
+        EncodeFxChain(retarget, *chain);
+        // A window that closed between the check and here answers with an
+        // error, and the fall-through opens a fresh one.
+        if (fFxMsgr.SendMessage(&retarget) == B_OK)
+            return;
+        fFxMsgr = BMessenger();
+        fFxTrack = kInvalidTrackId;
+    }
+
+    BRect wr(200, 150, 680, 770);
+    (new EffectsWindow(wr, *chain, track, BMessenger(this), focusSlot,
+                       trackName.c_str()))->Show();
+}
+
+// Show one of the dock's pages (T2). The body holds exactly one view: leaving
+// the old one in place would keep its size (the same lesson as the split
+// items), and a page that is not showing must not be metering or querying.
+void MainWindow::SetDockPage(int page) {
+    if (page < kDockEditor || page > kDockPlugins) return;
+    fDockPage = page;
+
+    // Every page leaves the body first; each branch below adds its own back.
+    if (fDockRoll != nullptr)    fDockRoll->RemoveSelf();
+    if (fDockEmpty != nullptr)   fDockEmpty->RemoveSelf();
+    if (fDockSamples != nullptr) fDockSamples->RemoveSelf();
+    if (fDockPlugins != nullptr) fDockPlugins->RemoveSelf();
+
+    switch (page) {
+        case kDockSamples:
+            if (fDockSamples == nullptr)
+                fDockSamples = new SampleBrowserView(BMessenger(this));
+            fEditorPane->GroupLayout()->AddView(fDockSamples, 1.0f);
+            fDockTitle->SetText("Samples");
+            fDockPop->SetEnabled(true);     // into its own window
+            break;
+        case kDockPlugins:
+            if (fDockPlugins == nullptr)
+                fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
+            else
+                fDockPlugins->SetTrack(fSelTrack);
+            fEditorPane->GroupLayout()->AddView(fDockPlugins, 1.0f);
+            // Name the chain a pick will land in: the page adds to whichever
+            // track the inspector is pointed at, and that is not otherwise
+            // visible from the dock.
+            {
+                Track* t = fProject->FindTrack(fSelTrack);
+                BString title("Plugins \xE2\x80\x94 add to ");
+                title << (t != nullptr ? t->name.c_str() : "no track selected");
+                fDockTitle->SetText(title.String());
+            }
+            fDockPop->SetEnabled(true);
+            break;
+        default:
+            if (fDockRoll != nullptr) {
+                fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
+                fDockPop->SetEnabled(true);
+            } else {
+                fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
+                fDockPop->SetEnabled(false);
+            }
+            // Restore the title the editor page had before the switch.
+            if (fDockRoll != nullptr) {
+                Track* t = fProject->FindTrack(fDockTrack);
+                BString title("Piano Roll \xE2\x80\x94 ");
+                title << (t != nullptr ? t->name.c_str() : "region");
+                fDockTitle->SetText(title.String());
+            } else {
+                fDockTitle->SetText("Editor");
+            }
+            break;
+    }
+    if (fDockSegments != nullptr) fDockSegments->SetSelected(page);
+    SetDockShown(true);
+}
+
+// A browser page, asked for by name (View > Sample Browser, the mixer strip's
+// Add Effect): show the dock on it, pointed at the chain the caller meant.
+void MainWindow::ShowDockBrowser(int page, TrackId track) {
+    if (track != kInvalidTrackId && fDockPlugins != nullptr)
+        fDockPlugins->SetTrack(track);
+    if (page == kDockPlugins) {
+        fSelTrack = track != kInvalidTrackId ? track : fSelTrack;
+        if (fDockPlugins == nullptr)
+            fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
+        else
+            fDockPlugins->SetTrack(fSelTrack);
+    }
+    fDockPage = page;
+    SetDockPage(page);
+}
+
 // Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
 // group: replacing its second item is all "open another region" takes, and the
 // old view goes away with it.
@@ -1970,6 +2130,8 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
     fDockTrack = track;
     fDockClip  = clip;
+    fDockPage  = kDockEditor;   // opening a region is asking for the editor page
+    if (fDockSegments != nullptr) fDockSegments->SetSelected(kDockEditor);
     BString title("Piano Roll \xE2\x80\x94 ");   // em dash
     title << t->name.c_str();
     fDockTitle->SetText(title.String());
@@ -1978,6 +2140,33 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     SetDockShown(true);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
+}
+
+// Pop out: the page that is showing becomes its own window, and the dock goes
+// back to the editor page (its content stays alive, so switching back is free).
+void MainWindow::PopOutDockPage() {
+    if (fDockPage == kDockSamples) {
+        BRect wr = BWindow::Frame();
+        wr.OffsetBy(40, 40);
+        wr.right = wr.left + 420; wr.bottom = wr.top + 380;
+        (new SampleBrowser(wr, BMessenger(this)))->Show();
+        SetDockPage(kDockEditor);
+        SetDockShown(false);
+        return;
+    }
+    if (fDockPage == kDockPlugins) {
+        BRect wr = BWindow::Frame();
+        wr.OffsetBy(60, 60);
+        wr.right = wr.left + 460; wr.bottom = wr.top + 400;
+        // The window's choice still lands in the inspector, exactly as the
+        // docked page's does: one handler for "turn a pick into a command".
+        (new PluginBrowser(wr, fSelTrack, BMessenger(fInspector),
+                           BMessenger(this)))->Show();
+        SetDockPage(kDockEditor);
+        SetDockShown(false);
+        return;
+    }
+    PopOutEditor();
 }
 
 // The docked editor becomes its own window. The window is the same PianoRoll
@@ -2017,10 +2206,16 @@ void MainWindow::ClearDockedEditor() {
     }
     fDockTrack = kInvalidTrackId;
     fDockClip  = kInvalidClipId;
-    if (fDockEmpty->Parent() == nullptr)
-        fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
-    fDockTitle->SetText("Editor");
-    fDockPop->SetEnabled(false);
+    // The hint belongs to the editor page: emptying the roll while the SAMPLES
+    // page is showing must not put the hint on top of it.
+    if (fDockPage == kDockEditor) {
+        if (fDockSamples != nullptr) fDockSamples->RemoveSelf();
+        if (fDockPlugins != nullptr) fDockPlugins->RemoveSelf();
+        if (fDockEmpty->Parent() == nullptr)
+            fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
+        fDockTitle->SetText("Editor");
+        fDockPop->SetEnabled(false);
+    }
 }
 
 void MainWindow::FrameResized(float newWidth, float newHeight) {
@@ -2868,6 +3063,12 @@ void MainWindow::LoadSettings() {
     if (fRootSplit != nullptr && fDock != nullptr) {
         const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
         fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
+        // The page first (it decides what the body holds), then whether the dock
+        // is showing at all.
+        if (s.dockPage >= kDockEditor && s.dockPage <= kDockPlugins) {
+            fDockPage = s.dockPage;
+            if (fDockSegments != nullptr) fDockSegments->SetSelected(fDockPage);
+        }
         SetDockShown(s.bottomVisible);
     }
 
@@ -2894,10 +3095,18 @@ void MainWindow::LoadSettings() {
     if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
     if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
-    // Restore the window frame (clamped to something sane).
+    // Restore the window frame: sane in both directions, and no larger than
+    // the screen it is being restored on. A frame saved on a bigger display
+    // (or by a test run) otherwise puts the window's own controls -- the dock's
+    // Pop out and x, at the right end of its strip -- off the screen entirely.
     if (s.winR - s.winL > 320 && s.winB - s.winT > 240) {
-        MoveTo(s.winL, s.winT);
-        ResizeTo(s.winR - s.winL, s.winB - s.winT);
+        const BRect screen = BScreen(this).Frame();
+        float w = std::min(s.winR - s.winL, screen.Width() - 20.0f);
+        float h = std::min(s.winB - s.winT, screen.Height() - 40.0f);
+        float x = std::max(8.0f, std::min(s.winL, screen.right - w));
+        float y = std::max(8.0f, std::min(s.winT, screen.bottom - h));
+        MoveTo(x, y);
+        ResizeTo(w, h);
     }
 }
 
@@ -2926,7 +3135,8 @@ void MainWindow::SaveSettings() {
     if (fInspector != nullptr && fInspector->Bounds().Width() > 1.0f)
         s.inspectorWidth = fInspector->Bounds().Width();
     if (fRootSplit != nullptr && fDock != nullptr) {
-        s.bottomVisible = fDock->Parent() != nullptr;
+        s.dockPage = fDockPage;
+    s.bottomVisible = fDock->Parent() != nullptr;
         if (fDock->Bounds().Height() > 1.0f)
             s.bottomHeight = fDock->Bounds().Height();
     }

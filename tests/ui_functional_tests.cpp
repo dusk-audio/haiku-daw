@@ -72,6 +72,12 @@ using namespace daw;
 #ifndef MSG_TOGGLE_INSPECTOR
 #define MSG_TOGGLE_INSPECTOR 'tins'
 #endif
+#ifndef MSG_TOGGLE_DOCK
+#define MSG_TOGGLE_DOCK 'tdck'
+#endif
+#ifndef kMsgMixFxAdd
+#define kMsgMixFxAdd 'mxfa'   // the channel strip's "add an effect" (T2: docked)
+#endif
 
 static const char* kExportName = "haiku_daw_ui_export.wav";
 static const char* kExportPath = "/tmp/haiku_daw_ui_export.wav";
@@ -1773,6 +1779,219 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return !playing(); }));
 }
 
+// --- the dock's pages (T2) -------------------------------------------------
+
+// The dock hosts one page at a time, switched from the strip's segmented
+// control: the editor (the roll or its hint), the samples and the plugins. The
+// browsers are the SAME views their windows host, so what is checked here is
+// that the right one is in the body and that the strip says so.
+static void TestDockPages(MainWindow* win, Project& project, CommandStack* stack) {
+    std::printf("dock pages ...\n");
+
+    // The window is normalised first: an earlier test drives the 150% layout,
+    // which makes the window GROW to satisfy its minimum (Haiku's layout
+    // enforces it), and a window wider than the screen is what hid the strip's
+    // own buttons in the first place.
+    if (win->Lock()) {
+        win->ResizeTo(900.0f, 640.0f);
+        win->Unlock();
+        win->InvalidateLayout(true);   // the layout pass a drag would cause
+    }
+    snooze(250000);
+
+    BView* dock = nullptr;
+    win->Lock();
+    dock = win->FindView("dock");
+    win->Unlock();
+    if (dock == nullptr) {   // the previous test popped the dock away: bring it back
+        win->PostMessage(MSG_TOGGLE_DOCK);
+        snooze(200000);
+    }
+
+    // Samples.
+    BMessage samples(MSG_DOCK_PAGE);
+    samples.AddInt32("index", 1);
+    win->PostMessage(&samples);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = win->FindView("samplebrowserview") != nullptr
+                     && win->FindView("pluginbrowserview") == nullptr
+                     && win->FindView("roll") == nullptr;
+        win->Unlock();
+        return ok;
+    }));
+    Shot("dock-samples");
+
+    // Plugins.
+    BMessage plugins(MSG_DOCK_PAGE);
+    plugins.AddInt32("index", 2);
+    win->PostMessage(&plugins);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = win->FindView("pluginbrowserview") != nullptr
+                     && win->FindView("samplebrowserview") == nullptr;
+        win->Unlock();
+        return ok;
+    }));
+    Shot("dock-plugins");
+
+    // The strip's own controls belong ON the strip: a title with an unlimited
+    // max size, next to a control that stretches, once pushed Pop out and the x
+    // past the window's edge -- a layout can be perfectly "valid" and still
+    // hide the buttons a user needs.
+    {
+        win->Lock();
+        float closeRight = -1.0f, stripRight = -1.0f, popLeft = -1.0f;
+        if (BView* strip = win->FindView("dockhead"))
+            stripRight = strip->Bounds().right;
+        if (BView* close = win->FindView("dockclose"))
+            closeRight = close->Frame().right;
+        if (BView* pop = win->FindView("popout"))
+            popLeft = pop->Frame().left;
+        win->Unlock();
+        // The strip spans the window it lives in: a dock that keeps an older,
+        // wider width hangs its own buttons off the window's edge.
+        float winW = 0.0f;
+        win->Lock();
+        winW = win->Bounds().Width();
+        win->Unlock();
+        std::printf("  window %.0f wide, strip right %.0f\n", winW, stripRight);
+        win->Lock();
+        win->Unlock();
+        CHECK(stripRight <= winW + 1.0f);
+        std::printf("  window %.0f wide: strip right %.0f, popout at %.0f, "
+                    "close right %.0f\n", winW, stripRight, popLeft, closeRight);
+        win->Lock();
+        auto dump = [&](const char* n) {
+            if (BView* v = win->FindView(n))
+                std::printf("    %s frame %.0f,%.0f,%.0f,%.0f min %.0f\n", n,
+                            v->Frame().left, v->Frame().top, v->Frame().right,
+                            v->Frame().bottom, v->MinSize().width);
+            else std::printf("    %s: not found\n", n);
+        };
+        dump("dock"); dump("dockhead"); dump("pluginbrowserview"); dump("list");
+        win->Unlock();
+        CHECK(closeRight > 0.0f && stripRight > 0.0f && closeRight <= stripRight);
+        CHECK(popLeft > 0.0f && popLeft < closeRight);
+    }
+
+    // Back to the editor page: the hint, since no region is open.
+    BMessage editor(MSG_DOCK_PAGE);
+    editor.AddInt32("index", 0);
+    win->PostMessage(&editor);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = win->FindView("samplebrowserview") == nullptr
+                     && win->FindView("pluginbrowserview") == nullptr;
+        win->Unlock();
+        return ok;
+    }));
+    Shot("dock-editor-page");
+
+
+    // A choice made in the DOCKED plugin browser runs the same path the window
+    // does: the inspector turns it into a SetFxCommand against the track named
+    // in the message, which is what makes the docked page worth having.
+    Track t = MakeMidiTrack(project, {}, "dock-fx");
+    CHECK(LockedAddTrack(win, project, t));
+    BMessage select(kMsgTrackSelected);
+    select.AddInt64("track", (int64)t.id);
+    win->PostMessage(&select);          // the page follows the selection
+    snooze(100000);
+
+    BMessage addFx(kMsgMixFxAdd);
+    addFx.AddInt64("track", (int64)t.id);
+    win->PostMessage(&addFx);           // what the empty slot in the inspector sends
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = win->FindView("pluginbrowserview") != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    {
+        int32 chainBefore = 0;
+        win->Lock();
+        if (Track* mt = project.FindTrack(t.id)) chainBefore = (int32)mt->fx.size();
+        win->Unlock();
+        CHECK(chainBefore == 0);
+
+        // Pick the first built-in (the list is populated from the catalogue).
+        // The row's invocation lands in the view as 'pbpk' + "index", which is
+        // what a double-click posts; sending it to the view directly is the
+        // same message on the same handler, without a synthetic mouse.
+        BView* browser = nullptr;
+        win->Lock();
+        browser = win->FindView("pluginbrowserview");
+        win->Unlock();
+        CHECK(browser != nullptr);
+        if (browser != nullptr) {
+            BMessage pick('pbpk');
+            pick.AddInt32("index", 0);
+            BMessenger(browser).SendMessage(&pick);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            Track* mt = project.FindTrack(t.id);
+            const bool ok = mt != nullptr && mt->fx.size() == 1;
+            win->Unlock();
+            return ok;
+        }));
+        Shot("dock-plugin-chosen");
+    }
+
+    // And the same chain opens the single effects window, retargeted.
+    {
+        BMessage show(kMsgShowFx);
+        show.AddInt64("track", (int64)t.id);
+        show.AddInt32("focus", 0);
+        const int before = VisibleWindows();
+        win->PostMessage(&show);
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(300000);
+        Shot("fx-window-track");
+
+        // Opening it again -- for another track -- does NOT make a second one.
+        Track t2 = MakeMidiTrack(project, {}, "dock-fx-2");
+        CHECK(LockedAddTrack(win, project, t2));
+        BMessage show2(kMsgShowFx);
+        show2.AddInt64("track", (int64)t2.id);
+        show2.AddInt32("focus", -1);
+        win->PostMessage(&show2);
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(300000);
+        // The title names the chain that is in it now: "<track>" alone (whole
+        // chain) rather than the first track's name.
+        bool titled = false;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w == nullptr || w->IsHidden()) continue;
+            const char* name = WindowTitle(w);
+            if (name != nullptr && std::strstr(name, "dock-fx-2") != nullptr)
+                titled = true;
+        }
+        CHECK(titled);
+        Shot("fx-window-retargeted");
+
+        // Close it again, so the rest of the run sees the window count it
+        // expects (and the app keeps only the main window).
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w == nullptr || w->IsHidden()) continue;
+            const char* name = WindowTitle(w);
+            if (name != nullptr && std::strstr(name, "dock-fx") != nullptr) {
+                if (w->Lock()) { w->Quit(); }
+                break;
+            }
+        }
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // The dock goes back to the editor page for whatever runs next.
+    win->PostMessage(&editor);
+    snooze(150000);
+}
+
 // --- the theme modes (T1) --------------------------------------------------
 
 // What the mode switch has to do that a unit test cannot see: leave the
@@ -1888,6 +2107,7 @@ static int32 TestThread(void*) {
     TestThemeScale(win, project);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
+    TestDockPages(win, project, &stack);
     TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
