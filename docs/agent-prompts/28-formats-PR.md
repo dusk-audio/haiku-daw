@@ -96,11 +96,43 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 | `ctest --test-dir b-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) | 53/53; `formats_tests` reports "157 checks, 0 failures (built without FLAC) (built without Ogg Vorbis)" |
 | `sh scripts/haiku_syntax_check.sh` | 0 FAIL (10 files) |
 | the same check with `-DDAW_HAVE_FLAC=1 -DDAW_HAVE_VORBIS=1 -DDAW_HAVE_LV2=1` | 0 FAIL (23 files: every Haiku-only source) |
-| VM `build` (LV2/FLAC/Vorbis ON) ctest | _pending_ |
-| VM `build-off` (`-DDAW_LV2=OFF`) ctest | _pending_ |
-| VM `build-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) ctest | _pending_ |
-| VM `ui_functional_tests` (checks) | _pending_ |
-| `DAW_UI_SHOTS` pass | _pending_ |
+| VM `build` (LV2/FLAC/Vorbis ON) | _pending_ (pass C) |
+| VM `build-off` (`-DDAW_LV2=OFF`, codecs ON) | _pending_ (pass C) |
+| VM `-DDAW_FLAC=OFF -DDAW_VORBIS=OFF` | _pending_ (pass C) |
+| VM `formats_tests` (build, codecs on) | **253 checks, 0 failures** |
+| VM `formats_tests` (codecs off) | **155 checks, 0 failures (built without FLAC / Ogg Vorbis)** |
+| VM `ui_functional_tests` | _pending_ (pass C) |
+| `DAW_UI_SHOTS` pass | _pending_ (pass C) |
+
+### What the VM turned up that the host could not
+
+Both harness-level, both found by the VM and fixed before pass C:
+
+1. **A quitting window must not be touched.** The M6 dialog test hid the
+   windows around it, and `HideOtherWindows` locked every window it found —
+   including the export dialog, which is still listed while it quits, with no
+   thread left to release its lock. The suite hung for the full 15-minute cap.
+   `LockWithTimeout` now skips a window that will not lock, and the test waits
+   for the dialog to leave the application's window list (not merely to stop
+   being drawn) before touching anything else. Every lock this test takes is
+   bounded for the same reason.
+2. **The VM's codecs are built unoptimised, and the suite's project is eight
+   seconds long.** Bouncing that to Ogg Vorbis took longer than the test's own
+   file timeout, so the check failed while the encode was still running; the
+   progress bar then stayed up over every later test and the app would not exit
+   at the end (ctest reported a timeout on a run whose every check had passed).
+   The container test now bounces a **one-second loop window** and waits 60 s
+   per container. `formats_tests` — the same encoders, the same exporter,
+   driven directly instead of through the window — passes on the VM with 0
+   failures, which is what says the encoders are sound and the trouble was the
+   harness's assumption about how much audio it was encoding.
+
+One more thing for whoever runs the next screenshot pass: **the VM's screen
+blanker engages during a long `DAW_UI_SHOTS` run and every shot comes back
+black** (pass B produced 25 black PNGs). Pass C keeps the screen awake by
+sending the shift key from the host every 25 s with `virsh sendkey` — input
+only, no system setting touched, the same thing a person jiggling the mouse
+does. Black shots in a future pass mean the same thing, not a broken app.
 
 `formats_tests` is 259 checks on the host build (all codecs on).
 
