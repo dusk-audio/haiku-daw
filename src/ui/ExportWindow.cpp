@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <LayoutBuilder.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
 #include <String.h>
@@ -68,94 +69,71 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     : BWindow(frame, "Export", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fCur(current), fApply(apply) {
-    BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
+    // Layout Kit (M1.4): the window sizes itself to its contents.
+    BView* root = new BView("root", B_WILL_DRAW);
     root->SetViewColor(ColHeader());
-    AddChild(root);
-
-    const float w = Bounds().Width();
-    float y = 10.0f;
+    BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // What to render.
-    {
-        fStems = new DawCheckBox(BRect(8, y, w - 8, y + 20), "st",
-                               "Separate stems (one file per track)", nullptr);
-        fStems->SetValue(stems ? B_CONTROL_ON : B_CONTROL_OFF);
-        root->AddChild(fStems);
-        y += 28.0f;
-    }
-    {
-        fRange = PickMenu("range", kRangeLabels, 2, current.range);
-        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "rg",
-                                      "Range:", fRange));
-        y += 30.0f;
-    }
-    {
-        int marked = 0;
-        for (int i = 0; i < 4; i++)
-            if (kRates[i] == current.sampleRate) marked = i;
-        fRate = PickMenu("rate", kRateLabels, 4, marked);
-        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "sr",
-                                      "Sample rate:", fRate));
-        y += 30.0f;
-    }
-    {
-        int marked = 0;
-        for (int i = 0; i < 3; i++)
-            if (kBitDepths[i] == current.bitDepth) marked = i;
-        fBits = PickMenu("bits", kBitLabels, 3, marked);
-        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "bd",
-                                      "Bit depth:", fBits));
-        y += 30.0f;
-    }
+    fStems = new DawCheckBox("st", "Separate stems (one file per track)",
+                             nullptr);
+    fStems->SetValue(stems ? B_CONTROL_ON : B_CONTROL_OFF);
+
+    fRange = PickMenu("range", kRangeLabels, 2, current.range);
+    int markedRate = 0;
+    for (int i = 0; i < 4; i++)
+        if (kRates[i] == current.sampleRate) markedRate = i;
+    fRate = PickMenu("rate", kRateLabels, 4, markedRate);
+    int markedBits = 0;
+    for (int i = 0; i < 3; i++)
+        if (kBitDepths[i] == current.bitDepth) markedBits = i;
+    fBits = PickMenu("bits", kBitLabels, 3, markedBits);
 
     // What to do to it on the way out.
-    fDither = new DawCheckBox(BRect(8, y, w - 8, y + 20), "dt",
-                            "Dither (16-bit only)", nullptr);
+    fDither = new DawCheckBox("dt", "Dither (16-bit only)", nullptr);
     fDither->SetValue(current.dither ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fDither);
-    y += 28.0f;
-
-    fNorm = new DawCheckBox(BRect(8, y, w - 8, y + 20), "nz",
-                          "Normalize loudness", nullptr);
+    fNorm = new DawCheckBox("nz", "Normalize loudness", nullptr);
     fNorm->SetValue(current.normalize ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fNorm);
-    y += 26.0f;
 
     // Text fields, not sliders: a BSlider draws only its label (Haiku never
     // shows the value), and a loudness target is a number the user wants to
     // read back. The transport bar's tempo field is the same idiom.
-    {
-        BString v;
-        v << current.targetLufs;
-        fLufs = new DawTextField(BRect(8, y, w - 8, y + 22), "lf",
-                                 "Target LUFS:", v.String(), nullptr);
-        root->AddChild(fLufs);
-        y += 30.0f;
-    }
+    BString lufsText;
+    lufsText << current.targetLufs;
+    fLufs = new DawTextField("lf", "Target LUFS:", lufsText.String(), nullptr);
 
-    fLim = new DawCheckBox(BRect(8, y, w - 8, y + 20), "lm",
-                         "True-peak limiter", nullptr);
+    fLim = new DawCheckBox("lm", "True-peak limiter", nullptr);
     fLim->SetValue(current.limiter ? B_CONTROL_ON : B_CONTROL_OFF);
-    root->AddChild(fLim);
-    y += 26.0f;
 
-    {
-        BString v;
-        v << current.truePeak;
-        fCeil = new DawTextField(BRect(8, y, w - 8, y + 22), "cl",
-                                 "Ceiling dBTP:", v.String(), nullptr);
-        root->AddChild(fCeil);
-        y += 30.0f;
-    }
+    BString ceilText;
+    ceilText << current.truePeak;
+    fCeil = new DawTextField("cl", "Ceiling dBTP:", ceilText.String(), nullptr);
 
-    DawButton* cancel = new DawButton(BRect(w - 186, y, w - 96, y + 24), "cx",
-                                  "Cancel", new BMessage(B_QUIT_REQUESTED));
-    root->AddChild(cancel);
-    DawButton* go = new DawButton(BRect(w - 90, y, w - 8, y + 24), "ok",
-                              stems ? "Export stems" : "Export",
-                              new BMessage(MSG_GO));
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(B_QUIT_REQUESTED));
+    DawButton* go = new DawButton("ok", stems ? "Export stems" : "Export",
+                                  new BMessage(MSG_GO));
     go->MakeDefault(true);
-    root->AddChild(go);
+
+    BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
+        .SetInsets(Themed(10.0f))
+        .Add(fStems)
+        .Add(new DawMenuField("rg", "Range:", fRange))
+        .Add(new DawMenuField("sr", "Sample rate:", fRate))
+        .Add(new DawMenuField("bd", "Bit depth:", fBits))
+        .Add(fDither)
+        .Add(fNorm)
+        .Add(fLufs)
+        .Add(fLim)
+        .Add(fCeil)
+        .AddGroup(B_HORIZONTAL)
+            .AddGlue()
+            .Add(cancel)
+            .Add(go)
+        .End()
+        .End();
+
+    ResizeToPreferred();
 }
 
 void ExportWindow::MessageReceived(BMessage* msg) {

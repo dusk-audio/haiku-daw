@@ -4,6 +4,7 @@
 #include "UiMetrics.h"
 
 #include "widgets/DawButton.h"   // the kit (M1.3)
+#include <LayoutBuilder.h>
 #include <StatusBar.h>
 #include <View.h>
 
@@ -15,20 +16,26 @@ ExportProgressWindow::ExportProgressWindow(BRect frame, BMessenger main,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_NOT_CLOSABLE
               | B_ASYNCHRONOUS_CONTROLS),
       fMain(main) {
-    BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
+    BView* root = new BView("root", B_WILL_DRAW);
     root->SetViewColor(ColHeader());
-    AddChild(root);
+    BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
-    const float w = Bounds().Width();
-    fBar = new BStatusBar(BRect(8, 10, w - 8, 32), "bar", label, nullptr);
+    fBar = new BStatusBar("bar", label, nullptr);
     fBar->SetMaxValue(100.0f);
     fBar->SetBarColor(ColAccent());
-    root->AddChild(fBar);
-
-    DawButton* cancel = new DawButton(BRect(w - 90, 40, w - 8, 64), "cx", "Cancel",
-                                  new BMessage(kMsgExportCancel));
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(kMsgExportCancel));
     cancel->SetTarget(fMain);   // straight to MainWindow, which owns the job
-    root->AddChild(cancel);
+    BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
+        .SetInsets(Themed(8.0f))
+        .Add(fBar)
+        .AddGroup(B_HORIZONTAL)
+            .AddGlue()
+            .Add(cancel)
+        .End()
+        .End();
+
+    ResizeToPreferred();
 }
 
 void ExportProgressWindow::MessageReceived(BMessage* msg) {
