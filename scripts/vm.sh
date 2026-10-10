@@ -37,7 +37,13 @@ do_sync() {
 case "$cmd" in
   ssh)   $SSH "${@:-uname -a; pwd}";;
   sync)  do_sync;;
-  build) do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 2>&1 | tail -3';;
-  test)  do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 >/tmp/b.log 2>&1 && ctest --test-dir build 2>&1 | tail -3';;
+  # The build and the test run write to a log and are tailed AFTERWARDS: a
+  # pipeline's status is its last command's, so `... | tail -3` reported SUCCESS
+  # for a failed compile (or a failing ctest) and left the previous binaries in
+  # place -- the exact trap the entry doc warns about ("check the build's exit
+  # code, not only ctest"), defeated by this script. `exit $rc` propagates the
+  # real status through ssh.
+  build) do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 >/tmp/daw-build.log 2>&1; rc=$?; tail -3 /tmp/daw-build.log; exit $rc';;
+  test)  do_sync; $SSH 'cd ~/haiku-daw && cmake -B build >/tmp/cm.log 2>&1 && cmake --build build -j2 >/tmp/b.log 2>&1; rc=$?; if [ $rc -ne 0 ]; then tail -3 /tmp/b.log; exit $rc; fi; ctest --test-dir build >/tmp/daw-ctest.log 2>&1; rc=$?; tail -3 /tmp/daw-ctest.log; exit $rc';;
   *)     echo "usage: sh scripts/vm.sh {ssh|sync|build|test} [cmd...]"; exit 1;;
 esac
