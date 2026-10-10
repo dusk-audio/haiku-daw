@@ -3,6 +3,7 @@
 #include "QuantizeWindow.h"
 #include "UiMetrics.h"
 #include "Widgets.h"
+#include "widgets/DawIcons.h"   // the tool glyphs (M1.6)
 
 #include <OS.h>   // system_time(): the humanize seed
 #include <PopUpMenu.h>
@@ -23,8 +24,10 @@ static constexpr float kEdge = 5.0f;    // resize grab zone
 static constexpr float kVelLaneH = 64.0f;   // bottom velocity (lollipop) lane
 static constexpr float kToolbarH = 28.0f;   // top tool palette strip
 
-static const char* kToolNames[7] = { "Ptr", "Pen", "Brush", "Erase",
-                                     "Split", "Glue", "Vel" };
+// The tool palette is icon-only since M1.6, so these names are what the hover
+// tooltip shows and what the buttons are called in the help.
+static const char* kToolNames[7] = { "Pointer", "Pencil", "Brush", "Eraser",
+                                     "Scissors", "Glue", "Velocity" };
 static BRect ZoomOutRectR() { return BRect(360, 5, 384, 23); }
 static BRect ZoomInRectR()  { return BRect(388, 5, 412, 23); }
 static BRect MidiMenuRectR() { return BRect(420, 5, 476, 23); }
@@ -136,8 +139,11 @@ int PianoRollView::YToPitch(float y) const {
     return fTopPitch - (int)std::floor((y - kToolbarH) / kRowH);
 }
 
+// Icon-only buttons since M1.6: a 22x18 glyph with the tool's name in its
+// tooltip reads faster than seven short words, and it is what the icon set is
+// for. (The name is still the label, so nothing else had to change.)
 BRect PianoRollView::ToolRect(int i) const {
-    return BRect(4 + i * 48, 5, 4 + i * 48 + 46, 23);
+    return BRect(4 + i * 26, 5, 4 + i * 26 + 22, 23);
 }
 int PianoRollView::ToolAt(BPoint where) const {
     for (int i = 0; i < 7; i++)
@@ -287,8 +293,11 @@ void PianoRollView::Draw(BRect) {
     FillRect(BRect(0, 0, w, kToolbarH - 1));
     SetHighColor(ColGrid());
     StrokeLine(BPoint(0, kToolbarH - 1), BPoint(w, kToolbarH - 1));
-    for (int i = 0; i < 7; i++)
-        DrawButton(this, ToolRect(i), kToolNames[i], i == (int)fTool, ColAccent());
+    for (int i = 0; i < 7; i++) {
+        DrawButton(this, ToolRect(i), "", i == (int)fTool, ColAccent());
+        icons::DrawTool(this, ToolRect(i).InsetByCopy(4, 3), i,
+                        i == (int)fTool ? Rgb(16, 18, 22) : ColText());
+    }
     DrawButton(this, ZoomOutRectR(), "\xE2\x88\x92", false);   // minus
     DrawButton(this, ZoomInRectR(),  "+", false);
     DrawButton(this, MidiMenuRectR(), "MIDI", false);
@@ -832,8 +841,20 @@ void PianoRollView::MouseDown(BPoint where) {
     Invalidate();
 }
 
-void PianoRollView::MouseMoved(BPoint where, uint32, const BMessage*) {
-    if (fDrag == Drag::None) return;
+void PianoRollView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
+    // The tool buttons carry no text since M1.6: hovering one names it. (The
+    // view is custom-drawn, so the tooltip is driven here rather than by a
+    // control per button.)
+    if (fDrag == Drag::None) {
+        const int hover = ToolAt(where);
+        if (hover != fHoverTool) {
+            fHoverTool = hover;
+            if (hover >= 0) { SetToolTip(kToolNames[hover]); ShowToolTip(); }
+            else            { HideToolTip(); }
+        }
+        if (transit == B_EXITED_VIEW) { fHoverTool = -1; HideToolTip(); }
+        return;
+    }
 
     if (fDrag == Drag::Brush) { PaintBrush(where); return; }
     if (fDrag == Drag::Erase) { EraseAt(where);   return; }
