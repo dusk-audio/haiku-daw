@@ -151,3 +151,31 @@
         lv2:index 4 ; lv2:symbol "gain" ; lv2:name "Gain" ;
         lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
     ] .
+
+# --- Stereo gain with state the ports cannot express -----------------------
+# `mul` lives only in the plugin's state:interface. The host can preserve it
+# ONLY by saving/restoring through lilv's state API, which is what the state
+# tests assert — including against the bundled preset below, whose `mul` (as a
+# plain property) and `gain` (as a pset:value on its port) must both arrive.
+<urn:haiku-daw:test:stateful>
+    a lv2:Plugin ;
+    doap:name "DAW Test Stateful" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:extensionData <http://lv2plug.in/ns/ext/state#interface> ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "inL" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "inR" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "outL" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
+    ] .

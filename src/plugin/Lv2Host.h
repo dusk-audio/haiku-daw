@@ -16,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace daw {
@@ -43,7 +44,23 @@ struct Lv2PluginInfo {
     std::string name;                    // display name (URI if none declared)
     std::string uri;                     // persisted id -> EffectDesc.pluginName
     std::vector<Lv2ParamInfo> params;    // input control ports, in slot order
+    // Parallel to `params`: each control-input port's LV2 symbol. Kept apart
+    // from Lv2ParamInfo so that struct stays field-for-field the add-on's
+    // PluginParamInfo (the editor swaps them without knowing which it has).
+    // Needed by presets: a state document addresses control ports by SYMBOL.
+    std::vector<std::string> paramSymbols;
     bool monoDual = false;               // hosted as 2 instances, one per channel
+};
+
+// One preset offered for a plugin: the label to show, the state document to
+// hand an instance, and the control-port values that state sets as (slot, value)
+// pairs — a preset need not mention every port, and the ones it does not
+// mention are left as the insert has them, which is what a partial preset from
+// another host means.
+struct Lv2PresetInfo {
+    std::string name;
+    std::string state;
+    std::vector<std::pair<int, float>> params;
 };
 
 // A plugin found on disk that we declined, and why. Kept (rather than dropped
@@ -96,9 +113,44 @@ public:
     // result. Control ports start at their port defaults; MakeEffect applies any
     // stored EffectDesc params over the top via SetParam.
     //
+    // `state` is the insert's stored plugin state (EffectDesc.state). When it is
+    // non-empty it is restored into the fresh instance HERE, before the instance
+    // is handed back — i.e. before anything can run it — so a project load comes
+    // up on the patch it saved rather than the plugin's factory default.
+    //
     // The returned effect is already instantiated and activated at this rate;
     // Prepare() re-instantiates only if it is later given a different one.
-    std::unique_ptr<IEffect> Create(const std::string& uri, double sampleRate);
+    std::unique_ptr<IEffect> Create(const std::string& uri, double sampleRate,
+                                    const std::string& state = std::string());
+
+    // Every preset available for `uri`: the ones the plugin's bundles ship
+    // (lv2:Preset), then the user's own saved ones. Empty for an unknown URI, a
+    // plugin with no presets, or a machine with no preset files. Non-const
+    // because asking guarantees the scan has run.
+    std::vector<Lv2PresetInfo> Presets(const std::string& uri);
+
+    // Save `state` + `params` as a user preset named `name` for `uri`, in the
+    // preset store (see Lv2PresetStore.h). False when the name is empty, the URI
+    // is unknown, or the file cannot be written.
+    bool SavePreset(const std::string& uri, const std::string& name,
+                    const std::string& state,
+                    const std::vector<float>& params);
+
+    // The control-port values a state document carries, as (slot, value) pairs
+    // in slot order, clamped to each port's declared domain. What a preset from
+    // a bundle needs in order to move this insert's knobs; user presets written
+    // by us carry their params directly and need not go through this.
+    std::vector<std::pair<int, float>> PresetParams(const std::string& uri,
+                                                    const std::string& state);
+
+    // Serialize the state of a RAW lilv instance (`LilvInstance*` as void*, so
+    // this header stays free of lilv) — the plugin's own editor owns one of
+    // those, and where the user edits a patch (a direct-access UI writes
+    // straight into it) is exactly where the state is newest. Same document
+    // shape as Lv2Effect::SaveState, from the same world and URID table, so the
+    // two blobs are interchangeable.
+    bool SaveInstanceState(const std::string& uri, void* instance,
+                           std::string* out);
 
 private:
     Lv2Host();

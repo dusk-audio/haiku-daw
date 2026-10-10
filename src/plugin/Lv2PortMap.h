@@ -88,7 +88,8 @@ struct Lv2PortSpec {
     bool  isToggled = false;
     std::vector<float> scalePoints;   // lv2:enumeration values, if declared
 
-    std::string name;
+    std::string name;      // lv2:name, the human label
+    std::string symbol;    // lv2:symbol, the machine name (state documents use it)
 };
 
 // Audio-port shapes v1 can host.

@@ -21,8 +21,12 @@
 //
 // Kit-free C++ against the LV2 headers only, so it builds wherever the host does.
 
+#include <lv2/atom/atom.h>
 #include <lv2/core/lv2.h>
+#include <lv2/state/state.h>
+#include <lv2/urid/urid.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -197,10 +201,132 @@ void InertConnect(LV2_Handle handle, uint32_t port, void* data) {
 void InertRun(LV2_Handle, uint32_t) {}
 void InertCleanup(LV2_Handle h) { delete static_cast<Inert*>(h); }
 
+// ---------------------------------------------------------------------------
+// urn:haiku-daw:test:stateful — stereo gain with state that is NOT a port.
+//
+// This is the data-loss case the host's state feature exists for: `mul` is a
+// value the plugin keeps internally, settable only through the state:interface
+// (there is no control port for it), so the host can preserve it ONLY by asking
+// the plugin for its state with lilv's state API and handing it back on the next
+// instantiation. Output = in * gain * mul, so a test can assert the state
+// actually reached the DSP rather than merely that a string was non-empty.
+//
+// The state property is keyed by URI, which is what the URID map feature the
+// host passes into save()/restore() is for — a plugin that stored state by
+// string key would not be exercising anything a real plugin does.
+// ---------------------------------------------------------------------------
+constexpr const char* kMulKeyUri = "urn:haiku-daw:test:state:mul";
+
+struct Stateful {
+    const float* in[2]  = {nullptr, nullptr};
+    float*       out[2] = {nullptr, nullptr};
+    const float* gain   = nullptr;
+    float        mul    = 1.0f;
+};
+
+LV2_Handle StatefulInstantiate(const LV2_Descriptor*, double,
+                               const char*, const LV2_Feature* const*) {
+    return new Stateful();
+}
+
+void StatefulConnect(LV2_Handle handle, uint32_t port, void* data) {
+    Stateful* self = static_cast<Stateful*>(handle);
+    switch (port) {
+        case 0: self->in[0]  = static_cast<const float*>(data); break;
+        case 1: self->in[1]  = static_cast<const float*>(data); break;
+        case 2: self->out[0] = static_cast<float*>(data);       break;
+        case 3: self->out[1] = static_cast<float*>(data);       break;
+        case 4: self->gain   = static_cast<const float*>(data); break;
+        default: break;
+    }
+}
+
+void StatefulRun(LV2_Handle handle, uint32_t frames) {
+    Stateful* self = static_cast<Stateful*>(handle);
+    if (!self->in[0] || !self->in[1] || !self->out[0] || !self->out[1]) return;
+    const float k = (self->gain ? *self->gain : 1.0f) * self->mul;
+    for (uint32_t i = 0; i < frames; i++) {
+        self->out[0][i] = self->in[0][i] * k;
+        self->out[1][i] = self->in[1][i] * k;
+    }
+}
+
+void StatefulCleanup(LV2_Handle h) { delete static_cast<Stateful*>(h); }
+
+// The features the host hands in, and nothing else: no map, no state.
+const LV2_URID_Map* MapOf(const LV2_Feature* const* features) {
+    if (!features) return nullptr;
+    for (int i = 0; features[i]; i++)
+        if (features[i]->URI && !std::strcmp(features[i]->URI, LV2_URID__map))
+            return static_cast<const LV2_URID_Map*>(features[i]->data);
+    return nullptr;
+}
+
+LV2_State_Status StatefulSave(LV2_Handle handle, LV2_State_Store_Function store,
+                              LV2_State_Handle state, uint32_t,
+                              const LV2_Feature* const* features) {
+    Stateful* self = static_cast<Stateful*>(handle);
+    const LV2_URID_Map* map = MapOf(features);
+    if (!map) return LV2_STATE_ERR_NO_FEATURE;   // the host must pass it
+    const LV2_URID key = map->map(map->handle, kMulKeyUri);
+    const LV2_URID type = map->map(map->handle, LV2_ATOM__Float);
+    return store(state, key, &self->mul, sizeof(float), type,
+                 LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE);
+}
+
+LV2_State_Status StatefulRestore(LV2_Handle handle,
+                                 LV2_State_Retrieve_Function retrieve,
+                                 LV2_State_Handle state, uint32_t,
+                                 const LV2_Feature* const* features) {
+    Stateful* self = static_cast<Stateful*>(handle);
+    const LV2_URID_Map* map = MapOf(features);
+    if (!map) return LV2_STATE_ERR_NO_FEATURE;
+    const LV2_URID key = map->map(map->handle, kMulKeyUri);
+
+    size_t   size  = 0;
+    uint32_t type  = 0, flags = 0;
+    const void* value = retrieve(state, key, &size, &type, &flags);
+    if (!value) return LV2_STATE_SUCCESS;   // not in this state: keep as is
+    // A float is what we write; a document authored elsewhere (a hand-written
+    // preset, another host, another version) may carry the same property as a
+    // double, an int, or a plain literal — lilv hands a non-typed property over
+    // as its TEXT — and all of them mean the same number.
+    const LV2_URID atomFloat  = map->map(map->handle, LV2_ATOM__Float);
+    const LV2_URID atomDouble = map->map(map->handle, LV2_ATOM__Double);
+    const LV2_URID atomInt    = map->map(map->handle, LV2_ATOM__Int);
+    const LV2_URID atomLong   = map->map(map->handle, LV2_ATOM__Long);
+    if (type == atomFloat && size == sizeof(float)) {
+        self->mul = *(const float*)value;
+    } else if (type == atomDouble && size == sizeof(double)) {
+        self->mul = (float)*(const double*)value;
+    } else if (type == atomInt && size == sizeof(int32_t)) {
+        self->mul = (float)*(const int32_t*)value;
+    } else if (type == atomLong && size == sizeof(int64_t)) {
+        self->mul = (float)*(const int64_t*)value;
+    } else if (size > 0 && size < 64) {
+        char buf[64];
+        std::memcpy(buf, value, size);
+        buf[size] = '\0';
+        char* end = nullptr;
+        const double parsed = std::strtod(buf, &end);
+        if (end != buf) self->mul = (float)parsed;
+    }
+    return LV2_STATE_SUCCESS;
+}
+
+const void* StatefulExtension(const char* uri) {
+    static const LV2_State_Interface iface = { StatefulSave, StatefulRestore };
+    if (uri && !std::strcmp(uri, LV2_STATE__interface)) return &iface;
+    return nullptr;
+}
+
 const LV2_Descriptor kDescriptors[] = {
     { "urn:haiku-daw:test:mono-gain",
       MonoGainInstantiate, MonoGainConnect, nullptr,
       MonoGainRun, nullptr, MonoGainCleanup, nullptr },
+    { "urn:haiku-daw:test:stateful",
+      StatefulInstantiate, StatefulConnect, nullptr,
+      StatefulRun, nullptr, StatefulCleanup, StatefulExtension },
     { "urn:haiku-daw:test:stereo-latent",
       StereoLatentInstantiate, StereoLatentConnect, StereoLatentActivate,
       StereoLatentRun, nullptr, StereoLatentCleanup, nullptr },

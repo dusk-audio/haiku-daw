@@ -277,6 +277,15 @@ if(DAW_LV2_ENABLED)
     add_dependencies(lv2_render_tests daw_test_plugins)
     add_test(NAME lv2_render_tests COMMAND lv2_render_tests)
 
+    # Plugin state and presets against the fixture's stateful plugin: save and
+    # restore asserted on the AUDIO it produces, the factory's load path, the
+    # bundled preset's discovery, and the user preset store. Shares the fixture
+    # and its LV2_PATH.
+    add_executable(lv2_state_tests tests/lv2_state_tests.cpp)
+    target_link_libraries(lv2_state_tests PRIVATE daw_lv2)
+    add_dependencies(lv2_state_tests daw_test_plugins)
+    add_test(NAME lv2_state_tests COMMAND lv2_state_tests)
+
     # LV2_PATH = our fixture + the system SPEC bundles.
     #
     # The spec bundles are not optional decoration. With the fixture dir alone,
@@ -299,8 +308,8 @@ if(DAW_LV2_ENABLED)
     endif()
     # The host's Haiku default path uses setenv(overwrite=0), so this wins there
     # too and the test sees the same world on both platforms.
-    set_tests_properties(lv2_fixture_tests lv2_render_tests PROPERTIES
-        ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
+    set_tests_properties(lv2_fixture_tests lv2_render_tests lv2_state_tests
+        PROPERTIES ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
 endif()
 
 add_executable(projectio_tests tests/projectio_tests.cpp)
