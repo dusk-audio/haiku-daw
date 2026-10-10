@@ -54,9 +54,17 @@ first item; plan item M4.1 (`docs/PLAN_1.0.md`).
   otherwise have been reading a graph the reclaimer had freed. Found by review
   while the build was running; no test fails without it (the window is narrow),
   so it is named in the record as review-covered, not test-covered.
-- **`scripts/haiku_syntax_check.sh`**: one line — the include set was missing
-  `headers/os/add-ons/*/`, so `EffectsWindow.cpp` (which includes `<Screen.h>` →
-  `<Accelerant.h>`) always reported FAIL and "0 FAIL" was unreachable.
+- **`scripts/haiku_syntax_check.sh`**: two things. (1) One line of mine — the
+  include set was missing `headers/os/add-ons/*/`, so `EffectsWindow.cpp` (which
+  includes `<Screen.h>` → `<Accelerant.h>`) always reported FAIL and "0 FAIL"
+  was unreachable. (2) **The LV2 coverage**: on master the check compiled the
+  `DAW_HAVE_LV2` branches OUT (the define comes from the `daw_lv2` target's
+  PUBLIC flags), so `src/ui/`'s and `tests/`'s LV2-only code was never checked.
+  The T3 agent fixed that on `origin/feature/lv2-state` (`33d6f05`); this branch
+  **cherry-picks that commit** (script only) rather than writing a second copy
+  of it. The check below therefore ran with `-DDAW_HAVE_LV2=1` active
+  (pkg-config has lilv-0 0.28.0 and lv2 1.18.10 here), which is what the VM
+  build does and what `tests/ui_functional_tests.cpp`'s LV2 half needs.
 
 ## Measurements (VM, beta6, 2 vCPU)
 
@@ -101,7 +109,7 @@ All on the branch tip (`ea4fe2c` unless noted); commands as run:
 | VM build | `flock /tmp/haiku-daw-vm.lock sh scripts/vm.sh build` | exit 0 |
 | VM ctest (`build`, LV2 on) | `ctest --test-dir build` | **55/55 passed** |
 | VM `ui_functional_tests` | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | **224 checks, 0 failures** |
-| VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | <!-- --> |
+| VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | **51/51 passed** |
 | screenshots | every `Shot()` of the run fetched and opened | <!-- --> |
 
 `ui_functional_tests` was 210 checks on master; the new `TestEngineGraphSwap`
