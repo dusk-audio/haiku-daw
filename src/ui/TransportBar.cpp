@@ -16,10 +16,18 @@ static BRect LcdRect(float h) { return BRect(212, 4, 360, h - 4); }
 TransportBar::TransportBar(BRect frame, BMessenger target,
                            uint32 playWhat, uint32 stopWhat, uint32 recWhat,
                            uint32 zoomOutWhat, uint32 zoomInWhat)
-    : BView(frame, "transport", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
+    : BView(frame, "transport", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP,
+            B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat),
       fZoomOut(zoomOutWhat), fZoomIn(zoomInWhat) {
     SetViewColor(ColChrome());
+}
+
+void TransportBar::GetPreferredSize(float* width, float* height) {
+    // Its height is a fixed strip (whose CONTENTS are pinned offsets, see
+    // MainWindow::LayoutTransportBar); the width is whatever the window gives.
+    if (width)  *width  = 0.0f;
+    if (height) *height = Themed(kDesignTransportH);
 }
 
 static void DrawButton(BView* v, BRect r, rgb_color fill, bool lit) {

@@ -29,6 +29,10 @@ int main() {
     a.exportLimiter      = true;
     a.exportRange        = 1;
     a.exportStems        = 1;
+    a.inspectorVisible   = false;      // the M1.4 panes
+    a.inspectorWidth     = 240.0f;
+    a.bottomVisible      = true;
+    a.bottomHeight       = 300.0f;
 
     AppSettings b;
     CHECK(b.Deserialize(a.Serialize()));
@@ -49,6 +53,11 @@ int main() {
     CHECK(b.exportLimiter == true);
     CHECK(b.exportRange == 1);
     CHECK(b.exportStems == 1);
+    // The pane layout the user left behind (M1.4).
+    CHECK(b.inspectorVisible == false);
+    CHECK(std::fabs(b.inspectorWidth - 240.0f) < 1e-3);
+    CHECK(b.bottomVisible == true);
+    CHECK(std::fabs(b.bottomHeight - 300.0f) < 1e-3);
 
     // An old settings file (no export keys at all) keeps the dialog defaults.
     AppSettings old;
@@ -56,6 +65,8 @@ int main() {
     CHECK(old.exportBitDepth == 16 && old.exportDither == true);
     CHECK(old.exportSampleRate == 0 && old.exportNormalize == false);
     CHECK(old.exportRange == 0 && old.exportStems == 0);
+    // ...and the panes default to the inspector showing, the dock hidden.
+    CHECK(old.inspectorVisible == true && old.bottomVisible == false);
 
     // Garbage / empty -> false, defaults retained.
     AppSettings c;

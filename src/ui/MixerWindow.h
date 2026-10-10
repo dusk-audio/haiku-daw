@@ -82,6 +82,10 @@ constexpr uint32 kMsgMixFxBypass = 'mxfb';   // + int32 "fx": toggle that insert
 constexpr uint32 kMsgMixFxMove   = 'mxfm';   // + int32 "from","to": reorder
 constexpr uint32 kMsgMixFxAdd    = 'mxfa';   // open the plugin browser for it
 
+// Bring the (already open) mixer to the front. The main window sends this
+// instead of opening a second rack (M1.4).
+constexpr uint32 kMsgMixerActivate = 'mxac';
+
 class MixerStripsView : public BView {
 public:
     MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips,
@@ -91,6 +95,7 @@ public:
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void MouseUp(BPoint where) override;
+    void MessageReceived(BMessage* msg) override;   // wheel: pan the rack
 
     void SetPeaks(const std::map<uint64, std::pair<float, float>>& peaks,
                   float masterL, float masterR);
@@ -115,6 +120,9 @@ private:
     // Rows strip `s` actually draws: one per insert plus a trailing empty slot,
     // or the cap with the last row standing in for the remainder.
     static int  FxRowsFor(const MixerStripInfo& s);
+
+    float fScrollX = 0.0f;           // horizontal pan when the rack is wider
+    float ContentWidth() const;      // all strips + master + margins
 
     std::vector<MixerStripInfo> fStrips;
     std::map<uint64, std::pair<float, float>> fPeaks;

@@ -107,6 +107,7 @@ private:
     struct LaneDef { const char* label; int cc; };   // cc < 0 = velocity
     static const LaneDef kLanes[4];
     int   fLane = 0;                    // index into kLanes (0 = velocity)
+    int   fHoverTool = -1;              // the tool button under the cursor
     BRect LanePickRect() const;         // the lane selector button
     // CC-lane geometry + editing.
     float CcValueToY(int value) const;  // 0..127 -> y inside the lane

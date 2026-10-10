@@ -22,7 +22,8 @@
 #include "../app/AppSettings.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
-#include "widgets/DawSlider.h"      // the kit (M1.3)
+#include "widgets/DawButton.h"      // the kit (M1.3)
+#include "widgets/DawSlider.h"
 #include "widgets/DawTextField.h"
 
 #include "../engine/DeviceLatency.h"
@@ -38,6 +39,12 @@
 #include "../model/RecordPlan.h"
 #include "../model/TakeNames.h"
 
+#include <GroupView.h>
+#include <LayoutBuilder.h>
+#include <SplitView.h>
+#include <SpaceLayoutItem.h>
+#include <StringView.h>
+#include <TabView.h>
 #include <Alert.h>
 #include <Application.h>
 #include <OS.h>   // system_time() for MIDI event timestamping
@@ -102,6 +109,9 @@ enum {
     MSG_EXPORT_MIDI     = 'emid',
     MSG_EXPORT_MIDI_REF = 'emdr',
     MSG_FOLLOW    = 'folw',   // toggle: chase the playhead
+    MSG_TOGGLE_INSPECTOR = 'tins',   // show/hide the inspector pane (M1.4)
+    MSG_TOGGLE_DOCK      = 'tdck',   // show/hide the docked bottom pane
+    MSG_POP_OUT_EDITOR   = 'poed',   // dock the MIDI editor out into a window
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -155,7 +165,7 @@ static std::vector<MidiNote> ParseNoteList(const BMessage* msg) {
     return notes;
 }
 
-static constexpr float kTransportH = 36.0f;   // design px; use Themed()
+static constexpr float kTransportH = kDesignTransportH;   // design px
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
 
 // --- native editor watches -------------------------------------------------
@@ -281,6 +291,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fMonoItem = new BMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
     viewMenu->AddItem(fMonoItem);
     viewMenu->AddSeparatorItem();
+    // The panes (M1.4): the inspector toggles with I, the dock with J.
+    fInspectorItem = new BMenuItem("Inspector", new BMessage(MSG_TOGGLE_INSPECTOR), 'I');
+    fInspectorItem->SetMarked(true);
+    viewMenu->AddItem(fInspectorItem);
+    fDockItem = new BMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
+    viewMenu->AddItem(fDockItem);
+    viewMenu->AddSeparatorItem();
     viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
     fFollowItem = new BMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
     fFollowItem->SetMarked(true);   // chase on by default
@@ -326,18 +343,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fMonInItem = new BMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
     audioMenu->AddItem(fMonInItem);
     menuBar->AddItem(audioMenu);
-    AddChild(menuBar);
-    float menuH = menuBar->Bounds().Height();
-    if (menuH < 1) menuH = 19;
 
     // --- Transport bar (below the menu) ---
-    const float barTop = menuH + 1;
-    BRect barRect(0, barTop, bounds.right, barTop + Themed(kTransportH));
+    BRect barRect(0, 0, bounds.right, Themed(kTransportH));
     fTransport = new TransportBar(barRect, BMessenger(this),
                                   MSG_PLAY, MSG_STOP, MSG_REC,
                                   MSG_ZOOM_OUT, MSG_ZOOM_IN);
     BView* bar = fTransport;
-    AddChild(bar);
 
     BFont lcdFont(be_bold_font);
     lcdFont.SetSize(Themed(15.0f));
@@ -401,16 +413,45 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                  Themed(kTransportH) - Themed(5)));
     bar->AddChild(fMeter);
 
-    // --- Inspector column (left) + timeline (fills the rest) ---
-    const float contentTop = barTop + Themed(kTransportH) + 1;
-    BRect inspRect(0, contentTop, InspectorWidth(), bounds.bottom);
-    fInspector = new InspectorView(inspRect, project, stack);
-    AddChild(fInspector);
-
-    BRect tlRect(InspectorWidth() + 1, contentTop, bounds.right, bounds.bottom);
-    fTimeline = new TimelineView(tlRect, project, stack);
+    // --- The panes (M1.4) ---
+    // Top row: the inspector (resizable, collapsible, toggled with I) beside
+    // the timeline. Bottom: the dock, which hosts the MIDI editor and the
+    // browsers and starts collapsed. A window-level layout drives both, so
+    // resizing the window is the layout's business now, not FrameResized's.
+    fPaneSplit = new BSplitView(B_HORIZONTAL, 1.0f);
+    fInspector = new InspectorView(BRect(0, 0, InspectorWidth(), 100),
+                                   project, stack);
+    fTimeline = new TimelineView(BRect(0, 0, 400, 100), project, stack);
     fTimeline->SetPeaks(peaks);
-    AddChild(fTimeline);
+    fPaneSplit->AddChild(fInspector, 0.0f);   // keeps its width...
+    fPaneSplit->AddChild(fTimeline, 1.0f);    // ...the timeline takes the rest
+    fPaneSplit->SetCollapsible(0, true);
+
+    fDock = new BTabView("dock", B_WIDTH_FROM_WIDEST);
+    fEditorPane = new BGroupView(B_VERTICAL, Themed(4.0f));
+    fEditorPane->SetViewColor(ColHeader());
+    {
+        BGroupView* head = new BGroupView(B_HORIZONTAL, Themed(6.0f));
+        head->SetViewColor(ColHeader());
+        BStringView* title = new BStringView("edtitle", "Editor");
+        title->SetHighColor(ColTextDim());
+        head->GroupLayout()->AddView(title);
+        head->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        DawButton* pop = new DawButton("popout", "Pop out",
+                                       new BMessage(MSG_POP_OUT_EDITOR));
+        head->GroupLayout()->AddView(pop);
+        fEditorPane->GroupLayout()->AddView(head);
+        fEditorPane->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+    }
+    fDock->AddTab(fEditorPane);
+    fRootSplit = new BSplitView(B_VERTICAL, 1.0f);
+    fRootSplit->AddChild(fPaneSplit, 1.0f);   // the dock joins on demand
+
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f)
+        .Add(menuBar)
+        .Add(bar)
+        .Add(fRootSplit)
+        .End();
 
     // Restore persisted preferences + window layout (after the menus exist).
     LoadSettings();
@@ -578,6 +619,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
             break;
+        case MSG_TOGGLE_INSPECTOR:
+            SetInspectorShown(!fInspectorShown);
+            break;
+        case kMsgOpenEditor: {
+            int64 track = 0, clip = 0;
+            msg->FindInt64("track", &track);
+            msg->FindInt64("clip", &clip);
+            OpenDockedEditor((TrackId)track, (ClipId)clip);
+            break;
+        }
+        case MSG_POP_OUT_EDITOR:
+            PopOutEditor();
+            break;
+        case MSG_TOGGLE_DOCK:
+            SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
+            break;
         case MSG_FOLLOW: {
             const bool on = !(fFollowItem && fFollowItem->IsMarked());
             if (fFollowItem) fFollowItem->SetMarked(on);
@@ -730,6 +787,35 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_MIXER: {
             std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject);
+            // One mixer (M1.4): asking again brings the open one forward with
+            // the current strips rather than stacking a second rack.
+            if (fMixerMsgr.IsValid()) {
+                BMessage r(kMsgMixStrips);
+                r.AddFloat("mg", fProject->masterGain);
+                for (const MixerStripInfo& st : strips) {
+                    r.AddInt64("tid", (int64)st.trackId);
+                    r.AddFloat("gain", st.gain);
+                    r.AddFloat("pan", st.pan);
+                    r.AddBool("mute", st.muted);
+                    r.AddBool("solo", st.soloed);
+                    r.AddBool("arm", st.armed);
+                    r.AddBool("mon", st.inputMonitor);
+                    r.AddInt32("color", st.colorIndex);
+                    r.AddInt32("type", st.type);
+                    r.AddInt32("fx", (int32)st.fx.size());
+                    for (const MixerInsertInfo& in : st.fx) {
+                        r.AddString("fxn", in.name.c_str());
+                        r.AddBool("fxb", in.bypassed);
+                    }
+                }
+                if (fMixerMsgr.SendMessage(&r) == B_OK) {
+                    BMessage act(kMsgMixerActivate);   // bring it to the front
+                    fMixerMsgr.SendMessage(&act);
+                    break;
+                }
+                // The window is gone (its messenger is dead): fall through and
+                // make a new one.
+            }
             const float ww = 24 + (strips.size() + 1) * (96 + 4);   // + master
             // Tall enough for the strip, including the insert block: four insert
             // rows cost ~60 px that the old single "FX n" button did not.
@@ -1705,11 +1791,105 @@ void MainWindow::LayoutTransportBar() {
     setVisible(fVolShown, showVol, { fVolLbl, fMaster });
 }
 
+// Show or hide the inspector pane (View > Inspector, key I). Collapsing the
+// split item is what actually reclaims the width; the view is hidden too, so
+// its 60 Hz meter updates stop painting into a collapsed column.
+void MainWindow::SetInspectorShown(bool shown) {
+    fInspectorShown = shown;
+    // The item LEAVES the split when hidden: a collapsed BSplitView item keeps
+    // its preferred size in this Haiku, which left an empty strip where the
+    // inspector used to be. Removing it hands the width back to the timeline,
+    // and re-adding puts it back where it was.
+    if (fPaneSplit != nullptr && fInspector != nullptr) {
+        if (shown && fInspector->Parent() == nullptr)
+            fPaneSplit->AddChild(0, fInspector, 0.0f);
+        else if (!shown && fInspector->Parent() != nullptr)
+            fInspector->RemoveSelf();
+    }
+    if (fInspectorItem != nullptr) fInspectorItem->SetMarked(shown);
+    if (fTimeline != nullptr) fTimeline->Invalidate();
+}
+
+// Show or hide the docked bottom pane, the same way and for the same reason.
+void MainWindow::SetDockShown(bool shown) {
+    if (fRootSplit == nullptr || fDock == nullptr) return;
+    if (shown && fDock->Parent() == nullptr)
+        fRootSplit->AddChild(fDock, 0.0f);
+    else if (!shown && fDock->Parent() != nullptr)
+        fDock->RemoveSelf();
+    if (fDockItem != nullptr) fDockItem->SetMarked(shown);
+}
+
+// Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
+// group: replacing its second item is all "open another region" takes, and the
+// old view goes away with it.
+void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
+    Track* t = fProject->FindTrack(track);
+    if (t == nullptr) return;
+    const MidiClip* c = t->FindMidiClip(clip);
+    if (c == nullptr) return;
+
+    if (fDockRoll != nullptr) {
+        fDockRoll->RemoveSelf();
+        delete fDockRoll;
+        fDockRoll = nullptr;
+    }
+    // The roll fills the pane below the header row; the split gives it its
+    // real size, so the frame here is only a hint.
+    fDockRoll = new PianoRollView(BRect(0, 0, 600, Themed(200.0f)), track, clip,
+                                  c->startFrame, c->lengthFrames, c->notes,
+                                  c->events, fProject->tempoMap,
+                                  fProject->sampleRate,
+                                  fProject->transport.playhead,
+                                  BMessenger(this));
+    fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
+    fDockTrack = track;
+    fDockClip  = clip;
+
+    SetDockShown(true);
+    fDock->Select(0);
+    fDockRoll->MakeFocus(true);
+    PushRollPlayhead(fProject->transport.playhead);
+}
+
+// The docked editor becomes its own window. The window is the same PianoRoll
+// the timeline used to open directly, so nothing about the editing paths
+// changes; the dock just stops hosting it.
+void MainWindow::PopOutEditor() {
+    Track* t = fProject->FindTrack(fDockTrack);
+    if (t == nullptr) return;
+    const MidiClip* c = t->FindMidiClip(fDockClip);
+    if (c == nullptr) return;
+    BPoint sp = ConvertToScreen(BPoint(InspectorWidth() + Themed(40.0f),
+                                       Themed(80.0f)));
+    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
+    PianoRoll* roll = new PianoRoll(wr, fDockTrack, fDockClip, c->startFrame,
+                                    c->lengthFrames, c->notes, c->events,
+                                    fProject->tempoMap, fProject->sampleRate,
+                                    fProject->transport.playhead,
+                                    BMessenger(this));
+    roll->Show();
+    // The window pushes the playhead through a messenger; the docked view was
+    // pushed to directly. Register it the same way the timeline used to.
+    BMessage m(kMsgRollOpened);
+    m.AddMessenger("m", BMessenger(roll));
+    PostMessage(&m);
+
+    if (fDockRoll != nullptr) {
+        fDockRoll->RemoveSelf();
+        delete fDockRoll;
+        fDockRoll = nullptr;
+        fDockTrack = kInvalidTrackId;
+        fDockClip  = kInvalidClipId;
+    }
+    SetDockShown(false);
+}
+
 void MainWindow::FrameResized(float newWidth, float newHeight) {
     BWindow::FrameResized(newWidth, newHeight);
-    // The inspector column and the timeline carry resizing modes that the
-    // server applies for them; the transport bar's CONTENTS do not, because
-    // they are not a flow -- they are pinned offsets. Do them here.
+    // The panes are a layout's business now (M1.4); the transport bar's
+    // CONTENTS are not a flow -- they are pinned offsets, so they still need
+    // this. The views repaint themselves through the frame-change events.
     LayoutTransportBar();
     if (fTimeline)  fTimeline->Invalidate();
     if (fInspector) fInspector->Invalidate();
@@ -2525,6 +2705,22 @@ void MainWindow::LoadSettings() {
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     if (!s.Deserialize(text)) return;
 
+    // The panes (M1.4). The width goes on as the inspector's preferred size
+    // and the split weights keep it fixed while the timeline takes the rest.
+    if (fPaneSplit != nullptr) {
+        const float w = s.inspectorWidth > 80.0f ? s.inspectorWidth
+                                                 : InspectorWidth();
+        fInspector->SetExplicitPreferredSize(BSize(w, B_SIZE_UNSET));
+        fPaneSplit->SetItemWeight(0, 0.0f, true);
+        fPaneSplit->SetItemWeight(1, 1.0f, true);
+        SetInspectorShown(s.inspectorVisible);
+    }
+    if (fRootSplit != nullptr && fDock != nullptr) {
+        const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
+        fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
+        SetDockShown(s.bottomVisible);
+    }
+
     fTransportCtl.fBufferFrames = (size_t)s.bufferFrames;
     fRecCtl.fCountInBars  = s.countInBars;
     fTransportCtl.fMetronome    = s.metronome;
@@ -2573,6 +2769,15 @@ void MainWindow::SaveSettings() {
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
+    // The panes as the user left them (M1.4).
+    s.inspectorVisible = fInspectorShown;
+    if (fInspector != nullptr && fInspector->Bounds().Width() > 1.0f)
+        s.inspectorWidth = fInspector->Bounds().Width();
+    if (fRootSplit != nullptr && fDock != nullptr) {
+        s.bottomVisible = fDock->Parent() != nullptr;
+        if (fDock->Bounds().Height() > 1.0f)
+            s.bottomHeight = fDock->Bounds().Height();
+    }
 
     BPath p;
     if (!ProjectDocument::SettingsPath(p)) return;
@@ -2597,6 +2802,7 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
 }
 
 void MainWindow::PushRollPlayhead(Frame ph) {
+    if (fDockRoll != nullptr) fDockRoll->SetPlayhead(ph);   // docked editor
     if (!fRollMsgr.IsValid()) return;
     BMessage m(kMsgRollPlayhead);
     m.AddInt64("ph", (int64)ph);

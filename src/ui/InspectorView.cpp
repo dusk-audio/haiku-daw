@@ -26,7 +26,8 @@
 namespace daw {
 
 InspectorView::InspectorView(BRect frame, Project* project, CommandStack* stack)
-    : BView(frame, "inspector", B_FOLLOW_LEFT | B_FOLLOW_TOP_BOTTOM, B_WILL_DRAW),
+    : BView(frame, "inspector", B_FOLLOW_LEFT | B_FOLLOW_TOP_BOTTOM,
+            B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       fProject(project), fStack(stack) {
     SetViewColor(ColHeader());
 }

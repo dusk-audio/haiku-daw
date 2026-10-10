@@ -10,7 +10,10 @@
 #include <Application.h>
 #include <Cursor.h>
 #include <Entry.h>
+#include <GroupView.h>
+#include <LayoutBuilder.h>
 #include <MenuItem.h>
+#include <SpaceLayoutItem.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 #include <Slider.h>
@@ -68,12 +71,15 @@ std::string LeafOf(const std::string& p) {
 
 InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
                                    TrackId track, BMessenger apply)
-    : BWindow(frame, "Instrument", B_TITLED_WINDOW,
+    : BWindow(frame, "Instrument", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fDesc(std::move(inst)), fTrack(track), fApply(apply) {
-    fRoot = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    fRoot->SetViewColor(ColHeader());
-    AddChild(fRoot);
+    BGroupView* root = new BGroupView(B_VERTICAL, Themed(6.0f));
+    root->GroupLayout()->SetInsets(Themed(8.0f), Themed(8.0f), Themed(8.0f),
+                                   Themed(8.0f));
+    fRoot = root;
+    root->SetViewColor(ColHeader());
+    BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // Reopening the editor on a track that already has a soundfont should show
     // its state, not a blank row — but LOOK UP only. Decoding here would block
@@ -173,13 +179,13 @@ void InstrumentWindow::LoadSoundfontNow(bool allowDecode) {
     if (fPartial) fStatus += "  \xE2\x80\x94 INCOMPLETE: " + inst->warning;
 }
 
-static BSlider* AdsrRow(BRect r, const char* label, int slot,
+static BSlider* AdsrRow(const char* label, int slot,
                         float mn, float mx, float value, BWindow* target) {
     BMessage* m = new BMessage(MSG_ADSR);
     m->AddInt32("slot", slot);
     m->AddFloat("min", mn);
     m->AddFloat("max", mx);
-    BSlider* s = new DawSlider(r, label, label, m, 0, 1000, B_HORIZONTAL);
+    BSlider* s = new DawSlider(label, label, m, 0, 1000, B_HORIZONTAL);
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
     s->SetValue((int32)(t * 1000.0f));
@@ -189,9 +195,15 @@ static BSlider* AdsrRow(BRect r, const char* label, int slot,
 }
 
 void InstrumentWindow::Build() {
-    while (BView* c = fRoot->ChildAt(0)) { fRoot->RemoveChild(c); delete c; }
-    const float w = Bounds().Width();
-    float y = 8;
+    // The root is a BGroupView: this pane is rebuilt whenever the voice kind
+    // changes, and a group layout takes children at any time (M1.4).
+    BGroupView* root = static_cast<BGroupView*>(fRoot);
+    BGroupLayout* layout = root->GroupLayout();
+    BView* child;
+    while ((child = fRoot->ChildAt(0)) != nullptr) {
+        child->RemoveSelf();   // takes it out of the layout too
+        delete child;
+    }
 
     // Voice kind.
     {
@@ -207,9 +219,7 @@ void InstrumentWindow::Build() {
             it->SetTarget(this);
             menu->AddItem(it);
         }
-        fRoot->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "md",
-                                         "Voice:", menu));
-        y += 30;
+        layout->AddView(new DawMenuField("md", "Voice:", menu));
     }
 
     if (!fDesc.UsesSoundfont()) {
@@ -224,14 +234,10 @@ void InstrumentWindow::Build() {
             it->SetTarget(this);
             menu->AddItem(it);
         }
-        fRoot->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20),
-                                       "wf", "Waveform:", menu));
-        y += 30;
+        layout->AddView(new DawMenuField("wf", "Waveform:", menu));
 
         auto add = [&](const char* lbl, int slot, float mn, float mx, float v) {
-            fRoot->AddChild(AdsrRow(BRect(8, y, w - 8, y + 26), lbl, slot,
-                                    mn, mx, v, this));
-            y += 32;
+            layout->AddView(AdsrRow(lbl, slot, mn, mx, v, this));
         };
         add("Attack (s)",  0, 0.0f, 1.0f, fDesc.synth.attack);
         add("Decay (s)",   1, 0.0f, 1.0f, fDesc.synth.decay);
@@ -239,17 +245,19 @@ void InstrumentWindow::Build() {
         add("Release (s)", 3, 0.0f, 2.0f, fDesc.synth.release);
     } else {
         // --- soundfont: file, preset, status ------------------------------
-        DawButton* pick = new DawButton(BRect(8, y, 88, y + 24), "pick",
-                                        "Load...", new BMessage(MSG_PICK));
+        BGroupView* fileRow = new BGroupView(B_HORIZONTAL, Themed(6.0f));
+        fileRow->SetViewColor(ColHeader());
+        DawButton* pick = new DawButton("pick", "Load...",
+                                        new BMessage(MSG_PICK));
         pick->SetTarget(this);
-        fRoot->AddChild(pick);
-
-        BStringView* file = new BStringView(BRect(96, y + 4, w - 8, y + 24),
+        fileRow->GroupLayout()->AddView(pick);
+        BStringView* file = new BStringView(
             "file", fDesc.path.empty() ? "(no file)"
                                        : LeafOf(fDesc.path).c_str());
         file->SetHighColor(ColText());
-        fRoot->AddChild(file);
-        y += 32;
+        fileRow->GroupLayout()->AddView(file);
+        fileRow->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        layout->AddView(fileRow);
 
         // The preset popup only earns its space when there is a choice, the
         // same rule DuskStudio's editor uses.
@@ -266,30 +274,25 @@ void InstrumentWindow::Build() {
                 it->SetTarget(this);
                 menu->AddItem(it);
             }
-            fRoot->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "ps",
-                                             "Preset:", menu));
-            y += 30;
+            layout->AddView(new DawMenuField("ps", "Preset:", menu));
         }
 
-        BStringView* st = new BStringView(BRect(8, y, w - 8, y + 20), "st",
-                                          fStatus.c_str());
+        BStringView* st = new BStringView("st", fStatus.c_str());
         // A failed load is the one thing here the user must not miss.
         st->SetHighColor(!fLoadOk ? ColRec()
                                   : (fPartial ? ColMon() : ColTextDim()));
-        fRoot->AddChild(st);
-        y += 26;
+        layout->AddView(st);
 
         if (!fDesc.path.empty() && !fLoadOk) {
-            BStringView* hint = new BStringView(BRect(8, y, w - 8, y + 20),
+            BStringView* hint = new BStringView(
                 "hint", "Track falls back to the synth voice.");
             hint->SetHighColor(ColTextDim());
-            fRoot->AddChild(hint);
-            y += 26;
+            layout->AddView(hint);
         }
     }
 
     // Fit the window to whichever pane is showing.
-    ResizeTo(w, y + 8);
+    ResizeToPreferred();
 }
 
 void InstrumentWindow::DispatchMessage(BMessage* m, BHandler* h) {

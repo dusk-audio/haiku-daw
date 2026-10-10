@@ -6,7 +6,10 @@
 #include "widgets/DawMenuField.h"
 #include "widgets/DawSlider.h"
 
+#include <GroupView.h>
+#include <LayoutBuilder.h>
 #include <MenuItem.h>
+#include <SpaceLayoutItem.h>
 #include <PopUpMenu.h>
 #include <StringView.h>
 
@@ -28,13 +31,18 @@ static constexpr float kLevelMax = 2.0f;   // sends can exceed unity
 SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
                          std::vector<std::pair<TrackId, std::string>> buses,
                          TrackId track, BMessenger apply)
-    : BWindow(frame, "Sends", B_TITLED_WINDOW,
+    : BWindow(frame, "Sends", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fSends(std::move(sends)), fBuses(std::move(buses)),
       fTrack(track), fApply(apply) {
-    fRoot = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    fRoot->SetViewColor(ColHeader());
-    AddChild(fRoot);
+    // A BGroupView, because this window's contents are rebuilt whenever a
+    // send is added or removed: a group layout takes children at any time.
+    BGroupView* root = new BGroupView(B_VERTICAL, Themed(6.0f));
+    root->SetViewColor(ColHeader());
+    root->GroupLayout()->SetInsets(Themed(8.0f), Themed(8.0f), Themed(8.0f),
+                                   Themed(8.0f));
+    fRoot = root;
+    BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
     Rebuild();
 }
 
@@ -58,21 +66,21 @@ static const char* BusName(const std::vector<std::pair<TrackId, std::string>>& b
 }
 
 void SendsWindow::Rebuild() {
-    while (BView* c = fRoot->ChildAt(0)) { fRoot->RemoveChild(c); delete c; }
-
-    // Design pixels through Themed(): the window is sized by its caller.
-    const float pad  = Themed(8.0f);
-    const float rowH = Themed(26.0f);
-    float y = Themed(8.0f);
-    const float w = Bounds().Width();
+    BGroupView* root = static_cast<BGroupView*>(fRoot);
+    BGroupLayout* layout = root->GroupLayout();
+    BView* child;
+    while ((child = fRoot->ChildAt(0)) != nullptr) {
+        child->RemoveSelf();   // takes it out of the layout too
+        delete child;
+    }
 
     if (fBuses.empty()) {
-        BStringView* hint = new BStringView(BRect(pad, y, w - pad,
-                                                  y + Themed(18.0f)),
+        BStringView* hint = new BStringView(
             "hint", "No bus tracks. Create a Bus (Track > New Bus) to send to.");
         hint->SetViewColor(ColHeader());
         hint->SetHighColor(ColText());
-        fRoot->AddChild(hint);
+        layout->AddView(hint);
+        ResizeToPreferred();
         return;
     }
 
@@ -90,46 +98,42 @@ void SendsWindow::Rebuild() {
             it->SetTarget(this);   // items route to this window (menu has no SetTarget)
             menu->AddItem(it);
         }
-        DawMenuField* field = new DawMenuField(BRect(pad, y,
-                                                     w - Themed(210.0f),
-                                                     y + Themed(20.0f)),
-            "dest", "To:", menu);
-        fRoot->AddChild(field);
+        BGroupView* row = new BGroupView(B_HORIZONTAL, Themed(6.0f));
+        row->SetViewColor(ColHeader());
+        BGroupLayout* rowLayout = row->GroupLayout();
 
-        DawCheckBox* pre = new DawCheckBox(BRect(w - Themed(200.0f), y,
-                                                 w - Themed(96.0f),
-                                                 y + Themed(20.0f)),
-            "pre", "Pre-fader", new BMessage(MSG_SPRE));
+        DawMenuField* field = new DawMenuField("dest", "To:", menu);
+        rowLayout->AddView(field);
+
+        DawCheckBox* pre = new DawCheckBox("pre", "Pre-fader",
+                                           new BMessage(MSG_SPRE));
         pre->Message()->AddInt32("send", (int32)i);
         pre->SetValue(s.preFader ? B_CONTROL_ON : B_CONTROL_OFF);
         pre->SetTarget(this);
-        fRoot->AddChild(pre);
+        rowLayout->AddView(pre);
 
-        DawButton* rm = new DawButton(BRect(w - Themed(90.0f), y - Themed(2.0f),
-                                            w - pad, y + Themed(20.0f)),
-            "rm", "Remove", new BMessage(MSG_SRM));
+        DawButton* rm = new DawButton("rm", "Remove", new BMessage(MSG_SRM));
         rm->Message()->AddInt32("send", (int32)i);
-        fRoot->AddChild(rm);
-        y += rowH;
+        rowLayout->AddView(rm);
+        rowLayout->AddItem(BSpaceLayoutItem::CreateGlue());
+        layout->AddView(row);
 
         // Level slider.
         BMessage* lm = new BMessage(MSG_SLVL);
         lm->AddInt32("send", (int32)i);
-        DawSlider* sl = new DawSlider(BRect(pad, y, w - pad,
-                                            y + Themed(26.0f)),
-            "level", "Level", lm, 0, 1000, B_HORIZONTAL);
+        DawSlider* sl = new DawSlider("level", "Level", lm, 0, 1000,
+                                      B_HORIZONTAL);
         float t = s.level / kLevelMax;
         if (t < 0) t = 0; if (t > 1) t = 1;
         sl->SetValue((int32)(t * 1000.0f));
         sl->SetModificationMessage(new BMessage(*lm));
         sl->SetTarget(this);
-        fRoot->AddChild(sl);
-        y += Themed(34.0f);
+        layout->AddView(sl);
     }
 
-    DawButton* add = new DawButton(BRect(pad, y, w - pad, y + Themed(22.0f)),
-                                   "add", "Add Send", new BMessage(MSG_SADD));
-    fRoot->AddChild(add);
+    DawButton* add = new DawButton("add", "Add Send", new BMessage(MSG_SADD));
+    layout->AddView(add);
+    ResizeToPreferred();
 }
 
 void SendsWindow::DispatchMessage(BMessage* m, BHandler* h) {
