@@ -1752,6 +1752,27 @@ static int32 TestThread(void*) {
     win->Show();
     snooze(300000);
 
+    {   // TEMP: dump the view tree and its frames (layout diagnosis)
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            std::printf("--- view tree (frame / hidden) ---\n");
+            struct Dump {
+                static void Walk(BView* v, int depth) {
+                    for (int i = 0; i < depth; i++) std::printf("  ");
+                    BRect f = v->Frame();
+                    std::printf("%s [%s] %.0f,%.0f %.0fx%.0f%s%s\n",
+                                v->Name() ? v->Name() : "(noname)",
+                                v->GetLayout() ? "layout" : "-",
+                                f.left, f.top, f.Width(), f.Height(),
+                                v->IsHidden() ? " HIDDEN" : "");
+                    for (int32 i = 0; i < v->CountChildren(); i++)
+                        if (BView* c = v->ChildAt(i)) Walk(c, depth + 1);
+                }
+            };
+            Dump::Walk(win, 0);
+            win->Unlock();
+        }
+    }
+
     TestMessageRoundTrip(win, project);
     TestPianoRollQuantize(win, project, stack);
     TestPianoRollTransforms(win, project, stack);
