@@ -2,6 +2,7 @@
 
 #include "UiMetrics.h"
 #include "../storage/BfsAttr.h"
+#include "../engine/AudioFormats.h"   // which formats this build can read
 
 #include "widgets/DawButton.h"      // the kit (M1.3)
 #include <Entry.h>
@@ -42,12 +43,22 @@ public:
     }
 };
 
-// True if the path looks like an audio file we can import.
+// True if the path looks like an audio file we can import. This is only the
+// QUERY's quick filter -- the import itself decides by content
+// (AudioFormats.h), so a file listed here under the wrong extension still
+// opens correctly. A format this build has no library for is not listed: the
+// browser must never offer a file that could only fail to import.
 static bool IsAudioPath(const char* p) {
     const char* dot = std::strrchr(p, '.');
     if (!dot) return false;
-    return strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".aif") == 0
-        || strcasecmp(dot, ".aiff") == 0;
+    if (strcasecmp(dot, ".wav") == 0 || strcasecmp(dot, ".aif") == 0
+        || strcasecmp(dot, ".aiff") == 0 || strcasecmp(dot, ".aifc") == 0)
+        return true;
+    if (strcasecmp(dot, ".flac") == 0)
+        return AudioFileFormatCanRead(AudioFileFormat::Flac);
+    if (strcasecmp(dot, ".ogg") == 0)
+        return AudioFileFormatCanRead(AudioFileFormat::Ogg);
+    return false;
 }
 
 SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
