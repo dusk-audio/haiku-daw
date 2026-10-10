@@ -90,6 +90,12 @@ constexpr uint32 kMsgInputMon = 'moni';
 // (Off -> Gain -> Pan -> fx lanes). The timeline owns the mode + curve editing.
 constexpr uint32 kMsgCycleAuto = 'caut';
 
+// TimelineView -> MainWindow: open the MIDI editor on a region (M1.4). The
+// editor lives in the docked bottom pane; the main window decides whether it
+// is docked or popped out into its own window.
+// int64 "track", int64 "clip".
+constexpr uint32 kMsgOpenEditor = 'oped';
+
 // TimelineView -> MainWindow: a clip/region edit (move/resize/fade/gain/split)
 // committed; rebuild the running engine at the playhead so it takes effect live
 // (clip fades, positions, etc. are otherwise only read at Load).

@@ -61,6 +61,12 @@ static int g_checks = 0, g_fails = 0;
 
 using namespace daw;
 
+// MainWindow's private message ids the tests post (the enum is file-local
+// there, so a test that drives them states them here).
+#ifndef MSG_POP_OUT_EDITOR
+#define MSG_POP_OUT_EDITOR 'poed'
+#endif
+
 static const char* kExportName = "haiku_daw_ui_export.wav";
 static const char* kExportPath = "/tmp/haiku_daw_ui_export.wav";
 
@@ -1555,6 +1561,68 @@ static void TestWidgetKit(MainWindow* win) {
     snooze(150000);
 }
 
+// M1.4: the docked MIDI editor. The timeline posts kMsgOpenEditor (it no
+// longer creates a window itself); the main window puts the editor in the
+// bottom pane, uncollapses it, and "Pop out" hands the same region to a window
+// of its own.
+static void TestDockedEditor(MainWindow* win, Project& project,
+                             CommandStack* stack) {
+    std::printf("docked editor ...\n");
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 4800 } }, "dock-roll");
+    const TrackId tid = t.id;
+    const ClipId  cid = t.midiClips.front().id;
+    CHECK(LockedAddTrack(win, project, t));
+    (void)stack;
+
+    BMessage open(kMsgOpenEditor);
+    open.AddInt64("track", (int64)tid);
+    open.AddInt64("clip", (int64)cid);
+    win->PostMessage(&open);
+
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        BView* roll = win->FindView("roll");      // the docked PianoRollView
+        BView* dock = win->FindView("dock");
+        const bool ok = roll != nullptr && dock != nullptr
+                     && dock->Bounds().Height() > Themed(20.0f);
+        win->Unlock();
+        return ok;
+    }));
+
+    // Pop out: the dock empties and a window of its own appears (and is closed
+    // again, because closing the main window is what quits the app).
+    const int before = VisibleWindows();
+    win->PostMessage(MSG_POP_OUT_EDITOR);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        BView* roll = win->FindView("roll");
+        BView* dock = win->FindView("dock");
+        const bool ok = roll == nullptr && dock != nullptr
+                     && dock->Bounds().Height() < Themed(20.0f);
+        win->Unlock();
+        return ok;
+    }));
+    CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w == nullptr || !w->IsHidden()) { /* checked below */ }
+    }
+    // Close the popped-out window by its title.
+    if (be_app->Lock()) {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w != nullptr && w != win && w->Name() != nullptr
+                && std::strcmp(w->Name(), "Piano Roll") == 0) {
+                w->Lock();
+                w->Quit();
+                break;
+            }
+        }
+        be_app->Unlock();
+    }
+    CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1588,6 +1656,7 @@ static int32 TestThread(void*) {
     TestKeyboardFocus(win, project);
     TestThemeScale(win, project);
     TestWidgetKit(win);
+    TestDockedEditor(win, project, &stack);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);

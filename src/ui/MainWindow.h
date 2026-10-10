@@ -46,11 +46,13 @@ class BMenu;
 
 class BSplitView;   // Haiku classes live in the global namespace
 class BTabView;
+class BGroupView;
 
 namespace daw {
 
 class TimelineView;
 class InspectorView;
+class PianoRollView;
 class MeterView;
 
 // Message ids that are part of the app's wiring rather than MainWindow's
@@ -179,8 +181,14 @@ private:
     BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
     BSplitView*     fRootSplit = nullptr;   // the panes over the dock
     BTabView*       fDock      = nullptr;
+    BGroupView*     fEditorPane = nullptr;   // the dock's Editor tab content
+    PianoRollView*  fDockRoll   = nullptr;   // the docked MIDI editor, or null
+    TrackId         fDockTrack  = kInvalidTrackId;
+    ClipId          fDockClip   = kInvalidClipId;
     bool            fInspectorShown = true;
     void SetInspectorShown(bool shown);
+    void OpenDockedEditor(TrackId track, ClipId clip);
+    void PopOutEditor();                     // dock -> its own window
 
     TimelineView*   fTimeline;
     InspectorView*  fInspector = nullptr;   // left track-inspector column

@@ -379,20 +379,14 @@ void TimelineView::PasteToTrack(TrackId track, Frame at, TrackType type) {
 void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
     Track* t = fProject->FindTrack(track);
     if (!t) return;
-    const MidiClip* c = t->FindMidiClip(clip);
-    if (!c) return;
-    BPoint sp = ConvertToScreen(BPoint(HeaderWidth() + 40, RulerHeight() + 40));
-    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
-    PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame,
-                                    c->lengthFrames, c->notes, c->events,
-                                    fProject->tempoMap, fProject->sampleRate,
-                                    fProject->transport.playhead,
-                                    BMessenger(Window()));
-    roll->Show();
-    // Register the roll so the main window can push the playhead ("tapehead").
+    if (t->FindMidiClip(clip) == nullptr) return;
+    // The main window owns the editor pane (M1.4): it decides whether the
+    // editor is docked in the bottom pane or popped out into its own window,
+    // and it is the only place that knows where the dock is.
     if (BWindow* w = Window()) {
-        BMessage m(kMsgRollOpened);
-        m.AddMessenger("m", BMessenger(roll));
+        BMessage m(kMsgOpenEditor);
+        m.AddInt64("track", (int64)track);
+        m.AddInt64("clip", (int64)clip);
         w->PostMessage(&m);
     }
 }

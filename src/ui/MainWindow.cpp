@@ -22,7 +22,8 @@
 #include "../app/AppSettings.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
-#include "widgets/DawSlider.h"      // the kit (M1.3)
+#include "widgets/DawButton.h"      // the kit (M1.3)
+#include "widgets/DawSlider.h"
 #include "widgets/DawTextField.h"
 
 #include "../engine/DeviceLatency.h"
@@ -38,8 +39,11 @@
 #include "../model/RecordPlan.h"
 #include "../model/TakeNames.h"
 
+#include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <SplitView.h>
+#include <SpaceLayoutItem.h>
+#include <StringView.h>
 #include <TabView.h>
 #include <Alert.h>
 #include <Application.h>
@@ -107,6 +111,7 @@ enum {
     MSG_FOLLOW    = 'folw',   // toggle: chase the playhead
     MSG_TOGGLE_INSPECTOR = 'tins',   // show/hide the inspector pane (M1.4)
     MSG_TOGGLE_DOCK      = 'tdck',   // show/hide the docked bottom pane
+    MSG_POP_OUT_EDITOR   = 'poed',   // dock the MIDI editor out into a window
 };
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
@@ -423,6 +428,22 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fPaneSplit->SetCollapsible(0, true);
 
     fDock = new BTabView("dock", B_WIDTH_FROM_WIDEST);
+    fEditorPane = new BGroupView(B_VERTICAL, Themed(4.0f));
+    fEditorPane->SetViewColor(ColHeader());
+    {
+        BGroupView* head = new BGroupView(B_HORIZONTAL, Themed(6.0f));
+        head->SetViewColor(ColHeader());
+        BStringView* title = new BStringView("edtitle", "Editor");
+        title->SetHighColor(ColTextDim());
+        head->GroupLayout()->AddView(title);
+        head->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        DawButton* pop = new DawButton("popout", "Pop out",
+                                       new BMessage(MSG_POP_OUT_EDITOR));
+        head->GroupLayout()->AddView(pop);
+        fEditorPane->GroupLayout()->AddView(head);
+        fEditorPane->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+    }
+    fDock->AddTab(fEditorPane);
     fRootSplit = new BSplitView(B_VERTICAL, 1.0f);
     fRootSplit->AddChild(fPaneSplit, 1.0f);
     fRootSplit->AddChild(fDock, 0.0f);
@@ -603,6 +624,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case MSG_TOGGLE_INSPECTOR:
             SetInspectorShown(!fInspectorShown);
+            break;
+        case kMsgOpenEditor: {
+            int64 track = 0, clip = 0;
+            msg->FindInt64("track", &track);
+            msg->FindInt64("clip", &clip);
+            OpenDockedEditor((TrackId)track, (ClipId)clip);
+            break;
+        }
+        case MSG_POP_OUT_EDITOR:
+            PopOutEditor();
             break;
         case MSG_TOGGLE_DOCK: {
             const bool collapsed = fRootSplit->IsItemCollapsed(1);
@@ -1752,6 +1783,73 @@ void MainWindow::SetInspectorShown(bool shown) {
     if (fTimeline != nullptr) fTimeline->Invalidate();
 }
 
+// Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
+// group: replacing its second item is all "open another region" takes, and the
+// old view goes away with it.
+void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
+    Track* t = fProject->FindTrack(track);
+    if (t == nullptr) return;
+    const MidiClip* c = t->FindMidiClip(clip);
+    if (c == nullptr) return;
+
+    if (fDockRoll != nullptr) {
+        fDockRoll->RemoveSelf();
+        delete fDockRoll;
+        fDockRoll = nullptr;
+    }
+    // The roll fills the pane below the header row; the split gives it its
+    // real size, so the frame here is only a hint.
+    fDockRoll = new PianoRollView(BRect(0, 0, 600, Themed(200.0f)), track, clip,
+                                  c->startFrame, c->lengthFrames, c->notes,
+                                  c->events, fProject->tempoMap,
+                                  fProject->sampleRate,
+                                  fProject->transport.playhead,
+                                  BMessenger(this));
+    fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
+    fDockTrack = track;
+    fDockClip  = clip;
+
+    fRootSplit->SetItemCollapsed(1, false);
+    if (fDockItem) fDockItem->SetMarked(true);
+    fDock->Select(0);
+    fDockRoll->MakeFocus(true);
+    PushRollPlayhead(fProject->transport.playhead);
+}
+
+// The docked editor becomes its own window. The window is the same PianoRoll
+// the timeline used to open directly, so nothing about the editing paths
+// changes; the dock just stops hosting it.
+void MainWindow::PopOutEditor() {
+    Track* t = fProject->FindTrack(fDockTrack);
+    if (t == nullptr) return;
+    const MidiClip* c = t->FindMidiClip(fDockClip);
+    if (c == nullptr) return;
+    BPoint sp = ConvertToScreen(BPoint(InspectorWidth() + Themed(40.0f),
+                                       Themed(80.0f)));
+    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
+    PianoRoll* roll = new PianoRoll(wr, fDockTrack, fDockClip, c->startFrame,
+                                    c->lengthFrames, c->notes, c->events,
+                                    fProject->tempoMap, fProject->sampleRate,
+                                    fProject->transport.playhead,
+                                    BMessenger(this));
+    roll->Show();
+    // The window pushes the playhead through a messenger; the docked view was
+    // pushed to directly. Register it the same way the timeline used to.
+    BMessage m(kMsgRollOpened);
+    m.AddMessenger("m", BMessenger(roll));
+    PostMessage(&m);
+
+    if (fDockRoll != nullptr) {
+        fDockRoll->RemoveSelf();
+        delete fDockRoll;
+        fDockRoll = nullptr;
+        fDockTrack = kInvalidTrackId;
+        fDockClip  = kInvalidClipId;
+    }
+    fRootSplit->SetItemCollapsed(1, true);
+    if (fDockItem) fDockItem->SetMarked(false);
+}
+
 void MainWindow::FrameResized(float newWidth, float newHeight) {
     BWindow::FrameResized(newWidth, newHeight);
     // The panes are a layout's business now (M1.4); the transport bar's
@@ -2670,6 +2768,7 @@ void MainWindow::UpdateTimeReadout(Frame playhead) {
 }
 
 void MainWindow::PushRollPlayhead(Frame ph) {
+    if (fDockRoll != nullptr) fDockRoll->SetPlayhead(ph);   // docked editor
     if (!fRollMsgr.IsValid()) return;
     BMessage m(kMsgRollPlayhead);
     m.AddInt64("ph", (int64)ph);
