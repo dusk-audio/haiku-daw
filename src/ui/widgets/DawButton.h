@@ -1,10 +1,15 @@
 // DawButton / DawToggle — the kit's push button and latching toggle (M1.3).
 //
-// Both draw with Widgets.h's shared DrawButton(), so a kit button and a
-// hand-drawn one on the timeline look identical. Hover is a light wash,
-// pressed a dark one, and the focus ring is the theme accent. A DawToggle
-// keeps a value (B_CONTROL_ON/OFF) and shows it lit in its colour — the
-// M/S/R/I lamps are the same drawing with a different colour.
+// Both draw through the control look (T1), so the button matches the stock
+// Haiku one in System mode and DawControlLook's in Dark mode; hover, pressed,
+// focus and disabled come from the look's own flags. A DawToggle keeps a value
+// (B_CONTROL_ON/OFF) and shows it lit in its colour — the M/S/R/I lamps are a
+// colour the look cannot express, so a lit toggle is drawn by the control with
+// an auto-contrast label.
+//
+// The timeline's hand-drawn boxes still use Widgets.h's DrawButton(): they are
+// painted inside the lane, on the lane's own background, not laid out as
+// controls.
 #pragma once
 
 #include "DawControl.h"
@@ -32,33 +37,28 @@ public:
         Invalidate();
     }
 
+    // The control look paints the button (T1): in System mode that is the
+    // stock Haiku button, in Dark mode DawControlLook's — one call, so a kit
+    // button and a stock one can never drift apart.
+    //
+    // The one state the look cannot express is a LIT toggle: "this button
+    // means REC" is a colour, not a flag. So an on toggle is drawn here in its
+    // own colour with an auto-contrast label, exactly as the timeline's M/S/R
+    // lamps are.
     void Draw(BRect) override {
-        DrawButton(this, Bounds(), Label(), Value() == B_CONTROL_ON, fOnColor);
-        if (fDefault && Value() != B_CONTROL_ON) {   // default: accent border
-            SetHighColor(ColAccent());
-            SetPenSize(Themed(1.0f));
-            StrokeRoundRect(Bounds().InsetBySelf(0.5f, 0.5f),
-                            Themed(3.0f), Themed(3.0f));
-            SetPenSize(1.0f);
-        }
-        // States the shared drawing has no opinion about: a light wash under
-        // the cursor, a dark one while the button is held down, and a disabled
-        // button sunk most of the way into the background.
-        if (!IsEnabled()) {
-            SetDrawingMode(B_OP_ALPHA);
-            rgb_color veil = ColBackground();
-            veil.alpha = 150;
-            SetHighColor(veil);
+        const bool on = Value() == B_CONTROL_ON;
+        const rgb_color base = PanelColor();
+        if (on) {
+            SetHighColor(fOnColor);
             FillRoundRect(Bounds(), Themed(3.0f), Themed(3.0f));
-            SetDrawingMode(B_OP_COPY);
-        } else if (IsPressed() || IsHover()) {
-            SetDrawingMode(B_OP_ALPHA);
-            if (IsPressed()) SetHighColor(0, 0, 0, 70);
-            else             SetHighColor(255, 255, 255, 26);
-            FillRoundRect(Bounds(), Themed(3.0f), Themed(3.0f));
-            SetDrawingMode(B_OP_COPY);
+            SetHighColor(LabelOn(fOnColor));
+            const float tw = StringWidth(Label());
+            DrawString(Label(), BPoint(Bounds().left
+                                           + (Bounds().Width() - tw) * 0.5f,
+                                       Bounds().bottom - Themed(6.0f)));
+        } else {
+            DrawButtonThroughLook(fDefault ? BControlLook::B_DEFAULT_BUTTON : 0);
         }
-        DrawFocusRing(Bounds());
     }
 
     void MouseDown(BPoint where) override {

@@ -17,8 +17,12 @@
 
 namespace daw {
 
-class DawSlider : public BSlider {
+class DawSlider : public BSlider, public ThemeAware {
 public:
+    // The trough and the thumb come from the control look, the filled part
+    // from the theme accent, so a slider reads as a slider in both modes.
+    void ApplyTheme() override { AdoptPanelColors(this); }
+
     DawSlider(BRect frame, const char* name, const char* label,
               BMessage* message, int32 minValue, int32 maxValue,
               orientation posture = B_HORIZONTAL,
@@ -111,12 +115,17 @@ protected:
         const BRect bar = BarFrame();
         if (!bar.IsValid()) return;
         const float r = Themed(2.0f);
-        SetHighColor(ColLcd());                       // the recessed trough
-        FillRoundRect(bar, r, r);
-        SetHighColor(ColGrid());
-        StrokeRoundRect(bar, r, r);
 
-        // The filled part, up to the thumb.
+        // The recessed trough is the look's (stock in System mode, the dark
+        // well in Dark mode) ...
+        be_control_look->DrawSliderBar(this, bar, Bounds(), PanelColorOf(this),
+                                       ColLcd(),
+                                       LookFlagsOf(IsEnabled(), false, IsFocus(),
+                                                   false),
+                                       Orientation());
+        // ... and the filled part is the theme accent, in both modes: which
+        // end of the range the handle is at is the slider's whole job.
+
         const BRect thumb = ThumbFrame();
         BRect fill = bar;
         if (Orientation() == B_HORIZONTAL) {
@@ -133,40 +142,32 @@ protected:
     }
 
     void DrawThumb() override {
-        const BRect thumb = ThumbFrame();
-        SetHighColor(ColHeaderHi());
-        FillRoundRect(thumb, Themed(2.0f), Themed(2.0f));
-        SetHighColor(ColBtnBorder());
-        StrokeRoundRect(thumb, Themed(2.0f), Themed(2.0f));
-        // A light centre line, so the handle reads as a grip.
-        SetHighColor(Rgb(232, 232, 238));
+        BRect thumb = ThumbFrame();
+        be_control_look->DrawSliderThumb(this, thumb, Bounds(), PanelColorOf(this),
+                                         LookFlagsOf(IsEnabled(), false, IsFocus(),
+                                                     fDragging),
+                                         Orientation());
+        // A centre line, so the handle reads as a grip whatever the look drew.
+        SetHighColor(ColText());
         const BPoint c((thumb.left + thumb.right) * 0.5f,
                        (thumb.top + thumb.bottom) * 0.5f);
         if (Orientation() == B_HORIZONTAL)
-            StrokeLine(BPoint(c.x, thumb.top + Themed(2.0f)),
-                       BPoint(c.x, thumb.bottom - Themed(2.0f)));
+            StrokeLine(BPoint(c.x, thumb.top + Themed(3.0f)),
+                       BPoint(c.x, thumb.bottom - Themed(3.0f)));
         else
-            StrokeLine(BPoint(thumb.left + Themed(2.0f), c.y),
-                       BPoint(thumb.right - Themed(2.0f), c.y));
+            StrokeLine(BPoint(thumb.left + Themed(3.0f), c.y),
+                       BPoint(thumb.right - Themed(3.0f), c.y));
     }
 
     void DrawHashMarks() override {
         if (HashMarkCount() < 2) return;
-        const BRect area = HashMarksFrame();
-        SetHighColor(ColTextDim());
-        const int32 count = HashMarkCount();
-        for (int32 i = 0; i < count; i++) {
-            const float t = (float)i / (float)(count - 1);
-            if (Orientation() == B_HORIZONTAL) {
-                const float x = area.left + t * area.Width();
-                StrokeLine(BPoint(x, area.top + Themed(2.0f)),
-                           BPoint(x, area.bottom - Themed(1.0f)));
-            } else {
-                const float y = area.bottom - t * area.Height();
-                StrokeLine(BPoint(area.left + Themed(2.0f), y),
-                           BPoint(area.right - Themed(1.0f), y));
-            }
-        }
+        BRect area = HashMarksFrame();
+        be_control_look->DrawSliderHashMarks(this, area, Bounds(),
+                                             PanelColorOf(this), HashMarkCount(),
+                                             B_HASH_MARKS_BOTTOM,
+                                             LookFlagsOf(IsEnabled(), false,
+                                                         IsFocus(), false),
+                                             Orientation());
     }
 
     // The value text BSlider asks for (UpdateText() formats it) in the theme's

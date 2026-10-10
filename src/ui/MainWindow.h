@@ -19,6 +19,7 @@
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
+#include "Theme.h"                    // ThemeAware + the tokens (T1)
 #include "RecordController.h"         // the record state + the recorder
 #include "RenderJobs.h"              // export/freeze/region rendering
 #include "TransportController.h"      // the engine + transport state
@@ -75,9 +76,23 @@ constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';
 constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
+// View > Dark Mode: flip the look between the user's own colours and the
+// DAW's dark palette (T1). Also what the functional test posts.
+constexpr uint32 MSG_THEME_MODE       = 'thmm';
+// MainWindow -> itself, a moment after a file panel is shown: the panel builds
+// its views after Show() returns, so the themed colours go on a second time.
+constexpr uint32 MSG_THEME_STOCK      = 'thst';
 
-class MainWindow : public BWindow {
+class MainWindow : public BWindow, public ThemeAware {
 public:
+    // A mode switch re-takes every colour this window cached (the window's own
+    // background and the transport bar's readouts); the walker invalidates the
+    // rest, which draw from the tokens (T1).
+    void ApplyTheme() override;
+    // Switch the whole process — tokens, control look and every open window —
+    // and remember it. The View menu and the functional test both land here.
+    void SetThemeMode(ThemeMode mode);
+
     // The transport's method moves (M1.1) live in TransportController; it
     // reaches the widgets and the model through the window it is given.
     friend class TransportController;
@@ -177,6 +192,7 @@ private:
     // The window's panes (M1.4): the inspector/timeline split, and the docked
     // bottom pane (the editor and the browsers) under it. Both are BSplitViews,
     // so the user resizes them and the sizes persist in AppSettings.
+    BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
     BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
     BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
@@ -185,6 +201,7 @@ private:
     BGroupView*     fEditorPane = nullptr;   // the dock's body: roll or hint
     BStringView*    fDockTitle  = nullptr;   // what the dock is showing
     BView*          fDockEmpty  = nullptr;   // the hint while nothing is open
+    BStringView*    fDockHint   = nullptr;   // its text (re-coloured on a mode switch)
     DawButton*      fDockPop    = nullptr;   // Pop out (only with a region)
     PianoRollView*  fDockRoll   = nullptr;   // the docked MIDI editor, or null
     TrackId         fDockTrack  = kInvalidTrackId;

@@ -33,6 +33,10 @@ until you have **looked at screenshots of it** and fixed what you saw.
    Each test calls `Shot("name")` where it has a window up; the files are
    numbered in run order. (`screenshot` exits non-zero even when it worked —
    the "shot failed" lines are noise; the files are what count.)
+   **Run it once per theme mode** (T1): with `DAW_UI_THEME` unset the run is
+   System (the user's own colours); with `DAW_UI_THEME=dark` it is the DAW's
+   dark palette. Both runs, every shot, or the mode nobody looked at is the
+   one that ships broken.
 3. **A window you add or change gets a `Shot()`** at the point a test has it
    on screen. No test opens it yet? Add one — `tests/ui_functional_tests.cpp`
    drives every window by posted message.

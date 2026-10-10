@@ -13,6 +13,8 @@
 // restart after it) only has to look the instrument up.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Instrument.h"
 #include "../model/types.h"
 #include "../synth/Sf2ToRegions.h"
@@ -30,7 +32,7 @@ namespace daw {
 //         string "path"; int32 "preset".
 constexpr uint32 kMsgApplyInstrument = 'inst';
 
-class InstrumentWindow : public BWindow {
+class InstrumentWindow : public BWindow, public ThemeAware {
 public:
     InstrumentWindow(BRect frame, InstrumentDesc inst, TrackId track,
                      BMessenger apply);
@@ -41,6 +43,8 @@ public:
 
 private:
     void Build();
+    // T1: a mode switch re-runs the build (panel, rows and readouts).
+    void ApplyTheme() override { Build(); }
     void Apply();
 
     // Post a deferred Build(). Menu handlers MUST use this rather than calling

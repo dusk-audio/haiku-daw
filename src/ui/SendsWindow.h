@@ -7,6 +7,8 @@
 // all model mutation. Opened from a track's "Snd" header box.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Project.h"   // daw::Send
 #include "../model/types.h"
 
@@ -24,7 +26,7 @@ namespace daw {
 // int32 "sp" (preFader 0/1).
 constexpr uint32 kMsgApplySends = 'snap';
 
-class SendsWindow : public BWindow {
+class SendsWindow : public BWindow, public ThemeAware {
 public:
     // `buses` is the list of routable bus targets (id + display name).
     SendsWindow(BRect frame, std::vector<Send> sends,
@@ -36,6 +38,9 @@ public:
 
 private:
     void Rebuild();   // (re)build the UI from the local send list
+    // T1: a mode switch re-runs the build, so the panel, the hint and every
+    // row take the new colours instead of keeping the old ones.
+    void ApplyTheme() override { Rebuild(); }
     void Apply();     // post the local send list to the main window
 
     std::vector<Send>                            fSends;   // local snapshot

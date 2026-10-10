@@ -6,15 +6,19 @@
 // the label) stays stock, so converting a window is swapping the class.
 #pragma once
 
-#include "../Theme.h"
+#include "DawControl.h"   // AdoptPanelColors + the look's flag helpers
 
 #include <TextControl.h>
 #include <TextView.h>
 
 namespace daw {
 
-class DawTextField : public BTextControl {
+class DawTextField : public BTextControl, public ThemeAware {
 public:
+    // The label half sits on the panel (a cached colour), the text half is the
+    // recessed well — both re-taken on a theme change.
+    void ApplyTheme() override { TakeThemeColors(); }
+
     DawTextField(BRect frame, const char* name, const char* label,
                  const char* text, BMessage* message,
                  uint32 resizeMask = B_FOLLOW_LEFT_TOP,
@@ -28,22 +32,27 @@ public:
 
     void AttachedToWindow() override {
         BTextControl::AttachedToWindow();
-        // The panel behind the label: the lane/row colour, chosen because it
-        // sits close to every panel colour the app uses (chrome, header, lane),
-        // so the field blends wherever it is placed.
-        SetViewColor(ColLane());
-        SetLowColor(ColLane());
+        TakeThemeColors();
+    }
+
+private:
+    // The panel behind the label is the parent's, like every other kit control
+    // (a fixed lane colour was a light slab in a dark panel the moment the two
+    // modes existed). The text half is the recessed well: ColLcd is the
+    // document colour in System mode and the dark well in Dark mode, and the
+    // caret and selection come from the process colours the same way.
+    void TakeThemeColors() {
+        AdoptPanelColors(this);
         SetHighColor(ColText());
         if (TextView() != nullptr) {
-            // High = text, low = the recessed well behind it; the caret and
-            // selection come from the system colours, which the app overrides
-            // in DawApplication (dark theme), so they stay visible here.
             TextView()->SetViewColor(ColLcd());
             TextView()->SetLowColor(ColLcd());
             TextView()->SetHighColor(ColText());
             TextView()->SetFont(be_plain_font);
         }
     }
+
+public:
 
     void GetPreferredSize(float* width, float* height) override {
         if (width)  *width  = Themed(120.0f);

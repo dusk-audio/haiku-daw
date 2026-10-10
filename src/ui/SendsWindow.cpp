@@ -37,8 +37,7 @@ SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
       fTrack(track), fApply(apply) {
     // A BGroupView, because this window's contents are rebuilt whenever a
     // send is added or removed: a group layout takes children at any time.
-    BGroupView* root = new BGroupView(B_VERTICAL, Themed(6.0f));
-    root->SetViewColor(ColHeader());
+    BGroupView* root = new ThemedGroupView("root", B_VERTICAL, Themed(6.0f));
     root->GroupLayout()->SetInsets(Themed(8.0f), Themed(8.0f), Themed(8.0f),
                                    Themed(8.0f));
     fRoot = root;
@@ -93,7 +92,7 @@ void SendsWindow::Rebuild() {
             BMessage* mm = new BMessage(MSG_SDEST);
             mm->AddInt32("send", (int32)i);
             mm->AddInt64("dest", (int64)p.first);
-            BMenuItem* it = new BMenuItem(p.second.c_str(), mm);
+            BMenuItem* it = new ThemedMenuItem(p.second.c_str(), mm);
             it->SetMarked(p.first == s.dest);
             it->SetTarget(this);   // items route to this window (menu has no SetTarget)
             menu->AddItem(it);

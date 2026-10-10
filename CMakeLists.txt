@@ -42,6 +42,7 @@ add_library(daw_model
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
+    src/app/ThemePalette.cpp    # kit-free theme palette derivation (T1)
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -116,6 +117,12 @@ enable_testing()
 add_executable(model_tests tests/model_tests.cpp)
 target_link_libraries(model_tests PRIVATE daw_model)
 add_test(NAME model_tests COMMAND model_tests)
+
+# The palette derivation: the tokens of both modes, and the contrast the
+# System-mode rules have to keep on a light and a dark system panel.
+add_executable(theme_palette_tests tests/theme_palette_tests.cpp)
+target_link_libraries(theme_palette_tests PRIVATE daw_model)
+add_test(NAME theme_palette_tests COMMAND theme_palette_tests)
 
 add_executable(commandstack_tests tests/commandstack_tests.cpp)
 target_link_libraries(commandstack_tests PRIVATE daw_model)

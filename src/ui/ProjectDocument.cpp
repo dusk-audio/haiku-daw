@@ -3,6 +3,7 @@
 #include "../app/AppSettings.h"
 #include "../model/Project.h"
 
+#include <File.h>
 #include <FindDirectory.h>
 
 #include <cstdio>
@@ -72,6 +73,25 @@ bool ProjectDocument::SettingsPath(BPath& out) {
     p.Append("settings");
     out = p;
     return true;
+}
+
+// The settings as data. DawApplication reads the theme mode through this
+// before any window exists (the control look is process-wide, so it has to be
+// chosen before the first window draws), and MainWindow reads the rest on top
+// of its own defaults.
+AppSettings ProjectDocument::ReadSettings() {
+    AppSettings s;
+    BPath p;
+    if (!SettingsPath(p)) return s;
+    BFile f(p.Path(), B_READ_ONLY);
+    if (f.InitCheck() != B_OK) return s;
+    off_t size = 0;
+    if (f.GetSize(&size) != B_OK || size <= 0 || size > 65536) return s;
+    std::string text;
+    text.resize((size_t)size);
+    if (f.Read(&text[0], (size_t)size) != (ssize_t)size) return s;
+    s.Deserialize(text);   // a garbage file keeps the defaults
+    return s;
 }
 
 bool ProjectDocument::RecoveryPath(BPath& out) const {

@@ -1,9 +1,9 @@
 // DawCheckBox — the kit's tick box (M1.3).
 //
 // A BCheckBox subclass: the click, the value flip, the keyboard and the
-// B_CONTROL_ON/OFF message all stay stock, and the box and the check mark are
-// drawn with the theme (the stock look would paint a light box on the dark
-// panel).
+// B_CONTROL_ON/OFF message all stay stock, and the box and its label are drawn
+// through the control look (T1) — the stock Haiku box in System mode,
+// DawControlLook's in Dark mode.
 #pragma once
 
 #include "DawControl.h"   // AdoptPanelColors
@@ -14,8 +14,10 @@
 
 namespace daw {
 
-class DawCheckBox : public BCheckBox {
+class DawCheckBox : public BCheckBox, public ThemeAware {
 public:
+    void ApplyTheme() override { AdoptPanelColors(this); }
+
     DawCheckBox(BRect frame, const char* name, const char* label,
                 BMessage* message,
                 uint32 resizingMode = B_FOLLOW_LEFT_TOP,
@@ -43,28 +45,20 @@ public:
         BRect r(b.left + Themed(1.0f), top, b.left + Themed(1.0f) + box,
                 top + box);
 
-        const bool on = Value() == B_CONTROL_ON;
-        SetHighColor(on ? ColAccent() : ColLcd());
-        FillRoundRect(r, Themed(2.0f), Themed(2.0f));
-        SetHighColor(on ? ColAccent() : ColBtnBorder());
-        StrokeRoundRect(r, Themed(2.0f), Themed(2.0f));
+        const rgb_color base = PanelColorOf(this);
+        uint32 flags = LookFlagsOf(IsEnabled(), false, IsFocus(), false);
+        if (Value() == B_CONTROL_ON) flags |= BControlLook::B_ACTIVATED;
+        be_control_look->DrawCheckBox(this, r, b, base, flags);
 
-        if (on) {   // the tick: two strokes of a check mark
-            SetHighColor(Rgb(255, 255, 255));
-            SetPenSize(Themed(1.5f));
-            const BPoint a(r.left + box * 0.24f, r.top + box * 0.52f);
-            const BPoint m(r.left + box * 0.44f, r.top + box * 0.72f);
-            const BPoint e(r.left + box * 0.78f, r.top + box * 0.30f);
-            StrokeLine(a, m);
-            StrokeLine(m, e);
-            SetPenSize(1.0f);
-        }
-
-        SetHighColor(IsEnabled() ? ColText() : ColTextDim());
-        // Baseline: the box's centre, nudged down by the font's own half-height.
-        DrawString(Label() != nullptr ? Label() : "",
-                   BPoint(r.right + Themed(6.0f),
-                          r.top + box * 0.5f + ThemeFontSize() * 0.4f));
+        // The label, through the look: it carries the disabled colouring and
+        // the vertical centring, so the box and the text share one baseline
+        // rule in both modes.
+        const BRect labelRect(r.right + Themed(6.0f), b.top, b.right, b.bottom);
+        be_control_look->DrawLabel(this, Label() != nullptr ? Label() : "",
+                                   labelRect, b, base, flags,
+                                   BAlignment(B_ALIGN_LEFT,
+                                              B_ALIGN_VERTICAL_CENTER),
+                                   nullptr);
 
         if (IsFocus()) {
             SetHighColor(ColAccent());

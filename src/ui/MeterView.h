@@ -5,12 +5,16 @@
 // anything >= 1.0 lights the clip zone.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include <View.h>
 
 namespace daw {
 
-class MeterView : public BView {
+class MeterView : public BView, public ThemeAware {
 public:
+    void ApplyTheme() override;   // T1: the cached panel colour
+
     explicit MeterView(BRect frame);
 
     void Draw(BRect updateRect) override;

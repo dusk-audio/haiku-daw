@@ -7,6 +7,8 @@
 // sliders.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Effect.h"
 #include "../model/types.h"
 
@@ -112,7 +114,9 @@ constexpr uint32 kMsgFxParams    = 'fxpv';
 void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain);
 std::vector<EffectDesc> DecodeFxChain(const BMessage& m);
 
-class EffectsView : public BView {
+class EffectsView : public BView, public ThemeAware {
+public:
+    void ApplyTheme() override;   // T1: the cached panel colour
 public:
     // `focusSlot` >= 0 shows ONLY that insert (the channel strip opens the
     // editor on the slot that was clicked). The view still holds the WHOLE

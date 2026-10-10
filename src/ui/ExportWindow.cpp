@@ -37,7 +37,7 @@ BPopUpMenu* PickMenu(const char* name, const char* const* labels, int count,
                      int marked) {
     BPopUpMenu* menu = new BPopUpMenu(name);
     for (int i = 0; i < count; i++) {
-        BMenuItem* it = new BMenuItem(labels[i], nullptr);
+        BMenuItem* it = new ThemedMenuItem(labels[i], nullptr);
         if (i == marked) it->SetMarked(true);
         menu->AddItem(it);
     }
@@ -70,8 +70,7 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fCur(current), fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
-    BView* root = new BView("root", B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView("root", B_WILL_DRAW);
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // What to render.

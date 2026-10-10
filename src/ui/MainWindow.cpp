@@ -1,5 +1,8 @@
 #include "MainWindow.h"
 
+#include "widgets/DawControlLook.h"   // InstallControlLookForMode
+#include "widgets/DawTextField.h"
+
 #include "TimelineView.h"
 #include "InspectorView.h"
 #include "TransportBar.h"
@@ -120,11 +123,14 @@ static const TrackId kMasterFxTarget = ~(TrackId)0;
 // colour with a hairline under it, laid out by a horizontal group. BGroupView
 // would do the layout but never draws, and the line is what separates the
 // strip from the editor below it.
-class PaneHeader : public BView {
+class PaneHeader : public BView, public ThemeAware {
 public:
+    // The strip's colour is cached, so it is re-taken on a mode switch (T1).
+    void ApplyTheme() override { SetViewColor(ColHeader()); }
+
     explicit PaneHeader(const char* name)
         : BView(name, B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE) {
-        SetViewColor(ColHeader());
+        ApplyTheme();
         BGroupLayout* g = new BGroupLayout(B_HORIZONTAL, Themed(4.0f));
         SetLayout(g);
         g->SetInsets(Themed(10.0f), Themed(3.0f), Themed(4.0f), Themed(4.0f));
@@ -165,6 +171,14 @@ static void ShowPanel(BFilePanel* panel, const char* title,
     }
     if (!saveText.empty()) panel->SetSaveText(saveText.c_str());
     panel->Show();
+    // A file panel is a stock Haiku window: its background and its list read
+    // the system colours, which the app no longer rewrites (T1), so the DAW's
+    // colours go on explicitly (a no-op in System mode). Twice: the panel is
+    // still laying itself out when Show() returns, so the second pass runs a
+    // moment later on the main window's looper.
+    ThemeStockWindow(panel->Window());
+    BMessageRunner::StartSending(panel->Messenger(),
+                                 new BMessage(MSG_THEME_STOCK), 250000, 1);
 }
 
 // Snapshot the mixer strip state from the model (used to open the mixer and to
@@ -293,70 +307,77 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
     BMenu* fileMenu = new BMenu("File");
-    fileMenu->AddItem(new BMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
-    fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
+    fileMenu->AddItem(new ThemedMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
+    fileMenu->AddItem(new ThemedMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fRecentMenu = new BMenu("Open Recent");
-    fileMenu->AddItem(fRecentMenu);
+    fileMenu->AddItem(new ThemedMenuItem(fRecentMenu));
     // Save has no ellipsis: once the project has a path it writes straight to
     // it (Save As is the way to move it). Both ask when there is no path yet.
-    fileMenu->AddItem(new BMenuItem("Save", new BMessage(MSG_SAVE), 'S'));
-    fileMenu->AddItem(new BMenuItem("Save As" B_UTF8_ELLIPSIS,
+    fileMenu->AddItem(new ThemedMenuItem("Save", new BMessage(MSG_SAVE), 'S'));
+    fileMenu->AddItem(new ThemedMenuItem("Save As" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SAVE_AS), 'S', B_SHIFT_KEY));
-    fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
-    fileMenu->AddItem(new BMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
-    fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
-    fileMenu->AddItem(new BMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
-    fileMenu->AddItem(new BMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
+    fileMenu->AddItem(new ThemedMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
+    fileMenu->AddItem(new ThemedMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
+    fileMenu->AddItem(new ThemedMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
+    fileMenu->AddItem(new ThemedMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
+    fileMenu->AddItem(new ThemedMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
     // Close is the window's own quit request, so the unsaved-changes prompt
     // applies exactly as it does to the title-bar button and Cmd-Q.
-    fileMenu->AddItem(new BMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
-    fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
-    menuBar->AddItem(fileMenu);
+    fileMenu->AddItem(new ThemedMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
+    fileMenu->AddItem(new ThemedMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
+    menuBar->AddItem(new ThemedMenuItem(fileMenu));
     BMenu* editMenu = new BMenu("Edit");
-    editMenu->AddItem(new BMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
-    editMenu->AddItem(new BMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
+    editMenu->AddItem(new ThemedMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
+    editMenu->AddItem(new ThemedMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
     editMenu->AddSeparatorItem();
-    editMenu->AddItem(new BMenuItem("Paste", new BMessage(MSG_PASTE), 'V'));
-    menuBar->AddItem(editMenu);
+    editMenu->AddItem(new ThemedMenuItem("Paste", new BMessage(MSG_PASTE), 'V'));
+    menuBar->AddItem(new ThemedMenuItem(editMenu));
     BMenu* trackMenu = new BMenu("Track");
-    trackMenu->AddItem(new BMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
-    trackMenu->AddItem(new BMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
-    trackMenu->AddItem(new BMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
-    menuBar->AddItem(trackMenu);
+    trackMenu->AddItem(new ThemedMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
+    trackMenu->AddItem(new ThemedMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
+    trackMenu->AddItem(new ThemedMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
+    menuBar->AddItem(new ThemedMenuItem(trackMenu));
     BMenu* helpMenu = new BMenu("Help");
-    helpMenu->AddItem(new BMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
+    helpMenu->AddItem(new ThemedMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_ABOUT)));
-    menuBar->AddItem(helpMenu);
+    menuBar->AddItem(new ThemedMenuItem(helpMenu));
 
     BMenu* viewMenu = new BMenu("View");
-    viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
-    fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
+    viewMenu->AddItem(new ThemedMenuItem("Mixer", new BMessage(MSG_MIXER)));
+    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
     viewMenu->AddItem(fMetItem);
-    viewMenu->AddItem(new BMenuItem("Master Effects" B_UTF8_ELLIPSIS,
+    viewMenu->AddItem(new ThemedMenuItem("Master Effects" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_MASTER_FX)));
     viewMenu->AddSeparatorItem();
-    fDimItem = new BMenuItem("Monitor: Dim", new BMessage(MSG_MON_DIM));
+    fDimItem = new ThemedMenuItem("Monitor: Dim", new BMessage(MSG_MON_DIM));
     viewMenu->AddItem(fDimItem);
-    fMonoItem = new BMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
+    fMonoItem = new ThemedMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
     viewMenu->AddItem(fMonoItem);
     viewMenu->AddSeparatorItem();
     // The panes (M1.4): the inspector toggles with I, the dock with J.
-    fInspectorItem = new BMenuItem("Inspector", new BMessage(MSG_TOGGLE_INSPECTOR), 'I');
+    fInspectorItem = new ThemedMenuItem("Inspector", new BMessage(MSG_TOGGLE_INSPECTOR), 'I');
     fInspectorItem->SetMarked(true);
     viewMenu->AddItem(fInspectorItem);
-    fDockItem = new BMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
+    fDockItem = new ThemedMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
     viewMenu->AddItem(fDockItem);
     viewMenu->AddSeparatorItem();
-    viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
-    fFollowItem = new BMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
+    // The look (T1): the user's own colours and the stock Haiku controls, or
+    // the DAW's dark palette in the DAW's own windows. It moves into the
+    // Preferences window when M3.5 builds one.
+    fThemeItem = new ThemedMenuItem("Dark Mode", new BMessage(MSG_THEME_MODE));
+    fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
+    viewMenu->AddItem(fThemeItem);
+    viewMenu->AddSeparatorItem();
+    viewMenu->AddItem(new ThemedMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
+    fFollowItem = new ThemedMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
     fFollowItem->SetMarked(true);   // chase on by default
     viewMenu->AddItem(fFollowItem);
-    viewMenu->AddItem(new BMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
+    viewMenu->AddItem(new ThemedMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SHORTCUTS)));
-    viewMenu->AddItem(new BMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
+    viewMenu->AddItem(new ThemedMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_BROWSER)));
-    menuBar->AddItem(viewMenu);
+    menuBar->AddItem(new ThemedMenuItem(viewMenu));
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
     BMenu* audioMenu = new BMenu("Audio");
@@ -369,11 +390,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                       1000.0 * n / fProject->sampleRate);
         BMessage* m = new BMessage(MSG_BUFFER);
         m->AddInt32("frames", n);
-        BMenuItem* it = new BMenuItem(lbl, m);
+        BMenuItem* it = new ThemedMenuItem(lbl, m);
         if ((size_t)n == fTransportCtl.fBufferFrames) it->SetMarked(true);
         fBufMenu->AddItem(it);
     }
-    audioMenu->AddItem(fBufMenu);
+    audioMenu->AddItem(new ThemedMenuItem(fBufMenu));
     audioMenu->AddSeparatorItem();
     // Count-in: metronome bars before capture begins.
     fCountInMenu = new BMenu("Count-in");
@@ -385,14 +406,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         else        std::snprintf(lbl, sizeof(lbl), "%d bar%s", n, n > 1 ? "s" : "");
         BMessage* m = new BMessage(MSG_COUNTIN);
         m->AddInt32("bars", n);
-        BMenuItem* it = new BMenuItem(lbl, m);
+        BMenuItem* it = new ThemedMenuItem(lbl, m);
         if (n == fRecCtl.fCountInBars) it->SetMarked(true);
         fCountInMenu->AddItem(it);
     }
-    audioMenu->AddItem(fCountInMenu);
-    fMonInItem = new BMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
+    audioMenu->AddItem(new ThemedMenuItem(fCountInMenu));
+    fMonInItem = new ThemedMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
     audioMenu->AddItem(fMonInItem);
-    menuBar->AddItem(audioMenu);
+    menuBar->AddItem(new ThemedMenuItem(audioMenu));
 
     // --- Transport bar (below the menu) ---
     BRect barRect(0, 0, bounds.right, Themed(kTransportH));
@@ -406,8 +427,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fTimeView = new BStringView(BRect(Themed(218), Themed(6), Themed(354),
                                         Themed(kTransportH) - Themed(5)),
                                 "time", "1.1   0:00.000");
-    fTimeView->SetViewColor(ColLcd());
-    fTimeView->SetHighColor(ColLcdText());
     fTimeView->SetFont(&lcdFont);
     fTimeView->SetAlignment(B_ALIGN_CENTER);
     bar->AddChild(fTimeView);
@@ -417,8 +436,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fVolLbl = new BStringView(BRect(Themed(430), Themed(8), Themed(460),
                                     Themed(kTransportH) - Themed(6)),
                               "vollbl", "Vol");
-    fVolLbl->SetViewColor(ColChrome());
-    fVolLbl->SetHighColor(ColText());
     bar->AddChild(fVolLbl);
     fMaster = new BSlider(BRect(Themed(462), Themed(4), Themed(588),
                                 Themed(kTransportH) - Themed(4)),
@@ -426,24 +443,19 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
-    fMaster->SetViewColor(ColChrome());
-    fMaster->SetLowColor(ColChrome());
-    rgb_color fill = ColAccent();
-    fMaster->UseFillColor(true, &fill);
-    fMaster->SetBarColor(Rgb(20, 22, 26));
     bar->AddChild(fMaster);
 
-    // "BPM" label + tempo field (light field for legibility; affects grid/snap
-    // + metronome on the next Play).
+    // "BPM" label + tempo field (affects grid/snap + metronome on the next
+    // Play).
     fBpmLbl = new BStringView(BRect(Themed(602), Themed(8), Themed(636),
                                     Themed(kTransportH) - Themed(6)),
                                           "bpmlbl", "BPM");
-    fBpmLbl->SetViewColor(ColChrome());
-    fBpmLbl->SetHighColor(ColText());
     bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
-    fTempo = new BTextControl(BRect(Themed(638), Themed(6), Themed(704),
+    // A kit text field, so the well behind the digits is the theme's rather
+    // than a stock white box in the dark look (T1).
+    fTempo = new DawTextField(BRect(Themed(638), Themed(6), Themed(704),
                                     Themed(kTransportH) - Themed(6)),
                               "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
     fTempo->SetDivider(0.0f);
@@ -453,8 +465,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
                                       Themed(kTransportH) - Themed(6)),
                                 "loud", "M --  S --  TP --");
-    fLoudView->SetViewColor(ColChrome());
-    fLoudView->SetHighColor(ColText());
     {
         // A size down from the bar's labels: the readout has to hold three
         // signed figures in the room between the tempo field and the meter.
@@ -490,11 +500,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // saying how to open one. No tab bar while there is only one thing to
     // show -- a lone unlabelled tab was all the old BTabView added.
     fDock = new BGroupView("dock", B_VERTICAL, 0.0f);
-    fDock->SetViewColor(ColBackground());
     {
         PaneHeader* head = new PaneHeader("dockhead");
         fDockTitle = new BStringView("edtitle", "Editor");
-        fDockTitle->SetHighColor(ColText());
         BFont bold(be_bold_font);
         bold.SetSize(Themed(11.5f));
         fDockTitle->SetFont(&bold);
@@ -509,20 +517,17 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         fDock->GetLayout()->AddView(head);
     }
     fEditorPane = new BGroupView(B_VERTICAL, 0.0f);
-    fEditorPane->SetViewColor(ColBackground());
     {
-        BStringView* hint = new BStringView("dockhint",
+        fDockHint = new BStringView("dockhint",
             "Double-click a MIDI region to edit it here");
-        hint->SetHighColor(ColTextDim());
-        hint->SetAlignment(B_ALIGN_CENTER);
-        hint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+        fDockHint->SetAlignment(B_ALIGN_CENTER);
+        fDockHint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
         // Glue either side centres it (a BStringView stretched to the body
         // draws its text at the bottom), and the group is what the roll swaps
         // with, so the glue goes when the hint does.
         BGroupView* empty = new BGroupView("dockempty", B_VERTICAL, 0.0f);
-        empty->SetViewColor(ColBackground());
         empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
-        empty->GroupLayout()->AddView(hint);
+        empty->GroupLayout()->AddView(fDockHint);
         empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
         fDockEmpty = empty;
         fEditorPane->GroupLayout()->AddView(empty, 1.0f);
@@ -544,6 +549,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         .Add(fRootSplit)
         .End();
 
+    // Every colour the bar and the dock keep is taken in one place, so a mode
+    // switch and the constructor cannot drift apart (T1).
+    ApplyTheme();
     // Restore persisted preferences + window layout (after the menus exist).
     LoadSettings();
     // A restored window frame resizes the bar before the user touches anything,
@@ -723,6 +731,31 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_POP_OUT_EDITOR:
             PopOutEditor();
             break;
+        case B_COLORS_UPDATED:
+            // The user changed the Appearance while the app is running. Haiku
+            // sends this to the windows, so the main window is where the DAW
+            // follows it: new base colours, new tokens, every cached view
+            // colour re-taken — and only in System mode, which is the mode
+            // that is supposed to look like the user's system. Nothing is
+            // written back (T1).
+            if (ActiveThemeMode() == ThemeMode::System) {
+                ReadSystemBaseColors();
+                ApplyThemeToAllWindows();
+            }
+            break;
+
+        case MSG_THEME_STOCK:
+            // A stock window (a file panel) finished building its views after
+            // Show() returned: one more pass over them.
+            ThemeStockWindows();
+            break;
+
+        case MSG_THEME_MODE:
+            // View > Dark Mode: a preference, applied live and saved.
+            SetThemeMode(ActiveThemeMode() == ThemeMode::Dark ? ThemeMode::System
+                                                              : ThemeMode::Dark);
+            break;
+
         case MSG_TOGGLE_DOCK:
             SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
             break;
@@ -1432,7 +1465,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                           "for Haiku:\nmultitrack audio and MIDI, mixing, "
                           "automation,\nLV2 plugins, and offline export.",
                           DAW_VERSION_STRING);
-            BAlert* a = new BAlert("About Haiku DAW", text, "OK", nullptr,
+            BAlert* a = new ThemedAlertWindow("About Haiku DAW", text, "OK", nullptr,
                                    nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
             a->Go(nullptr);   // async, like the other alerts
             break;
@@ -1454,7 +1487,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             BPath p;
             BEntry e;
             if (fDoc.RecoveryPath(p) && (e.SetTo(p.Path()), e.Exists())) {
-                BAlert* a = new BAlert("Recover",
+                BAlert* a = new ThemedAlertWindow("Recover",
                     "Unsaved work from a previous session was found. Recover it?",
                     "Discard", "Recover");
                 if (a->Go() == 1) LoadFrom(p.Path(), /*asRecovery*/ true);
@@ -1514,7 +1547,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_SHORTCUTS: {
-            BAlert* a = new BAlert("Keyboard Shortcuts",
+            BAlert* a = new ThemedAlertWindow("Keyboard Shortcuts",
                 "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
                 "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-V paste\n"
                 "       Ctrl-D duplicate   Del delete selection   Esc clear\n"
@@ -2316,7 +2349,7 @@ void MainWindow::PrimeSoundfonts() {
         "Some instruments could not be loaded. Those tracks will play the "
         "built-in synth voice until the files are available again."
         + missing;
-    BAlert* a = new BAlert("Soundfonts", text.c_str(), "OK", nullptr, nullptr,
+    BAlert* a = new ThemedAlertWindow("Soundfonts", text.c_str(), "OK", nullptr, nullptr,
                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
     a->Go(nullptr);   // async: don't block the load
@@ -2390,8 +2423,8 @@ void MainWindow::ReportError(const char* title, const std::string& detail) {
     // Asynchronous (like the About box): a report must never block the looper,
     // and nothing here decides anything -- it is only ever a message. M1 gives
     // it the themed look; the stock alert is the honest placeholder.
-    BAlert* a = new BAlert(title, detail.c_str(), "OK", nullptr, nullptr,
-                           B_WIDTH_AS_USUAL, B_STOP_ALERT);
+    BAlert* a = new ThemedAlertWindow(title, detail.c_str(), "OK", nullptr,
+                                      nullptr, B_WIDTH_AS_USUAL, B_STOP_ALERT);
     a->SetShortcut(0, B_ESCAPE);
     a->Go(nullptr);
 }
@@ -2424,7 +2457,7 @@ void MainWindow::CollectMissingMedia() {
     }
     list += "\nLocate them, or skip and leave those clips silent.";
 
-    BAlert* a = new BAlert("Missing Media", list.c_str(), "Skip",
+    BAlert* a = new ThemedAlertWindow("Missing Media", list.c_str(), "Skip",
                            "Locate" B_UTF8_ELLIPSIS, nullptr,
                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
@@ -2521,13 +2554,13 @@ void MainWindow::RebuildRecentMenu() {
     while (fRecentMenu->CountItems() > 0)
         delete fRecentMenu->RemoveItem((int32)0);
     if (fDoc.Recent().empty()) {
-        BMenuItem* none = new BMenuItem("(none)", nullptr);
+        BMenuItem* none = new ThemedMenuItem("(none)", nullptr);
         none->SetEnabled(false);   // an empty submenu is a dead end
         fRecentMenu->AddItem(none);
         return;
     }
     for (const std::string& path : fDoc.Recent()) {
-        BMenuItem* item = new BMenuItem(
+        BMenuItem* item = new ThemedMenuItem(
             ProjectDocument::DisplayName(path).c_str(),
                                         new BMessage(MSG_OPEN_RECENT));
         item->Message()->AddString("path", path.c_str());
@@ -2542,7 +2575,7 @@ void MainWindow::RebuildRecentMenu() {
 // gives Save a silent path; this is the smallest correct answer until then).
 bool MainWindow::ConfirmDiscardChanges() {
     if (!fStack->IsDirty()) return true;
-    BAlert* a = new BAlert("Unsaved Changes",
+    BAlert* a = new ThemedAlertWindow("Unsaved Changes",
         "This project has unsaved changes.", "Cancel", "Discard", "Save",
         B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
@@ -2819,6 +2852,7 @@ void MainWindow::LoadSettings() {
     s.exportLimiter   = fExportChoices.limiter;
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
+    s.themeMode       = ActiveThemeMode();
     if (!s.Deserialize(text)) return;
 
     // The panes (M1.4). The width goes on as the inspector's preferred size
@@ -2857,6 +2891,7 @@ void MainWindow::LoadSettings() {
     fExportChoices.stems      = s.exportStems != 0;
     MarkRadio(fBufMenu, "frames", (int32)fTransportCtl.fBufferFrames);
     MarkRadio(fCountInMenu, "bars", fRecCtl.fCountInBars);
+    if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
     if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
     // Restore the window frame (clamped to something sane).
@@ -2883,6 +2918,7 @@ void MainWindow::SaveSettings() {
     s.exportLimiter   = fExportChoices.limiter;
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
+    s.themeMode       = ActiveThemeMode();
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
     // The panes as the user left them (M1.4).
@@ -2901,6 +2937,58 @@ void MainWindow::SaveSettings() {
     if (f.InitCheck() != B_OK) return;
     const std::string t = s.Serialize();
     f.Write(t.data(), t.size());
+}
+
+void MainWindow::ApplyTheme() {
+    // What this window CACHED. Everything else it draws (the timeline, the
+    // inspector, the meter, the transport glyphs) reads the tokens at draw
+    // time and only needs the invalidate the walker does.
+    //
+    // The window's own top view is what shows where no pane covers it: a
+    // BWindow has no background colour of its own to set, and the app may not
+    // change the system panel colour it would otherwise use (T1) — the
+    // layout's owner view is the seam that is left.
+    if (BLayout* layout = GetLayout()) {
+        if (BView* top = layout->Owner()) {
+            top->SetViewColor(ColBackground());
+            // SetViewColor tells the server the colour but does not repaint the
+            // view, so the window's own background has to be asked for.
+            top->Invalidate();
+        }
+    }
+
+    const rgb_color chrome = ColChrome();
+    if (fTimeView != nullptr) {
+        fTimeView->SetViewColor(ColLcd());
+        fTimeView->SetHighColor(ColLcdText());
+    }
+    for (BStringView* label : { fVolLbl, fBpmLbl, fLoudView }) {
+        if (label == nullptr) continue;
+        label->SetViewColor(chrome);
+        label->SetHighColor(ColText());
+    }
+    if (fMaster != nullptr) {
+        fMaster->SetViewColor(chrome);
+        fMaster->SetLowColor(chrome);
+        fMaster->SetBarColor(ColLcd());
+        rgb_color fill = ColAccent();
+        fMaster->UseFillColor(true, &fill);
+    }
+    if (fDock != nullptr)       fDock->SetViewColor(ColBackground());
+    if (fEditorPane != nullptr) fEditorPane->SetViewColor(ColBackground());
+    if (fDockEmpty != nullptr)  fDockEmpty->SetViewColor(ColBackground());
+    if (fDockTitle != nullptr)  fDockTitle->SetHighColor(ColText());
+    if (fDockHint != nullptr)   fDockHint->SetHighColor(ColTextDim());
+}
+
+void MainWindow::SetThemeMode(ThemeMode mode) {
+    SetActiveThemeMode(mode);
+    if (mode == ThemeMode::System)
+        ReadSystemBaseColors();
+    InstallControlLookForMode(mode);
+    ApplyThemeToAllWindows();
+    if (fThemeItem != nullptr) fThemeItem->SetMarked(mode == ThemeMode::Dark);
+    SaveSettings();   // it is a preference: it survives the quit
 }
 
 void MainWindow::UpdateTimeReadout(Frame playhead) {
