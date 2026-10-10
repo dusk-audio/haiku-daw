@@ -22,6 +22,13 @@ struct AppSettings {
     // The last few projects saved or opened, most recent first (the File
     // menu's Open Recent). At most kMaxRecent; plain paths, one `recent` line
     // each so a path with spaces survives.
+    // The M1.4 panes: the inspector column (width and whether it shows) and
+    // the docked bottom pane (the editor/browser tabs) the same.
+    bool  inspectorVisible = true;
+    float inspectorWidth   = 190.0f;
+    bool  bottomVisible    = false;
+    float bottomHeight     = 260.0f;
+
     std::vector<std::string> recentProjects;
     static constexpr size_t kMaxRecent = 10;
 

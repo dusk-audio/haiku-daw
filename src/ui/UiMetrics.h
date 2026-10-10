@@ -24,6 +24,7 @@ constexpr float kDesignTrackGap    = 1.0f;   // divider between lanes
 constexpr float kDesignHeaderWidth = 150.0f; // slim per-lane header
 constexpr float kDesignHdrMeterW   = 16.0f;  // per-track meter strip (right edge)
 constexpr float kDesignInspectorW  = 190.0f; // left inspector column
+constexpr float kDesignTransportH  = 36.0f;  // the transport strip
 
 inline float RulerHeight()    { return Themed(kDesignRulerHeight); }
 inline float TrackHeight()    { return Themed(kDesignTrackHeight); }

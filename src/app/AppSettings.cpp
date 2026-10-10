@@ -20,6 +20,8 @@ std::string AppSettings::Serialize() const {
       << "metronome " << (metronome ? 1 : 0) << "\n"
       << "monitorin " << (monitorInput ? 1 : 0) << "\n"
       << "win " << winL << " " << winT << " " << winR << " " << winB << "\n"
+      << "uiinsp " << (inspectorVisible ? 1 : 0) << " " << inspectorWidth << "\n"
+      << "uibottom " << (bottomVisible ? 1 : 0) << " " << bottomHeight << "\n"
       << "expbits "   << exportBitDepth << "\n"
       << "expdither " << (exportDither ? 1 : 0) << "\n"
       << "exprate "   << exportSampleRate << "\n"
@@ -61,6 +63,14 @@ bool AppSettings::Deserialize(const std::string& text) {
         else if (kw == "win") {
             float l, t, r, b;
             if (ls >> l >> t >> r >> b) { winL = l; winT = t; winR = r; winB = b; }
+        }
+        else if (kw == "uiinsp") {
+            int v; float w;
+            if (ls >> v >> w) { inspectorVisible = (v != 0); inspectorWidth = w; }
+        }
+        else if (kw == "uibottom") {
+            int v; float h;
+            if (ls >> v >> h) { bottomVisible = (v != 0); bottomHeight = h; }
         }
         else if (kw == "expbits")   { int v; if (ls >> v) exportBitDepth = v; }
         else if (kw == "expdither") { int v; if (ls >> v) exportDither = (v != 0); }

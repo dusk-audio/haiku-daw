@@ -29,7 +29,8 @@ namespace daw {
 
 TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
     : BView(frame, "timeline", B_FOLLOW_ALL_SIDES,
-            B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE | B_NAVIGABLE),
+            B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE | B_NAVIGABLE
+            | B_SUPPORTS_LAYOUT),
       fProject(project),
       fStack(stack),
       fFramesPerPixel(kDefaultFramesPerPixel),

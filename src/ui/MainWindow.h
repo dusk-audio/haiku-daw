@@ -44,6 +44,9 @@ class BMenuItem;
 class BTextControl;
 class BMenu;
 
+class BSplitView;   // Haiku classes live in the global namespace
+class BTabView;
+
 namespace daw {
 
 class TimelineView;
@@ -167,6 +170,17 @@ private:
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
     PeakMap*        fPeaks;          // non-owning; new takes add entries here
+
+    // The window's panes (M1.4): the inspector/timeline split, and the docked
+    // bottom pane (the editor and the browsers) under it. Both are BSplitViews,
+    // so the user resizes them and the sizes persist in AppSettings.
+    BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
+    BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
+    BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
+    BSplitView*     fRootSplit = nullptr;   // the panes over the dock
+    BTabView*       fDock      = nullptr;
+    bool            fInspectorShown = true;
+    void SetInspectorShown(bool shown);
 
     TimelineView*   fTimeline;
     InspectorView*  fInspector = nullptr;   // left track-inspector column
