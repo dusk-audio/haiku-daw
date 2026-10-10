@@ -657,12 +657,11 @@ void TimelineView::GlueAt(const Hit& hit) {
     const Track* t = fProject->FindTrack(hit.track);
     if (!t) return;
     ClipId prev = kInvalidClipId;
-    Frame  prevEnd = 0, prevStart = 0;
+    Frame  prevEnd = 0;
     if (hit.midi) {
         for (const MidiClip& c : t->midiClips) {
             if (c.id == hit.clip) break;
             prev = c.id; prevEnd = c.startFrame + c.lengthFrames;
-            prevStart = c.startFrame;
         }
         if (prev == kInvalidClipId) return;
         const MidiClip* cur = t->FindMidiClip(hit.clip);
@@ -671,13 +670,11 @@ void TimelineView::GlueAt(const Hit& hit) {
         for (const Clip& c : t->clips) {
             if (c.id == hit.clip) break;
             prev = c.id; prevEnd = c.startFrame + c.lengthFrames;
-            prevStart = c.startFrame;
         }
         if (prev == kInvalidClipId) return;
         const Clip* cur = t->FindClip(hit.clip);
         if (!cur || prevEnd < cur->startFrame) return;
     }
-    (void)prevStart;
     if (fStack->Execute(join(prev), *fProject)) {
         Invalidate();
         if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
@@ -883,7 +880,13 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
                               : "Ruler: click to seek, drag for a loop, "
                                 "Ctrl-drag for punch";
     } else if (where.x < HeaderWidth()) {
-        fHoverHeader = HeaderControlAt(TrackIndexAt(where), where);
+        // The header: a control highlight, and the track it belongs to (the
+        // drawing compares ids).
+        const int hidx = TrackIndexAt(where);
+        fHover.lane = hidx;
+        if (hidx >= 0 && hidx < (int)fProject->Tracks().size())
+            fHover.track = fProject->Tracks()[(size_t)hidx].id;
+        fHoverHeader = HeaderControlAt(hidx, where);
         if (fHoverHeader >= 0) tip = HeaderTip(fHoverHeader);
     } else {
         fHover = HitTest(where);
@@ -3349,7 +3352,8 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
 
     // Pointer feedback (M2.1), drawn last so it sits over the border: the
     // grabbed edge lights up, and the scissors show where the cut would land.
-    if (c.id == fHover.clip) {
+    // Not while a drag owns the screen (the hover state is stale then).
+    if (fHoverValid && c.id == fHover.clip) {
         if (fTool == Tool::Pointer) DrawHoverEdge(block, fHover.zone);
         DrawScissorsHover(block);
     }
@@ -3461,7 +3465,7 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             StrokeRoundRect(block, Themed(5), Themed(5));
         }
         // Pointer feedback, exactly as an audio clip gets it (M2.1).
-        if (mc.id == fHover.clip) {
+        if (fHoverValid && mc.id == fHover.clip) {
             if (fTool == Tool::Pointer) DrawHoverEdge(block, fHover.zone);
             DrawScissorsHover(block);
         }
