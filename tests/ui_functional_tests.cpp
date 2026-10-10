@@ -562,25 +562,32 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
                     (int)dlg->IsHidden(),
                     (int)(dlg->IsActive()));
     }
+    {
+        const BRect f = dlg->Frame();
+        std::printf("  DIAG dlg minimized=%d ws=%#" B_PRIx32
+                    " feel=%#" B_PRIx32 " flags=%#" B_PRIx32 " look=%#" B_PRIx32
+                    " frame %.0f,%.0f,%.0f,%.0f\n",
+                    (int)dlg->IsMinimized(),
+                    (uint32)dlg->Workspaces(), (uint32)dlg->Feel(),
+                    (uint32)dlg->Flags(), (uint32)dlg->Look(),
+                    f.left, f.top, f.right, f.bottom);
+    }
     Shot("export-dialog");
 
-    // Move the dialog clear of the main window: if it appears there, it was
-    // being drawn UNDER the main window rather than never reaching the screen.
-    if (dlg->LockWithTimeout(2000000) == B_OK) {
-        dlg->MoveTo(560, 40);
-        dlg->Unlock();
-    }
+    // Does ACTIVATING it put it on screen? That is the difference between "the
+    // app_server never mapped it" and "it is there, just not in front".
+    dlg->Activate(true);
     snooze(1500000);
     {
         const BRect f = dlg->Frame();
-        std::printf("  DIAG dialog after move %.0f,%.0f,%.0f,%.0f hidden=%d\n",
-                    f.left, f.top, f.right, f.bottom, (int)dlg->IsHidden());
+        std::printf("  DIAG dlg after activate active=%d frame %.0f,%.0f,%.0f,%.0f\n",
+                    (int)dlg->IsActive(), f.left, f.top, f.right, f.bottom);
     }
-    Shot("export-dialog-moved");
+    Shot("export-dialog-activated");
 
     // Control: a window THIS THREAD creates, same feel, nowhere near the main
-    // window. If this one draws and the dialog does not, the difference is in
-    // the dialog or where it is created; if neither draws, it is the screen.
+    // window. It draws, which is what says the difference is in the dialog or
+    // in how it is shown, not in the screen.
     BWindow* ctl = new BWindow(BRect(620, 380, 820, 500), "DiagControl",
                                B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL);
     BView* cv = new BView(ctl->Bounds(), "cv", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
@@ -588,6 +595,11 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     ctl->AddChild(cv);
     ctl->Show();
     snooze(1000000);
+    std::printf("  DIAG ctl minimized=%d ws=%#" B_PRIx32
+                " feel=%#" B_PRIx32 " flags=%#" B_PRIx32 " look=%#" B_PRIx32
+                "\n", (int)ctl->IsMinimized(),
+                (uint32)ctl->Workspaces(), (uint32)ctl->Feel(),
+                (uint32)ctl->Flags(), (uint32)ctl->Look());
     Shot("diag-control");
     if (ctl->LockWithTimeout(2000000) == B_OK) ctl->Quit();
 
