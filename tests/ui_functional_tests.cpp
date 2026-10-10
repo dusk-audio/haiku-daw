@@ -16,6 +16,7 @@
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
+#include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
 #include "../src/ui/widgets/DawKnob.h"
 #include "../src/ui/widgets/DawSlider.h"
@@ -49,6 +50,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -148,7 +150,25 @@ static bool LockedAddTrack(MainWindow* win, Project& p, const Track& t) {
     if (win->LockWithTimeout(1000000) != B_OK) return false;
     const bool ok = p.AddTrack(t);
     win->Unlock();
+    // What the app's own edit paths post after a model change: without it the
+    // lanes only repaint where the playhead sweeps, and the screen lies.
+    win->PostMessage(kMsgUiRefresh);
     return ok;
+}
+
+// A screenshot of the whole screen, for reviewing what each test leaves up.
+// Only with DAW_UI_SHOTS=<dir> set (a no-op otherwise, so a normal run's
+// timing is untouched): the pause lets the windows finish drawing, and the
+// files are numbered in run order so a directory listing reads as the run.
+static void Shot(const char* name) {
+    static const char* dir = std::getenv("DAW_UI_SHOTS");
+    static int n = 0;
+    if (dir == nullptr || dir[0] == '\0') return;
+    snooze(600000);
+    char cmd[512];
+    std::snprintf(cmd, sizeof(cmd), "screenshot -s '%s/%02d-%s.png'",
+                  dir, n++, name);
+    if (std::system(cmd) != 0) std::printf("  shot failed: %s\n", name);
 }
 
 // Visible windows: what "a window appeared" means to a user, and what the
@@ -276,6 +296,7 @@ static void TestPianoRollQuantize(MainWindow* win, Project& project,
     snooze(300000);
     BView* view = roll->FindView("roll");
     CHECK(view != nullptr);
+    Shot("pianoroll-window");
 
     if (view) {
         // What QuantizeWindow posts: 1/16, full strength, no swing.
@@ -336,6 +357,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     // Exactly one window appears (the file panel) and nothing renders yet.
     CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
     std::printf("  export: the panel is up\n");
+    Shot("export-panel");
     std::remove(kExportPath);
     CHECK(!FileExists(kExportPath));
     HideOtherWindows(win);
@@ -352,6 +374,7 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     // The window must keep answering while it renders: this track has to land.
     // (Under the lock: the looper is handling the export messages meanwhile.)
     std::printf("  export: waiting for responsiveness\n");
+    Shot("export-progress");   // the bar, if the render is still going
     size_t before = 0;
     if (win->LockWithTimeout(1000000) == B_OK) { before = project.Tracks().size(); win->Unlock(); }
     win->PostMessage(MSG_NEW_MIDI);
@@ -433,6 +456,7 @@ static void TestExportStems(MainWindow* win, Project& project) {
     opts.AddInt32("stems", 1);          // the dialog's "separate stems" box
     win->PostMessage(&opts);
     CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    Shot("stems-panel");
     HideOtherWindows(win);
 
     entry_ref base;
@@ -608,6 +632,7 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
         return v[0].velocity == (up[0].velocity - 10 > 1 ? up[0].velocity - 10 : 1);
     }));
     CHECK(stack.UndoName() == "Adjust Velocity");
+    Shot("pianoroll-transformed");
 
     roll->Lock();
     roll->Quit();
@@ -653,6 +678,7 @@ static void TestAboutBox(MainWindow* win) {
     const int32 before = VisibleWindows();
     win->PostMessage(MSG_ABOUT);
     CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    Shot("about");
     HideOtherWindows(win);   // the alert, as its OK button does
     std::printf("  version: %s\n", DAW_VERSION_STRING);
     // Non-empty only: the header is generated from CMakeLists, so the drift
@@ -704,6 +730,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
     win->PostMessage(&open);
     CHECK(WaitFor([&] { return VisibleWindows() == before + 1; },
                   30000000));
+    Shot("lv2-native-editor");
 
     // The committed write an editor posts when a gesture goes quiet: one undo
     // step, in the model.
@@ -801,6 +828,7 @@ static void TestLv2EditorWiring(MainWindow* win, Project& project,
         win->PostMessage(&open);
         CHECK(WaitFor([&] { return VisibleWindows() == before + 1; },
                       30000000));
+        Shot("lv2-param-panel");
         HideOtherWindows(win);
         CHECK(WaitQuiet());
 
@@ -843,6 +871,7 @@ static void TestFileMenuFlows(MainWindow* win, Project& project,
     CHECK(dirtyIt());
     win->PostMessage(MSG_SAVE_AS);
     CHECK(WaitFor([&] { return VisibleWindows() == 2; }));   // the panel
+    Shot("save-as-panel");
     HideOtherWindows(win);                    // the panel, as its Cancel does
     entry_ref dir;
     CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
@@ -878,6 +907,7 @@ static void TestFileMenuFlows(MainWindow* win, Project& project,
     CHECK(dirtyIt());
     win->PostMessage(MSG_NEW_PROJECT);
     CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+    Shot("unsaved-changes-alert");
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
     CHECK(WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
@@ -968,6 +998,7 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 2));       // Save
     CHECK(WaitFor([&] { return !AlertUp("Unsaved Changes"); }));
     CHECK(WaitFor([&] { return VisibleWindows() >= 2; }));   // the panel
+    Shot("quit-save-panel");
     // Still alive: no quit. Retried, not a single shot -- the window thread
     // may be busy for a moment (an autosave tick), and one slow second is not
     // the failure this is looking for.
@@ -1019,6 +1050,7 @@ static void TestUnsavedChanges(MainWindow* win, Project& project,
         return true;
     }));
     CHECK(clean);
+    Shot("opened-project");
     std::remove(openPath);
 }
 
@@ -1043,6 +1075,7 @@ static void TestErrorReports(MainWindow* win, Project& project,
     bad.AddString("name", "no_such_dir_haiku_daw/x.dawproj");
     win->PostMessage(&bad);
     CHECK(WaitFor([&] { return AlertUp("Save Project"); }));
+    Shot("save-error-alert");
     HideOtherWindows(win);                    // the alert, as its OK does
     CHECK(WaitQuiet());
 
@@ -1089,6 +1122,7 @@ static void TestErrorReports(MainWindow* win, Project& project,
     open.AddRef("refs", &ref);
     win->PostMessage(&open);
     CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
+    Shot("missing-media-alert");
     const bool skipAnswered = AnswerAlertWhenUp("Missing Media", 0);  // Skip
     std::printf("  skip answered=%d, alert still up=%d, windows=%d\n",
                 (int)skipAnswered, (int)AlertUp("Missing Media"),
@@ -1137,6 +1171,7 @@ static void TestErrorReports(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return AlertUp("Missing Media"); }));
     CHECK(AnswerAlertWhenUp("Missing Media", 1));  // Locate…
     CHECK(WaitFor([&] { return VisibleWindows() == 2; }));   // the panel
+    Shot("relink-panel");
     entry_ref found;
     CHECK(BEntry(foundPath).GetRef(&found) == B_OK);
     BMessage picked(MSG_RELINK_REF);
@@ -1240,6 +1275,7 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     CHECK(!playing());
     sendKey(" ");
     CHECK(WaitFor([&] { return playing(); }));
+    Shot("playing");
     sendKey(" ");
     CHECK(WaitFor([&] { return !playing(); }));
 
@@ -1380,6 +1416,7 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     const float yLaneB = yLaneA + TrackHeight() + TrackGap();
     click(Themed(2.0f), yLaneB);
     CHECK(WaitFor([&] { return selected() == b.id; }));
+    Shot("theme-150");
 
     // --- back at 100% the same y is lane content, not ruler: no seek.
     SetThemeScaleOverride(1.0f);
@@ -1461,6 +1498,7 @@ static void TestWidgetKit(MainWindow* win) {
     root->AddChild(knob);
     probe->Show();
     snooze(250000);
+    Shot("widget-kit");
 
     auto postMouse = [&](BView* view, uint32 what, BPoint at, int32 clicks) {
         BPoint screen(at);
@@ -1544,6 +1582,7 @@ static void TestWidgetKit(MainWindow* win) {
         probe->Unlock();
     }
     CHECK(knobValue > 10.0f);
+    Shot("widget-kit-used");
 
     // Pressed, then released outside the control: no invocation. The point is
     // outside the button but inside the window, so the message is dispatched.
@@ -1592,6 +1631,7 @@ static void TestDockedEditor(MainWindow* win, Project& project,
         win->Unlock();
         return ok;
     }));
+    Shot("docked-editor");
 
     // Pop out: the dock empties and a window of its own appears (and is closed
     // again, because closing the main window is what quits the app).
@@ -1605,6 +1645,7 @@ static void TestDockedEditor(MainWindow* win, Project& project,
             win->Unlock();
         }
         CHECK(inspGone);
+        Shot("inspector-hidden");
     }
     win->PostMessage(MSG_TOGGLE_INSPECTOR);
     snooze(200000);
@@ -1628,6 +1669,7 @@ static void TestDockedEditor(MainWindow* win, Project& project,
         return ok;
     }));
     CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    Shot("popped-out-editor");
 
     // Close it again: it is the one visible window that is not the main one.
     // (Closing the main window is what quits the app, so it stays.)
@@ -1711,6 +1753,7 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     // records.
     CHECK(elapsed < 10000000);
     snooze(2000000);            // let the timeline draw it for a while
+    Shot("big-project-playing");
     {
         BMessage key(B_KEY_DOWN);   // space again: stop
         key.AddString("bytes", " ");
@@ -1751,27 +1794,7 @@ static int32 TestThread(void*) {
                                      &peaks);
     win->Show();
     snooze(300000);
-
-    {   // TEMP: dump the view tree and its frames (layout diagnosis)
-        if (win->LockWithTimeout(1000000) == B_OK) {
-            std::printf("--- view tree (frame / hidden) ---\n");
-            struct Dump {
-                static void Walk(BView* v, int depth) {
-                    for (int i = 0; i < depth; i++) std::printf("  ");
-                    BRect f = v->Frame();
-                    std::printf("%s [%s] %.0f,%.0f %.0fx%.0f%s%s\n",
-                                v->Name() ? v->Name() : "(noname)",
-                                v->GetLayout() ? "layout" : "-",
-                                f.left, f.top, f.Width(), f.Height(),
-                                v->IsHidden() ? " HIDDEN" : "");
-                    for (int32 i = 0; i < v->CountChildren(); i++)
-                        if (BView* c = v->ChildAt(i)) Walk(c, depth + 1);
-                }
-            };
-            Dump::Walk(win, 0);
-            win->Unlock();
-        }
-    }
+    Shot("startup");
 
     TestMessageRoundTrip(win, project);
     TestPianoRollQuantize(win, project, stack);
@@ -1814,6 +1837,10 @@ int main() {
         std::printf("ui_functional_tests: no app_server - skipping\n");
         return 77;   // CTest SKIP_RETURN_CODE
     }
+    // The app's own look (main.cpp installs it the same way, before any
+    // window): without it the windows here are drawn partly by the stock look,
+    // and what the run shows is not what a user sees.
+    be_control_look = new DawControlLook();
     // A window is the only honest proof that there is a display to drive.
     BWindow* probe = new BWindow(BRect(0, 0, 40, 40), "probe",
                                  B_NO_BORDER_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
