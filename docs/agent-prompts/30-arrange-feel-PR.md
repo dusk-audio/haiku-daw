@@ -117,6 +117,55 @@ localises in one run.
 faulted the team (evidence: the `LastTest.log` above). With the lock in place
 the same run is green.
 
+### The second fault: the glyph cursors' bitmap had no owner
+
+The re-run got past the lock bug (its output now reached `  arrange: tools`) and
+then faulted again, inside the tools section. The kernel's log gave it exactly:
+
+```
+KERN: 73125: DEBUGGER: View method requires owner and doesn't have one.
+KERN: stack trace, current PC ... _kern_debugger
+KERN:   TimelineView::CursorObject(TimelineView::Pointer) + 0x523
+KERN:   TimelineView::ApplyCursor(TimelineView::Pointer)
+KERN:   TimelineView::UpdateHover(BPoint, uint32, uint32)
+KERN:   TimelineView::SetTool(TimelineView::Tool)      <- KeyDown('5'), Mute
+KERN:   TimelineView::KeyDown(char const*, int)
+KERN:   TimelineView::MessageReceived(BMessage*)
+```
+
+This one was a **real defect in the feature, not the test**: the tool glyphs are
+drawn into a 16×16 `BBitmap` so they can be cursors, and
+`BBitmap(BRect, color_space)` defaults `acceptsViews` to **false**
+(`Bitmap.h:52`). Without `B_BITMAP_ACCEPTS_VIEWS` the bitmap has no off-screen
+window, `BBitmap::AddChild` silently does nothing (`Bitmap.cpp:886`), so the
+drawing view has **no owner** — and the first `BView` call it makes trips
+`_CheckOwnerLockAndSwitchCurrent()`'s assertion (`View.cpp:6870`). Dismissing
+that dialog is `SIGKILLTHR`, i.e. ctest's "Signal 21".
+
+Fixed in `9926399`: the bitmap is built with `acceptsViews`, locked **before**
+`AddChild` (the order `BBitmap` requires), and the glyph cursor fails soft if
+either step fails.
+
+**Mutation check:** reverting `acceptsViews` to false reproduces the fault with
+the same syslog line and stack; with it the suite passes.
+
+That is also why the test now *applies* every glyph cursor (pencil … fade, plus
+the slip cursor under Alt) instead of only mapping them through `CursorFor`: the
+mapping is pure and never crashed, so only applying a cursor reaches
+`CursorObject`. A fault is not something a `CHECK` can catch for the next
+reader — the run has to reach the code.
+
+### Handling a faulted run (VM hygiene)
+
+A fault leaves Haiku's error dialog up, and every later run on that machine
+hangs behind it (ctest reports `Signal 21`, which is the dialog's Terminate, not
+the fault). The runs now take a screenshot before and after, clear the dialog
+with `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp 'sendkey ret'`
+(a keyboard event, not a settings change — the debug server's own settings are
+never touched), and `rm -f` the recovery file. The lesson is also written into
+`docs/HANDOFF.md`'s dev-loop section, with the syslog one-liner that prints the
+assertion and the stack, so the next agent inherits it instead of the dialog.
+
 ### Numbers
 
 | Check | Result |
