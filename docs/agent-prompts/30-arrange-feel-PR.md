@@ -339,9 +339,13 @@ accepted dark shots look like (`docs/agent-prompts/shots-25/dark`,
 `shots-26/dark`), so it is the established dark look, not a regression from this
 branch.
 
-The pass was re-run after the branch's last code commit and diffed shot by shot
-against the one reviewed above: **identical except the desktop clock** (a 125x12 px
-corner), so what this record describes is what the final revision renders.
+Both passes were re-run after the branch's last code commit and diffed shot by
+shot against the ones reviewed above. **Every shot that shows this package's
+change is identical except the desktop clock** (a 125x12 px corner): the seven
+`arrange-*` shots plus `theme-150`, in both modes. (Some of the OTHER tests'
+shots differ between runs for their own reasons — the humanize transform draws
+from `system_time()`, alerts open where the pointer is — which is pre-existing
+per-run variance, not a rendering difference.)
 
 **What I could not verify on the VM:** the cursor *glyphs* as the user sees them
 (there is no interactive mouse; the mapping is asserted through `CursorFor` and
