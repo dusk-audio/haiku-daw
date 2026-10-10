@@ -56,10 +56,11 @@ Branch `feature/midi-expression` off `master`. Spec: `32-midi-expression.md`.
 | host `ctest --test-dir build-host` | 53/53 green (`midi_expression_tests` 61 checks, `sampler_tests` 122, `exporter_tests` 91, `projectio_tests` 156, `synth_tests` and `midicontrol_tests` unchanged and green) |
 | ASan/UBSan (`b-asan`, clean reconfigure) | build exit 0, 53/53 green |
 | `scripts/haiku_syntax_check.sh` | stock list on `master`'s copy: 9 OK + 1 pre-existing FAIL (`src/ui/EffectsWindow.cpp`, `<Screen.h>` → `<Accelerant.h>` is not on its include path — `feature/lv2-state` fixes that, and the file is untouched here). The equivalent sweep of **all 65 Haiku-compiled sources** with that fix plus `-DDAW_HAVE_LV2=1` (also from `feature/lv2-state`'s copy, and not cherry-pickable onto master's older script): **0 FAIL**. |
-| VM `build` ctest | TBD |
-| VM `build-off` ctest | TBD |
-| VM `ui_functional_tests` | TBD |
-| `DAW_UI_SHOTS` review | TBD |
+| VM `build` ctest | 55/55 passed (23.3 s), `ui_functional_tests` 17.7 s |
+| VM `build-off` ctest | 51/51 passed (21.0 s), `ui_functional_tests` 16.6 s |
+| VM `ui_functional_tests` | **226 checks, 0 failures** (210 before this package; the new `test_piano_roll_cc_lane` adds 16) |
+| `DAW_UI_SHOTS` review | 26 shots taken and pulled; `02-pianoroll-cc-lane` and `03-pianoroll-cc-point` reviewed at full size and zoomed — the review found a real bug (the caption read `CC1` for the mod wheel), fixed in `c43b594`, and the re-run's shots show `Mod` |
+| VM checkout after the runs | `git rev-parse HEAD` = `c43b594` (the branch), so no run tested another tree; `grep -A 10 DEBUGGER /boot/system/var/log/syslog` names only the first faulted run, nothing since the fix |
 
 ## Mutation checks (each: break it, watch the named test fail, restore)
 
@@ -74,7 +75,8 @@ Branch `feature/midi-expression` off `master`. Spec: `32-midi-expression.md`.
 | 7 | `sustain-window` — ignore the region-window cap | `midi_expression_tests` (4 FAIL) |
 | 8 | `sustain-restrike` — drop the re-strike cut | `midi_expression_tests` (4 FAIL) |
 | 9 | `playback-notes` — `CollectPlaybackNotes` skips the pedal | `exporter_tests` (2 FAIL) |
-| 10 | `lane-controller` — the lane writes a fixed CC7 whatever it shows | `ui_functional_tests` (VM) |
+| 10 | `lane-controller` — the lane writes a fixed CC7 whatever it shows | `ui_functional_tests` on the VM: 221 checks, **2 failures** (`sawCc1`, `differs`), exit 1 |
+| 11 | `lane-label` — the caption stops naming the controller | `ui_functional_tests` on the VM: 226 checks, **1 failure** (`laneLabel() == "Mod"`), exit 1 |
 
 The live-input path (`UpdateLiveVoices`) is Haiku-only and cannot be
 mutation-checked on the host; it is compile-checked (`haiku_syntax_check.sh`)
@@ -84,7 +86,25 @@ device) — the live path's evidence is that it renders through the same
 
 ## UI review (UI_GUIDELINES §1/§3)
 
-TBD — shots and what was fixed.
+Shots taken (`DAW_UI_SHOTS`, dark theme as `main.cpp` sets up), all 26 opened;
+the two that show this change were reviewed at full size and zoomed:
+
+- `02-pianoroll-cc-lane` — the roll with the lane switched to CC1: the button
+  is tinted (a controller lane), the lane strip is empty, nothing overlaps, the
+  caption fits its rect. **This is where the caption bug showed**: it read
+  `CC1`, not `Mod` (`SetLaneCc` drew the buffer while `LaneLabelFor` returned
+  the name without copying it). Fixed in `c43b594`, and the caption is now
+  required to agree with the lane by the functional test
+  (`laneLabel() == "Mod"/"Sus"/"CC74"/"Vel"`) — the check that would have
+  caught it without a screenshot.
+- `03-pianoroll-cc-point` — the same lane after a click: the staircase holds
+  127 from frame 0 (the level the engine renders, `CcDefault` for the fallback)
+  with its handle at the point, inside the lane, nothing clipped.
+
+Also opened `01-pianoroll-window` and the main-window shots
+(`00-startup`, `14-playing`, `18-docked-editor`, `21-big-project-playing`) to
+confirm nothing else about the roll or a lane changed: the velocity lane and
+its lollipops are untouched, the button's rect and the toolbar are unchanged.
 
 ## The first run of the new UI test faulted (and what it taught)
 
