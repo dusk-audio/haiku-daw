@@ -180,14 +180,38 @@ assertion and the stack, so the next agent inherits it instead of the dialog.
 
 ## Mutation checks
 
-Host (each was applied, watched to fail, reverted):
+Host (each applied, watched to fail, reverted, named in `c6255d9`):
 
 - `SnapGrid.h`: triplet multiplier 1.5 → 1.0 — 4 snap checks failed.
 - `Commands.cpp` (`JoinableSuccessor`): the gap refusal bypassed — 4 failed.
 - `Commands.cpp` (`JoinClipsCommand::Do`): the seam fade-out left in place — 1.
 - `Commands.cpp` (`JoinMidiClipsCommand::Do`): the rebase delta zeroed — 2.
 
-VM (each applied, watched to fail, reverted) — see below.
+VM, one mutation per suite run (applied, watched to fail, reverted; driven by a
+throwaway commit object so the branch is untouched) — numbers below.
+
+## The failures the first diagnostic run found, and what each fix was
+
+The first full run (319 checks) came back with 16 failures and no fault. Three
+were real:
+
+- `HitTest` read the modifiers from the window's **current message**, so
+  `CursorFor(where, B_CONTROL_KEY)` could not ask for the Ctrl zone and answered
+  `Move` where the caller wanted `Gain`/`Slip` (`7a24567`). The zone depends on
+  the modifiers, so they are a parameter now.
+- The test focused the timeline with a **lone mouse-down**, leaving a
+  rubber-band gesture live; the next click's mouse-up committed a band-select
+  over a zero-height rect, selecting a clip nobody meant — and split-at-playhead
+  then honoured that selection and did nothing, which cascaded into six more
+  checks. It clicks this track's empty lane now (a full click) and asserts the
+  selection is empty before going on.
+- The Ctrl+wheel check asserted the **wrong direction** (Haiku's wheel delta is
+  positive rolling down, so wheel-up zooms in). Both directions are driven.
+
+The rest of the fixes were hygiene: the scrollbar check sends the thumb to the
+far end before dragging it back (SetValue ignores a value it is already at) and
+prints the values; the test restores the pointer tool, the horizontal scroll and
+the dock's open/shut state, because the NEXT test measures this window.
 
 ## Screenshots
 
