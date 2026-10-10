@@ -1938,12 +1938,14 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     std::printf("  arrange: zoom anchor (pointer)\n");
     {
         // Scroll away from the content's start first: at scroll 0 a zoom-in
-        // cannot keep an anchor put (the scroll has nowhere to go but 0), which
-        // is correct and not what this check is about.
+        // cannot keep an anchor put (the scroll has nowhere to go but 0). Not
+        // too far, either: the scroll ceiling is the content end (the
+        // scroll-past-the-end rule), and a zoom that would cross it is clamped,
+        // which moves the anchor -- correct behaviour, but not what this checks.
         const float anchorX = HeaderWidth() + Themed(300.0f);
         if (win->LockWithTimeout(1000000) == B_OK) {
             if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
-                v->ScrollToFrame(500000);
+                v->ScrollToFrame(50000);
             win->Unlock();
         }
         postMouse(B_MOUSE_MOVED, BPoint(anchorX, laneMid));
