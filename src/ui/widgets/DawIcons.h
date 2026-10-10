@@ -89,6 +89,65 @@ inline void DrawTool(BView* v, BRect r, int tool, rgb_color color) {
     v->SetPenSize(1.0f);
 }
 
+// The arrange tool palette (M2.3), in kArrangeToolNames order: Pointer, Pencil,
+// Scissors, Glue, Mute, Fade. The four tools the piano roll also has are the
+// SAME shapes as DrawTool draws above, so the two palettes read as one set; a
+// cursor for a tool is drawn from this function too, so a button and the pointer
+// it selects can never drift apart.
+inline void DrawArrangeTool(BView* v, BRect r, int tool, rgb_color color) {
+    if (!r.IsValid()) return;
+    switch (tool) {
+        case 1:  icons::DrawTool(v, r, 1, color); return;   // pencil
+        case 2:  icons::DrawTool(v, r, 4, color); return;   // scissors
+        case 3:  icons::DrawTool(v, r, 5, color); return;   // glue
+        default: break;
+    }
+    v->SetHighColor(color);
+    const float pen = std::max(Themed(1.2f), 1.0f);
+    v->SetPenSize(pen);
+    switch (tool) {
+        case 0: {   // pointer: the roll's arrow, so the two palettes agree
+            icons::DrawTool(v, r, 0, color);
+            break;
+        }
+        case 4: {   // mute: a speaker cone with a stroke through it
+            BPoint cone[3] = { P(r, 0.26f, 0.42f), P(r, 0.26f, 0.62f),
+                               P(r, 0.46f, 0.76f) };
+            v->FillPolygon(cone, 3);
+            v->FillRect(BRect(P(r, 0.16f, 0.46f), P(r, 0.28f, 0.58f)));
+            v->StrokeLine(P(r, 0.54f, 0.34f), P(r, 0.80f, 0.66f));
+            v->StrokeLine(P(r, 0.80f, 0.34f), P(r, 0.54f, 0.66f));
+            break;
+        }
+        default: {  // 5 fade: a rising ramp under a clip's corner
+            BPoint ramp[3] = { P(r, 0.20f, 0.80f), P(r, 0.80f, 0.80f),
+                               P(r, 0.80f, 0.22f) };
+            v->StrokeLine(P(r, 0.20f, 0.80f), P(r, 0.80f, 0.24f));
+            v->StrokePolygon(ramp, 3);
+            break;
+        }
+    }
+    v->SetPenSize(1.0f);
+}
+
+// The slip glyph (M2.1's slip cursor): a clip's two edges with the material
+// free to slide between them. Not a palette tool -- Alt-drag on an audio clip
+// is the gesture.
+inline void DrawSlipGlyph(BView* v, BRect r, rgb_color color) {
+    if (!r.IsValid()) return;
+    v->SetHighColor(color);
+    const float pen = std::max(Themed(1.2f), 1.0f);
+    v->SetPenSize(pen);
+    v->StrokeLine(P(r, 0.18f, 0.24f), P(r, 0.18f, 0.76f));   // left edge
+    v->StrokeLine(P(r, 0.82f, 0.24f), P(r, 0.82f, 0.76f));   // right edge
+    v->StrokeLine(P(r, 0.34f, 0.50f), P(r, 0.66f, 0.50f));   // the sliding band
+    BPoint l[3] = { P(r, 0.34f, 0.32f), P(r, 0.34f, 0.68f), P(r, 0.24f, 0.50f) };
+    BPoint rr[3] = { P(r, 0.66f, 0.32f), P(r, 0.66f, 0.68f), P(r, 0.76f, 0.50f) };
+    v->FillPolygon(l, 3);
+    v->FillPolygon(rr, 3);
+    v->SetPenSize(1.0f);
+}
+
 // Transport glyphs (the strip draws its own, at its own size; these are for
 // menus and dialogs that need the same shapes small).
 inline void DrawTransport(BView* v, BRect r, int which, rgb_color color) {

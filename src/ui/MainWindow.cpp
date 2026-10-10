@@ -500,7 +500,12 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // made narrower again once it had been wide, and on a small screen its
     // right end (the dock's own Pop out and x) sat off the screen entirely.
     fInspector->SetExplicitMinSize(BSize(Themed(120.0f), Themed(80.0f)));
-    fTimeline->SetExplicitMinSize(BSize(Themed(240.0f), Themed(80.0f)));
+    // ...and the timeline's is the arrange tool strip (M2.3) plus a little: the
+    // strip is drawn inside the timeline, so a narrower pane would clip its own
+    // buttons. The height keeps the tool strip + ruler + one lane usable.
+    fTimeline->SetExplicitMinSize(
+        BSize(std::max(Themed(240.0f), ArrToolStripWidth() + Themed(8.0f)),
+              Themed(80.0f)));
     fPaneSplit->AddChild(fInspector, 0.0f);   // keeps its width...
     fPaneSplit->AddChild(fTimeline, 1.0f);    // ...the timeline takes the rest
     fPaneSplit->SetCollapsible(0, true);

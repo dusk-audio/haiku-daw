@@ -78,6 +78,9 @@ using namespace daw;
 #ifndef kMsgMixFxAdd
 #define kMsgMixFxAdd 'mxfa'   // the channel strip's "add an effect" (T2: docked)
 #endif
+#ifndef MSG_UNDO_TEST
+#define MSG_UNDO_TEST 'undo'  // Edit > Undo (MainWindow's MSG_UNDO)
+#endif
 
 static const char* kExportName = "haiku_daw_ui_export.wav";
 static const char* kExportPath = "/tmp/haiku_daw_ui_export.wav";
@@ -1397,14 +1400,17 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     SetThemeScaleOverride(1.5f);
     CHECK(std::fabs(TrackHeight()    - 111.0f) < 0.01f);
     CHECK(std::fabs(RulerHeight()    -  42.0f) < 0.01f);
+    CHECK(std::fabs(ToolbarHeight()  -  42.0f) < 0.01f);
     CHECK(std::fabs(TrackGap()       -   1.5f) < 0.01f);
     CHECK(std::fabs(HeaderWidth()    - 225.0f) < 0.01f);
     CHECK(std::fabs(InspectorWidth() - 285.0f) < 0.01f);
 
-    // ... and the view draws and hit-tests with them: a click 7 design-pixels
-    // below the DESIGN ruler (y = 35, inside the 150% ruler) seeks.
+    // ... and the view draws and hit-tests with them: a click in the middle of
+    // the ruler seeks. The y is the ruler's own middle through Themed(), so it
+    // lands in the ruler at any scale -- and outside it (in a lane) at 100%,
+    // which the second half of this test uses.
     const float x = HeaderWidth() + Themed(50.0f);
-    const float yRuler = kDesignRulerHeight + 7.0f;         // 35
+    const float yRuler = ToolbarHeight() + RulerHeight() * 0.5f;
     if (win->LockWithTimeout(1000000) == B_OK) {
         project.transport.playhead = 0;
         win->Unlock();
@@ -1414,7 +1420,7 @@ static void TestThemeScale(MainWindow* win, Project& project) {
 
     // A lane click at the scaled geometry selects that lane (the click target
     // and the drawn lane are one computation).
-    const float yLaneA = RulerHeight()
+    const float yLaneA = TimelineContentTop()
                        + (float)iA * (TrackHeight() + TrackGap())
                        + TrackHeight() * 0.5f;
     click(Themed(2.0f), yLaneA);   // header gutter, left of the M/S/R buttons
@@ -1428,6 +1434,8 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     SetThemeScaleOverride(1.0f);
     CHECK(std::fabs(TrackHeight() - 74.0f) < 0.01f);
     CHECK(std::fabs(RulerHeight() - 28.0f) < 0.01f);
+    CHECK(std::fabs(ToolbarHeight() - 28.0f) < 0.01f);
+    CHECK(std::fabs(TimelineContentTop() - 56.0f) < 0.01f);
     if (win->LockWithTimeout(1000000) == B_OK) {
         project.transport.playhead = 0;
         win->Unlock();
@@ -1437,6 +1445,576 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     CHECK(playhead() == 0);
 
     SetThemeScaleOverride(0.0f);   // back to the real font
+}
+
+// M2.1-2.3: the arrange window's feel. The tool palette and its keys, the snap
+// grid and its indicator, split-at-playhead, each tool's gesture, the pointer
+// feedback (hit zones and the cursor each one wants), the mouse-anchored zoom,
+// scrolling past the end, the real scrollbars and the piano roll following the
+// playhead.
+static void TestArrangeFeel(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_arrange_feel\n");
+
+    // A MIDI track of its own at the end, with one 2-bar region far enough in
+    // that there is empty lane on both sides of it. 120 BPM @ 48k: a beat is
+    // 24000 frames, so the region is beats 2..4.
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Midi;
+    t.name = "arrange";
+    MidiClip mc;
+    mc.id = project.NextClipId();
+    mc.startFrame   = 48000;
+    mc.lengthFrames = 48000;
+    mc.notes.push_back({ 60, 100, 2000, 1000 });
+    t.midiClips.push_back(mc);
+    CHECK(LockedAddTrack(win, project, t));
+
+    TimelineView* tv = nullptr;
+    int laneIdx = -1;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
+        laneIdx = project.IndexOfTrack(t.id);
+        win->Unlock();
+    }
+    CHECK(tv != nullptr);
+    if (!tv) return;
+    CHECK(laneIdx >= 0);
+
+    // Focus the timeline the way a user would; every bare key below arrives
+    // through MainWindow's router only because of this.
+    auto click = [&](float x, float y) {
+        BPoint screen(x, y);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(BPoint(x, y));
+            win->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 1);
+            m.AddPoint("where", BPoint(x, y));
+            m.AddPoint("screen_where", screen);
+            BMessenger(tv).SendMessage(&m);
+        }
+    };
+    auto postMouse = [&](uint32 what, BPoint at) {
+        BPoint screen = at;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(at);
+            win->Unlock();
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+        m.AddInt32("clicks", 1);
+        m.AddPoint("where", at);
+        m.AddPoint("screen_where", screen);
+        BMessenger(tv).SendMessage(&m);
+    };
+    auto sendKey = [&](const char* bytes) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    };
+    // Read something out of the view under the window lock.
+    auto readTool = [&] {
+        int idx = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                idx = (int)v->ActiveTool();
+            win->Unlock();
+        }
+        return idx;
+    };
+    auto regions = [&] {
+        int n = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            n = tr ? (int)tr->midiClips.size() : -1;
+            win->Unlock();
+        }
+        return n;
+    };
+
+    // Top of the lane stack, whatever earlier flows scrolled to.
+    BMessage topWheel(B_MOUSE_WHEEL_CHANGED);
+    topWheel.AddFloat("be:wheel_delta_y", -100000.0f);
+    BMessenger(tv).SendMessage(&topWheel);
+    snooze(120000);
+
+    BMessage focusClick(B_MOUSE_DOWN);
+    focusClick.AddInt32("buttons", 1);
+    focusClick.AddPoint("where", BPoint(HeaderWidth() + 40.0f,
+                                       TimelineContentTop() + 40.0f));
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        focusClick.AddPoint("screen_where",
+                            tv->ConvertToScreen(BPoint(
+                                HeaderWidth() + 40.0f,
+                                TimelineContentTop() + 40.0f)));
+        win->Unlock();
+    }
+    BMessenger(tv).SendMessage(&focusClick);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus()) != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    // The lane's geometry, as the view computes it. The track is the last one
+    // added and earlier tests have filled the stack, so scroll to the BOTTOM of
+    // it first: at 0 the lane would be below the pane and a synthetic click's
+    // "screen_where" would not land on the view at all.
+    BMessage bottomWheel(B_MOUSE_WHEEL_CHANGED);
+    bottomWheel.AddFloat("be:wheel_delta_y", 100000.0f);
+    BMessenger(tv).SendMessage(&bottomWheel);
+    snooze(120000);
+    float scrollY = 0.0f;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+            scrollY = v->ScrollY();
+        win->Unlock();
+    }
+    const float laneTop = TimelineContentTop() - scrollY
+                        + (float)laneIdx * (TrackHeight() + TrackGap());
+    const float laneMid = laneTop + TrackHeight() * 0.7f;   // below the top band
+    const float clipLeft  = tv->FrameToX(mc.startFrame);
+    const float clipRight = tv->FrameToX(mc.startFrame + mc.lengthFrames);
+    // The whole lane must be on screen, or the clicks below are not delivered.
+    float viewH = 0.0f;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        viewH = tv->Bounds().Height();
+        win->Unlock();
+    }
+    CHECK(laneTop >= TimelineContentTop());
+    CHECK(laneTop + TrackHeight() <= viewH + 1.0f);
+
+    // --- 1. The tool palette: the keys select, and the palette button does too.
+    sendKey("3");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Scissors; }));
+    sendKey("5");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Mute; }));
+    sendKey("1");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Pointer; }));
+    // The Glue button (4th of six, at the roll's button pitch).
+    click(Themed(4.0f) + 3 * Themed(24.0f) + Themed(11.0f), Themed(14.0f));
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Glue; }));
+    Shot("arrange-palette");
+    sendKey("1");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Pointer; }));
+
+    // --- 2. Pointer feedback: the hit zones and the cursor each one wants.
+    {
+        struct Expect { float x, y; TimelineView::Zone zone; const char* what; };
+        const Expect zones[] = {
+            { clipLeft + Themed(2.0f), laneTop + Themed(5.0f),
+              TimelineView::Zone::FadeIn,  "top-left corner fades" },
+            { clipLeft + Themed(2.0f), laneMid,
+              TimelineView::Zone::TrimLeft, "left edge trims" },
+            { clipRight - Themed(2.0f), laneMid,
+              TimelineView::Zone::TrimRight, "right edge trims" },
+            { (clipLeft + clipRight) * 0.5f, laneMid,
+              TimelineView::Zone::Body, "the middle moves" },
+        };
+        for (const Expect& e : zones) {
+            TimelineView::Hit h;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                h = tv->HitTest(BPoint(e.x, e.y));
+                win->Unlock();
+            }
+            std::printf("  hit[%s] lane=%d zone=%d\n", e.what, h.lane, (int)h.zone);
+            CHECK(h.track == t.id);
+            CHECK(h.clip == mc.id);
+            CHECK(h.zone == e.zone);
+        }
+        // The cursor follows the tool and the modifiers (M2.1's set: trim,
+        // fade, gain, move, split, slip).
+        const BPoint mid((clipLeft + clipRight) * 0.5f, laneMid);
+        const BPoint left(clipLeft + Themed(2.0f), laneMid);
+        auto cursorAt = [&](const BPoint& p, uint32 mods, int tool) {
+            TimelineView::Pointer c = TimelineView::Pointer::Default;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (TimelineView* v =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                    v->SetTool((TimelineView::Tool)tool);
+                    c = v->CursorFor(p, mods);
+                }
+                win->Unlock();
+            }
+            return c;
+        };
+        CHECK(cursorAt(mid, 0, 0) == TimelineView::Pointer::Move);
+        CHECK(cursorAt(left, 0, 0) == TimelineView::Pointer::Trim);
+        CHECK(cursorAt(BPoint(left.x, laneTop + Themed(5.0f)), 0, 0)
+              == TimelineView::Pointer::Fade);
+        CHECK(cursorAt(mid, B_CONTROL_KEY, 0) == TimelineView::Pointer::Gain);
+        CHECK(cursorAt(mid, B_OPTION_KEY, 0) == TimelineView::Pointer::Slip);
+        CHECK(cursorAt(mid, 0, 2) == TimelineView::Pointer::Split);   // scissors
+        CHECK(cursorAt(mid, 0, 5) == TimelineView::Pointer::Fade);    // fade tool
+        // Restore the pointer tool through the same path.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                v->SetTool(TimelineView::Tool::Pointer);
+            win->Unlock();
+        }
+        // The hover highlight is drawn for exactly this state: park the pointer
+        // on the left edge and let the view repaint.
+        postMouse(B_MOUSE_MOVED, left);
+        snooze(150000);
+        Shot("arrange-hover");
+    }
+
+    // --- 3. Split at the playhead (S), one undo step.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 72000;   // beat 3, inside the region
+        win->Unlock();
+    }
+    sendKey("s");
+    CHECK(WaitFor([&] { return regions() == 2; }));
+    {
+        Frame a = -1, b = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            if (tr && tr->midiClips.size() == 2) {
+                a = tr->midiClips[0].startFrame + tr->midiClips[0].lengthFrames;
+                b = tr->midiClips[1].startFrame;
+            }
+            win->Unlock();
+        }
+        CHECK(a == 72000);            // the cut landed on the playhead
+        CHECK(b == 72000);            // and the halves meet exactly
+    }
+    // One gesture, one undo entry: undo puts the single region back.
+    win->PostMessage(MSG_UNDO_TEST);  // Edit > Undo
+    CHECK(WaitFor([&] { return regions() == 1; }));
+    sendKey("s");                     // ...and it can be done again
+    CHECK(WaitFor([&] { return regions() == 2; }));
+
+    // --- 4. Scissors cuts where it is clicked; Glue puts it back.
+    sendKey("3");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Scissors; }));
+    click(tv->FrameToX(54000), laneMid);          // inside the first half
+    CHECK(WaitFor([&] { return regions() == 3; }));
+    sendKey("4");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Glue; }));
+    click(tv->FrameToX(50000), laneMid);          // glue the halves back
+    CHECK(WaitFor([&] { return regions() == 2; }));
+    Shot("arrange-clips");
+
+    // --- 5. Pencil draws a region on empty lane, snapped to the grid.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (TimelineView* v =
+                dynamic_cast<TimelineView*>(win->FindView("timeline")))
+            v->SetSnapGrid({ SnapKind::Quarter, false });
+        win->Unlock();
+    }
+    sendKey("2");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Pencil; }));
+    const float penX0 = tv->FrameToX(110000);     // past the region's end
+    const float penX1 = tv->FrameToX(170000);
+    postMouse(B_MOUSE_DOWN, BPoint(penX0, laneMid));
+    postMouse(B_MOUSE_MOVED, BPoint(penX1, laneMid));
+    postMouse(B_MOUSE_UP, BPoint(penX1, laneMid));
+    CHECK(WaitFor([&] { return regions() == 3; }));
+    {
+        Frame start = -1, len = 0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            if (tr)
+                for (const MidiClip& c : tr->midiClips)
+                    if (c.startFrame > 100000) { start = c.startFrame;
+                                                 len = c.lengthFrames; }
+            win->Unlock();
+        }
+        CHECK(start == 120000);     // 110000 snapped to the quarter-note grid
+        CHECK(len == 48000);        // 170000 snapped to 168000, minus 120000
+    }
+
+    // --- 6. Mute mutes the track (per-clip mute is M2.5's Clip.muted).
+    sendKey("5");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Mute; }));
+    click(tv->FrameToX(60000), laneMid);
+    CHECK(WaitFor([&] {
+        bool muted = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            muted = tr && tr->muted;
+            win->Unlock();
+        }
+        return muted;
+    }));
+    click(tv->FrameToX(60000), laneMid);
+    CHECK(WaitFor([&] {
+        bool muted = true;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            muted = tr && tr->muted;
+            win->Unlock();
+        }
+        return !muted;
+    }));
+
+    // --- 7. Fade sets the fade of the nearer edge, without the corner grip.
+    sendKey("6");
+    CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Fade; }));
+    const float midX = tv->FrameToX(55000);
+    postMouse(B_MOUSE_DOWN, BPoint(midX, laneMid));
+    postMouse(B_MOUSE_MOVED, BPoint(midX + Themed(40.0f), laneMid));
+    postMouse(B_MOUSE_UP, BPoint(midX + Themed(40.0f), laneMid));
+    CHECK(WaitFor([&] {
+        Frame fin = 0, len = 0, start = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* tr = project.FindTrack(t.id))
+                for (const MidiClip& c : tr->midiClips)
+                    if (c.startFrame == 48000) {
+                        fin = c.fadeInFrames; len = c.lengthFrames;
+                        start = c.startFrame;
+                    }
+            win->Unlock();
+        }
+        return fin > 0 && len == 24000 && start == 48000;
+    }));
+    Shot("arrange-fade");
+
+    // --- 8. The snap field says what is selected, and Off means free.
+    {
+        const char* label = nullptr;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                label = v->SnapLabel();
+            win->Unlock();
+        }
+        CHECK(label != nullptr && std::strcmp(label, "1/4") == 0);
+    }
+    // A ruler click seeks to the grid (a quarter note), then freely with Off.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+    click(tv->FrameToX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
+    CHECK(WaitFor([&] {
+        bool ok = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            ok = project.transport.playhead == 24000;   // snapped to beat 1
+            win->Unlock();
+        }
+        return ok;
+    }));
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead = 0;
+        if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+            v->SetSnapGrid({ SnapKind::Off, false });
+        win->Unlock();
+    }
+    {
+        const char* label = nullptr;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v =
+                    dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                label = v->SnapLabel();
+            win->Unlock();
+        }
+        CHECK(label != nullptr && std::strcmp(label, "Off") == 0);
+    }
+    Shot("arrange-snap");
+    click(tv->FrameToX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
+    CHECK(WaitFor([&] {
+        bool ok = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            ok = project.transport.playhead == 20000;   // no snap at all
+            win->Unlock();
+        }
+        return ok;
+    }));
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+            v->SetSnapGrid({ SnapKind::Sixteenth, false });
+        win->Unlock();
+    }
+
+    // --- 9. The zoom anchors on the pointer (Ctrl+wheel) ...
+    {
+        const float anchorX = HeaderWidth() + Themed(200.0f);
+        postMouse(B_MOUSE_MOVED, BPoint(anchorX, laneMid));
+        snooze(80000);
+        Frame anchor = 0;
+        double fppBefore = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                anchor = v->XToFrame(anchorX);
+                fppBefore = v->FramesPerPixel();
+            }
+            win->Unlock();
+        }
+        BMessage zoom(B_MOUSE_WHEEL_CHANGED);
+        zoom.AddFloat("be:wheel_delta_y", 1.0f);
+        zoom.AddInt32("modifiers", B_CONTROL_KEY);
+        BMessenger(tv).SendMessage(&zoom);
+        CHECK(WaitFor([&] {
+            bool ok = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                    ok = v->FramesPerPixel() < fppBefore;   // zoomed in
+                win->Unlock();
+            }
+            return ok;
+        }));
+        {
+            float x = 0.0f;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                    x = v->FrameToX(anchor);
+                win->Unlock();
+            }
+            std::printf("  zoom anchor: x=%.1f (was %.1f)\n", x, anchorX);
+            CHECK(std::fabs(x - anchorX) < 2.0f);
+        }
+    }
+
+    // --- 10. ... and on the playhead for the keyboard's +/-.
+    {
+        Frame ph = 0;
+        float xBefore = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            ph = project.transport.playhead;
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                xBefore = v->FrameToX(ph);
+            win->Unlock();
+        }
+        // Park the playhead where the view can see it.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                v->ScrollToFrame(0);
+                project.transport.playhead = 100000;
+                v->SetPlayhead(100000);
+                ph = 100000;
+                xBefore = v->FrameToX(ph);
+            }
+            win->Unlock();
+        }
+        sendKey("-");   // zoom out
+        snooze(150000);
+        float xAfter = 0.0f;
+        double fpp = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                xAfter = v->FrameToX(ph);
+                fpp = v->FramesPerPixel();
+            }
+            win->Unlock();
+        }
+        CHECK(fpp > 0.0);
+        CHECK(std::fabs(xAfter - xBefore) < 3.0f);   // the playhead stayed put
+    }
+
+    // --- 11. Scrolling past the end of the last clip, with real scrollbars.
+    {
+        Frame lastEnd = 0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            for (const Track& tr : project.Tracks()) {
+                for (const Clip& c : tr.clips)
+                    if (c.startFrame + c.lengthFrames > lastEnd)
+                        lastEnd = c.startFrame + c.lengthFrames;
+                for (const MidiClip& c : tr.midiClips)
+                    if (c.startFrame + c.lengthFrames > lastEnd)
+                        lastEnd = c.startFrame + c.lengthFrames;
+            }
+            win->Unlock();
+        }
+        CHECK(lastEnd > 0);
+        Frame scrolled = -1, end = 0, clipEndX = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                v->ScrollToFrame(lastEnd * 4);       // far past the content
+                scrolled = v->ScrollFrame();
+                end = v->ContentEndFrame();
+                clipEndX = v->FrameToX(lastEnd);
+            }
+            win->Unlock();
+        }
+        CHECK(scrolled == end);          // the clamp is the content end...
+        CHECK(scrolled >= lastEnd);      // ...which is past the last clip
+        CHECK(clipEndX <= HeaderWidth());   // it really scrolled off the left
+        Shot("arrange-scrollbars");
+
+        // The scrollbars are real controls with the content's range.
+        BScrollBar* hbar = nullptr;
+        BScrollBar* vbar = nullptr;
+        float rangeMax = -1.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            hbar = dynamic_cast<BScrollBar*>(win->FindView("tlhscroll"));
+            vbar = dynamic_cast<BScrollBar*>(win->FindView("tlvscroll"));
+            if (hbar) {
+                float mn = 0.0f;
+                hbar->GetRange(&mn, &rangeMax);
+            }
+            win->Unlock();
+        }
+        CHECK(hbar != nullptr);
+        CHECK(vbar != nullptr);
+        CHECK(std::fabs(rangeMax - (float)end) < 2.0f);
+        if (hbar) {           // dragging it to the left scrolls the view
+            hbar->SetValue(0.0f);
+            CHECK(WaitFor([&] {
+                bool ok = false;
+                if (win->LockWithTimeout(1000000) == B_OK) {
+                    if (TimelineView* v =
+                            dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                        ok = v->ScrollFrame() == 0;
+                    win->Unlock();
+                }
+                return ok;
+            }));
+        }
+    }
+
+    // --- 12. The docked piano roll follows the playhead into view.
+    {
+        BMessage open(kMsgOpenEditor);
+        open.AddInt64("track", (int64)t.id);
+        open.AddInt64("clip", (int64)t.midiClips.empty()
+                                  ? kInvalidClipId : t.midiClips[0].id);
+        win->PostMessage(&open);
+        PianoRollView* roll = nullptr;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            roll = dynamic_cast<PianoRollView*>(win->FindView("roll"));
+            win->Unlock();
+            return roll != nullptr;
+        }));
+        if (roll) {
+            Frame scroll0 = 0, span = 0;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                scroll0 = roll->ScrollFrame();
+                span    = roll->VisibleSpan();
+                win->Unlock();
+            }
+            CHECK(span > 0);
+            const Frame far = mc.startFrame + span * 4;   // well past the view
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                roll->SetPlayhead(far);
+                win->Unlock();
+            }
+            Frame scroll1 = 0;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                scroll1 = roll->ScrollFrame();
+                win->Unlock();
+            }
+            std::printf("  roll follow: scroll %lld -> %lld (span %lld)\n",
+                        (long long)scroll0, (long long)scroll1, (long long)span);
+            CHECK(scroll1 != scroll0);                       // it followed
+            const Frame rel = far - mc.startFrame;
+            CHECK(scroll1 <= rel && rel <= scroll1 + span);  // it is in view
+            Shot("arrange-roll-follow");
+        }
+    }
 }
 
 // M1.3: the kit's controls are real BControls. A click lands on them the way
@@ -2170,6 +2748,7 @@ static int32 TestThread(void*) {
     TestErrorReports(win, project, stack);
     TestKeyboardFocus(win, project);
     TestThemeScale(win, project);
+    TestArrangeFeel(win, project);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
     TestDockPages(win, project, &stack);

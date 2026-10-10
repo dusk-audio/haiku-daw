@@ -14,15 +14,19 @@
 #include "../model/PeakCache.h"
 #include "../model/Commands.h"
 #include "../model/Grid.h"
+#include "../model/SnapGrid.h"     // the arrange grid the menu offers
 #include "../model/Crossfade.h"   // ClipFades (the per-track fade cache)
 #include "UiMetrics.h"             // HeaderWidth() (the peak invalidation)
 
+#include <Cursor.h>
+#include <ScrollBar.h>
 #include <View.h>
 
 #include <array>
 #include <functional>
 
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -31,6 +35,21 @@
 namespace daw {
 
 class Recorder;   // engine capture source (live waveform envelope)
+
+// A BScrollBar that reports its value instead of scrolling a target view: the
+// timeline scrolls by frame offset, not by moving its bounds, so the default
+// BScrollBar behaviour (ScrollBy on a target) is the wrong mechanism. With no
+// target set, BScrollBar only updates itself -- and calls this virtual, which
+// is the hook.
+class TimelineScrollBar : public BScrollBar {
+public:
+    TimelineScrollBar(const char* name, orientation dir, float min, float max,
+                      std::function<void(float)> onValue);
+    void ValueChanged(float newValue) override;
+
+private:
+    std::function<void(float)> fOnValue;
+};
 
 // Clip region-operation + track-freeze requests posted to the main window,
 // which owns the engine/decode and issues the resulting command(s). Each region
@@ -67,15 +86,67 @@ public:
     void KeyDown(const char* bytes, int32 numBytes) override;
     void AttachedToWindow() override;
 
+    // Editing tools (M2.3): the palette strip across the top of the view picks
+    // the click behaviour, exactly as the piano roll's does.
+    enum class Tool { Pointer, Pencil, Scissors, Glue, Mute, Fade };
+    Tool        ActiveTool() const { return fTool; }
+    void        SetTool(Tool t);
+    static const char* ToolName(Tool t);
+
+    // What a press at `where` would act on -- one answer, shared by MouseDown,
+    // the hover highlight and the cursor, so the three cannot disagree.
+    enum class Zone { None, Body, TrimLeft, TrimRight, FadeIn, FadeOut, Gain, Slip };
+    struct Hit {
+        int     lane  = -1;                    // track index, -1 = none
+        TrackId track = kInvalidTrackId;
+        ClipId  clip  = kInvalidClipId;        // audio clip or MIDI region
+        bool    midi  = false;
+        Zone    zone  = Zone::None;
+    };
+    Hit HitTest(BPoint where) const;
+
+    // The cursor this pointer state wants. `mods` is passed rather than read so
+    // a test can ask for the Alt/Ctrl variants without a keyboard.
+    enum class Pointer { Default, Move, Trim, Gain, Slip, Split, Fade, Pencil,
+                         Glue, Mute };
+    Pointer CursorFor(BPoint where, uint32 mods) const;
+    Pointer ShownCursor() const { return fCursor; }
+
+    // The snap grid (M2.3). Public so the functional test can drive what the
+    // popup menu sets, and so the indicator's label has one definition.
+    void     SetSnapGrid(SnapGrid g);
+    SnapGrid Snap() const { return fSnap; }
+    const char* SnapLabel() const { return SnapGridLabel(fSnap); }
+
+    // Split every clip/region the playhead falls inside (one undo step): the
+    // selection's when there is one, else every track's. `S`.
+    void SplitAtPlayhead();
+
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);
+    // Zoom about the frame under `x`, so the point under the pointer stays put.
+    void ZoomAnchoredAt(double factor, float x);
     void PanBy(Frame deltaFrames);
     void ZoomToFit();               // fit the whole project in the view width
     void ScrollVerticalBy(float dy);// vertical track scroll (clamped)
+    void ScrollToFrame(Frame f);    // absolute scroll (the scrollbar's setter)
+    void ScrollToY(float y);
 
     // Frame <-> pixel mapping (content area, i.e. right of the header gutter).
     float FrameToX(Frame f) const;
     Frame XToFrame(float x) const;
+
+    // Top of the lane area: the tool strip, then the ruler.
+    float ContentTop() const { return TimelineContentTop(); }
+    // Where the project's content ends (last clip/region, playhead, loop,
+    // punch, markers): the horizontal scroll may go this far, so the whole
+    // arrangement can be scrolled past the left edge.
+    Frame ContentEndFrame() const;
+    // Visible-frame introspection for the functional tests.
+    double FramesPerPixel() const { return fFramesPerPixel; }
+    Frame  ScrollFrame()     const { return fScrollFrame; }
+    float  ScrollY()         const { return fScrollY; }
+    float  VisibleFrames()   const;
 
     // Musical grid built from the project; Snapped() snaps a frame to it
     // unless Shift is held (free placement).
@@ -142,6 +213,7 @@ public:
 
 private:
     void DrawRuler(BRect update);
+    void DrawToolbar();                 // the tool palette strip
     void DrawLanes(BRect update);
     // Iterate visible bar/beat gridlines: fn(x, isBar, barNumber).
     void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
@@ -155,6 +227,64 @@ private:
     void DrawClip(const Clip& c, BRect lane, rgb_color base,
                   Frame fadeIn, Frame fadeOut, BRect update);
     void DrawClipWave(const Clip& c, BRect block, BRect update);
+
+    // --- the tool strip (M2.3) --------------------------------------------
+    BRect ToolRect(int i) const;        // palette button i
+    int   ToolButtonAt(BPoint where) const;   // -1 if not on one
+    BRect GridRect() const;             // the snap field
+    BRect ZoomOutRect() const;
+    BRect ZoomInRect() const;
+    void  HandleToolbarClick(BPoint where);
+    void  OpenGridMenu();               // the snap popup
+    void  DrawToolButton(int i);        // button + glyph + hover
+
+    // --- the tools' gestures ----------------------------------------------
+    void ScissorsAt(const Hit& hit, BPoint where);
+    void GlueAt(const Hit& hit);
+    void MuteAt(const Hit& hit);
+    void FadeStart(const Hit& hit, BPoint where);      // drag the nearer fade
+    bool PencilAt(const Hit& hit, BPoint where);       // true = took the click
+    void CommitPencil(BPoint where);                   // mouse-up of a draw
+    // The region a pencil drag would create: press frame to release frame.
+    Frame fPencilStart = 0;
+    Frame fPencilLen   = 0;
+
+    // --- hover, cursor and tooltips (M2.1) --------------------------------
+    // Recomputed on every mouse move; the drawing reads the same Hit the click
+    // path uses, and only a CHANGE repaints (a pointer move over a big project
+    // must not repaint the world).
+    void UpdateHover(BPoint where, uint32 mods, uint32 transit);
+    int  HeaderControlAt(int idx, BPoint where) const;   // -1 = none
+    void ApplyCursor(Pointer p);
+    void SetTip(const char* text);      // tooltip, only when it changes
+    Hit     fHover;                     // what is under the cursor
+    BPoint  fHoverPos{ -1.0f, -1.0f };
+    bool    fHoverValid  = false;
+    int     fHoverToolBtn = -1;         // palette button under the cursor
+    int     fHoverHeader  = -1;         // track-header control under the cursor
+    float   fSplitHoverX  = -1.0f;      // scissors' future cut line
+    std::string fTip;
+    Pointer fCursor = Pointer::Default;
+    std::map<int, std::unique_ptr<BCursor>> fCursors;
+    const BCursor* CursorObject(Pointer p);   // built once, on first use
+    void DrawHoverEdge(const BRect& block, Zone zone);   // clip-edge highlight
+    void DrawScissorsHover(const BRect& block);          // the future cut line
+
+    // --- navigation (M2.2) -------------------------------------------------
+    void SyncScrollBars();              // ranges/proportions/values
+    void LayoutScrollBars();            // frames (a layout view does not
+                                        // reposition children by follow modes)
+    void FrameResized(float newWidth, float newHeight) override;
+    TimelineScrollBar* fHBar = nullptr;
+    TimelineScrollBar* fVBar = nullptr;
+    float fBarThickness = 14.0f;        // the stock scrollbar's, from GetPreferredSize
+    bool  fSyncingBars  = false;        // our own SetValue must not echo back
+    float fBarLastX = -1.0f, fBarLastY = -1.0f, fBarLastRangeX = -1.0f;
+    float fBarLastRangeY = -1.0f, fBarLastPropX = -1.0f, fBarLastPropY = -1.0f;
+
+    // --- editing tools / snap (M2.3) ---------------------------------------
+    Tool     fTool = Tool::Pointer;
+    SnapGrid fSnap;                     // 1/16, as the editor always snapped
 
     // Effective fades per track, cached: ComputeCrossfades allocates, and it
     // changes only when the clips do. The cache holds the tuples it was built
@@ -188,7 +318,7 @@ private:
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
-                      RulerPunch };
+                      RulerPunch, Pencil, Slip };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -209,6 +339,10 @@ private:
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
     Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)
     Frame   fDragFadeOutOrig = 0;
+    // Slip (Alt-drag): the read offset at drag start and the pointer x there,
+    // so the whole gesture is one offset delta committed on release.
+    Frame   fDragSlipOrig    = 0;
+    float   fDragSlipGrabX   = 0.0f;
     // Clip-move ghost (follows the cursor across lanes; model isn't touched
     // until drop).
     int     fDragCurLane  = -1;        // target lane under the cursor
