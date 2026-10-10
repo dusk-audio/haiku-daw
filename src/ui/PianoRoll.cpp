@@ -115,6 +115,33 @@ void PianoRollView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
+// The transport's playhead, pushed by the main window's pulse. M2.2: the roll
+// FOLLOWS it -- when it leaves the visible span the view scrolls so it stays on
+// screen (the same 10 % margin policy the timeline's chase uses), which is what
+// makes a docked or popped-out roll usable while the song plays.
+Frame PianoRollView::VisibleSpan() const {
+    const float w = Bounds().Width() - kKbdW;
+    if (w < 1.0f) return 0;
+    return (Frame)((double)w * fFramesPerPixel);
+}
+
+void PianoRollView::SetPlayhead(Frame absFrame) {
+    if (absFrame == fPlayhead) return;
+    const Frame rel = absFrame - fClipStart;
+    if (absFrame >= 0 && fFollow) {
+        const Frame visible = VisibleSpan();
+        if (visible > 0) {
+            const Frame right = fScrollFrame + visible;
+            if (rel < fScrollFrame || rel > right - visible / 10) {
+                fScrollFrame = rel - visible / 10;
+                if (fScrollFrame < 0) fScrollFrame = 0;
+            }
+        }
+    }
+    fPlayhead = absFrame;
+    Invalidate();
+}
+
 void PianoRollView::SelectOnly(int i) {
     fSel.assign(fNotes.size(), 0);
     if (i >= 0 && (size_t)i < fSel.size()) fSel[(size_t)i] = 1;
@@ -158,10 +185,22 @@ int PianoRollView::ToolAt(BPoint where) const {
     return -1;
 }
 void PianoRollView::ZoomBy(double factor) {
-    // Zoom about the view's left edge (keeps the left-visible frame anchored).
+    // The keys and the strip's buttons anchor on the roll's playhead when it is
+    // in view (so the bar being worked on stays put), else on the centre.
+    float x = (kKbdW + Bounds().right) * 0.5f;
+    const float px = FrameToX(fPlayhead - fClipStart);
+    if (fPlayhead >= 0 && px >= kKbdW && px <= Bounds().right) x = px;
+    ZoomAnchoredAt(factor, x);
+}
+
+// Zoom keeping the frame under `x` where it is (M2.2's pointer-anchored zoom).
+void PianoRollView::ZoomAnchoredAt(double factor, float x) {
+    const Frame anchor = XToFrame(x);
     fFramesPerPixel *= factor;
     if (fFramesPerPixel < 8)    fFramesPerPixel = 8;
     if (fFramesPerPixel > 8192) fFramesPerPixel = 8192;
+    fScrollFrame = anchor - (Frame)((double)(x - kKbdW) * fFramesPerPixel);
+    if (fScrollFrame < 0) fScrollFrame = 0;
     Invalidate();
 }
 Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
@@ -886,6 +925,10 @@ void PianoRollView::MouseDown(BPoint where) {
 }
 
 void PianoRollView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
+    // The pointer's last position: the Ctrl+wheel zoom anchors on it (M2.2),
+    // and a wheel message carries no position of its own.
+    fHoverPos = where;
+    fHoverSeen = true;
     // The tool buttons carry no text since M1.6: hovering one names it. (The
     // view is custom-drawn, so the tooltip is driven here rather than by a
     // control per button.)
@@ -1010,11 +1053,16 @@ void PianoRollView::MessageReceived(BMessage* msg) {
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         float dy = 0.0f;
         if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
-            if (modifiers() & B_SHIFT_KEY) {          // Shift+wheel: scroll time
+            const uint32 mods = EventModifiers(msg);
+            if (mods & B_SHIFT_KEY) {                 // Shift+wheel: scroll time
                 fScrollFrame += (Frame)((double)dy * 8.0 * fFramesPerPixel);
                 if (fScrollFrame < 0) fScrollFrame = 0;
-            } else if (modifiers() & B_CONTROL_KEY) { // Ctrl+wheel: zoom time
-                ZoomBy(dy > 0 ? 1.2 : 1.0 / 1.2);
+            } else if (mods & B_CONTROL_KEY) {        // Ctrl+wheel: zoom time,
+                float x = fHoverPos.x;                // anchored on the pointer
+                if (x < kKbdW) x = kKbdW;
+                if (x > Bounds().right) x = Bounds().right;
+                if (!fHoverSeen) x = (kKbdW + Bounds().right) * 0.5f;
+                ZoomAnchoredAt(dy > 0 ? 1.2 : 1.0 / 1.2, x);
             } else {                                   // wheel: scroll pitch
                 fTopPitch -= (int)dy * 3;
                 if (fTopPitch > 127) fTopPitch = 127;
