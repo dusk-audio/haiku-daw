@@ -95,6 +95,21 @@ void ApplyFxInsert(std::vector<EffectDesc>& chain, int index, int bypassed,
     chain[(size_t)index].mix      = ClampFxMix(mix);
 }
 
+// Apply one parsed `fxsc`/`masterfxsc` record (insert -> external sidechain
+// source track) to `chain`. Same policy as ApplyFxInsert's INDEX for the same
+// reason: a record that cannot address a slot has nothing to attach to, and
+// failing the whole load over it would lose the rest of a recoverable project.
+// The source is stored as-is rather than resolved here — the track it names may
+// be parsed later in the file — and a source that names no track at all (or the
+// master sentinel) simply means "no key" when a host resolves it.
+void ApplyFxSidechain(std::vector<EffectDesc>& chain, int index, TrackId src) {
+    if (index < 0 || index >= (int)chain.size())
+        return;
+    if (src == kInvalidTrackId)
+        return;   // 0 is the descriptor's own "none"; nothing to store
+    chain[(size_t)index].sidechainSource = src;
+}
+
 } // namespace
 
 bool ProjectIO::Save(const Project& p, const std::string& path) {
@@ -147,6 +162,14 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         f << "masterfxin " << i << " " << (e.bypassed ? 1 : 0) << " "
           << e.mix << "\n";
     }
+    // External-sidechain source per master insert (the key is a TRACK either
+    // way: the master chain can be ducked by a track, nothing keys the master).
+    // One optional line per insert that HAS one, so a project that never uses a
+    // sidechain saves byte-identically to a pre-sidechain build's file.
+    for (size_t i = 0; i < p.masterFx.size(); i++)
+        if (p.masterFx[i].sidechainSource != kInvalidTrackId)
+            f << "masterfxsc " << i << " "
+              << p.masterFx[i].sidechainSource << "\n";
 
     // Tempo/meter map. Frame 0 is seeded from `tempo`/`timesig` above, so only
     // changes at frame > 0 are written.
@@ -212,6 +235,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "fxin " << i << " " << (e.bypassed ? 1 : 0) << " "
               << e.mix << "\n";
         }
+        // External-sidechain source per insert (see the master chain above),
+        // written after this track's `fx`/`fxin` lines so the index it names
+        // already addresses a loaded slot.
+        for (size_t i = 0; i < t.fx.size(); i++)
+            if (t.fx[i].sidechainSource != kInvalidTrackId)
+                f << "fxsc " << i << " " << t.fx[i].sidechainSource << "\n";
 
         for (const Send& s : t.sends)
             f << "send " << s.dest << " " << s.level << " "
@@ -379,6 +408,14 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(p.masterFx, index, byp, mix);
+        }
+        else if (kw == "masterfxsc") {
+            // Optional; absent in files from before sidechains existed, in
+            // which case the insert keeps EffectDesc's default (no source) and
+            // behaves exactly as it used to.
+            int index = -1; long long src = 0;
+            iss >> index >> src;
+            ApplyFxSidechain(p.masterFx, index, src > 0 ? (TrackId)src : kInvalidTrackId);
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "tempochange") {
@@ -550,6 +587,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(cur.fx, index, byp, mix);
+        }
+        else if (kw == "fxsc" && haveTrack) {
+            int index = -1; long long src = 0;
+            iss >> index >> src;
+            ApplyFxSidechain(cur.fx, index, src > 0 ? (TrackId)src : kInvalidTrackId);
         }
         else if (kw == "fxauto" && haveTrack) {
             FxAutoLane fa;

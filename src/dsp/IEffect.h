@@ -42,6 +42,31 @@ public:
     // and whenever the tempo changes. Default: no-op.
     virtual void SetTempo(double /*bpm*/) {}
 
+    // Hand this block's EXTERNAL sidechain key to the effect: interleaved
+    // stereo, `frames` frames, exactly the block the next Process() call will
+    // receive. The host calls it immediately before Process(), on the audio
+    // thread, for every insert whose EffectDesc names a sidechain source; an
+    // insert with no source is never called at all.
+    //
+    // Contract, all three parts forced by the RT context:
+    //   - the pointer is valid ONLY during the following Process() call — the
+    //     host re-supplies it every block, and the effect must not retain it
+    //     past that call (see dsp/SidechainKey.h for the storage that does
+    //     this correctly);
+    //   - the host may pass nullptr (or never call this) whenever no key is
+    //     routed this block: a cycle in the routing graph, a source that no
+    //     longer exists, an insert the host chose not to key. An effect whose
+    //     keyed path is enabled must then behave exactly as it does with
+    //     keying off — internal detection, never silence and never a stale
+    //     key. Failing soft is the contract, because the alternative is a
+    //     mute button becoming a mute on some other track;
+    //   - the effect must not keep a pointer to the caller's buffer.
+    //
+    // Default: no-op, which keeps every effect that was written before this
+    // existed source- and behavior-compatible (they simply never detect on a
+    // key).
+    virtual void SetSidechain(const float* /*stereo*/, int /*frames*/) {}
+
     // Processing latency this effect adds, in FRAMES (per-channel samples, NOT
     // interleaved floats) at the Prepare() rate: the number of frames by which
     // its output lags its input (a look-ahead limiter, a linear-phase FIR, an
