@@ -60,6 +60,35 @@ control's screen rect, not the window's), and a push button reports
   dialog (double-click a track name) shows a dark field with bright text, an
   accent-bordered OK, a hover wash, and a focus ring; menus are dark now.
 
+## Slice 2 — the value controls, and two more windows
+
+| File | What it is |
+|---|---|
+| `src/ui/widgets/DawSlider.h` | a `BSlider` subclass. Dragging, the keyboard, the hash marks, the focus model and the message protocol stay stock — the kit overrides only `DrawBar`, `DrawThumb`, `DrawHashMarks`, `DrawText` and `DrawFocusMark`. Subclassing rather than re-implementing is what keeps a converted window behaving like the one it replaced |
+| `src/ui/widgets/DawCheckBox.h` | a `BCheckBox` subclass: the click, the value flip and the `B_CONTROL_ON/OFF` message stay stock, the box and its tick are drawn dark |
+| `src/ui/widgets/DawMenuField.h` | a `BMenuField` subclass: the popup, the marked item and the label stay stock, the well, the label and the accent arrow are drawn here (the stock control look would paint a light island) |
+| `src/ui/QuantizeWindow.cpp` | converted: `DawSlider` ×2, `DawCheckBox`, `DawMenuField`, `DawButton`, rows and insets through `Themed()` |
+| `src/ui/SendsWindow.cpp` | converted: `DawMenuField`, `DawCheckBox`, `DawButton`, `DawSlider` per send, rows through `Themed()` |
+
+The two windows keep their base-class pointers in their headers (`BSlider*`,
+`BCheckBox*`), so the conversion did not touch the headers at all: the kit's
+controls ARE the stock types.
+
+The probe test grows two controls: a click ticks the box on and off with the
+value on the message, and a click near the slider's right end moves its value
+there — checked against the control's own `Value()`, not only the message.
+
+### Verification (slice 2)
+
+- Host suite: **52/52**.
+- `haiku_syntax_check.sh`: **10 OK, 0 FAIL**.
+- VM `build`: ctest **54/54**, `ui_functional_tests` **163 checks, 0 failures**
+  (+4 deliberate).
+- VM `build-off`: ctest **50/50**.
+- Click list for Marc: the Quantize window (MIDI menu → Quantize) now shows
+  dark sliders with hash marks, a dark tick box and a dark grid field; the
+  Sends window the same, with the accent arrow on each `To:` field.
+
 ## Still to come
 
 Slices 2+ per the spec: `DawSlider`/`DawFader`/`DawKnob`/`DawCheckBox`/
