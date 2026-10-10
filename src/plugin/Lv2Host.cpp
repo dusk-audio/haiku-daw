@@ -1,6 +1,7 @@
 #include "Lv2Host.h"
 
 #include "Lv2PortMap.h"
+#include "Lv2PresetStore.h"
 #include "../dsp/EffectFactory.h"
 #include "../model/Effect.h"
 
@@ -12,6 +13,7 @@
 #include <lv2/options/options.h>
 #include <lv2/instance-access/instance-access.h>
 #include <lv2/parameters/parameters.h>
+#include <lv2/state/state.h>
 #include <lv2/urid/urid.h>
 
 #include <algorithm>
@@ -74,6 +76,13 @@ public:
     const LV2_Feature* MapFeature() const   { return &fMapFeature; }
     const LV2_Feature* UnmapFeature() const { return &fUnmapFeature; }
 
+    // The bare interfaces, for lilv's state API — which takes an LV2_URID_Map*
+    // rather than a feature, and must be handed the SAME table the instance was
+    // given or a state's URIDs would be unmapped to whatever this table happens
+    // to hold at those numbers.
+    LV2_URID_Map*   MapPtr()   { return &fMap; }
+    LV2_URID_Unmap* UnmapPtr() { return &fUnmap; }
+
 private:
     static LV2_URID MapCb(LV2_URID_Map_Handle h, const char* uri) {
         return static_cast<UridMap*>(h)->Map(uri);
@@ -132,9 +141,11 @@ class Lv2Effect : public IEffect {
 public:
     Lv2Effect(const LilvPlugin* plugin, const Lv2PortLayout& layout,
               const std::vector<Lv2ControlMeta>& ctrl, std::string name,
-              UridMap& urids, double sampleRate)
+              UridMap& urids, LilvWorld* world, std::recursive_mutex& worldLock,
+              std::string uri, const std::string& state, double sampleRate)
         : fPlugin(plugin), fLayout(layout), fCtrl(ctrl),
-          fName(std::move(name)), fUrids(urids) {
+          fName(std::move(name)), fUrids(urids), fWorld(world),
+          fWorldLock(worldLock), fUri(std::move(uri)) {
         fSequenceType = fUrids.Map(LV2_ATOM__Sequence);
 
         // fCtrl is built alongside fLayout.controlIn during the scan, so the two
@@ -158,6 +169,12 @@ public:
             fDiscard.resize(kMaxLv2BlockFrames, 0.0f);
 
         Instantiate(sampleRate);
+        // The insert's stored state, restored into the instance the caller is
+        // about to run. It goes on AFTER instantiation and activation and
+        // before anyone else can see the object: LV2's instantiation threading
+        // class forbids restoring on an instance something else is running, and
+        // nothing here has been handed out yet.
+        if (!state.empty()) LoadState(state);
     }
 
     ~Lv2Effect() override { Teardown(); }
@@ -252,6 +269,59 @@ public:
 
     int LatencySamples() const override { return fLatency; }
     const char* Name() const override { return fName.c_str(); }
+
+    // The plugin's own state, through its state:interface, as a lilv document.
+    //
+    // Port values are deliberately NOT captured (get_value == NULL): the
+    // control ports are the model's `params`, and a second copy of them inside
+    // the blob would be a second truth — one that automation (which writes the
+    // instance, never the model) would quietly diverge from. What this saves is
+    // exactly what the model cannot know.
+    //
+    // The feature list carries our URID map, because that is how a plugin
+    // turns the property keys it stores into the URIDs the store callback
+    // takes; without it a plugin has no way to name anything and fails.
+    bool SaveState(std::string* out) const override {
+        if (!out || fInstances.empty() || !fWorld || !fInstances[0].handle)
+            return false;
+        std::lock_guard<std::recursive_mutex> lock(fWorldLock);
+        const LV2_Feature* features[] = {
+            fUrids.MapFeature(), fUrids.UnmapFeature(), nullptr
+        };
+        LilvState* st = lilv_state_new_from_instance(
+            fPlugin, fInstances[0].handle, fUrids.MapPtr(),
+            nullptr, nullptr, nullptr, nullptr,   // no file directories
+            nullptr, nullptr, 0, features);
+        if (!st) return false;
+        const std::string uri = fUri + "#state";
+        char* str = lilv_state_to_string(fWorld, fUrids.MapPtr(),
+                                         fUrids.UnmapPtr(), st, uri.c_str(),
+                                         nullptr);
+        lilv_state_free(st);
+        if (!str) return false;
+        out->assign(str);
+        lilv_free(str);
+        return true;
+    }
+
+    bool LoadState(const std::string& state) override {
+        if (state.empty() || fInstances.empty() || !fWorld) return false;
+        std::lock_guard<std::recursive_mutex> lock(fWorldLock);
+        LilvState* st = lilv_state_new_from_string(fWorld, fUrids.MapPtr(),
+                                                   state.c_str());
+        if (!st) return false;
+        const LV2_Feature* features[] = {
+            fUrids.MapFeature(), fUrids.UnmapFeature(), nullptr
+        };
+        // One restore per instance: a MonoDual plugin is two instances, and
+        // both channels must come up on the same patch.
+        for (Inst& inst : fInstances)
+            if (inst.handle)
+                lilv_state_restore(st, inst.handle, nullptr, nullptr, 0,
+                                   features);
+        lilv_state_free(st);
+        return true;
+    }
 
 private:
     struct Inst {
@@ -425,6 +495,14 @@ private:
     std::vector<Lv2ControlMeta> fCtrl;
     std::string                 fName;
     UridMap&                    fUrids;
+    // What serializing this instance's state takes: lilv parses and writes RDF
+    // through a world, and the state document is addressed by a URI.
+    LilvWorld*                  fWorld = nullptr;
+    // Serializes lilv use across loopers: the running instance's state is saved
+    // from the main window while the effects window may be listing presets, and
+    // lilv's world is not thread-safe (see Impl::worldMutex).
+    std::recursive_mutex&       fWorldLock;
+    std::string                 fUri;
 
     std::vector<Inst>  fInstances;
     std::vector<float> fControlIn, fControlOut;
@@ -455,6 +533,14 @@ struct Lv2Host::Impl {
     LilvWorld* world = nullptr;
     UridMap    urids;
     bool       scanned = false;
+
+    // lilv's world is not thread-safe, and since the insert panel grew a preset
+    // menu this host is reached from TWO loopers: the effects window asks for
+    // presets while the main window may be instantiating a plugin or capturing
+    // state. Recursive because the public entry points call each other
+    // (Presets -> PresetParams) and a plain mutex would deadlock there. Never
+    // taken on the audio thread -- every caller is off-RT by construction.
+    std::recursive_mutex worldMutex;
 
     // Parallel to `plugins`: everything Create needs that the public listing
     // does not expose.
@@ -510,6 +596,7 @@ bool NodeAsFloat(const LilvNode* n, float* out) {
 } // namespace
 
 void Lv2Host::ScanAll() {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     if (fImpl->scanned) return;
     fImpl->scanned = true;
 
@@ -635,6 +722,12 @@ void Lv2Host::ScanAll() {
                     if (const char* ps = lilv_node_as_string(pn)) s.name = ps;
                     lilv_node_free(pn);
                 }
+                // The symbol too: a state document names control ports by it,
+                // and it is the only name that is stable across a re-labelled
+                // plugin (a preset saved here must survive the plugin being
+                // retitled in its next release).
+                if (const LilvNode* sym = lilv_port_get_symbol(p, port))
+                    if (const char* ss = lilv_node_as_string(sym)) s.symbol = ss;
 
                 // Three distinct domains, kept distinct. isInteger stays true
                 // for all of them ("not continuous"), while isToggled and the
@@ -699,9 +792,11 @@ void Lv2Host::ScanAll() {
         info.uri      = uri;
         info.monoDual = layout.topology == Lv2Topology::MonoDual;
         for (const Lv2PortSpec& s : specs)
-            if (s.role == Lv2PortRole::ControlIn)
+            if (s.role == Lv2PortRole::ControlIn) {
                 info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger,
                                         s.isToggled, s.scalePoints });
+                info.paramSymbols.push_back(s.symbol);
+            }
 
         fImpl->plugins.push_back(info);
         fImpl->entries.push_back({ p, layout, ctrl });
@@ -721,6 +816,7 @@ void Lv2Host::ScanAll() {
 }
 
 bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     ScanAll();   // idempotent: the world has to exist before it can be asked
     LilvWorld* w = fImpl->world;
     if (!w) return true;
@@ -773,7 +869,8 @@ bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
 }
 
 std::unique_ptr<IEffect> Lv2Host::Create(const std::string& uri,
-                                         double sampleRate) {
+                                         double sampleRate,
+                                         const std::string& state) {
     ScanAll();
     for (size_t i = 0; i < fImpl->plugins.size(); i++) {
         if (fImpl->plugins[i].uri != uri) continue;
@@ -785,13 +882,218 @@ std::unique_ptr<IEffect> Lv2Host::Create(const std::string& uri,
         // as PluginHost's trampoline.
         const double rate = sampleRate > 0.0 ? sampleRate : 44100.0;
 
+        std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
         std::unique_ptr<Lv2Effect> fx(new Lv2Effect(
             e.plugin, e.layout, e.ctrl, fImpl->plugins[i].name,
-            fImpl->urids, rate));
+            fImpl->urids, fImpl->world, fImpl->worldMutex,
+            fImpl->plugins[i].uri, state, rate));
         if (!fx->Valid()) return nullptr;        // plugin refused to instantiate
         return std::unique_ptr<IEffect>(fx.release());
     }
     return nullptr;                              // unknown or rejected URI
+}
+
+// ---------------------------------------------------------------------------
+// Presets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The URID of an atom type we can read out of a preset's port values. Anything
+// else (a string, a path, an object) is not a knob and is skipped.
+bool PortValueAsFloat(LV2_URID type, uint32_t size, const void* value,
+                      LV2_URID atomFloat, LV2_URID atomInt, float* out) {
+    if (type == atomFloat && size == sizeof(float)) {
+        *out = *(const float*)value;
+        return true;
+    }
+    if (type == atomInt && size == sizeof(int32_t)) {
+        *out = (float)*(const int32_t*)value;
+        return true;
+    }
+    if (type == atomFloat && size == sizeof(double)) {   // unusual but legal
+        *out = (float)*(const double*)value;
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+std::vector<std::pair<int, float>> Lv2Host::PresetParams(const std::string& uri,
+                                                         const std::string& state) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
+    ScanAll();
+    std::vector<std::pair<int, float>> out;
+    if (state.empty() || !fImpl->world) return out;
+
+    // Which hostable plugin, and (for the clamp) the same per-port metadata the
+    // effect itself applies — from the scan's own table, so a preset's value is
+    // coerced by exactly the rules SetParam uses and cannot come out different.
+    const Lv2PluginInfo* info = nullptr;
+    const std::vector<Lv2ControlMeta>* ctrl = nullptr;
+    for (size_t i = 0; i < fImpl->plugins.size(); i++) {
+        if (fImpl->plugins[i].uri != uri) continue;
+        info = &fImpl->plugins[i];
+        ctrl = &fImpl->entries[i].ctrl;
+        break;
+    }
+    if (!info || !ctrl) return out;
+
+    struct Sink {
+        const std::vector<std::string>* symbols = nullptr;
+        const std::vector<Lv2ControlMeta>* ctrl = nullptr;
+        LV2_URID atomFloat = 0, atomInt = 0;
+        std::vector<std::pair<int, float>>* out = nullptr;
+    } sink;
+    sink.symbols   = &info->paramSymbols;
+    sink.ctrl      = ctrl;
+    sink.atomFloat = fImpl->urids.Map(LV2_ATOM__Float);
+    sink.atomInt   = fImpl->urids.Map(LV2_ATOM__Int);
+    sink.out       = &out;
+
+    LilvState* st = lilv_state_new_from_string(fImpl->world,
+                                               fImpl->urids.MapPtr(),
+                                               state.c_str());
+    if (!st) return out;
+    lilv_state_emit_port_values(
+        st,
+        [](const char* portSymbol, void* user, const void* value,
+           uint32_t size, uint32_t type) {
+            Sink& s = *(Sink*)user;
+            if (!portSymbol || !value || !s.symbols || !s.ctrl || !s.out)
+                return;
+            for (size_t i = 0; i < s.symbols->size(); i++) {
+                if ((*s.symbols)[i] != portSymbol) continue;
+                if (i >= s.ctrl->size()) return;
+                float v = 0.0f;
+                if (!PortValueAsFloat(type, size, value, s.atomFloat, s.atomInt, &v))
+                    return;
+                // The value a preset carries was valid for the plugin that WROTE
+                // it, which need not be the version installed here: coerce it
+                // through the port's declared domain rather than writing
+                // something the plugin does not accept.
+                const Lv2ControlMeta& m = (*s.ctrl)[i];
+                v = ClampLv2Param(v, m.mn, m.mx, m.hasMin, m.hasMax, m.isInteger,
+                                  m.isToggled, &m.scalePoints);
+                s.out->push_back({ (int)i, v });
+                return;
+            }
+        },
+        &sink);
+    lilv_state_free(st);
+
+    std::sort(out.begin(), out.end(),
+              [](const std::pair<int, float>& a, const std::pair<int, float>& b) {
+                  return a.first < b.first;
+              });
+    return out;
+}
+
+bool Lv2Host::SaveInstanceState(const std::string& uri, void* instance,
+                                std::string* out) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
+    ScanAll();
+    if (!instance || !out || !fImpl->world) return false;
+    LilvNode* uriNode = lilv_new_uri(fImpl->world, uri.c_str());
+    if (!uriNode) return false;
+    const LilvPlugin* p = lilv_plugins_get_by_uri(
+        lilv_world_get_all_plugins(fImpl->world), uriNode);
+    lilv_node_free(uriNode);
+    if (!p) return false;
+
+    const LV2_Feature* features[] = {
+        fImpl->urids.MapFeature(), fImpl->urids.UnmapFeature(), nullptr
+    };
+    LilvState* st = lilv_state_new_from_instance(
+        p, static_cast<LilvInstance*>(instance), fImpl->urids.MapPtr(),
+        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, 0, features);
+    if (!st) return false;
+    const std::string stateUri = uri + "#state";
+    char* str = lilv_state_to_string(fImpl->world, fImpl->urids.MapPtr(),
+                                     fImpl->urids.UnmapPtr(), st,
+                                     stateUri.c_str(), nullptr);
+    lilv_state_free(st);
+    if (!str) return false;
+    out->assign(str);
+    lilv_free(str);
+    return true;
+}
+
+std::vector<Lv2PresetInfo> Lv2Host::Presets(const std::string& uri) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
+    ScanAll();
+    std::vector<Lv2PresetInfo> out;
+    if (!fImpl->world) return out;
+
+    // The plugin's own bundled presets first: they are what the plugin's author
+    // shipped, and the user's own saved ones come after so a locally saved
+    // "Default" never hides the factory one.
+    for (size_t i = 0; i < fImpl->plugins.size(); i++) {
+        if (fImpl->plugins[i].uri != uri) continue;
+        const LilvPlugin* p = fImpl->entries[i].plugin;
+        if (!p) break;
+
+        LilvWorld* w = fImpl->world;
+        LilvNode* presetClass =
+            lilv_new_uri(w, "http://lv2plug.in/ns/ext/presets#Preset");
+        if (presetClass) {
+            LilvNodes* related = lilv_plugin_get_related(p, presetClass);
+            if (related) {
+                LILV_FOREACH(nodes, it, related) {
+                    const LilvNode* node = lilv_nodes_get(related, it);
+                    if (!node || !lilv_node_is_uri(node)) continue;
+                    // A preset in a bundle that is only reachable through
+                    // rdfs:seeAlso is not loaded yet; ask for it explicitly.
+                    lilv_world_load_resource(w, node);
+                    LilvState* st =
+                        lilv_state_new_from_world(w, fImpl->urids.MapPtr(), node);
+                    if (!st) continue;
+
+                    Lv2PresetInfo info;
+                    if (const char* label = lilv_state_get_label(st))
+                        info.name = label;
+                    if (info.name.empty())
+                        info.name = lilv_node_as_string(node);
+                    const std::string stateUri = lilv_node_as_string(node);
+                    char* str = lilv_state_to_string(
+                        w, fImpl->urids.MapPtr(), fImpl->urids.UnmapPtr(), st,
+                        stateUri.c_str(), nullptr);
+                    lilv_state_free(st);
+                    if (!str) continue;
+                    info.state.assign(str);
+                    lilv_free(str);
+                    info.params = PresetParams(uri, info.state);
+                    out.push_back(std::move(info));
+                }
+                lilv_nodes_free(related);
+            }
+            lilv_node_free(presetClass);
+        }
+        break;
+    }
+
+    for (const PresetEntry& e : LoadPresetsFor(PresetStoreDir(), uri)) {
+        Lv2PresetInfo info;
+        info.name = e.name;
+        info.state = e.state;
+        for (size_t i = 0; i < e.params.size(); i++)
+            info.params.push_back({ (int)i, e.params[i] });
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+bool Lv2Host::SavePreset(const std::string& uri, const std::string& name,
+                         const std::string& state,
+                         const std::vector<float>& params) {
+    ScanAll();
+    if (!Find(uri)) return false;   // unknown or unhostable plugin
+    PresetEntry e;
+    e.name = name;
+    e.state = state;
+    e.params = params;
+    return SavePresetToStore(PresetStoreDir(), uri, e);
 }
 
 } // namespace daw

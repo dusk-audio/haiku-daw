@@ -21,6 +21,7 @@
 #include "Version.h"   // DAW_VERSION_STRING (generated from CMake)
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
+#include "../plugin/Lv2Host.h"     // preset listing/saving for an insert panel
 #endif
 #include "../storage/BfsAttr.h"
 #include "../app/AppSettings.h"
@@ -1391,6 +1392,30 @@ void MainWindow::MessageReceived(BMessage* msg) {
             ShowFxWindow((TrackId)tid, fx);
             break;
         }
+        case kMsgFxPresetPrompt: {
+            // An insert panel asking for a preset name: the prompt for it is
+            // opened here (windows belong to this thread) and answers with
+            // kMsgSaveFxPreset below.
+            int64 tid = 0, fx = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("aux", &fx);
+            BMessenger self(this);
+            (new RenameWindow(BRect(120, 120, 420, 164), (TrackId)tid, "",
+                              self, kMsgSaveFxPreset, fx, "Save Preset"))->Show();
+            break;
+        }
+        case kMsgSaveFxPreset: {
+            // An insert panel's "Save Preset..." prompt answered. The prompt
+            // (RenameWindow) knows only the track and the insert index it was
+            // opened for; the model and the live instance are here.
+            int64 tid = 0, fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("aux", &fx);   // RenameWindow echoes the insert index
+            BString name;
+            msg->FindString("name", &name);
+            SaveFxPreset((TrackId)tid, (int)fx, name.String());
+            break;
+        }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
             int64 tid = 0; int32 fx = 0, slot = 0; float v = 0.0f;
             msg->FindInt64("track", &tid);
@@ -2397,6 +2422,13 @@ void MainWindow::ValidateFxWatch() {
 // milliseconds of UI stall (the editors answer from their own looper and the
 // timeout is short).
 void MainWindow::FlushFxEditors() {
+    // The running engine first: a plugin's own state lives in the instance the
+    // audio thread is driving, and this is the one point every save, render and
+    // autosave passes through. It goes in BEFORE the editors below, which
+    // overwrite it for the inserts they are actually showing — the editor is
+    // where the user's patch edits happen, so it wins where both exist.
+    if (fTransportCtl.fEngine) fTransportCtl.fEngine->CaptureFxStates(*fProject);
+
     for (size_t i = fFxWatches.size(); i > 0; --i) {
         const FxEntry& w = fFxWatches[i - 1];
         if (!w.editor || !w.editor->Alive()) continue;
@@ -2409,6 +2441,29 @@ void MainWindow::FlushFxEditors() {
         // than lose the last gesture.
         if (static_cast<EditorHandle*>(w.editor.get())->msgr.SendMessage(
                 &flush, &reply, 200000, 200000) != B_OK) continue;
+
+        // The editor's own state, if it has one. Deliberately NOT a command:
+        // this is the same kind of derived session data as the playhead — it is
+        // the plugin's patch, captured from the object that holds it, and it has
+        // no visible representation for a user to undo. Applied only to the
+        // insert the editor is still showing: the URI check is the same one
+        // kMsgFxParamCommit uses, and for the same reason (the commit is
+        // asynchronous, so the insert at that index may be another plugin by
+        // now — or another plugin may have been dropped in after it).
+        bool tookState = false;
+        BString state;
+        if (reply.FindString("state", &state) == B_OK && state.Length() > 0) {
+            const bool master = (w.track == kMasterFxTarget);
+            Track* t = master ? nullptr : fProject->FindTrack(w.track);
+            std::vector<EffectDesc>* chain =
+                master ? &fProject->masterFx : (t ? &t->fx : nullptr);
+            if (chain && w.fx >= 0 && w.fx < (int32)chain->size() &&
+                (*chain)[(size_t)w.fx].pluginName == w.uri) {
+                (*chain)[(size_t)w.fx].state = state.String();
+                tookState = true;
+            }
+        }
+
         std::vector<SetFxParamCommand::SlotValue> vals;
         for (int32 k = 0; ; k++) {
             int32 slot = 0;
@@ -2417,14 +2472,15 @@ void MainWindow::FlushFxEditors() {
             if (reply.FindFloat("val", k, &v) != B_OK) break;
             vals.push_back({ slot, v });
         }
-        if (vals.empty()) continue;
         const bool master = (w.track == kMasterFxTarget);
-        if (fStack->Execute(std::make_unique<SetFxParamCommand>(
-                w.track, master, w.fx, std::move(vals)), *fProject)) {
-            // A flush happens before a save/render; the panel's copy is stale
-            // from this moment on (same rule as the commit path).
-            PushChainToFxWindow(w.track);
-        }
+        const bool applied = !vals.empty() &&
+            fStack->Execute(std::make_unique<SetFxParamCommand>(
+                w.track, master, w.fx, std::move(vals)), *fProject);
+        // A flush happens before a save/render; the panel's copy is stale from
+        // this moment on (same rule as the commit path) — for the captured state
+        // as much as for the values: left alone, its next knob move would commit
+        // the chain from before this capture and drop the patch again.
+        if (applied || tookState) PushChainToFxWindow(w.track);
     }
 
     // ...and the GENERIC panel, which this loop does not reach: it folds wheel
@@ -2453,6 +2509,39 @@ void MainWindow::FlushFxEditors() {
             }
         }
     }
+}
+
+// The panel's "Save Preset...": the insert's current patch, named and written
+// to the preset store. The patch is captured first (the same flush a save
+// does), because it lives in the live instance — a preset saved from the model
+// alone would be the last project save's patch, not the one playing.
+void MainWindow::SaveFxPreset(TrackId tid, int fx, const char* name) {
+#ifdef DAW_HAVE_LV2
+    if (!name || !name[0]) return;
+    const bool master = (tid == kMasterFxTarget);
+    if (!master && !fProject->FindTrack(tid)) return;
+
+    // Pull the state into the model the way SaveTo does. This rewrites the
+    // chain vector the pointers below would come from, so they are taken after.
+    FlushFxEditors();
+
+    Track* t = master ? nullptr : fProject->FindTrack(tid);
+    std::vector<EffectDesc>* chain =
+        master ? &fProject->masterFx : (t ? &t->fx : nullptr);
+    if (!chain || fx < 0 || fx >= (int32)chain->size()) return;
+    const EffectDesc& d = (*chain)[(size_t)fx];
+    if (d.type != EffectType::Lv2 || d.pluginName.empty()) {
+        ReportError("Save Preset",
+                    "Presets are only supported for LV2 plugins.");
+        return;
+    }
+    if (!Lv2Host::Instance().SavePreset(d.pluginName, name, d.state, d.params))
+        ReportError("Save Preset",
+                    std::string("Could not write the preset \"") + name +
+                    "\".\n\nCheck that the settings folder is writable.");
+#else
+    (void)tid; (void)fx; (void)name;
+#endif
 }
 
 // Close every native editor and forget every watch: their insert addresses
@@ -3380,7 +3469,7 @@ bool MainWindow::OpenNativeEditor(TrackId tid, int fx) {
     title += master ? " \xE2\x80\x94 Master" : (" \xE2\x80\x94 " + t->name);
 
     BRect uw(160, 160, 160 + 960, 160 + 680);
-    Lv2UiWindow::Open(uw, d.pluginName, title, d.params, tid, fx,
+    Lv2UiWindow::Open(uw, d.pluginName, title, d.params, d.state, tid, fx,
                       BMessenger(this));
     return true;
 #else

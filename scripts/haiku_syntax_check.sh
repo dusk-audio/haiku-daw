@@ -21,6 +21,15 @@ if command -v pkg-config >/dev/null 2>&1; then
   for mod in lilv-0 lv2; do
     pkg-config --exists $mod && INCS="$INCS $(pkg-config --cflags $mod)"
   done
+  # DAW_HAVE_LV2 comes from the daw_lv2 target's PUBLIC definition, so the VM
+  # build compiles the LV2 branches of src/ui/ and tests/ while a check without
+  # it silently compiles them OUT — which is how a use-before-declaration in a
+  # DAW_HAVE_LV2-only test function passed this check and failed the VM build.
+  # Only when both modules are there, since the branches need lilv AND the LV2
+  # headers (the same condition CMake's target uses).
+  if pkg-config --exists lilv-0 lv2; then
+    INCS="$INCS -DDAW_HAVE_LV2=1"
+  fi
   # <lv2/core/lv2.h> lives under the SYSTEM include root, which the cross
   # compiler's sysroot does not search. Adding that root itself is not an
   # option (it drags glibc's headers into libstdc++) -- so a directory holding

@@ -2059,6 +2059,70 @@ static void TestThemeMode(MainWindow* win) {
 
 // --- driver ----------------------------------------------------------------
 
+#ifdef DAW_HAVE_LV2
+// --- 8. LV2 insert state: the preset box on the insert panel ---------------
+//
+// What is left of the preset feature on this side of the glass: an LV2 insert's
+// panel draws the Preset box, and the whole chain still round-trips through a
+// panel commit with its state intact (the codec is what silently destroyed
+// patches before). The menu itself blocks in BPopUpMenu::Go, so what a preset
+// choice DOES is covered host-side (lv2_state_tests); what the panel LOOKS
+// like is what this shot is for.
+static void TestLv2InsertPresets(MainWindow* win, Project& project) {
+    std::printf("test_lv2_insert_presets\n");
+    Lv2Host::Instance().ScanAll();
+    const std::vector<Lv2PluginInfo>& plugins = Lv2Host::Instance().Plugins();
+    const Lv2PluginInfo* chosen = nullptr;
+    for (const Lv2PluginInfo& p : plugins)
+        if (!p.uri.empty()) { chosen = &p; break; }
+    if (!chosen) {
+        std::printf("  no hostable LV2 plugin installed - nothing to show\n");
+        return;
+    }
+
+    Track t = MakeMidiTrack(project, {}, "lv2-preset");
+    EffectDesc d = MakeInsertDesc(EffectType::Lv2, chosen->uri);
+    d.state = "<urn:haiku-daw:test:state:1>\n    a pset:Preset ;\n"
+              "    lv2:appliesTo <urn:haiku-daw:test:stateful> .\n";
+    t.fx.push_back(d);
+    const TrackId tid = t.id;
+    CHECK(LockedAddTrack(win, project, t));
+
+    // A panel commit -- what any knob move posts -- must not drop the state.
+    BMessage apply(kMsgApplyFx);
+    apply.AddInt64("track", (int64)tid);
+    EncodeFxChain(apply, t.fx);
+    win->PostMessage(&apply);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        Track* tr = project.FindTrack(tid);
+        const bool ok = tr && !tr->fx.empty() && tr->fx[0].state == d.state;
+        win->Unlock();
+        return ok;
+    }));
+
+    BMessage show(kMsgShowFx);
+    show.AddInt64("track", (int64)tid);
+    show.AddInt32("focus", 0);
+    const int before = VisibleWindows();
+    win->PostMessage(&show);
+    CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    snooze(300000);
+    Shot("fx-window-lv2-preset");
+
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w == nullptr || w->IsHidden()) continue;
+        const char* name = WindowTitle(w);
+        if (name != nullptr && std::strstr(name, "lv2-preset") != nullptr) {
+            if (w->Lock()) { w->Quit(); }
+            break;
+        }
+    }
+    CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+}
+#endif
+
 static int32 TestThread(void*) {
     // A leftover recovery file makes the window open its "Recover?" alert at
     // startup, and that alert BLOCKS the window thread until someone answers
@@ -2101,6 +2165,7 @@ static int32 TestThread(void*) {
     TestAboutBox(win);
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);
+    TestLv2InsertPresets(win, project);
 #endif
     TestErrorReports(win, project, stack);
     TestKeyboardFocus(win, project);

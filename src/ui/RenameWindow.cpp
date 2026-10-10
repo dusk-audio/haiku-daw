@@ -12,11 +12,15 @@ namespace daw {
 enum { MSG_OK = 'rnok' };
 
 RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
-                           BMessenger apply, uint32 what)
-    : BWindow(frame, what == kMsgRenameMarker ? "Rename Marker" : "Rename Track",
+                           BMessenger apply, uint32 what, int64 aux,
+                           const char* title)
+    : BWindow(frame,
+              title ? title
+                    : (what == kMsgRenameMarker ? "Rename Marker"
+                                                : "Rename Track"),
               B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
-      fTrack(track), fApply(apply), fWhat(what),
+      fTrack(track), fApply(apply), fWhat(what), fAux(aux),
       fOldName(current ? current : "") {
     // Layout Kit (M1.4): the window sizes itself to its contents, which is
     // also what keeps it right at a larger font -- the old fixed rects did
@@ -45,6 +49,7 @@ void RenameWindow::MessageReceived(BMessage* msg) {
     if (msg->what == MSG_OK) {
         BMessage m(fWhat);
         m.AddInt64("track", (int64)fTrack);
+        m.AddInt64("aux", fAux);   // 0 for a rename; the insert index for a preset
         m.AddString("name", fText->Text());
         m.AddString("oldname", fOldName.c_str());   // disambiguates same-frame markers
         fApply.SendMessage(&m);
