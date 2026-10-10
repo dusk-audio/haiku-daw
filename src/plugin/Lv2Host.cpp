@@ -141,11 +141,11 @@ class Lv2Effect : public IEffect {
 public:
     Lv2Effect(const LilvPlugin* plugin, const Lv2PortLayout& layout,
               const std::vector<Lv2ControlMeta>& ctrl, std::string name,
-              UridMap& urids, LilvWorld* world, std::string uri,
-              const std::string& state, double sampleRate)
+              UridMap& urids, LilvWorld* world, std::recursive_mutex& worldLock,
+              std::string uri, const std::string& state, double sampleRate)
         : fPlugin(plugin), fLayout(layout), fCtrl(ctrl),
           fName(std::move(name)), fUrids(urids), fWorld(world),
-          fUri(std::move(uri)) {
+          fWorldLock(worldLock), fUri(std::move(uri)) {
         fSequenceType = fUrids.Map(LV2_ATOM__Sequence);
 
         // fCtrl is built alongside fLayout.controlIn during the scan, so the two
@@ -284,6 +284,7 @@ public:
     bool SaveState(std::string* out) const override {
         if (!out || fInstances.empty() || !fWorld || !fInstances[0].handle)
             return false;
+        std::lock_guard<std::recursive_mutex> lock(fWorldLock);
         const LV2_Feature* features[] = {
             fUrids.MapFeature(), fUrids.UnmapFeature(), nullptr
         };
@@ -305,6 +306,7 @@ public:
 
     bool LoadState(const std::string& state) override {
         if (state.empty() || fInstances.empty() || !fWorld) return false;
+        std::lock_guard<std::recursive_mutex> lock(fWorldLock);
         LilvState* st = lilv_state_new_from_string(fWorld, fUrids.MapPtr(),
                                                    state.c_str());
         if (!st) return false;
@@ -496,6 +498,10 @@ private:
     // What serializing this instance's state takes: lilv parses and writes RDF
     // through a world, and the state document is addressed by a URI.
     LilvWorld*                  fWorld = nullptr;
+    // Serializes lilv use across loopers: the running instance's state is saved
+    // from the main window while the effects window may be listing presets, and
+    // lilv's world is not thread-safe (see Impl::worldMutex).
+    std::recursive_mutex&       fWorldLock;
     std::string                 fUri;
 
     std::vector<Inst>  fInstances;
@@ -527,6 +533,14 @@ struct Lv2Host::Impl {
     LilvWorld* world = nullptr;
     UridMap    urids;
     bool       scanned = false;
+
+    // lilv's world is not thread-safe, and since the insert panel grew a preset
+    // menu this host is reached from TWO loopers: the effects window asks for
+    // presets while the main window may be instantiating a plugin or capturing
+    // state. Recursive because the public entry points call each other
+    // (Presets -> PresetParams) and a plain mutex would deadlock there. Never
+    // taken on the audio thread -- every caller is off-RT by construction.
+    std::recursive_mutex worldMutex;
 
     // Parallel to `plugins`: everything Create needs that the public listing
     // does not expose.
@@ -582,6 +596,7 @@ bool NodeAsFloat(const LilvNode* n, float* out) {
 } // namespace
 
 void Lv2Host::ScanAll() {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     if (fImpl->scanned) return;
     fImpl->scanned = true;
 
@@ -801,6 +816,7 @@ void Lv2Host::ScanAll() {
 }
 
 bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     ScanAll();   // idempotent: the world has to exist before it can be asked
     LilvWorld* w = fImpl->world;
     if (!w) return true;
@@ -866,9 +882,11 @@ std::unique_ptr<IEffect> Lv2Host::Create(const std::string& uri,
         // as PluginHost's trampoline.
         const double rate = sampleRate > 0.0 ? sampleRate : 44100.0;
 
+        std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
         std::unique_ptr<Lv2Effect> fx(new Lv2Effect(
             e.plugin, e.layout, e.ctrl, fImpl->plugins[i].name,
-            fImpl->urids, fImpl->world, fImpl->plugins[i].uri, state, rate));
+            fImpl->urids, fImpl->world, fImpl->worldMutex,
+            fImpl->plugins[i].uri, state, rate));
         if (!fx->Valid()) return nullptr;        // plugin refused to instantiate
         return std::unique_ptr<IEffect>(fx.release());
     }
@@ -904,6 +922,7 @@ bool PortValueAsFloat(LV2_URID type, uint32_t size, const void* value,
 
 std::vector<std::pair<int, float>> Lv2Host::PresetParams(const std::string& uri,
                                                          const std::string& state) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     ScanAll();
     std::vector<std::pair<int, float>> out;
     if (state.empty() || !fImpl->world) return out;
@@ -973,6 +992,7 @@ std::vector<std::pair<int, float>> Lv2Host::PresetParams(const std::string& uri,
 
 bool Lv2Host::SaveInstanceState(const std::string& uri, void* instance,
                                 std::string* out) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     ScanAll();
     if (!instance || !out || !fImpl->world) return false;
     LilvNode* uriNode = lilv_new_uri(fImpl->world, uri.c_str());
@@ -1001,6 +1021,7 @@ bool Lv2Host::SaveInstanceState(const std::string& uri, void* instance,
 }
 
 std::vector<Lv2PresetInfo> Lv2Host::Presets(const std::string& uri) {
+    std::lock_guard<std::recursive_mutex> lock(fImpl->worldMutex);
     ScanAll();
     std::vector<Lv2PresetInfo> out;
     if (!fImpl->world) return out;
