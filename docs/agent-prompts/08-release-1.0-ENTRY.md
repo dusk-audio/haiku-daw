@@ -1,5 +1,8 @@
 # Session entry — push Haiku DAW toward a 1.0 release
 
+> **Superseded 2026-10-10 by `24-continue-1.0-ENTRY.md`.** This file's task
+> list is finished; it stays as the record of R0–R5 and of the decisions in §2.
+
 You are a coding agent working in `/home/marc/haiku-daw` on a Linux host (zsh).
 The project is a native digital audio workstation for Haiku OS (C++17, CMake).
 The owner is Marc. Your job is to move the project toward a shippable 1.0 by

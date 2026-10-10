@@ -8,6 +8,9 @@ another). Read these before writing code:
 2. `docs/agent-prompts/README.md` — the package plan, the status table and the
    rules every package follows. Your task brief is one of the files beside it.
 3. **`docs/UI_GUIDELINES.md` — before touching anything under `src/ui/`.**
+4. Starting a session with no other instructions? Your entry prompt is
+   `docs/agent-prompts/24-continue-1.0-ENTRY.md`; the plan it works through is
+   `docs/PLAN_1.0.md`.
 
 Non-negotiable:
 

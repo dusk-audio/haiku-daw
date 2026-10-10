@@ -1,5 +1,8 @@
 # Agent Work Packages — Commercial-Parity Push
 
+**Current entry prompt:** `24-continue-1.0-ENTRY.md` (the 1.0 plan, M1.4 onward:
+`docs/PLAN_1.0.md`).
+
 Prompts for parallel Claude (Opus) agents. Each prompt file is self-contained: hand one file to one agent as its task prompt, in this repo, on its own branch.
 
 ## Why these packages
