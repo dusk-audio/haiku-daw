@@ -131,15 +131,23 @@ static void TestSwapUnderLoad() {
     });
 
     std::thread consumer([&] {
-        while (!stopConsumer.load()) {
+        for (;;) {
             FakeGraph* g = slot.Active();     // ONE load per "block"
-            if (g) {
-                // Touch it the way a render would; the payload stays readable.
+            const bool have = (g != nullptr);
+            if (have) {
+                // HOLD it the way a block does, then touch it: if the reclaimer
+                // frees a retired graph too early, this read lands on freed
+                // memory and ASan reports it. (Without the hold the window is
+                // too small for the race to be seen at all, and only the
+                // deterministic checks above would notice.)
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
                 volatile int v = g->payload;
                 (void)v;
             }
             gen.fetch_add(1, std::memory_order_release);
-            std::this_thread::sleep_for(std::chrono::microseconds(200));
+            if (stopConsumer.load()) break;
+            if (!have)
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
         }
     });
 
