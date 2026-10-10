@@ -1,12 +1,12 @@
 #include "PeakCache.h"
 
-#include "../engine/WavSource.h"
+#include "../engine/IAudioSource.h"
 
 #include <algorithm>
 
 namespace daw {
 
-bool PeakCache::Build(WavSource& src, int framesPerBucket) {
+bool PeakCache::Build(IAudioSource& src, int framesPerBucket) {
     if (!src.IsValid() || framesPerBucket < 1)
         return false;
 

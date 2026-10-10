@@ -40,7 +40,13 @@ struct AppSettings {
     // The export dialog's last choices, so a repeat bounce does not have to be
     // re-specified. 0 sample rate = the project's own; range 0 = whole project,
     // 1 = the loop range; stems 0 = mixdown, 1 = stems.
+    // exportContainer is AudioFileFormat's ordinal (0 WAV, 1 AIFF, 2 FLAC,
+    // 3 Ogg Vorbis) as an int, so this stays a plain settings struct with no
+    // include of the engine headers; a value this build cannot write is
+    // ignored on load (see MainWindow::ApplySettings).
+    int   exportContainer = 0;
     int   exportBitDepth  = 16;
+    float exportVorbisQuality = 0.5f;
     bool  exportDither    = true;
     int   exportSampleRate = 0;
     bool  exportNormalize = false;

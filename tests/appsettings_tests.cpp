@@ -20,7 +20,9 @@ int main() {
     a.monitorInput = true;
     a.lastDir      = "/boot/home/My Samples";   // note the space
     a.winL = 10; a.winT = 20; a.winR = 900; a.winB = 640;
+    a.exportContainer    = 2;          // FLAC, as AudioFileFormat's ordinal
     a.exportBitDepth     = 24;
+    a.exportVorbisQuality = 0.8f;
     a.exportDither       = false;
     a.exportSampleRate   = 96000;
     a.exportNormalize    = true;
@@ -44,7 +46,9 @@ int main() {
     CHECK(std::fabs(b.winL - 10) < 1e-3 && std::fabs(b.winR - 900) < 1e-3);
     // The export dialog's last choices survive too (they are the reason the
     // dialog does not have to be re-specified on every bounce).
+    CHECK(b.exportContainer == 2);              // the format survives too
     CHECK(b.exportBitDepth == 24);
+    CHECK(std::fabs(b.exportVorbisQuality - 0.8f) < 1e-3);
     CHECK(b.exportDither == false);
     CHECK(b.exportSampleRate == 96000);
     CHECK(b.exportNormalize == true);
@@ -63,6 +67,9 @@ int main() {
     AppSettings old;
     CHECK(old.Deserialize("buffer 512\nmetronome 0\n"));
     CHECK(old.exportBitDepth == 16 && old.exportDither == true);
+    // A file an older build wrote has no container line: the dialog must
+    // reopen on WAV, not on whatever the enum's zero happens to be.
+    CHECK(old.exportContainer == 0 && old.exportVorbisQuality == 0.5f);
     CHECK(old.exportSampleRate == 0 && old.exportNormalize == false);
     CHECK(old.exportRange == 0 && old.exportStems == 0);
     // ...and the panes default to the inspector showing, the dock hidden.

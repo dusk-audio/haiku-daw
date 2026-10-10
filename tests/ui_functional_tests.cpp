@@ -27,6 +27,7 @@
 #include "../src/model/Commands.h"   // SetFxCommand
 #include "../src/engine/WavSource.h"   // reading a bounce back
 #include "../src/engine/WavWriter.h"   // ...and writing the Locate… fixture
+#include "../src/engine/AudioFormats.h"   // the format menus + sniffing a bounce
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
@@ -39,6 +40,8 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <MenuField.h>   // the export dialog's Format / Vorbis quality menus
+#include <MenuItem.h>    // ...and the rows inside them
 #include <Directory.h>
 #include <Entry.h>
 #include <Messenger.h>
@@ -471,6 +474,140 @@ static void TestExportStems(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return CountWavs(dir) == expected; }, 60000000));
 
     if (system(rm.c_str()) != 0) return;
+}
+
+// --- 4b. the export dialog's format row (M6) -------------------------------
+
+// The dialog itself: its Format menu must offer exactly what this build can
+// write (AudioFormats' tables), and applying it must reach MainWindow as a
+// container. Ends by putting the remembered choice back to plain WAV, so a
+// later test that posts only "bits" still bounces a .wav.
+static void TestExportFormatDialog(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
+    std::printf("test_export_format_dialog\n");
+    const int32 windowsBefore = VisibleWindows();
+    win->PostMessage(MSG_EXPORT);
+
+    BWindow* dlg = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Export") == 0) {
+                dlg = w;
+                return true;
+            }
+        }
+        return false;
+    }));
+    if (!dlg) return;
+    snooze(300000);
+    Shot("export-dialog");
+
+    dlg->Lock();
+    BMenuField* fmt  = dynamic_cast<BMenuField*>(dlg->FindView("fm"));
+    BMenuField* qual = dynamic_cast<BMenuField*>(dlg->FindView("vq"));
+    CHECK(fmt != nullptr);
+    CHECK(qual != nullptr);
+    if (fmt && fmt->Menu()) {
+        // Rows are the kit-free tables' rows, in order, with no extras: a
+        // build without libFLAC must not offer FLAC.
+        CHECK(fmt->Menu()->CountItems() == ExportFormatChoiceCount());
+        const int n = std::min(fmt->Menu()->CountItems(),
+                               ExportFormatChoiceCount());
+        for (int i = 0; i < n; i++) {
+            BMenuItem* it = fmt->Menu()->ItemAt(i);
+            CHECK(it != nullptr);
+            if (it) CHECK(std::strcmp(it->Label(),
+                                      ExportFormatChoiceAt(i).label) == 0);
+        }
+        // What a click does: mark a row. (The items carry no message, so the
+        // menu field's own label follows the mark, which is what the label
+        // under the arrows reads.)
+        fmt->Menu()->ItemAt(1)->SetMarked(true);
+    }
+    if (qual && qual->Menu()) {
+        CHECK(qual->Menu()->CountItems() == VorbisQualityChoiceCount());
+        qual->Menu()->ItemAt(VorbisQualityChoiceCount() - 1)->SetMarked(true);
+    }
+    dlg->Unlock();
+
+    // The dialog applies by posting its own go-ahead to itself.
+    dlg->PostMessage('exok');
+    // ...and MainWindow answers with the save panel, exactly as before.
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+
+    // Put the remembered choice back to WAV (row 0) for whatever runs next.
+    BMessage back(kMsgExportOptions);
+    back.AddInt32("container", (int32)AudioFileFormat::Wav);
+    back.AddInt32("bits", 16);
+    win->PostMessage(&back);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; }));
+    HideOtherWindows(win);
+}
+
+// One bounce per container this build can write, all the way through the app:
+// the dialog's answer, the panel's answer, and the file that lands -- whose
+// format is SNIFFED from its bytes, not assumed from the name it was given.
+static void TestExportFormats(MainWindow* win, Project& project) {
+    CHECK(WaitQuiet());
+    std::printf("test_export_formats\n");
+
+    struct Case { AudioFileFormat fmt; const char* name; };
+    const Case cases[] = {
+        { AudioFileFormat::Wav,  "haiku_daw_ui_fmt.wav" },
+        { AudioFileFormat::Flac, "haiku_daw_ui_fmt.flac" },
+        { AudioFileFormat::Ogg,  "haiku_daw_ui_fmt.ogg" },
+    };
+    for (const Case& k : cases) {
+        if (!AudioFileFormatCanWrite(k.fmt))
+            continue;   // not in this build: the dialog would not offer it
+        const std::string path = std::string("/tmp/") + k.name;
+        std::remove(path.c_str());
+        std::remove((path + ".part").c_str());
+
+        const int32 windowsBefore = VisibleWindows();
+        BMessage opts(kMsgExportOptions);
+        opts.AddInt32("bits", 16);
+        opts.AddInt32("container", (int32)k.fmt);
+        opts.AddFloat("vquality", 0.5f);
+        opts.AddBool("dither", false);
+        opts.AddInt32("rate", 0);
+        opts.AddBool("norm", false);
+        opts.AddFloat("lufs", -14.0f);
+        opts.AddFloat("ceil", -1.0f);
+        opts.AddBool("lim", false);
+        opts.AddInt32("range", 0);
+        opts.AddInt32("stems", 0);
+        win->PostMessage(&opts);
+        CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+        HideOtherWindows(win);
+
+        entry_ref dir;
+        CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+        BMessage ref(MSG_EXPORT_REF);
+        ref.AddRef("directory", &dir);
+        ref.AddString("name", k.name);
+        win->PostMessage(&ref);
+
+        CHECK(WaitFor([&] { return FileExists(path); }, 60000000));
+        CHECK(FileExists(path));
+        CHECK(!FileExists(path + ".part"));
+        // The bytes decide: a FLAC export is a FLAC whatever it was called.
+        CHECK(SniffAudioFileFormat(path) == k.fmt);
+        CHECK(WaitQuiet());
+        std::remove(path.c_str());
+    }
+
+    // Back to WAV for anything that follows (see TestExportFormatDialog).
+    BMessage back(kMsgExportOptions);
+    back.AddInt32("container", (int32)AudioFileFormat::Wav);
+    back.AddInt32("bits", 16);
+    win->PostMessage(&back);
+    snooze(200000);
+    HideOtherWindows(win);
 }
 
 // The loop range bounces what the loop covers, not the whole timeline.
@@ -1804,6 +1941,10 @@ static int32 TestThread(void*) {
     TestExportCancel(win, project);
     TestExportStems(win, project);
     TestExportLoopRange(win, project);
+    // After the WAV-only flows above, so a non-WAV container left remembered
+    // by these cannot change what they write.
+    TestExportFormatDialog(win, project);
+    TestExportFormats(win, project);
     TestAboutBox(win);
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);

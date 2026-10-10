@@ -8,6 +8,7 @@
 #include "TransportBar.h"
 #include "MeterView.h"
 #include "../engine/DeviceLatency.h"
+#include "../engine/WavSource.h"   // reading a finished take back (a WAV we wrote)
 #include "../model/RecordPlan.h"   // CountInFrames / CompensateRoundTrip
 #include "../model/TakeNames.h"     // NextFreeWavPath (the take name)
 

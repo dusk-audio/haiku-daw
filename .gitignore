@@ -3,3 +3,4 @@ build-host/
 *.o
 *.a
 b-asan/
+b-noformats/

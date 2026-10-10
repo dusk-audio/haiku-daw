@@ -13,6 +13,7 @@
 #include "../model/TakeNames.h"
 #include "../engine/Exporter.h"
 #include "../engine/WavSource.h"
+#include "../engine/AudioFormats.h"   // OpenAudioSource: any format, one reader
 #include "../engine/WavWriter.h"
 #include "../engine/Resampler.h"
 
@@ -42,7 +43,8 @@ void RenderJobs::StartExport(const char* path, bool stems) {
     const ExportChoices c = fWin->fExportChoices;
     const double rate = c.sampleRate > 0 ? (double)c.sampleRate : 0.0;
     ExportOptions opts;
-    opts.format    = ExportFormat{ c.bitDepth, c.dither };
+    opts.format    = ExportFormat{ c.bitDepth, c.dither, c.container,
+                                   c.vorbisQuality };
     opts.normalize = ExportNormalize{ c.normalize, c.targetLufs, c.truePeak,
                                       c.limiter };
     opts.range     = ExportRange{};   // whole project unless the loop is asked
@@ -144,19 +146,21 @@ void RenderJobs::FreezeTrack(TrackId track, bool freeze) {
         std::fprintf(stderr, "Freeze: render failed for track %ld\n", (long)track);
         return;
     }
-    WavSource src;
-    if (!src.Open(path)) return;
-    const double fileRate = src.FrameRate();
+    // The freeze render is a WAV we just wrote, but it goes through the same
+    // factory as any import so this path cannot drift from the others.
+    std::unique_ptr<IAudioSource> src = OpenAudioSource(path);
+    if (!src) return;
+    const double fileRate = src->FrameRate();
     const double projRate = fWin->fProject->sampleRate;
     Clip fc;
     fc.startFrame   = 0;
     fc.sourceOffset = 0;
     fc.sourcePath   = path;
-    fc.lengthFrames = (Frame)llround(src.TotalFrames()
+    fc.lengthFrames = (Frame)llround(src->TotalFrames()
                         * (fileRate > 0 ? projRate / fileRate : 1.0));
     fWin->fStack->Execute(std::make_unique<FreezeTrackCommand>(track, true, fc),
                     *fWin->fProject);
-    (*fWin->fPeaks)[path].Build(src);
+    (*fWin->fPeaks)[path].Build(*src);
     fWin->fTimeline->Invalidate();
 }
 
@@ -216,8 +220,8 @@ void RenderJobs::RegionReverse(TrackId track, ClipId clip) {
     macro->Add(std::make_unique<AddClipCommand>(track, nc));
     fWin->fStack->Execute(std::move(macro), *fWin->fProject);
 
-    WavSource src;
-    if (src.Open(path)) (*fWin->fPeaks)[path].Build(src);
+    std::unique_ptr<IAudioSource> src = OpenAudioSource(path);
+    if (src) (*fWin->fPeaks)[path].Build(*src);
     fWin->fTimeline->Invalidate();
 }
 
@@ -260,12 +264,13 @@ int64_t RenderJobs::DecodeClipRegion(const Clip& c, std::vector<float>& out,
 
     out.clear();
     outRate = 0.0;
-    WavSource src;
-    if (!src.Open(c.sourcePath))
+    // Whatever the clip points at -- a WAV take, an imported FLAC, an AIFF.
+    std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
+    if (!src)
         return 0;
-    outRate = src.FrameRate();
+    outRate = src->FrameRate();
     if (c.sourceOffset > 0)
-        src.Seek(c.sourceOffset);
+        src->Seek(c.sourceOffset);
     // The clip plays lengthFrames project-frames == that many source-frames
     // scaled by the rate ratio, starting at sourceOffset.
     const double projRate = fWin->fProject->sampleRate;
@@ -274,7 +279,7 @@ int64_t RenderJobs::DecodeClipRegion(const Clip& c, std::vector<float>& out,
         wantSrc = (int64_t)llround((double)c.lengthFrames * outRate / projRate);
     const float* chunk = nullptr;
     size_t frames = 0;
-    while ((int64_t)(out.size() / 2) < wantSrc && src.ReadChunk(&chunk, &frames)) {
+    while ((int64_t)(out.size() / 2) < wantSrc && src->ReadChunk(&chunk, &frames)) {
         int64_t have = (int64_t)(out.size() / 2);
         int64_t take = wantSrc - have;
         if ((int64_t)frames > take) frames = (size_t)take;

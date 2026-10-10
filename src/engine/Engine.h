@@ -1,6 +1,7 @@
 // Engine — milestone 2 playback engine.
 //
-// Pulls decoded audio from disk (WavSource) through a lock-free RingBuffer
+// Pulls decoded audio from disk (any IAudioSource: WAV, AIFF, FLAC, Ogg
+// Vorbis) through a lock-free RingBuffer
 // filled by a per-track disk thread, and mixes it in the BSoundPlayer
 // real-time callback. One TrackStream per playing clip; the callback sums
 // them, so extending to true multitrack (milestone 3) is just more streams.
@@ -11,11 +12,11 @@
 //   - Disk threads do all file reading and fill the rings.
 //   - The main thread starts/stops and polls IsFinished().
 //
-// Haiku-only: depends on the Media Kit (BSoundPlayer + WavSource).
+// Haiku-only: depends on the Media Kit (BSoundPlayer).
 #pragma once
 
 #include "RingBuffer.h"
-#include "WavSource.h"
+#include "AudioFormats.h"   // OpenAudioSource (WAV / AIFF / FLAC / Ogg)
 #include "Resampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
@@ -79,8 +80,8 @@ public:
 
     TrackId Track() const { return fTrackId; }
     Frame EndFrame() const { return fStart + fLength; }
-    bool  Valid() const { return fSource.IsValid(); }
-    float SourceRate() const { return fSource.FrameRate(); }
+    bool  Valid() const { return fSource && fSource->IsValid(); }
+    float SourceRate() const { return fSource ? fSource->FrameRate() : 0.0f; }
 
 private:
     void DiskLoop();             // producer thread body
@@ -100,7 +101,10 @@ private:
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
 
-    WavSource   fSource;
+    // The factory's reader for whatever the clip's file is: WAV, AIFF, FLAC or
+    // Ogg Vorbis. Owned (the concrete readers are not copyable and their
+    // lifetime is per-clip-stream), and null until Prepare() opens it.
+    std::unique_ptr<IAudioSource> fSource;
     std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
     std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
