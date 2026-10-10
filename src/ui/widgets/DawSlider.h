@@ -9,6 +9,9 @@
 #include "../Theme.h"
 
 #include <Slider.h>
+#include <Window.h>
+
+#include <cmath>
 
 namespace daw {
 
@@ -39,6 +42,67 @@ public:
         SetHighColor(ColText());
         if (Label() != nullptr && Label()[0] != '\0' && ToolTip() == nullptr)
             SetToolTip(Label());
+    }
+
+    // The value a double-click returns to (the minimum until one is set).
+    void SetDefaultValue(int32 value) { fDefaultValue = value; }
+
+    // The drag model: clicking the trough jumps there (the stock gesture),
+    // then dragging is RELATIVE to the grab point, which is what makes Shift
+    // for a fine rate possible at all. The keyboard, the hash marks and the
+    // focus model stay the base class's.
+    void MouseDown(BPoint where) override {
+        if (!IsEnabled()) return;
+        MakeFocus(true);
+        int32 clicks = 1;
+        if (Window() != nullptr && Window()->CurrentMessage() != nullptr)
+            Window()->CurrentMessage()->FindInt32("clicks", &clicks);
+        if (clicks > 1) {
+            BSlider::SetValue(fDefaultValue);
+            Invoke();
+            return;
+        }
+        if (!ThumbFrame().Contains(where)) {
+            const int32 jumped = ValueForPoint(where);
+            if (jumped != Value()) {
+                BSlider::SetValue(jumped);
+                Invoke();
+            }
+        }
+        fDragging  = true;
+        fGrabPoint = where;
+        fGrabValue = Value();
+        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    }
+
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override {
+        if (!fDragging) {
+            BSlider::MouseMoved(where, transit, drag);
+            return;
+        }
+        const BRect bar = BarFrame();
+        if (bar.Width() <= 0.0f || bar.Height() <= 0.0f) return;
+        const int32 vMin = ValueForPoint(BPoint(bar.left, bar.top));
+        const int32 vMax = ValueForPoint(BPoint(bar.right, bar.bottom));
+        const bool horizontal = Orientation() == B_HORIZONTAL;
+        const float span = horizontal ? bar.Width() : bar.Height();
+        float d = horizontal ? (where.x - fGrabPoint.x) / span
+                             : (fGrabPoint.y - where.y) / span;
+        if ((modifiers() & B_SHIFT_KEY) != 0) d /= 10.0f;
+        int32 v = fGrabValue + (int32)std::lround(d * (vMax - vMin));
+        if (v < vMin) v = vMin;
+        if (v > vMax) v = vMax;
+        if (v != Value()) {
+            BSlider::SetValue(v);
+            if (ModificationMessage() != nullptr)
+                Invoke(ModificationMessage());
+        }
+    }
+
+    void MouseUp(BPoint where) override {
+        if (!fDragging) { BSlider::MouseUp(where); return; }
+        fDragging = false;
+        Invoke();
     }
 
 protected:
@@ -115,6 +179,11 @@ protected:
         DrawString(text, BPoint((b.left + b.right) * 0.5f - tw * 0.5f,
                                 b.top + Themed(11.0f)));
     }
+
+    int32 fDefaultValue = 0;
+    bool  fDragging     = false;
+    BPoint fGrabPoint;
+    int32 fGrabValue    = 0;
 
     void DrawFocusMark() override {
         if (!IsFocus()) return;
