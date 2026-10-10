@@ -171,12 +171,50 @@ assertion and the stack, so the next agent inherits it instead of the dialog.
 | Check | Result |
 |---|---|
 | host `cmake --build build-host` | exit 0 |
-| host `ctest --test-dir build-host` | 58/58 (baseline 56/56 + the two new suites) |
+| host `ctest --test-dir build-host` | 58/58 (baseline 56/56 + `snapgrid_tests` + `arrange_cmd_tests`) |
 | ASan build + ctest | 58/58 |
 | `sh scripts/haiku_syntax_check.sh` | 67 files, 0 FAIL |
-| VM `build` ctest | see below |
-| VM `build-off` ctest | see below |
-| VM `ui_functional_tests` | see below |
+| VM `build` ctest | 60/60 when `ui_functional_tests` passes; in one run it was 59/60 — that test's own big-project 5 s wait (see below) |
+| VM `build-off` ctest | 55/55 |
+| VM `ui_functional_tests` | 329 checks, **0 failures** — two direct runs and both screenshot passes (light and dark) |
+
+### One pre-existing failure, seen once: TestPianoRollTransforms' Humanize
+
+On one run the suite came back with a single red — `ui_functional_tests.cpp:604`,
+the Humanize step of `TestPianoRollTransforms` (a package-04 test, not mine):
+
+```cpp
+    rv->RunMidiOp(MidiOp::Humanize);
+    std::vector<MidiNote> before;
+    CHECK(notes(&before));            // <- read AFTER the op
+    ... CHECK(WaitFor(... !NotesEqual(h, before)));
+```
+
+`before` is read *after* the op, so it is a race: whichever side the read lands
+on, the check needs the model to move again. Either mechanism is pre-existing
+(and the seed is `system_time()`, so a draw that leaves every note in place is
+also possible). It did not recur in the two runs after it, and none of this
+package's code is on that path (`RunMidiOp`, `Humanize`, `MidiOps` are
+untouched; the same check passed in every other run of the same tree). Reported,
+not fixed: it belongs to package 04.
+
+A second pre-existing red appeared once, in a `ctest` run: `TestBigProjectPlayback`'s
+`WaitFor(playing(), 5000000)`. The test itself documents the number — "MEASURED
+2026-10-09, VM: 3.1 s for this project. The plan's budget is 300 ms, and the fix
+is M4.1" — so a 5 s wait is a marginal bound on this machine, and under ctest's
+own load (and with one more track than the measurement had) it crosses. My
+direct runs measured **3452 ms**, **3817 ms** and (before this package's fixtures
+existed) 5061 ms on the same VM: it is load, not this branch — the same build
+passed the suite directly in the same hold. Reported, not fixed: M4.1 owns it.
+
+### One tooling mistake worth recording
+
+The first screenshot attempt ran `ctest` and the `build-off` build on the VM
+checkout the mutation cycle had left behind (the driver syncs its mutated tree
+and does not sync back), so that build compiled the mutation and failed. The
+final run re-syncs the branch after the cycle and before anything else measures
+the tree. The same class of mistake as the leaked commit above: a mutation run
+owns the VM checkout as well as the worktree.
 
 ## Mutation checks
 
@@ -188,7 +226,43 @@ Host (each applied, watched to fail, reverted, named in `c6255d9`):
 - `Commands.cpp` (`JoinMidiClipsCommand::Do`): the rebase delta zeroed — 2.
 
 VM, one mutation per suite run (applied, watched to fail, reverted; driven by a
-throwaway commit object so the branch is untouched) — numbers below.
+throwaway commit object so the branch is untouched). What each run reported:
+
+| mutation | result |
+|---|---|
+| `SetTool` never changes | 25 failures: the tool-selection checks and every gesture that depends on the tool |
+| `Snapped` ignores the grid | 6: the pencil's snapped start/length, both snap-indicator seeks |
+| `HitTest` ignores the caller's modifiers | NOT DEMONSTRATED (see below) |
+| the Ctrl+wheel direction flipped | exactly the two zoom-direction checks |
+| `ScrollToFrame` clamps early | exactly the three scroll-past-the-end checks |
+| the roll does not follow | exactly the two follow checks |
+
+(Two of those cycles ran against a tree I was editing at the time, so their
+failure sets also carry reds from the test's *own* bug — the MIDI-region cursor
+mistake below.)
+
+**The `hit-test-mods` mutation has no evidence.** Three attempts, all of them
+no-ops: the first replaced only one of the five call sites (the scissors
+branch, which no check can tell apart), the second inserted its `// MUTATION`
+comment mid-expression so the file did not compile — and `vm.sh build` ends in a
+pipe to `tail`, so a FAILED compile still exits 0 and left the previous binary
+in place (the entry doc's own warning, met through my tooling). The third, with
+the driver fixed to replace every site and to check the build's real exit code,
+is the one whose result is in the record. Until it lands, treat the Gain/Slip
+*cursor* checks as covered by the mutation of `SnapFrame`/`SnapStepsPerBeat`
+only indirectly: their zone mapping is asserted (`CursorFor` over an audio clip
+with Ctrl/Alt) but not proven to fail when the zone logic breaks.
+
+### An accident worth recording: a mutation leaked into a commit
+
+`5c466dd` captured a mutation: the driver above applies a mutation to the
+working tree and restores it afterwards, and that commit was made in the same
+worktree while the driver was mid-cycle, so `git add -A` staged the mutated
+`SetTool` (`return;   // MUTATION: the tool never changes`). Found by reading the
+branch back (`git grep -c MUTATION HEAD`), fixed in `d3b89a6` — a new commit
+rather than a rewrite, per this repo's rules. The rule that came out of it: a
+mutation-check run owns the worktree until it prints its summary; do not commit
+from there while one is running.
 
 ## The failures the first diagnostic run found, and what each fix was
 
@@ -215,4 +289,49 @@ the dock's open/shut state, because the NEXT test measures this window.
 
 ## Screenshots
 
-See below.
+Two passes, `DAW_UI_THEME=light` and `DAW_UI_THEME=dark` (40 shots each; the
+suite green in both, `ui_functional_tests: 329 checks, 0 failures`). Shots I
+opened and checked, against `docs/UI_GUIDELINES.md` §3:
+
+**Light** — `00-startup`, `13-playing`, `14-theme-150`, `15-arrange-palette`,
+`16-arrange-hover`, `17-arrange-clips`, `18-arrange-fade`, `19-arrange-snap`,
+`20-arrange-scrollbars`, `21-arrange-roll-follow`, plus 1:1 crops of the tool
+strip, the clip's left edge and both scrollbars.
+
+**Dark** — `00-startup`, `13-playing`, `14-theme-150`, `15-arrange-palette`,
+`20-arrange-scrollbars`, `37-opened-project`.
+
+What the shots show, and what I checked:
+
+- The **tool strip** fits at 100 % and at 150 % in both modes: six buttons, the
+  separators, the snap field and the zoom pair, nothing clipped, nothing
+  overlapping, the strip's height fixed (it does not grow with the window).
+- The **snap indicator** reads at a glance: `1/16` / `1/4` on the lit field,
+  `Off` dim (shots 15-19).
+- The **hover highlight** is a clearly visible bright bar on the clip's left
+  edge (crop of shot 16) — legible against the dark clip fill in both modes.
+- The **scrollbars** are stock-drawn and their thumbs track the scroll: measured
+  on the pixels, the thumb's 78 % span sits at the LEFT with the view at frame 0
+  (shot 21) and at the RIGHT with the view scrolled to the content end (shot 20),
+  which is the "scroll past the end of the last clip" state — the ruler shows
+  bars 3-9 with the lanes empty.
+- The **docked piano roll** scrolled to the playhead (shot 21: "Piano Roll —
+  arrange" with the tapehead in view).
+- No dead bands, no labels against an edge, no stale panes after Open (shot 37).
+
+**Nothing had to be fixed from this pass.** One thing I chased and cleared: in
+the dark pass the *panel backgrounds* (inspector, dock, transport bar) are light
+while the custom-drawn chrome is dark. That is exactly what T1's and T2's
+accepted dark shots look like (`docs/agent-prompts/shots-25/dark`,
+`shots-26/dark`), so it is the established dark look, not a regression from this
+branch.
+
+**What I could not verify on the VM:** the cursor *glyphs* as the user sees them
+(there is no interactive mouse; the mapping is asserted through `CursorFor` and
+the glyph-cursor path — the bitmap drawing that once faulted — is applied by the
+test on the real target), and the tooltip pop-ups (Haiku shows them from the
+tooltip manager on a real hover+idle; the suite sets them, and the shots cannot
+show that). Both are on the click list for the desktop.
+
+The fixture cleanup at the end of `TestArrangeFeel` runs after its last `Shot`,
+so every shot above is of the state the test set up.
