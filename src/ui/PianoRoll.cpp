@@ -99,21 +99,30 @@ static const char* CcCommonName(int cc) {
 
 // Bottom-lane label. Short, because the button is 42 px wide: an abbreviation
 // for the controllers people know by one ("Mod", "Vol", "Pan", "Expr", "Sus"),
-// "CC n" for the rest. LaneMenu() writes the fuller "CC<n> <name>" form.
+// "CC n" for the rest. It always WRITES what it returns into `buf`, because the
+// button draws the buffer — the first cut returned the name without copying it
+// and the lane said "CC1" for the mod wheel (a screenshot found it; the test
+// now reads the caption back through LaneLabel()).
 const char* PianoRollView::LaneLabelFor(int cc, char* buf, size_t n) {
-    if (cc < 0) return "Vel";
-    const char* name = CcCommonName(cc);
-    std::snprintf(buf, n, "CC%d", cc);
-    if (!name) return buf;
-    // On the button only the shortest names fit; the menu uses them all.
-    switch (cc) {
-        case 1:  return "Mod";
-        case 7:  return "Vol";
-        case 10: return "Pan";
-        case 11: return "Expr";
-        case 64: return "Sus";
-        default: return buf;
+    const char* label = "Vel";
+    if (cc >= 0) {
+        // On the button only the shortest names fit; the menu (CcItemLabel)
+        // spells out the rest ("CC64 Sus").
+        switch (cc) {
+            case 1:  label = "Mod";  break;
+            case 7:  label = "Vol";  break;
+            case 10: label = "Pan";  break;
+            case 11: label = "Expr"; break;
+            case 64: label = "Sus";  break;
+            default: label = nullptr; break;
+        }
+        if (label == nullptr) {
+            std::snprintf(buf, n, "CC%d", cc);
+            return buf;
+        }
     }
+    std::snprintf(buf, n, "%s", label);
+    return buf;
 }
 
 PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,

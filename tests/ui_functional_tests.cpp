@@ -326,16 +326,29 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
         }
         return cc;
     };
+    auto laneLabel = [&]() -> std::string {
+        std::string s;
+        if (roll->LockWithTimeout(1000000) == B_OK) {
+            s = rv->LaneLabel();
+            roll->Unlock();
+        }
+        return s;
+    };
 
     // It opens on velocity, and every controller number is offered -- including
-    // ones no voice acts on yet (74) and the pedal (64).
+    // ones no voice acts on yet (74) and the pedal (64). The caption has to
+    // agree with the lane, or the strip misnames what it draws.
     CHECK(laneCc() == -1);
+    CHECK(laneLabel() == "Vel");
     setLane(64);
     CHECK(laneCc() == 64);
+    CHECK(laneLabel() == "Sus");
     setLane(74);
     CHECK(laneCc() == 74);
+    CHECK(laneLabel() == "CC74");
     setLane(1);                            // the mod wheel: one a voice DOES act on
     CHECK(laneCc() == 1);
+    CHECK(laneLabel() == "Mod");
     Shot("pianoroll-cc-lane");
 
     // A click in the strip is the whole flow: the view hit-tests the lane
@@ -425,6 +438,7 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
     // Back to velocity, the lane the roll opens on.
     setLane(-1);
     CHECK(laneCc() == -1);
+    CHECK(laneLabel() == "Vel");
     roll->Lock();
     roll->Quit();
     snooze(200000);

@@ -70,6 +70,10 @@ public:
     // a popup, exactly like RunMidiOp below.
     void SetLaneCc(int cc);
     int  LaneCc() const { return fLaneCc; }
+    // The lane button's caption ("Vel", "Mod", "CC74", ...): what the button
+    // draws, readable so a test can require the caption to agree with the lane
+    // (the two disagreed once, and only a screenshot noticed).
+    const char* LaneLabel() const { return fLaneLabel; }
 
     // --- MIDI transforms ---------------------------------------------------
     // The transform runs here, on the snapshot, and the result is posted as one
