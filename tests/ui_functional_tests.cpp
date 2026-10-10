@@ -1592,7 +1592,27 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     // Pop out: the dock empties and a window of its own appears (and is closed
     // again, because closing the main window is what quits the app).
     const int before = VisibleWindows();
+    std::printf("  dock: before popout visible=%d\n", before);
     win->PostMessage(MSG_POP_OUT_EDITOR);
+    snooze(400000);
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            BView* roll = win->FindView("roll");
+            BView* dock = win->FindView("dock");
+            std::printf("  dock: after popout roll=%p dock=%p dockH=%.1f\n",
+                        (void*)roll, (void*)dock,
+                        dock ? dock->Bounds().Height() : -1.0f);
+            win->Unlock();
+        }
+        std::printf("  dock: windows now=%d visible=%d\n",
+                    (int)be_app->CountWindows(), VisibleWindows());
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            std::printf("    win[%d] '%s' hidden=%d\n", (int)i,
+                        w && w->Name() ? w->Name() : "(null)",
+                        w ? (int)w->IsHidden() : -1);
+        }
+    }
     CHECK(WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         BView* roll = win->FindView("roll");
