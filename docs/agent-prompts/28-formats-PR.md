@@ -96,13 +96,15 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 | `ctest --test-dir b-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) | 53/53; `formats_tests` reports "157 checks, 0 failures (built without FLAC) (built without Ogg Vorbis)" |
 | `sh scripts/haiku_syntax_check.sh` | 0 FAIL (10 files) |
 | the same check with `-DDAW_HAVE_FLAC=1 -DDAW_HAVE_VORBIS=1 -DDAW_HAVE_LV2=1` | 0 FAIL (23 files: every Haiku-only source) |
-| VM `build` (LV2/FLAC/Vorbis ON) | _pending_ (pass C) |
-| VM `build-off` (`-DDAW_LV2=OFF`, codecs ON) | _pending_ (pass C) |
-| VM `-DDAW_FLAC=OFF -DDAW_VORBIS=OFF` | _pending_ (pass C) |
-| VM `formats_tests` (build, codecs on) | **253 checks, 0 failures** |
-| VM `formats_tests` (codecs off) | **155 checks, 0 failures (built without FLAC / Ogg Vorbis)** |
-| VM `ui_functional_tests` | _pending_ (pass C) |
-| `DAW_UI_SHOTS` pass | _pending_ (pass C) |
+| VM `build` (LV2/FLAC/Vorbis ON) — configure finds both libraries, build | exit 0, `ctest` **55/55** (was 54/54; +`formats_tests`) |
+| VM `build-off` (`-DDAW_LV2=OFF`, codecs ON), build | exit 0, `ctest` **51/51** (was 50/50) |
+| VM `-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`, build | exit 0; `formats_tests` **155 checks, 0 failures (built without FLAC / Ogg Vorbis)** |
+| VM `formats_tests` (build, codecs on) | **274 checks, 0 failures** (280 on the host: the six `/dev/full` checks are Linux-only) |
+| VM `ui_functional_tests` (with `DAW_UI_SHOTS`) | **252 checks, 0 failures**, clean exit, 25 shots |
+
+VM configure output for the enabled build, verbatim:
+`-- FLAC support enabled (/boot/system/develop/lib/libFLAC.so)` and
+`-- Ogg Vorbis support enabled (/boot/system/develop/lib/libvorbisfile.so)`.
 
 ### What the VM turned up that the host could not
 
