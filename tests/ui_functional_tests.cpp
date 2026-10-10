@@ -30,12 +30,16 @@
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
-#ifdef DAW_HAVE_LV2
-#include "../src/plugin/Lv2Host.h"
-#include "../src/ui/Lv2UiWindow.h"
+// Unconditional, though the LV2 test below is the reason the editor's header
+// was pulled in first: EffectsWindow.h has its own LV2 #ifdefs, and the
+// sidechain picker's test needs it (and MixerWindow's kMsgMixFx) in the
+// -DDAW_LV2=OFF build too.
 #include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
 #include "../src/ui/MixerWindow.h"      // kMsgMixFx (open the effects editor)
 #include "../src/dsp/SidechainKey.h"    // kExtKeySlot (the picker's appended slot)
+#ifdef DAW_HAVE_LV2
+#include "../src/plugin/Lv2Host.h"
+#include "../src/ui/Lv2UiWindow.h"
 #endif
 
 #include <Alert.h>
