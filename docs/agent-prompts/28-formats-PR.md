@@ -1,7 +1,7 @@
 # 28 — M6 file formats: AIFF/AIFC, FLAC and Ogg Vorbis import + export
 
-Branch `feature/formats` off `master` (`6d88063`). Spec: `28-formats.md`.
-Draft — the verification numbers below are filled in as each pass runs.
+Branch `feature/formats` off `master` (`6d88063`), PR #5. Spec:
+`28-formats.md`. Every number below is from a completed run.
 
 ## What this is
 
@@ -213,20 +213,22 @@ touch the same region, so expect one trivial conflict there.)
 Looked at, at full size and zoomed on the rows (the export dialog is the only
 window this branch changes; `docs/UI_GUIDELINES.md` §3 list):
 
-- **`06-export-dialog`** — the dialog with the new **Format** and **Vorbis
-  quality** rows, at (200,200) in the diagnostic pass and at (560,40) in the
-  pass the suite now takes. Rows read, top to bottom: the stems box; Format
-  showing the remembered choice ("WAV 32-bit float" — the previous test had
-  set 32-bit float, so this is the dialog remembering rather than a default
-  leaking through); Vorbis quality ("Medium"); Range ("Loop range"); Sample
-  rate ("Project rate"); Dither; Normalize loudness; Target LUFS; True-peak
-  limiter; Ceiling dBTP; Cancel / Export. Nothing overlaps, every label and
-  every marked value fits its well, the window is exactly as tall as its
-  contents with no dead band, the title is "Export", and both buttons are
-  centred.
-- **`07-export-dialog-ws`** — the same dialog built by MainWindow, once it
-  could be mapped (see below). Identical content, which is what says the twin
-  the suite shoots is the window the user gets.
+- **`06-export-dialog`** — in the final pass this shot has **both** dialogs in
+  it: the twin the suite builds, at (560,40), and the one MainWindow opened, at
+  (200,200). Rows read, top to bottom: the stems box; **Format** showing the
+  remembered choice ("WAV 32-bit float" on MainWindow's — the previous test
+  had set 32-bit float, so this is the dialog remembering rather than a
+  default leaking through — and "WAV 16-bit PCM" on the twin, which starts
+  from `ExportChoices`' own default); **Vorbis quality** ("Medium"); Range
+  ("Loop range" / "Whole project"); Sample rate ("Project rate"); Dither;
+  Normalize loudness; Target LUFS; True-peak limiter; Ceiling dBTP; Cancel /
+  Export. Nothing overlaps, every label and every marked value fits its well,
+  the window is exactly as tall as its contents with no dead band, the title
+  is "Export", and both buttons are centred.
+- The same shot from the diagnostic pass (a `DAW_UI_SHOTS` run with the extra
+  probes, kept for comparison) shows the identical window at (200,200), which
+  is what says the twin and the real dialog are indistinguishable in what
+  matters here — the layout and the rows.
 
 One thing I looked at and did **not** change, because it is the theme work's
 (T1): the wells are **right-aligned with ragged left edges** (each row's well
