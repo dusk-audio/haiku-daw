@@ -555,7 +555,16 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
     if (!dlg) return;
     snooze(300000);
+    {
+        const BRect f = dlg->Frame();
+        std::printf("  DIAG dialog frame %.0f,%.0f,%.0f,%.0f hidden=%d "
+                    "active=%d\n", f.left, f.top, f.right, f.bottom,
+                    (int)dlg->IsHidden(),
+                    (int)(dlg->IsActive()));
+    }
     Shot("export-dialog");
+    snooze(2000000);
+    Shot("export-dialog-late");
 
     // Bounded, like every lock this suite takes outside BAlert: a window whose
     // looper is stuck must fail a check, not hang the run for 15 minutes.
