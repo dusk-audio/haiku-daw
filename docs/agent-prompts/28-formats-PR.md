@@ -93,7 +93,7 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 | `cmake --build build-host` | exit 0 |
 | `ctest --test-dir build-host` | 53/53 (was 52/52; +`formats_tests`) |
 | `ctest --test-dir b-asan` (`-DDAW_SANITIZE=ON`) | 53/53 |
-| `ctest --test-dir b-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) | 53/53; `formats_tests` reports "155 checks, 0 failures (built without FLAC) (built without Ogg Vorbis)" |
+| `ctest --test-dir b-noformats` (`-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`) | 53/53; `formats_tests` reports "157 checks, 0 failures (built without FLAC) (built without Ogg Vorbis)" |
 | `sh scripts/haiku_syntax_check.sh` | 0 FAIL |
 | VM `build` (LV2/FLAC/Vorbis ON) ctest | _pending_ |
 | VM `build-off` (`-DDAW_LV2=OFF`) ctest | _pending_ |
@@ -122,6 +122,9 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 5. **`VorbisSink` not propagating a failed page write** → the `/dev/full` leg
    of `test_export_containers`: `!ok` fails (a disk-full Vorbis export would
    otherwise rename a truncated file into place).
+
+Each one was applied, the failing check watched, and the tree restored (a
+`git diff` after each confirms nothing was left behind).
 
 ### Tests added or extended
 
