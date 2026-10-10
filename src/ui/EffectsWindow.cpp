@@ -748,14 +748,15 @@ void EffectsView::Draw(BRect) {
             DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));
             fHits.push_back({ (int)i, 8, 0, sel, 0, 0 });   // kind 8 = delay sync
             knobTop += kSelH;
-        } else if (EffectSupportsSidechain(d.type)) {
-            // External sidechain source (package 05). Shown only for the types
-            // that consume a key, so the row is never a control that does
-            // nothing. The dot marks a ROUTED key: the menu is the same
-            // "None"/track choice whether or not extKey is set, and while no
-            // source is picked the insert detects its own input as it always
-            // has.
-            const char* nm = KeySourceName(d.sidechainSource);
+        }
+
+        // External sidechain source (package 05). A row of its own, BELOW
+        // whatever the type drew above it — deliberately not another arm of the
+        // if/else above, where a Compressor would never reach it (its own arm
+        // matches first) and its panel would show the height without the row.
+        // The label is accent-coloured when a key is routed; with no source
+        // picked the insert detects its own input as it always has.
+        if (EffectSupportsSidechain(d.type)) {
             BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
             SetHighColor(ColHeaderHi()); FillRect(sel);
             SetHighColor(ColGrid());     StrokeRect(sel);
@@ -763,7 +764,7 @@ void EffectsView::Draw(BRect) {
             DrawString("Key:", BPoint(sel.left + 8, sel.bottom - 6));
             SetHighColor(d.sidechainSource == kInvalidTrackId ? ColTextDim()
                                                              : ColAccent());
-            BString keyLbl(nm);
+            BString keyLbl(KeySourceName(d.sidechainSource));
             TruncateString(&keyLbl, B_TRUNCATE_END, sel.Width() - 72.0f);
             DrawString(keyLbl.String(), BPoint(sel.left + 52, sel.bottom - 6));
             SetHighColor(ColText());
