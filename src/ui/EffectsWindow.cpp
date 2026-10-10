@@ -6,6 +6,7 @@
 #include "../plugin/PluginHost.h"
 #include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
+#include "RenameWindow.h"           // the "Save Preset..." name prompt
 
 // Only linked when CMake found lilv; DAW_HAVE_LV2 comes from the daw_lv2 target.
 // Without it every LV2 branch below compiles out and an Lv2 insert simply shows
@@ -41,6 +42,7 @@ static constexpr float kTitleH   = 22.0f;
 // Per-insert header, under the title bar: bypass button + wet/dry slider.
 static constexpr float kHeaderH  = 22.0f;
 static constexpr float kBypassW  = 52.0f;
+static constexpr float kPresetW  = 76.0f;    // the "Preset v" box (LV2 inserts)
 static constexpr float kMixValW  = 40.0f;
 static constexpr float kKnobW    = 68.0f;
 static constexpr float kKnobH    = 86.0f;
@@ -328,6 +330,11 @@ void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain) {
         // un-bypassed / fully wet on the next knob move.
         m.AddInt32("eb", d.bypassed ? 1 : 0);
         m.AddFloat("em", d.mix);
+        // The plugin's own state travels with the descriptor too. This panel
+        // commits the WHOLE chain: a codec that dropped the state would destroy
+        // every insert's patch on the next knob move -- which is precisely the
+        // data loss the state feature exists to end.
+        m.AddString("es", d.state.c_str());
         for (float v : d.params) m.AddFloat("ep", v);
     }
 }
@@ -348,6 +355,8 @@ std::vector<EffectDesc> DecodeFxChain(const BMessage& m) {
         if (m.FindInt32("eb", i, &byp) == B_OK) d.bypassed = (byp != 0);
         float mix = 1.0f;
         if (m.FindFloat("em", i, &mix) == B_OK) d.mix = ClampFxMix(mix);
+        BString st;
+        if (m.FindString("es", i, &st) == B_OK) d.state = st.String();
         int32 count = 0;
         m.FindInt32("ec", i, &count);
         for (int32 j = 0; j < count; j++) {
@@ -682,9 +691,29 @@ void EffectsView::Draw(BRect) {
         DrawString("Byp", BPoint(byp.left + 14, byp.bottom - 5));
         fHits.push_back({ (int)i, 11, 0, byp, 0, 0 });   // kind 11 = bypass
 
+        // Preset box, where there is a plugin to ask for presets. An LV2 insert
+        // whose URI resolves has a preset list (its bundles' plus the user's);
+        // a built-in does not -- "preset" for those is what the Add menu
+        // already offers, and a box that opened an empty menu would be a lie.
+        float afterByp = byp.right + 8;
+#ifdef DAW_HAVE_LV2
+        if (d.type == EffectType::Lv2 && !d.pluginName.empty()
+            && Lv2Host::Instance().Find(d.pluginName) != nullptr) {
+            BRect pb(afterByp, hdr.top + 3, afterByp + kPresetW, hdr.bottom - 3);
+            SetHighColor(ColHeaderHi()); FillRect(pb);
+            SetHighColor(ColGrid());     StrokeRect(pb);
+            SetHighColor(ColText());
+            DrawString("Preset", BPoint(pb.left + 6, pb.bottom - 5));
+            SetHighColor(ColTextDim());
+            DrawString("v", BPoint(pb.right - 10, pb.bottom - 5));
+            fHits.push_back({ (int)i, 13, 0, pb, 0, 0 });   // kind 13 = presets
+            afterByp = pb.right + 8;
+        }
+#endif
+
         SetHighColor(ColTextDim());
-        DrawString("Mix", BPoint(byp.right + 8, hdr.bottom - 6));
-        BRect mixR(byp.right + 8 + StringWidth("Mix") + 6, hdr.top + 5,
+        DrawString("Mix", BPoint(afterByp, hdr.bottom - 6));
+        BRect mixR(afterByp + StringWidth("Mix") + 6, hdr.top + 5,
                    panel.right - 8 - kMixValW, hdr.bottom - 5);
         if (mixR.Width() > 8) {
             SetHighColor(ColHeaderHi()); FillRect(mixR);
@@ -855,6 +884,22 @@ static EffectDesc MakeDefault(EffectType t) {
         default:                     return EqDesc();
     }
 }
+
+#ifdef DAW_HAVE_LV2
+// Write a preset onto a descriptor: its control-port values (grown to reach
+// every slot it names) and its state. One place, so the values and the state a
+// preset carries can never be applied half-way -- a preset whose knobs moved
+// but whose patch did not would be a wrong sound, not a partial one.
+static void ApplyPresetToDesc(EffectDesc& d, const Lv2PresetInfo& p) {
+    for (const std::pair<int, float>& sv : p.params) {
+        if (sv.first < 0) continue;
+        if ((int)d.params.size() <= sv.first)
+            d.params.resize((size_t)sv.first + 1, 0.0f);
+        d.params[(size_t)sv.first] = sv.second;
+    }
+    d.state = p.state;
+}
+#endif
 
 // Public: build a fresh insert for `type`. Shared by the effects editor and the
 // channel strip, because the defaults rule below is a trap worth encoding once.
@@ -1040,6 +1085,54 @@ void EffectsView::MouseDown(BPoint where) {
             OpenBrowser();
             break;
 #ifdef DAW_HAVE_LV2
+        case 13: {   // preset menu: list the plugin's presets, load one, save one
+            if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
+            EffectDesc& d = fChain[h.effect];
+            const std::vector<Lv2PresetInfo> presets =
+                Lv2Host::Instance().Presets(d.pluginName);
+
+            BPopUpMenu* menu = new BPopUpMenu("preset", false, false);
+            std::vector<BMenuItem*> presetItems;   // IndexOf counts separators
+            for (const Lv2PresetInfo& p : presets) {
+                BMenuItem* it = new ThemedMenuItem(p.name.c_str(), nullptr);
+                presetItems.push_back(it);
+                menu->AddItem(it);
+            }
+            if (presets.empty()) {
+                BMenuItem* none = new ThemedMenuItem("No presets yet", nullptr);
+                none->SetEnabled(false);
+                menu->AddItem(none);
+            }
+            menu->AddSeparatorItem();
+            BMenuItem* save = new ThemedMenuItem("Save Preset...", nullptr);
+            menu->AddItem(save);
+
+            BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+            if (sel == save) {
+                // The name prompt. It posts kMsgSaveFxPreset to MainWindow,
+                // which is where the model and the live instance are; the
+                // insert is named by its INDEX, and MainWindow re-resolves it.
+                BRect wf = Window() ? Window()->Frame() : BRect(200, 200, 480, 240);
+                BRect pr(0, 0, 300, 0);
+                pr.OffsetTo(wf.left + (wf.Width() - pr.Width()) * 0.5f,
+                            wf.top + 60);
+                (new RenameWindow(pr, fTrack, "", fApply, kMsgSaveFxPreset,
+                                  (int64)h.effect, "Save Preset"))->Show();
+            } else if (sel) {
+                size_t which = presetItems.size();
+                for (size_t k = 0; k < presetItems.size(); k++)
+                    if (presetItems[k] == sel) { which = k; break; }
+                if (which < presets.size()) {
+                    // Through Apply() like every other edit here: the whole
+                    // chain, one undoable SetFxCommand.
+                    ApplyPresetToDesc(d, presets[which]);
+                    Apply();
+                    Invalidate();
+                }
+            }
+            delete menu;
+            break;
+        }
         case 10: {   // open the plugin's own editor
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
             // Asked for by INDEX, and opened by MainWindow: this view's fChain

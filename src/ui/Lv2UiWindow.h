@@ -43,7 +43,11 @@ public:
     static bool HasNativeUi(const std::string& pluginUri);
 
     // Opens the plugin's editor for the insert at `fxIndex` of `track`, seeded
-    // with `params` (that insert's stored values, slot order).
+    // with `params` (that insert's stored values, slot order) and `state` (the
+    // insert's stored plugin state — a synth's patch, which is not reachable
+    // through a control port). Restoring the state into the editor's own
+    // instance is what makes the editor show the patch the project holds, and
+    // what makes a preset saved from it the patch the user sees.
     //
     // `track` is the chain's address as the rest of the UI writes it, master
     // sentinel included, and `apply` is the MainWindow messenger: a live editor
@@ -59,6 +63,7 @@ public:
     static Lv2UiWindow* Open(BRect frame, const std::string& pluginUri,
                              const std::string& displayName,
                              const std::vector<float>& params,
+                             const std::string& state,
                              TrackId track, int fxIndex, BMessenger apply);
 
     ~Lv2UiWindow() override;

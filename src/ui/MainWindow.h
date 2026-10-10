@@ -144,6 +144,10 @@ private:
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
     void FlushFxEditors();           // before a save: commit what they wrote
+    // Save the insert's current patch as a named preset (the panel's
+    // "Save Preset..."). Captures the state the way a save does, then writes a
+    // preset file; `fx` is an index into the track's (or master's) chain.
+    void SaveFxPreset(TrackId tid, int fx, const char* name);
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path, bool asRecovery = false);
     // File > New: ask, then a fresh empty project at the session's rate.

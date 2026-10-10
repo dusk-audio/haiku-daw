@@ -114,6 +114,12 @@ constexpr uint32 kMsgFxWatch     = 'fxpw';
 // actually moved.
 constexpr uint32 kMsgFxParams    = 'fxpv';
 
+// The "Save Preset..." prompt's answer, posted to MainWindow (RenameWindow is
+// the prompt, and it knows nothing about inserts): int64 "track", int64 "aux"
+// (the insert index), string "name". MainWindow applies it because only it can
+// reach the live instance whose patch the preset is.
+constexpr uint32 kMsgSaveFxPreset = 'fxps';
+
 // Serialize / parse a chain of insert descriptors into a message: the same
 // layout kMsgApplyFx and kMsgFxChain carry, in ONE place so the two ends of
 // that conversation cannot drift apart.
