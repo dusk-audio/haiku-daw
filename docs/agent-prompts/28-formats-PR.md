@@ -97,10 +97,11 @@ here because the CMakeLists comment for `DAW_LV2` says the opposite for lilv.
 | `sh scripts/haiku_syntax_check.sh` | 0 FAIL (10 files) |
 | the same check with `-DDAW_HAVE_FLAC=1 -DDAW_HAVE_VORBIS=1 -DDAW_HAVE_LV2=1` | 0 FAIL (23 files: every Haiku-only source) |
 | VM `build` (LV2/FLAC/Vorbis ON) — configure finds both libraries, build | exit 0, `ctest` **55/55** (was 54/54; +`formats_tests`) |
+| VM `ui_functional_tests` inside that ctest | **253 checks, 0 failures** |
 | VM `build-off` (`-DDAW_LV2=OFF`, codecs ON), build | exit 0, `ctest` **51/51** (was 50/50) |
 | VM `-DDAW_FLAC=OFF -DDAW_VORBIS=OFF`, build | exit 0; `formats_tests` **155 checks, 0 failures (built without FLAC / Ogg Vorbis)** |
 | VM `formats_tests` (build, codecs on) | **274 checks, 0 failures** (280 on the host: the six `/dev/full` checks are Linux-only) |
-| VM `ui_functional_tests` (with `DAW_UI_SHOTS`) | **252 checks, 0 failures**, clean exit, 25 shots |
+| VM `ui_functional_tests` with `DAW_UI_SHOTS` | clean exit, 25 shots; the export-dialog shot opened and zoomed (the only window this branch changes), plus the export panel, stems panel, widget-kit and save-panel shots for comparison |
 
 VM configure output for the enabled build, verbatim:
 `-- FLAC support enabled (/boot/system/develop/lib/libFLAC.so)` and
