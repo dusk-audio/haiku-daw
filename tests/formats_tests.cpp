@@ -988,6 +988,130 @@ static void TestExportContainers() {
     std::remove(wav.c_str());
 }
 
+// The exporter's other options run BEFORE the sink, so they are
+// container-independent by construction -- which is exactly the kind of claim
+// that is worth a test rather than an argument. Two of them, on whichever
+// compressed container this build has.
+static void TestExportOptionsPerFormat() {
+    std::printf("test_export_options_per_format\n");
+    const bool haveFlac = AudioFileFormatCanWrite(AudioFileFormat::Flac);
+    const AudioFileFormat fmt = haveFlac ? AudioFileFormat::Flac
+                                         : AudioFileFormat::Ogg;
+    if (!AudioFileFormatCanWrite(fmt)) return;   // no codec in this build
+    const char* ext = AudioFileFormatExtension(fmt);
+
+    // A quiet source: normalizing it has to move the level a long way.
+    const std::string src = "formats_test_quiet.wav";
+    {
+        WavWriter w;
+        w.OpenFormat(src.c_str(), 48000, 2, 16, false);
+        std::vector<int16_t> pcm(24000 * 2);
+        for (int64_t i = 0; i < 24000; i++) {
+            const double s = 0.05 * std::sin(double(i) * 0.02);
+            pcm[(size_t)i * 2]     = (int16_t)std::lround(s * 32767.0);
+            pcm[(size_t)i * 2 + 1] = (int16_t)std::lround(-s * 32767.0);
+        }
+        w.WriteInt16(pcm.data(), pcm.size());
+        w.Close();
+    }
+    Project p;
+    p.sampleRate = 48000.0;
+    Track t;
+    t.id = p.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "quiet";
+    Clip c;
+    c.id = p.NextClipId();
+    c.startFrame = 0;
+    c.lengthFrames = 24000;
+    c.sourcePath = src;
+    t.clips.push_back(c);
+    CHECK(p.AddTrack(t));
+
+    const std::string plain = std::string("formats_test_plain.") + ext;
+    const std::string loud  = std::string("formats_test_loud.") + ext;
+    std::remove(plain.c_str());
+    std::remove(loud.c_str());
+
+    ExportOptions a;
+    a.format = ExportFormat{ 16, false, fmt, 0.5f };
+    CHECK(ExportWav(p, plain, 0.0, a));
+
+    // Normalize to a level the source is nowhere near, with the true-peak
+    // limiter holding the ceiling -- the whole mastering chain, into a codec.
+    ExportOptions b;
+    b.format    = ExportFormat{ 16, false, fmt, 0.5f };
+    b.normalize = ExportNormalize{ true, -14.0f, -1.0f, true };
+    CHECK(ExportWav(p, loud, 0.0, b));
+
+    std::unique_ptr<IAudioSource> s1 = OpenAudioSource(plain);
+    std::unique_ptr<IAudioSource> s2 = OpenAudioSource(loud);
+    CHECK(s1 != nullptr);
+    CHECK(s2 != nullptr);
+    if (s1 && s2) {
+        CHECK(s1->TotalFrames() == s2->TotalFrames());
+        const std::vector<float> v1 = ReadAll(*s1);
+        const std::vector<float> v2 = ReadAll(*s2);
+        CHECK(v1.size() == v2.size());
+        double m1 = 0.0, m2 = 0.0;
+        const size_t n = std::min(v1.size(), v2.size());
+        for (size_t i = 0; i < n; i++) {
+            m1 += std::fabs(double(v1[i]));
+            m2 += std::fabs(double(v2[i]));
+        }
+        CHECK(m1 > 0.0);
+        // The normalized program is far louder -- and, because it went through
+        // the limiter, still finite and in range.
+        CHECK(m2 > m1 * 2.0);
+        CHECK(m2 / (n > 0 ? n : 1) < 1.0);
+    }
+    std::remove(plain.c_str());
+    std::remove(loud.c_str());
+    std::remove(src.c_str());
+
+    // 16-bit dither is a per-format setting too: a dithered FLAC 16 differs
+    // from an undithered one by no more than the 1 LSB the dither adds.
+#if defined(DAW_HAVE_FLAC)
+    {
+        const std::string a16 = "formats_test_dither_off.flac";
+        const std::string b16 = "formats_test_dither_on.flac";
+        std::remove(a16.c_str());
+        std::remove(b16.c_str());
+        const std::vector<float> sig = TestSignal(3000, 2);
+
+        for (int pass = 0; pass < 2; pass++) {
+            FlacSink sink;
+            SinkFormat sf;
+            sf.sampleRate = 48000; sf.channels = 2; sf.bitDepth = 16;
+            sf.dither = (pass != 0);
+            CHECK(sink.Open(pass ? b16 : a16, sf));
+            CHECK(sink.WriteFloat(sig.data(), sig.size()));
+            CHECK(sink.Close());
+        }
+        std::unique_ptr<IAudioSource> sA = OpenAudioSource(a16);
+        std::unique_ptr<IAudioSource> sB = OpenAudioSource(b16);
+        CHECK(sA != nullptr);
+        CHECK(sB != nullptr);
+        if (sA && sB) {
+            const std::vector<float> va = ReadAll(*sA);
+            const std::vector<float> vb = ReadAll(*sB);
+            CHECK(va.size() == vb.size());
+            int changed = 0;
+            double worst = 0.0;
+            for (size_t i = 0; i < std::min(va.size(), vb.size()); i++) {
+                const double d = std::fabs(double(va[i]) - double(vb[i]));
+                if (d > 0.0) changed++;
+                if (d > worst) worst = d;
+            }
+            CHECK(changed > 0);            // the dither really was applied
+            CHECK(worst <= 1.5 / 32768.0); // ...and it is dither, not noise
+        }
+        std::remove(a16.c_str());
+        std::remove(b16.c_str());
+    }
+#endif
+}
+
 // --- main ------------------------------------------------------------------
 
 int main() {
@@ -1007,6 +1131,7 @@ int main() {
 #endif
     TestChoiceTables();
     TestExportContainers();
+    TestExportOptionsPerFormat();
 
     std::printf("\nformats_tests: %d checks, %d failures"
 #if !defined(DAW_HAVE_FLAC)
