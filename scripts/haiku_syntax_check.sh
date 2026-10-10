@@ -10,7 +10,9 @@ INCS="-idirafter $H -idirafter $H/posix"
 for g in build/generated build-off/generated build-host/generated; do
   [ -d "$g" ] && INCS="$INCS -I$g"
 done
-for d in "$H"/os "$H"/os/*/; do INCS="$INCS -I$d"; done
+# os/add-ons/*/ as well: Screen.h pulls in Accelerant.h from there, and without
+# it every file that includes <Screen.h> (EffectsWindow.cpp) failed to check.
+for d in "$H"/os "$H"/os/*/ "$H"/os/add-ons/*/; do INCS="$INCS -I$d"; done
 FILES="$*"
 [ -z "$FILES" ] && FILES="src/main.cpp src/ui/TimelineView.cpp src/ui/MainWindow.cpp \
   src/ui/MeterView.cpp src/ui/EffectsWindow.cpp src/ui/SendsWindow.cpp \
