@@ -207,6 +207,20 @@ direct runs measured **3452 ms**, **3817 ms** and (before this package's fixture
 existed) 5061 ms on the same VM: it is load, not this branch — the same build
 passed the suite directly in the same hold. Reported, not fixed: M4.1 owns it.
 
+### A trap in our own tooling, found through the mutation driver
+
+`sh scripts/vm.sh build` (and `test`) ended in `... | tail -3`, so a FAILED
+compile exited 0 and left the previous binaries in place — the entry doc's
+"check the build's exit code, not only ctest" warning, defeated by the script
+itself. It cost one mutation cycle that silently ran a stale binary. Fixed on
+this branch (standalone commit): the build/test output goes to a log, which is
+tailed afterwards, and the remote command `exit`s with the real status, so ssh
+propagates it. The lesson is in `docs/HANDOFF.md` beside the crash-dialog one.
+The VM proof (a deliberate `#error` in a leaf source file, then
+`sh scripts/vm.sh build` must exit non-zero) was queued as one lock hold and is
+recorded in the commit that follows it; at the time of writing the shared lock
+was held by another agent's pass.
+
 ### One tooling mistake worth recording
 
 The first screenshot attempt ran `ctest` and the `build-off` build on the VM
@@ -232,7 +246,7 @@ throwaway commit object so the branch is untouched). What each run reported:
 |---|---|
 | `SetTool` never changes | 25 failures: the tool-selection checks and every gesture that depends on the tool |
 | `Snapped` ignores the grid | 6: the pencil's snapped start/length, both snap-indicator seeks |
-| `HitTest` ignores the caller's modifiers | NOT DEMONSTRATED (see below) |
+| `HitTest` ignores the caller's modifiers | exactly the Gain cursor check (`cursorAt(audioBody, B_CONTROL_KEY, 0) == Pointer::Gain`, 1 failure). The Slip check passes by design: the Body zone derives slip from the caller's modifiers either way |
 | the Ctrl+wheel direction flipped | exactly the two zoom-direction checks |
 | `ScrollToFrame` clamps early | exactly the three scroll-past-the-end checks |
 | the roll does not follow | exactly the two follow checks |
@@ -241,17 +255,16 @@ throwaway commit object so the branch is untouched). What each run reported:
 failure sets also carry reds from the test's *own* bug — the MIDI-region cursor
 mistake below.)
 
-**The `hit-test-mods` mutation has no evidence.** Three attempts, all of them
-no-ops: the first replaced only one of the five call sites (the scissors
-branch, which no check can tell apart), the second inserted its `// MUTATION`
-comment mid-expression so the file did not compile — and `vm.sh build` ends in a
-pipe to `tail`, so a FAILED compile still exits 0 and left the previous binary
-in place (the entry doc's own warning, met through my tooling). The third, with
-the driver fixed to replace every site and to check the build's real exit code,
-is the one whose result is in the record. Until it lands, treat the Gain/Slip
-*cursor* checks as covered by the mutation of `SnapFrame`/`SnapStepsPerBeat`
-only indirectly: their zone mapping is asserted (`CursorFor` over an audio clip
-with Ctrl/Alt) but not proven to fail when the zone logic breaks.
+**The `hit-test-mods` mutation took four attempts to get right**, and the story
+is worth keeping: the first replaced only one of the five call sites (the
+scissors branch, which no check can tell apart); the second inserted its
+`// MUTATION` comment mid-expression so the file did not compile, and `vm.sh
+build` ended in a pipe to `tail`, so the FAILED compile exited 0 and left the
+previous binary in place (fixed on this branch, see below); the third was the
+same single-site replace with a compiling form; the fourth, with the driver
+replacing every site and checking the build's real exit code, failed exactly the
+check it should — and that run's build really was the mutated one (`BUILD=0`
+with the mutation in the tree, `[9 site(s)]` reported).
 
 ### An accident worth recording: a mutation leaked into a commit
 
