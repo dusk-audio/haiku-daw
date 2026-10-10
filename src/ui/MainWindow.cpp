@@ -1809,6 +1809,7 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     fDockTrack = track;
     fDockClip  = clip;
 
+    if (fDock) fDock->Show();
     fRootSplit->SetItemCollapsed(1, false);
     if (fDockItem) fDockItem->SetMarked(true);
     fDock->Select(0);
@@ -1846,7 +1847,10 @@ void MainWindow::PopOutEditor() {
         fDockTrack = kInvalidTrackId;
         fDockClip  = kInvalidClipId;
     }
+    // Collapse and hide: the split reclaims the height, and hiding keeps an
+    // empty tab view from drawing its frame into a collapsed strip.
     fRootSplit->SetItemCollapsed(1, true);
+    if (fDock) fDock->Hide();
     if (fDockItem) fDockItem->SetMarked(false);
 }
 
@@ -2684,6 +2688,7 @@ void MainWindow::LoadSettings() {
         const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
         fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
         fRootSplit->SetItemCollapsed(1, !s.bottomVisible);
+        if (s.bottomVisible) fDock->Show(); else fDock->Hide();
         if (fDockItem != nullptr) fDockItem->SetMarked(s.bottomVisible);
     }
 

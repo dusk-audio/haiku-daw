@@ -66,6 +66,9 @@ using namespace daw;
 #ifndef MSG_POP_OUT_EDITOR
 #define MSG_POP_OUT_EDITOR 'poed'
 #endif
+#ifndef MSG_TOGGLE_INSPECTOR
+#define MSG_TOGGLE_INSPECTOR 'tins'
+#endif
 
 static const char* kExportName = "haiku_daw_ui_export.wav";
 static const char* kExportPath = "/tmp/haiku_daw_ui_export.wav";
@@ -1591,6 +1594,33 @@ static void TestDockedEditor(MainWindow* win, Project& project,
 
     // Pop out: the dock empties and a window of its own appears (and is closed
     // again, because closing the main window is what quits the app).
+    // The inspector toggles the same way (View > Inspector, key I).
+    win->PostMessage(MSG_TOGGLE_INSPECTOR);
+    snooze(200000);
+    {
+        float inspHidden = -1.0f, inspCollapsed = -1.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            BView* insp = win->FindView("inspector");
+            win->Unlock();
+            if (insp) { inspHidden = insp->IsHidden() ? 1.0f : 0.0f;
+                        inspCollapsed = insp->Bounds().Width(); }
+        }
+        std::printf("  insp: hidden=%.0f width=%.1f\n", inspHidden, inspCollapsed);
+        CHECK(inspHidden == 1.0f);
+    }
+    win->PostMessage(MSG_TOGGLE_INSPECTOR);
+    snooze(200000);
+    {
+        float inspHidden = -1.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            BView* insp = win->FindView("inspector");
+            win->Unlock();
+            if (insp) inspHidden = insp->IsHidden() ? 1.0f : 0.0f;
+        }
+        std::printf("  insp: back hidden=%.0f\n", inspHidden);
+        CHECK(inspHidden == 0.0f);
+    }
+
     const int before = VisibleWindows();
     std::printf("  dock: before popout visible=%d\n", before);
     win->PostMessage(MSG_POP_OUT_EDITOR);
