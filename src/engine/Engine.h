@@ -465,6 +465,28 @@ private:
             FrameDelay delay;   // PDC: aligns this send to dest.inputLatency
         };
         std::vector<SendTarget>               sendTargets;
+        // External sidechain keys (package 05), one entry per fx slot (parallel
+        // to `fx`, like fxBypass/fxMix):
+        //   fxKeySrc   — the descriptor's source track id as loaded, kept so
+        //                SyncFx can tell a source CHANGE from a param push: a
+        //                source change moves graph edges, so it is structural;
+        //   fxKeyNode  — that source resolved to a node index, or -1 for "no
+        //                key routed this run" (no source, a self-key, a source
+        //                not in this graph, or a failed topo/PDC solve — a
+        //                cycle. The insert then detects internally: fail soft);
+        //   fxKeyDelay — the PDC delay line that aligns the key with THIS
+        //                node's input, prepared to EdgeDelay(src, this) at Load.
+        //                Carries state across blocks, exactly like SendTarget's.
+        std::vector<TrackId>                  fxKeySrc;
+        std::vector<long>                     fxKeyNode;
+        std::vector<FrameDelay>               fxKeyDelay;
+        // This node's own material is delayed by its PDC input latency before
+        // the fader/fx run (length 0 — a no-op — for every node nothing feeds).
+        // A keyed node is the first node that has BOTH its own material and an
+        // input: its key arrives delayed to that latency, so its material has
+        // to sit at the same buffer position or the detector would compare
+        // audio and key frames from different timeline moments.
+        FrameDelay                            inDelay;
         // PDC delay line on this node's OUTPUT edge (into `output` or the master
         // sink), aligning it to that destination's input latency. Zero-length
         // (a plain accumulate) when nothing on the path is latent.
@@ -510,6 +532,10 @@ private:
               fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
               fxBypass(std::move(o.fxBypass)), fxMix(std::move(o.fxMix)),
               fxDryDelay(std::move(o.fxDryDelay)),
+              fxKeySrc(std::move(o.fxKeySrc)),
+              fxKeyNode(std::move(o.fxKeyNode)),
+              fxKeyDelay(std::move(o.fxKeyDelay)),
+              inDelay(std::move(o.inDelay)),
               sendTargets(std::move(o.sendTargets)),
               outDelay(std::move(o.outDelay)),
               gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
@@ -535,6 +561,10 @@ private:
             fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
             fxBypass = std::move(o.fxBypass); fxMix = std::move(o.fxMix);
             fxDryDelay = std::move(o.fxDryDelay);
+            fxKeySrc = std::move(o.fxKeySrc);
+            fxKeyNode = std::move(o.fxKeyNode);
+            fxKeyDelay = std::move(o.fxKeyDelay);
+            inDelay = std::move(o.inDelay);
             sendTargets = std::move(o.sendTargets);
             outDelay = std::move(o.outDelay);
             gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
@@ -560,10 +590,23 @@ private:
     std::unique_ptr<std::atomic<bool>[]>      fMasterFxBypass;
     std::unique_ptr<std::atomic<float>[]>     fMasterFxMix;
     std::vector<FrameDelay>                   fMasterFxDelay;
+    // Master-chain external sidechain keys, the same three parallel arrays the
+    // Bus keeps (see Bus::fxKeySrc). The key is a track even when the consumer
+    // is the master, so a master insert can be ducked by any track.
+    std::vector<TrackId>                      fMasterFxKeySrc;
+    std::vector<long>                         fMasterFxKeyNode;
+    std::vector<FrameDelay>                   fMasterFxKeyDelay;
     // One block of dry signal, held while an insert's wet leg is computed in
     // place. Preallocated at Load (RT never allocates); nodes and the master run
     // sequentially inside one callback, so a single buffer serves them all.
     std::vector<float>                        fScratch;
+    // One block that holds a node's own material while it is delayed by that
+    // node's PDC input latency (only used when that latency is non-zero), and
+    // one that holds a sidechain key while its per-edge delay line runs. Both
+    // preallocated at Load; both are read and re-filled within one node's turn,
+    // so a single pair serves every node and every insert.
+    std::vector<float>                        fMaterial;
+    std::vector<float>                        fKeyScratch;
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
     // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
     // the engine at the loop seam, which rebuilds every Bus; without this the
