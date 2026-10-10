@@ -1540,6 +1540,27 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         }
         return n;
     };
+    // EVERY view call runs under the window lock. BView's accessors --
+    // Bounds(), and anything that invalidates or sets a value -- call
+    // check_lock(), which DEBUGGERS on an unlocked looper: on the target that
+    // is a crash dialog, not a failed check (this test's first version faulted
+    // exactly here, calling HitTest without the lock).
+    auto hitAt = [&](const BPoint& p) {
+        TimelineView::Hit h;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            h = tv->HitTest(p);
+            win->Unlock();
+        }
+        return h;
+    };
+    auto frameX = [&](Frame f) {
+        float x = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            x = tv->FrameToX(f);
+            win->Unlock();
+        }
+        return x;
+    };
 
     // Top of the lane stack, whatever earlier flows scrolled to.
     BMessage topWheel(B_MOUSE_WHEEL_CHANGED);
@@ -1583,8 +1604,8 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     const float laneTop = TimelineContentTop() - scrollY
                         + (float)laneIdx * (TrackHeight() + TrackGap());
     const float laneMid = laneTop + TrackHeight() * 0.7f;   // below the top band
-    const float clipLeft  = tv->FrameToX(mc.startFrame);
-    const float clipRight = tv->FrameToX(mc.startFrame + mc.lengthFrames);
+    const float clipLeft  = frameX(mc.startFrame);
+    const float clipRight = frameX(mc.startFrame + mc.lengthFrames);
     // The whole lane must be on screen, or the clicks below are not delivered.
     float viewH = 0.0f;
     if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1595,6 +1616,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     CHECK(laneTop + TrackHeight() <= viewH + 1.0f);
 
     // --- 1. The tool palette: the keys select, and the palette button does too.
+    std::printf("  arrange: tools\n");
     sendKey("3");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Scissors; }));
     sendKey("5");
@@ -1609,6 +1631,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Pointer; }));
 
     // --- 2. Pointer feedback: the hit zones and the cursor each one wants.
+    std::printf("  arrange: hit zones and cursors\n");
     {
         struct Expect { float x, y; TimelineView::Zone zone; const char* what; };
         const Expect zones[] = {
@@ -1622,12 +1645,9 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
               TimelineView::Zone::Body, "the middle moves" },
         };
         for (const Expect& e : zones) {
-            TimelineView::Hit h;
-            if (win->LockWithTimeout(1000000) == B_OK) {
-                h = tv->HitTest(BPoint(e.x, e.y));
-                win->Unlock();
-            }
-            std::printf("  hit[%s] lane=%d zone=%d\n", e.what, h.lane, (int)h.zone);
+            const TimelineView::Hit h = hitAt(BPoint(e.x, e.y));
+            std::printf("  hit[%s] lane=%d zone=%d\n", e.what, h.lane,
+                        (int)h.zone);
             CHECK(h.track == t.id);
             CHECK(h.clip == mc.id);
             CHECK(h.zone == e.zone);
@@ -1671,6 +1691,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 3. Split at the playhead (S), one undo step.
+    std::printf("  arrange: split at playhead\n");
     if (win->LockWithTimeout(1000000) == B_OK) {
         project.transport.playhead = 72000;   // beat 3, inside the region
         win->Unlock();
@@ -1697,17 +1718,51 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return regions() == 2; }));
 
     // --- 4. Scissors cuts where it is clicked; Glue puts it back.
+    std::printf("  arrange: scissors and glue\n");
     sendKey("3");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Scissors; }));
-    click(tv->FrameToX(54000), laneMid);          // inside the first half
+    click(frameX(54000), laneMid);          // inside the first half
     CHECK(WaitFor([&] { return regions() == 3; }));
+    {
+        // The cut is where the scissors were, not at an edge or the playhead.
+        Frame a = -1, b = -1, len = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            if (tr && tr->midiClips.size() == 3) {
+                a = tr->midiClips[0].startFrame + tr->midiClips[0].lengthFrames;
+                b = tr->midiClips[1].startFrame;
+                len = tr->midiClips[0].lengthFrames;
+            }
+            win->Unlock();
+        }
+        CHECK(a == 54000);
+        CHECK(b == 54000);
+        CHECK(len == 6000);
+    }
     sendKey("4");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Glue; }));
-    click(tv->FrameToX(50000), laneMid);          // glue the halves back
+    click(frameX(50000), laneMid);          // glue the halves back
     CHECK(WaitFor([&] { return regions() == 2; }));
+    {
+        // ...and the glued region is the one they came from, note and all.
+        Frame start = -1, len = 0; std::size_t notes = 0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            if (tr && !tr->midiClips.empty()) {
+                start = tr->midiClips[0].startFrame;
+                len   = tr->midiClips[0].lengthFrames;
+                notes = tr->midiClips[0].notes.size();
+            }
+            win->Unlock();
+        }
+        CHECK(start == 48000);
+        CHECK(len == 24000);
+        CHECK(notes == 1);
+    }
     Shot("arrange-clips");
 
     // --- 5. Pencil draws a region on empty lane, snapped to the grid.
+    std::printf("  arrange: pencil\n");
     if (win->LockWithTimeout(1000000) == B_OK) {
         if (TimelineView* v =
                 dynamic_cast<TimelineView*>(win->FindView("timeline")))
@@ -1716,8 +1771,8 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
     sendKey("2");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Pencil; }));
-    const float penX0 = tv->FrameToX(110000);     // past the region's end
-    const float penX1 = tv->FrameToX(170000);
+    const float penX0 = frameX(110000);     // past the region's end
+    const float penX1 = frameX(170000);
     postMouse(B_MOUSE_DOWN, BPoint(penX0, laneMid));
     postMouse(B_MOUSE_MOVED, BPoint(penX1, laneMid));
     postMouse(B_MOUSE_UP, BPoint(penX1, laneMid));
@@ -1737,9 +1792,10 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 6. Mute mutes the track (per-clip mute is M2.5's Clip.muted).
+    std::printf("  arrange: mute\n");
     sendKey("5");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Mute; }));
-    click(tv->FrameToX(60000), laneMid);
+    click(frameX(60000), laneMid);
     CHECK(WaitFor([&] {
         bool muted = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1749,7 +1805,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         }
         return muted;
     }));
-    click(tv->FrameToX(60000), laneMid);
+    click(frameX(60000), laneMid);
     CHECK(WaitFor([&] {
         bool muted = true;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1761,9 +1817,10 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }));
 
     // --- 7. Fade sets the fade of the nearer edge, without the corner grip.
+    std::printf("  arrange: fade\n");
     sendKey("6");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Fade; }));
-    const float midX = tv->FrameToX(55000);
+    const float midX = frameX(55000);
     postMouse(B_MOUSE_DOWN, BPoint(midX, laneMid));
     postMouse(B_MOUSE_MOVED, BPoint(midX + Themed(40.0f), laneMid));
     postMouse(B_MOUSE_UP, BPoint(midX + Themed(40.0f), laneMid));
@@ -1783,6 +1840,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     Shot("arrange-fade");
 
     // --- 8. The snap field says what is selected, and Off means free.
+    std::printf("  arrange: snap indicator\n");
     {
         const char* label = nullptr;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1798,7 +1856,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         project.transport.playhead = 0;
         win->Unlock();
     }
-    click(tv->FrameToX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
+    click(frameX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
     CHECK(WaitFor([&] {
         bool ok = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1824,7 +1882,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         CHECK(label != nullptr && std::strcmp(label, "Off") == 0);
     }
     Shot("arrange-snap");
-    click(tv->FrameToX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
+    click(frameX(20000), ToolbarHeight() + RulerHeight() * 0.5f);
     CHECK(WaitFor([&] {
         bool ok = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1840,6 +1898,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 9. The zoom anchors on the pointer (Ctrl+wheel) ...
+    std::printf("  arrange: zoom anchor (pointer)\n");
     {
         const float anchorX = HeaderWidth() + Themed(200.0f);
         postMouse(B_MOUSE_MOVED, BPoint(anchorX, laneMid));
@@ -1879,6 +1938,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 10. ... and on the playhead for the keyboard's +/-.
+    std::printf("  arrange: zoom anchor (playhead)\n");
     {
         Frame ph = 0;
         float xBefore = 0.0f;
@@ -1915,6 +1975,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 11. Scrolling past the end of the last clip, with real scrollbars.
+    std::printf("  arrange: scrollbars and past-the-end\n");
     {
         Frame lastEnd = 0;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1961,7 +2022,10 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         CHECK(vbar != nullptr);
         CHECK(std::fabs(rangeMax - (float)end) < 2.0f);
         if (hbar) {           // dragging it to the left scrolls the view
-            hbar->SetValue(0.0f);
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                hbar->SetValue(0.0f);
+                win->Unlock();
+            }
             CHECK(WaitFor([&] {
                 bool ok = false;
                 if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1976,6 +2040,7 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
 
     // --- 12. The docked piano roll follows the playhead into view.
+    std::printf("  arrange: roll follow\n");
     {
         BMessage open(kMsgOpenEditor);
         open.AddInt64("track", (int64)t.id);
