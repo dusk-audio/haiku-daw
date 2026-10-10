@@ -2059,73 +2059,6 @@ static void TestThemeMode(MainWindow* win) {
 
 // --- driver ----------------------------------------------------------------
 
-static int32 TestThread(void*) {
-    // A leftover recovery file makes the window open its "Recover?" alert at
-    // startup, and that alert BLOCKS the window thread until someone answers
-    // it -- every check that needs the lock then times out, which reads
-    // exactly like a hang (the same shape as M1.1's crash-dialog lesson).
-    // The recovery prompt has its own coverage elsewhere; a test run starts
-    // from a clean slate.
-    {
-        BPath settings;
-        if (ProjectDocument::SettingsPath(settings) == B_OK) {
-            BPath recovery(settings);
-            if (recovery.Append("recovery.dawproj") == B_OK)
-                BEntry(recovery.Path()).Remove();
-        }
-    }
-
-    // One project for the whole run: windows come and go, the model stays, and
-    // nothing is freed while a looper could still be reading it.
-    Project project;
-    project.sampleRate = 48000.0;
-    CommandStack stack;
-    MainWindow::PeakMap peaks;
-
-    // ONE window for the run: closing the main window quits the app (that is
-    // what QuitRequested does), so a per-test window would end the run early.
-    MainWindow* win = new MainWindow(BRect(60, 60, 900, 660), &project, &stack,
-                                     &peaks);
-    win->Show();
-    snooze(300000);
-    Shot("startup");
-
-    TestMessageRoundTrip(win, project);
-    TestPianoRollQuantize(win, project, stack);
-    TestPianoRollTransforms(win, project, stack);
-    TestExportFlow(win, project);
-    TestDeviceLatency();
-    TestExportCancel(win, project);
-    TestExportStems(win, project);
-    TestExportLoopRange(win, project);
-    TestAboutBox(win);
-#ifdef DAW_HAVE_LV2
-    TestLv2EditorWiring(win, project, stack);
-    TestLv2InsertPresets(win, project, stack);
-#endif
-    TestErrorReports(win, project, stack);
-    TestKeyboardFocus(win, project);
-    TestThemeScale(win, project);
-    TestWidgetKit(win);
-    TestDockedEditor(win, project, &stack);
-    TestDockPages(win, project, &stack);
-    TestBigProjectPlayback(win, project);
-    // New leaves no path behind, so the unsaved-changes flow after it still
-    // exercises the save-panel branch.
-    TestFileMenuFlows(win, project, stack);
-    TestUnsavedChanges(win, project, stack);   // last: it replaces the project
-    // The theme switch flips the whole process and puts it back; last, so no
-    // other test's shots depend on the mode it leaves behind.
-    TestThemeMode(win);
-
-    std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
-                g_fails);
-    std::fflush(stdout);
-    win->LockWithTimeout(1000000);
-    win->Quit();   // and with it the application
-    return 0;
-}
-
 #ifdef DAW_HAVE_LV2
 // --- 8. LV2 insert state: the preset box on the insert panel ---------------
 //
@@ -2135,8 +2068,7 @@ static int32 TestThread(void*) {
 // patches before). The menu itself blocks in BPopUpMenu::Go, so what a preset
 // choice DOES is covered host-side (lv2_state_tests); what the panel LOOKS
 // like is what this shot is for.
-static void TestLv2InsertPresets(MainWindow* win, Project& project,
-                                 CommandStack* stack) {
+static void TestLv2InsertPresets(MainWindow* win, Project& project) {
     std::printf("test_lv2_insert_presets\n");
     Lv2Host::Instance().ScanAll();
     const std::vector<Lv2PluginInfo>& plugins = Lv2Host::Instance().Plugins();
@@ -2190,6 +2122,73 @@ static void TestLv2InsertPresets(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 #endif
+
+static int32 TestThread(void*) {
+    // A leftover recovery file makes the window open its "Recover?" alert at
+    // startup, and that alert BLOCKS the window thread until someone answers
+    // it -- every check that needs the lock then times out, which reads
+    // exactly like a hang (the same shape as M1.1's crash-dialog lesson).
+    // The recovery prompt has its own coverage elsewhere; a test run starts
+    // from a clean slate.
+    {
+        BPath settings;
+        if (ProjectDocument::SettingsPath(settings) == B_OK) {
+            BPath recovery(settings);
+            if (recovery.Append("recovery.dawproj") == B_OK)
+                BEntry(recovery.Path()).Remove();
+        }
+    }
+
+    // One project for the whole run: windows come and go, the model stays, and
+    // nothing is freed while a looper could still be reading it.
+    Project project;
+    project.sampleRate = 48000.0;
+    CommandStack stack;
+    MainWindow::PeakMap peaks;
+
+    // ONE window for the run: closing the main window quits the app (that is
+    // what QuitRequested does), so a per-test window would end the run early.
+    MainWindow* win = new MainWindow(BRect(60, 60, 900, 660), &project, &stack,
+                                     &peaks);
+    win->Show();
+    snooze(300000);
+    Shot("startup");
+
+    TestMessageRoundTrip(win, project);
+    TestPianoRollQuantize(win, project, stack);
+    TestPianoRollTransforms(win, project, stack);
+    TestExportFlow(win, project);
+    TestDeviceLatency();
+    TestExportCancel(win, project);
+    TestExportStems(win, project);
+    TestExportLoopRange(win, project);
+    TestAboutBox(win);
+#ifdef DAW_HAVE_LV2
+    TestLv2EditorWiring(win, project, stack);
+    TestLv2InsertPresets(win, project);
+#endif
+    TestErrorReports(win, project, stack);
+    TestKeyboardFocus(win, project);
+    TestThemeScale(win, project);
+    TestWidgetKit(win);
+    TestDockedEditor(win, project, &stack);
+    TestDockPages(win, project, &stack);
+    TestBigProjectPlayback(win, project);
+    // New leaves no path behind, so the unsaved-changes flow after it still
+    // exercises the save-panel branch.
+    TestFileMenuFlows(win, project, stack);
+    TestUnsavedChanges(win, project, stack);   // last: it replaces the project
+    // The theme switch flips the whole process and puts it back; last, so no
+    // other test's shots depend on the mode it leaves behind.
+    TestThemeMode(win);
+
+    std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
+                g_fails);
+    std::fflush(stdout);
+    win->LockWithTimeout(1000000);
+    win->Quit();   // and with it the application
+    return 0;
+}
 
 int main() {
     // Line-buffer stdout: with a pipe (ctest) the progress lines would sit in
