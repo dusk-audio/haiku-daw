@@ -490,6 +490,28 @@ static void TestExportStems(MainWindow* win, Project& project) {
 
 // --- 4b. the export dialog's format row (M6) -------------------------------
 
+// A bounce that fails raises an alert TITLED "Export" -- the same title as the
+// dialog this section looks for. Answer it, or the next title lookup finds the
+// alert instead of the window it wants, and the count arithmetic around it
+// goes wrong.
+static void ClearExportAlert() {
+    AnswerAlertWhenUp("Export", 0, 2000000);
+    snooze(200000);
+}
+
+// The export OPTIONS dialog: a plain BWindow titled "Export" (the alert above
+// carries the same title, which is why BAlert is excluded).
+static BWindow* FindExportDialog() {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (!w || w->IsHidden()) continue;
+        if (std::strcmp(WindowTitle(w), "Export") != 0) continue;
+        if (dynamic_cast<BAlert*>(w) != nullptr) continue;
+        return w;
+    }
+    return nullptr;
+}
+
 // Pick a row the way a click in a radio menu does: exactly one marked, so the
 // dialog's FindMarked() reads back what was chosen. (BMenuItem::SetMarked does
 // not unmark the siblings -- that happens in BMenu's own click handling.)
@@ -505,23 +527,14 @@ static void SelectMenuRow(BMenu* menu, int index) {
 // container. Ends by putting the remembered choice back to plain WAV, so a
 // later test that posts only "bits" still bounces a .wav.
 static void TestExportFormatDialog(MainWindow* win, Project& project) {
+    ClearExportAlert();
     CHECK(WaitQuiet());
     std::printf("test_export_format_dialog\n");
     const int32 windowsBefore = VisibleWindows();
     win->PostMessage(MSG_EXPORT);
 
     BWindow* dlg = nullptr;
-    CHECK(WaitFor([&] {
-        for (int32 i = 0; i < be_app->CountWindows(); i++) {
-            BWindow* w = be_app->WindowAt(i);
-            if (w && !w->IsHidden()
-                && std::strcmp(WindowTitle(w), "Export") == 0) {
-                dlg = w;
-                return true;
-            }
-        }
-        return false;
-    }));
+    CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
     if (!dlg) return;
     snooze(300000);
     Shot("export-dialog");
@@ -577,6 +590,7 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
 // the dialog's answer, the panel's answer, and the file that lands -- whose
 // format is SNIFFED from its bytes, not assumed from the name it was given.
 static void TestExportFormats(MainWindow* win, Project& project) {
+    ClearExportAlert();
     CHECK(WaitQuiet());
     std::printf("test_export_formats\n");
 
@@ -617,7 +631,10 @@ static void TestExportFormats(MainWindow* win, Project& project) {
         ref.AddString("name", k.name);
         win->PostMessage(&ref);
 
-        CHECK(WaitFor([&] { return FileExists(path); }, 60000000));
+        // 30 s per container, not the 60 s the single WAV bounce above uses:
+        // this loops over three of them, and the suite has a 300 s ctest
+        // timeout to stay inside even when every one of them fails.
+        CHECK(WaitFor([&] { return FileExists(path); }, 30000000));
         CHECK(FileExists(path));
         CHECK(!FileExists(path + ".part"));
         // The bytes decide: a FLAC export is a FLAC whatever it was called.
