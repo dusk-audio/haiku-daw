@@ -50,7 +50,8 @@ static constexpr int kMidiRange = 48;
 // 5 px was almost impossible to hit deliberately, which made resizing look like
 // it did not exist. 9 is still narrow enough that grabbing the middle of a short
 // region moves it rather than resizing it.
-static constexpr float kEdgeGrab = 9.0f;
+static constexpr float kEdgeGrab = 9.0f;   // design px; use EdgeGrab()
+static float EdgeGrab() { return Themed(kEdgeGrab); }
 
 // Edits snap to this grid resolution (16th notes) unless Shift is held.
 static constexpr int kSnapDivision = 4;
@@ -61,21 +62,41 @@ static float LaneHeightOf(const Track& t);
 // Slim per-lane header controls: name, M/S/R + input-monitor, a pan knob, and a
 // horizontal gain fader. Everything else (routing, fx, sends, instrument, input)
 // lives in the left inspector for the selected track.
-static BRect MuteRect(BRect lane)    { return BRect(6,   lane.top + 20, 24,  lane.top + 38); }
-static BRect SoloRect(BRect lane)    { return BRect(28,  lane.top + 20, 46,  lane.top + 38); }
-static BRect ArmRect(BRect lane)     { return BRect(50,  lane.top + 20, 68,  lane.top + 38); }
-static BRect MonRect(BRect lane)     { return BRect(72,  lane.top + 20, 90,  lane.top + 38); }
-static BRect PanKnobRect(BRect lane) { return BRect(100, lane.top + 15, 128, lane.top + 43); }
-static BRect GainRect(BRect lane)    { return BRect(6,   lane.top + 50, 128, lane.top + 62); }
+// Design pixels through Themed(): drawing AND hit-testing both come through
+// here, so the click targets follow the scale for free.
+static BRect MuteRect(BRect lane) {
+    return BRect(Themed(6),   lane.top + Themed(20),
+                 Themed(24),  lane.top + Themed(38));
+}
+static BRect SoloRect(BRect lane) {
+    return BRect(Themed(28),  lane.top + Themed(20),
+                 Themed(46),  lane.top + Themed(38));
+}
+static BRect ArmRect(BRect lane) {
+    return BRect(Themed(50),  lane.top + Themed(20),
+                 Themed(68),  lane.top + Themed(38));
+}
+static BRect MonRect(BRect lane) {
+    return BRect(Themed(72),  lane.top + Themed(20),
+                 Themed(90),  lane.top + Themed(38));
+}
+static BRect PanKnobRect(BRect lane) {
+    return BRect(Themed(100), lane.top + Themed(15),
+                 Themed(128), lane.top + Themed(43));
+}
+static BRect GainRect(BRect lane) {
+    return BRect(Themed(6),   lane.top + Themed(50),
+                 Themed(128), lane.top + Themed(62));
+}
 
 float TimelineView::FrameToX(Frame f) const {
-    return kHeaderWidth
+    return HeaderWidth()
          + static_cast<float>((f - fScrollFrame) / fFramesPerPixel);
 }
 
 Frame TimelineView::XToFrame(float x) const {
     return fScrollFrame
-         + static_cast<Frame>((x - kHeaderWidth) * fFramesPerPixel);
+         + static_cast<Frame>((x - HeaderWidth()) * fFramesPerPixel);
 }
 
 void TimelineView::AttachedToWindow() {
@@ -106,7 +127,7 @@ void TimelineView::PanBy(Frame deltaFrames) {
 }
 
 void TimelineView::ScrollVerticalBy(float dy) {
-    const float viewH = Bounds().Height() - kRulerHeight;
+    const float viewH = Bounds().Height() - RulerHeight();
     const float maxScroll = ContentHeight() - viewH;
     fScrollY += dy;
     if (fScrollY > maxScroll) fScrollY = maxScroll;
@@ -122,7 +143,7 @@ void TimelineView::ZoomToFit() {
         for (const MidiClip& mc : t.midiClips)
             if (mc.startFrame + mc.lengthFrames > end) end = mc.startFrame + mc.lengthFrames;
     }
-    const float contentW = Bounds().Width() - kHeaderWidth;
+    const float contentW = Bounds().Width() - HeaderWidth();
     if (end <= 0 || contentW < 1.0f) return;
     double fpp = (double)end / contentW * 1.05;   // small margin
     if (fpp < 16.0)    fpp = 16.0;
@@ -227,7 +248,7 @@ void TimelineView::MessageReceived(BMessage* msg) {
 void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
     // One page = the visible content width in frames.
-    const Frame page = (Frame)((Bounds().right - kHeaderWidth) * fFramesPerPixel);
+    const Frame page = (Frame)((Bounds().right - HeaderWidth()) * fFramesPerPixel);
     switch (bytes[0]) {
         case B_LEFT_ARROW:
             if (modifiers() & B_COMMAND_KEY) JumpToMarker(-1);
@@ -254,8 +275,8 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
             Invalidate();
             break;
         }
-        case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - kRulerHeight) * 0.8f); break;
-        case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - kRulerHeight) * 0.8f); break;
+        case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - RulerHeight()) * 0.8f); break;
+        case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - RulerHeight()) * 0.8f); break;
         case B_DELETE: case B_BACKSPACE:
             if (!fSelClips.empty()) DeleteSelection();
             else BView::KeyDown(bytes, numBytes);
@@ -359,7 +380,7 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
     if (!t) return;
     const MidiClip* c = t->FindMidiClip(clip);
     if (!c) return;
-    BPoint sp = ConvertToScreen(BPoint(kHeaderWidth + 40, kRulerHeight + 40));
+    BPoint sp = ConvertToScreen(BPoint(HeaderWidth() + 40, RulerHeight() + 40));
     BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
     PianoRoll* roll = new PianoRoll(wr, track, clip, c->startFrame,
                                     c->lengthFrames, c->notes, c->events,
@@ -532,10 +553,10 @@ void TimelineView::Draw(BRect updateRect) {
     SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
     auto band = [&](Frame a, Frame b, uint8 r, uint8 g, uint8 bl, uint8 al) {
         float x0 = FrameToX(a), x1 = FrameToX(b);
-        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+        if (x0 < HeaderWidth()) x0 = HeaderWidth();
         if (x1 <= x0) return;
         SetHighColor(r, g, bl, al);
-        FillRect(BRect(x0, kRulerHeight, x1, botY));
+        FillRect(BRect(x0, RulerHeight(), x1, botY));
     };
     if (tr.loopEnabled && tr.loopEnd > tr.loopStart)
         band(tr.loopStart, tr.loopEnd, 70, 120, 95, 40);      // green
@@ -543,9 +564,9 @@ void TimelineView::Draw(BRect updateRect) {
         band(tr.punchIn, tr.punchOut, 160, 60, 60, 45);       // red
     for (const Marker& mk : fProject->markers) {
         const float x = FrameToX(mk.frame);
-        if (x < kHeaderWidth || x > Bounds().right) continue;
+        if (x < HeaderWidth() || x > Bounds().right) continue;
         SetHighColor(52, 199, 89, 70);
-        StrokeLine(BPoint(x, kRulerHeight), BPoint(x, botY));
+        StrokeLine(BPoint(x, RulerHeight()), BPoint(x, botY));
     }
     SetDrawingMode(B_OP_COPY);
 
@@ -565,9 +586,9 @@ void TimelineView::DrawDragGhost() {
                 Frame ns = c.startFrame + fMultiDelta;
                 if (ns < 0) ns = 0;
                 float x0 = FrameToX(ns), x1 = FrameToX(ns + c.lengthFrames);
-                if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+                if (x0 < HeaderWidth()) x0 = HeaderWidth();
                 if (x1 <= x0) continue;
-                StrokeRect(BRect(x0, lane.top + 3, x1, lane.bottom - 3));
+                StrokeRect(BRect(x0, lane.top + Themed(3), x1, lane.bottom - Themed(3)));
             }
         }
         return;
@@ -577,12 +598,12 @@ void TimelineView::DrawDragGhost() {
     BRect lane = LaneRect(fDragCurLane);
     float x0 = FrameToX(fDragCurStart);
     float x1 = FrameToX(fDragCurStart + fDragClipOrigLen);
-    if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+    if (x0 < HeaderWidth()) x0 = HeaderWidth();
     if (x1 <= x0) return;
-    BRect g(x0, lane.top + 3, x1, lane.bottom - 3);
+    BRect g(x0, lane.top + Themed(3), x1, lane.bottom - Themed(3));
     SetHighColor(Rgb(210, 225, 255));
     StrokeRect(g);
-    StrokeLine(BPoint(g.left, g.top + 1), BPoint(g.right, g.top + 1));
+    StrokeLine(BPoint(g.left, g.top + Themed(1)), BPoint(g.right, g.top + Themed(1)));
 }
 
 void TimelineView::SetPlayhead(Frame f) {
@@ -591,7 +612,7 @@ void TimelineView::SetPlayhead(Frame f) {
     // Follow (chase): page the scroll when the playhead nears the right edge or
     // falls before the visible window, so a long take stays on screen.
     if (fFollow) {
-        const float contentW = Bounds().Width() - kHeaderWidth;
+        const float contentW = Bounds().Width() - HeaderWidth();
         if (contentW > 1.0f) {
             const Frame viewFrames = (Frame)(contentW * fFramesPerPixel);
             if (f < fScrollFrame
@@ -610,21 +631,21 @@ void TimelineView::SetPlayhead(Frame f) {
     // Repaint the two 1-px columns (a hair wide for the AA'd line) from the
     // ruler bottom to the view bottom.
     BRect b = Bounds();
-    Invalidate(BRect(xOld - 1, kRulerHeight, xOld + 1, b.bottom));
-    Invalidate(BRect(xNew - 1, kRulerHeight, xNew + 1, b.bottom));
+    Invalidate(BRect(xOld - 1, RulerHeight(), xOld + 1, b.bottom));
+    Invalidate(BRect(xNew - 1, RulerHeight(), xNew + 1, b.bottom));
 }
 
 int TimelineView::TrackIndexAt(BPoint where) const {
-    if (!fProject || where.y < kRulerHeight)
+    if (!fProject || where.y < RulerHeight())
         return -1;
     // Walk cumulative lane heights (variable per track), scroll-offset.
-    float y = kRulerHeight - fScrollY;
+    float y = RulerHeight() - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < (int)tracks.size(); i++) {
         const float h = LaneHeightOf(tracks[i]);
         if (where.y >= y && where.y <= y + h)
             return i;
-        y += h + kTrackGap;   // clicks in the gap fall through -> -1
+        y += h + TrackGap();   // clicks in the gap fall through -> -1
     }
     return -1;
 }
@@ -658,10 +679,10 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     // A marker near the click (within ~8 px) can be removed.
     Frame nearTempo = -1, nearMeter = -1;
     for (const TempoChange& t : tm.Tempos())
-        if (t.frame > 0 && std::fabs(FrameToX(t.frame) - where.x) < 8.0f)
+        if (t.frame > 0 && std::fabs(FrameToX(t.frame) - where.x) < Themed(8.0f))
             nearTempo = t.frame;
     for (const MeterChange& m : tm.Meters())
-        if (m.frame > 0 && std::fabs(FrameToX(m.frame) - where.x) < 8.0f)
+        if (m.frame > 0 && std::fabs(FrameToX(m.frame) - where.x) < Themed(8.0f))
             nearMeter = m.frame;
 
     BPopUpMenu* menu = new BPopUpMenu("tm", false, false);
@@ -763,14 +784,14 @@ void TimelineView::MouseDown(BPoint where) {
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
 
     // Right-click on the ruler: tempo / meter change menu.
-    if (rightClick && where.y < kRulerHeight && where.x >= kHeaderWidth) {
+    if (rightClick && where.y < RulerHeight() && where.x >= HeaderWidth()) {
         HandleRulerMenu(where);
         return;
     }
 
     // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
     // range instead. On release we decide seek-vs-drag by how far it moved.
-    if (where.y < kRulerHeight && where.x >= kHeaderWidth) {
+    if (where.y < RulerHeight() && where.x >= HeaderWidth()) {
         // Left-click a marker flag: jump the playhead there.
         if (!rightClick) {
             if (const Marker* mk = MarkerAt(where)) {
@@ -795,7 +816,7 @@ void TimelineView::MouseDown(BPoint where) {
     BRect lane = LaneRect(idx);
     const Track& t = fProject->Tracks()[idx];
 
-    if (where.x < kHeaderWidth) {
+    if (where.x < HeaderWidth()) {
         // Any header click selects the track (drives the left inspector).
         if (fSelectedTrack != t.id) {
             fSelectedTrack = t.id;
@@ -1025,17 +1046,17 @@ void TimelineView::MouseDown(BPoint where) {
             fDragIsMidiClip  = true;
             const float xStart = FrameToX(c.startFrame);
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
-            const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
+            const bool  wide   = (xEnd - xStart) > 2 * EdgeGrab();
             // Fade grips: the top name-strip band within 14px of either edge
             // (checked before move/resize so the corner always grabs the fade).
-            const bool  topBand = where.y <= lane.top + 16;
-            if (topBand && where.x <= xStart + 14) {
+            const bool  topBand = where.y <= lane.top + Themed(16);
+            if (topBand && where.x <= xStart + Themed(14)) {
                 fDrag = Drag::ClipFadeIn;    // top-left grip = fade in
-            } else if (topBand && where.x >= xEnd - 14) {
+            } else if (topBand && where.x >= xEnd - Themed(14)) {
                 fDrag = Drag::ClipFadeOut;   // top-right grip = fade out
-            } else if (wide && where.x >= xEnd - kEdgeGrab) {
+            } else if (wide && where.x >= xEnd - EdgeGrab()) {
                 fDrag = Drag::ClipResize;
-            } else if (wide && where.x <= xStart + kEdgeGrab) {
+            } else if (wide && where.x <= xStart + EdgeGrab()) {
                 fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
@@ -1141,18 +1162,18 @@ void TimelineView::MouseDown(BPoint where) {
             fDragFadeOutOrig = c.fadeOutFrames;
             const float xStart = FrameToX(c.startFrame);
             const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
-            const bool  wide   = (xEnd - xStart) > 2 * kEdgeGrab;
-            const bool  topBand = where.y <= lane.top + 14;
+            const bool  wide   = (xEnd - xStart) > 2 * EdgeGrab();
+            const bool  topBand = where.y <= lane.top + Themed(14);
             if (modifiers() & B_CONTROL_KEY) {
                 fDrag = Drag::ClipGain;        // Ctrl-drag vertical = clip gain
                 fDragOrig = c.gain;
-            } else if (topBand && where.x <= xStart + 12) {
+            } else if (topBand && where.x <= xStart + Themed(12)) {
                 fDrag = Drag::ClipFadeIn;      // top-left corner = fade in
-            } else if (topBand && where.x >= xEnd - 12) {
+            } else if (topBand && where.x >= xEnd - Themed(12)) {
                 fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
-            } else if (wide && where.x >= xEnd - kEdgeGrab) {
+            } else if (wide && where.x >= xEnd - EdgeGrab()) {
                 fDrag = Drag::ClipResize;
-            } else if (wide && where.x <= xStart + kEdgeGrab) {
+            } else if (wide && where.x <= xStart + EdgeGrab()) {
                 fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
@@ -1176,7 +1197,7 @@ void TimelineView::MouseDown(BPoint where) {
 
     // Left-click on empty audio content: clear selection (unless Shift) and
     // begin a rubber-band box select.
-    if (fDrag == Drag::None && !rightClick && where.x >= kHeaderWidth) {
+    if (fDrag == Drag::None && !rightClick && where.x >= HeaderWidth()) {
         if (!(modifiers() & B_SHIFT_KEY)) fSelClips.clear();
         fBanding = true;
         fBandA = fBandB = where;
@@ -1266,7 +1287,7 @@ void TimelineView::PreviewDrag(BPoint where) {
         } else {
             tr.loopStart = lo; tr.loopEnd = hi; tr.loopEnabled = true;
         }
-        Invalidate(BRect(0, 0, Bounds().right, kRulerHeight));
+        Invalidate(BRect(0, 0, Bounds().right, RulerHeight()));
         return;
     }
 
@@ -1688,13 +1709,13 @@ void TimelineView::DrawLiveMidi(BRect region, TrackId track) {
         if (x0 > region.right) continue;
         if (x0 < region.left)  x0 = region.left;
         if (x1 > region.right) x1 = region.right;
-        if (x1 < x0 + 1)       x1 = x0 + 1;
+        if (x1 < x0 + Themed(1))       x1 = x0 + Themed(1);
         int p = n.pitch;
         if (p < loPitch) p = loPitch;
         if (p > hiPitch) p = hiPitch;
         const float frac = 1.0f - (float)(p - loPitch) / (float)(hiPitch - loPitch);
-        const float y = region.top + 2 + frac * (h - 6);
-        FillRect(BRect(x0, y, x1, y + 3));
+        const float y = region.top + Themed(2) + frac * (h - Themed(6));
+        FillRect(BRect(x0, y, x1, y + Themed(3)));
     }
 }
 
@@ -1709,7 +1730,7 @@ void TimelineView::DrawLiveAudio(BRect region) {
     size_t step = (size_t)(fFramesPerPixel / bucketTFrames);
     if (step < 1) step = 1;
     const float mid = (region.top + region.bottom) * 0.5f;
-    const float half = region.Height() * 0.5f - 2.0f;
+    const float half = region.Height() * 0.5f - Themed(2.0f);
     SetHighColor(ColWave());
     for (size_t i = 0; i < count; i += step) {
         // Peak over the buckets this column spans (so striding loses nothing).
@@ -1728,15 +1749,15 @@ void TimelineView::DrawLiveAudio(BRect region) {
 
 void TimelineView::DrawPlayhead() {
     const float x = FrameToX(fPlayhead);
-    if (x < kHeaderWidth || x > Bounds().right)
+    if (x < HeaderWidth() || x > Bounds().right)
         return;
     SetHighColor(ColPlayhead());
-    StrokeLine(BPoint(x, kRulerHeight), BPoint(x, Bounds().bottom));
+    StrokeLine(BPoint(x, RulerHeight()), BPoint(x, Bounds().bottom));
 }
 
 void TimelineView::DrawRuler(BRect update) {
     BRect r = Bounds();
-    r.bottom = kRulerHeight;
+    r.bottom = RulerHeight();
 
     SetHighColor(ColRuler());
     FillRect(r);
@@ -1749,32 +1770,32 @@ void TimelineView::DrawRuler(BRect update) {
     if (tr.loopEnabled && tr.loopEnd > tr.loopStart) {
         float lx0 = FrameToX(tr.loopStart);
         float lx1 = FrameToX(tr.loopEnd);
-        if (lx0 < kHeaderWidth) lx0 = kHeaderWidth;
+        if (lx0 < HeaderWidth()) lx0 = HeaderWidth();
         if (lx1 > lx0) {
             SetHighColor(Rgb(70, 110, 90));
-            FillRect(BRect(lx0, 0, lx1, kRulerHeight));
+            FillRect(BRect(lx0, 0, lx1, RulerHeight()));
         }
     }
     // Punch region (Ctrl-drag): a red band on the lower half of the ruler.
     if (tr.punchEnabled && tr.punchOut > tr.punchIn) {
         float px0 = FrameToX(tr.punchIn);
         float px1 = FrameToX(tr.punchOut);
-        if (px0 < kHeaderWidth) px0 = kHeaderWidth;
+        if (px0 < HeaderWidth()) px0 = HeaderWidth();
         if (px1 > px0) {
             SetHighColor(Rgb(150, 60, 60));
-            FillRect(BRect(px0, kRulerHeight - 6, px1, kRulerHeight));
+            FillRect(BRect(px0, RulerHeight() - Themed(6), px1, RulerHeight()));
         }
     }
 
     // Bar/beat ticks: bars full-height + numbered, beats short (when zoomed in).
     ForEachGridLine([&](float x, bool isBar, long bar) {
         SetHighColor(isBar ? ColText() : ColGrid());
-        StrokeLine(BPoint(x, isBar ? 0 : kRulerHeight - 8),
-                   BPoint(x, kRulerHeight));
+        StrokeLine(BPoint(x, isBar ? 0 : RulerHeight() - Themed(8)),
+                   BPoint(x, RulerHeight()));
         if (isBar) {
             char label[16];
             std::snprintf(label, sizeof(label), "%ld", bar);
-            DrawString(label, BPoint(x + 3, kRulerHeight - 9));
+            DrawString(label, BPoint(x + Themed(3), RulerHeight() - Themed(9)));
         }
     });
 
@@ -1784,44 +1805,44 @@ void TimelineView::DrawRuler(BRect update) {
     for (std::size_t i = 0; i < tempos.size(); i++) {
         const TempoChange& t = tempos[i];
         const float x = FrameToX(t.frame);
-        const bool  onScreen = (x >= kHeaderWidth && x <= r.right);
+        const bool  onScreen = (x >= HeaderWidth() && x <= r.right);
         // A ramp draws a diagonal from this marker to the next, sloping up when
         // accelerating; may start off the left edge, so don't gate purely on x.
         if (t.ramp && i + 1 < tempos.size()) {
             const float nx = FrameToX(tempos[i + 1].frame);
-            if (nx >= kHeaderWidth && x <= r.right) {
-                const float x0 = std::max(x, (float)kHeaderWidth);
+            if (nx >= HeaderWidth() && x <= r.right) {
+                const float x0 = std::max(x, (float)HeaderWidth());
                 const float x1 = std::min(nx, r.right);
                 const bool  up = tempos[i + 1].bpm > t.bpm;
                 SetHighColor(Rgb(230, 170, 70));
-                StrokeLine(BPoint(x0, up ? kRulerHeight - 3 : 3),
-                           BPoint(x1, up ? 3 : kRulerHeight - 3));
+                StrokeLine(BPoint(x0, up ? RulerHeight() - Themed(3) : Themed(3)),
+                           BPoint(x1, up ? Themed(3) : RulerHeight() - Themed(3)));
             }
         }
         if (!onScreen) continue;
         SetHighColor(Rgb(230, 170, 70));
-        StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
+        StrokeLine(BPoint(x, 0), BPoint(x, RulerHeight()));
         char s[16];
         std::snprintf(s, sizeof(s), t.ramp ? "%.0f~" : "%.0f", t.bpm);
-        DrawString(s, BPoint(x + 2, 9));
+        DrawString(s, BPoint(x + Themed(2), Themed(9)));
     }
     for (const MeterChange& m : tm.Meters()) {
         const float x = FrameToX(m.frame);
-        if (x < kHeaderWidth || x > r.right) continue;
+        if (x < HeaderWidth() || x > r.right) continue;
         SetHighColor(Rgb(120, 190, 230));
         char s[16]; std::snprintf(s, sizeof(s), "%d/%d", m.num, m.denom);
-        DrawString(s, BPoint(x + 2, 19));
+        DrawString(s, BPoint(x + Themed(2), Themed(19)));
     }
 
     // Position markers: a small flag + name at the top of the ruler.
     for (const Marker& mk : fProject->markers) {
         const float x = FrameToX(mk.frame);
-        if (x < kHeaderWidth || x > r.right) continue;
+        if (x < HeaderWidth() || x > r.right) continue;
         SetHighColor(ColMidiAccent());   // green flag, distinct from tempo/meter
-        FillRect(BRect(x, 0, x + 8, 7));
-        StrokeLine(BPoint(x, 0), BPoint(x, kRulerHeight));
+        FillRect(BRect(x, 0, x + Themed(8), Themed(7)));
+        StrokeLine(BPoint(x, 0), BPoint(x, RulerHeight()));
         SetHighColor(ColText());
-        DrawString(mk.name.c_str(), BPoint(x + 10, 8));
+        DrawString(mk.name.c_str(), BPoint(x + Themed(10), Themed(8)));
     }
 }
 
@@ -1856,7 +1877,7 @@ void TimelineView::LoopBetweenMarkers() {
 
 // The marker whose flag is under `where` on the ruler, or nullptr.
 const Marker* TimelineView::MarkerAt(BPoint where) const {
-    if (!fProject || where.y >= kRulerHeight) return nullptr;
+    if (!fProject || where.y >= RulerHeight()) return nullptr;
     const Marker* best = nullptr; float bestd = 9.0f;
     for (const Marker& mk : fProject->markers) {
         const float d = std::fabs(FrameToX(mk.frame) - where.x);
@@ -1870,7 +1891,7 @@ const Marker* TimelineView::MarkerAt(BPoint where) const {
 void TimelineView::ForEachGridLine(
         const std::function<void(float, bool, long)>& fn) const {
     const TempoMap& tm = fProject->tempoMap;
-    const Frame leftFrame  = XToFrame(kHeaderWidth);
+    const Frame leftFrame  = XToFrame(HeaderWidth());
     const Frame rightFrame = XToFrame(Bounds().right);
     if (rightFrame <= leftFrame) return;
 
@@ -1887,7 +1908,7 @@ void TimelineView::ForEachGridLine(
         const Frame f = tm.FrameAt((double)beat);
         if (f > rightFrame) break;
         const float x = FrameToX(f);
-        if (x < kHeaderWidth) continue;
+        if (x < HeaderWidth()) continue;
         int bar = 1, bb = 1;
         tm.BarBeat(f, &bar, &bb);
         const bool isBar = (bb == 1);
@@ -1901,27 +1922,27 @@ static float LaneHeightOf(const Track& t) {
     // Floor at the default so the header controls always fit; taller lanes just
     // add waveform room.
     float h = (float)t.height;
-    if (h < kTrackHeight) h = kTrackHeight;
-    if (h > 300.0f)       h = 300.0f;
+    if (h < TrackHeight()) h = TrackHeight();
+    if (h > Themed(300.0f)) h = Themed(300.0f);
     return h;
 }
 
 float TimelineView::ContentHeight() const {
     float h = 0.0f;
     for (const Track& t : fProject->Tracks())
-        h += LaneHeightOf(t) + kTrackGap;
+        h += LaneHeightOf(t) + TrackGap();
     return h;
 }
 
 BRect TimelineView::LaneRect(int index) const {
     // Sum the heights of all lanes above `index` (variable per-track heights),
     // offset by the vertical scroll.
-    float top = kRulerHeight - fScrollY;
+    float top = RulerHeight() - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < index && i < (int)tracks.size(); i++)
-        top += LaneHeightOf(tracks[i]) + kTrackGap;
+        top += LaneHeightOf(tracks[i]) + TrackGap();
     const float h = (index >= 0 && index < (int)tracks.size())
-                    ? LaneHeightOf(tracks[index]) : kTrackHeight;
+                    ? LaneHeightOf(tracks[index]) : TrackHeight();
     return BRect(0, top, const_cast<TimelineView*>(this)->Bounds().right,
                  top + h);
 }
@@ -1969,12 +1990,12 @@ void TimelineView::DrawLanes(BRect update) {
                         n++;
                         if (o.sourceOffset <= c.sourceOffset) k++;
                     }
-                float bx = FrameToX(c.startFrame) + 4;
-                if (bx < kHeaderWidth + 2) bx = kHeaderWidth + 2;
+                float bx = FrameToX(c.startFrame) + Themed(4);
+                if (bx < HeaderWidth() + Themed(2)) bx = HeaderWidth() + Themed(2);
                 char tb[16];
                 std::snprintf(tb, sizeof(tb), "T%d/%d", k, n);
                 SetHighColor(Rgb(240, 220, 120));
-                DrawString(tb, BPoint(bx, lane.bottom - 16));
+                DrawString(tb, BPoint(bx, lane.bottom - Themed(16)));
             }
         }
         DrawCrossfades(t, lane);
@@ -1986,10 +2007,10 @@ void TimelineView::DrawLanes(BRect update) {
         if (fRecording && t.armed && fRecLen > 0) {
             float rx0 = FrameToX(fRecStart);
             float rx1 = FrameToX(fRecStart + fRecLen);
-            if (rx0 < kHeaderWidth) rx0 = kHeaderWidth;
+            if (rx0 < HeaderWidth()) rx0 = HeaderWidth();
             if (rx1 > lane.right)   rx1 = lane.right;
             if (rx1 > rx0) {
-                BRect rb(rx0, lane.top + 3, rx1, lane.bottom - 3);
+                BRect rb(rx0, lane.top + Themed(3), rx1, lane.bottom - Themed(3));
                 SetHighColor(Rgb(150, 50, 50));
                 FillRect(rb);
                 SetHighColor(ColPlayhead());
@@ -2001,7 +2022,7 @@ void TimelineView::DrawLanes(BRect update) {
                 else if (t.type == TrackType::Audio && fLiveRec)
                     DrawLiveAudio(rb);
                 SetHighColor(ColText());
-                DrawString("\xE2\x97\x8F REC", BPoint(rb.left + 4, rb.top + 14));
+                DrawString("\xE2\x97\x8F REC", BPoint(rb.left + Themed(4), rb.top + Themed(14)));
             }
         }
 
@@ -2020,25 +2041,25 @@ void TimelineView::DrawLanes(BRect update) {
 // Custom-drawn (not BControls) so it stays pixel-aligned with the lane and
 // needs no per-track child-view bookkeeping.
 void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
-    BRect hdr(0, lane.top, kHeaderWidth, lane.bottom);
+    BRect hdr(0, lane.top, HeaderWidth(), lane.bottom);
     const bool selected = (t.id == fSelectedTrack);
     SetHighColor(selected ? ColHeaderHi() : ColHeader());
     FillRect(hdr);
     // Left color strip by track type: audio = blue, MIDI = green, bus = grey.
     SetHighColor(t.type == TrackType::Midi ? ColMidiAccent()
                : t.type == TrackType::Bus  ? ColTextDim() : ColAudioAccent());
-    FillRect(BRect(0, lane.top, 4, lane.bottom));
+    FillRect(BRect(0, lane.top, Themed(4), lane.bottom));
     SetHighColor(ColGrid());
-    StrokeLine(BPoint(kHeaderWidth - 1, lane.top),
-               BPoint(kHeaderWidth - 1, lane.bottom));
+    StrokeLine(BPoint(HeaderWidth() - 1, lane.top),
+               BPoint(HeaderWidth() - 1, lane.bottom));
     // Selection: subtle blue outline (not a harsh solid block).
     if (t.id == fSelectedTrack) {
         SetHighColor(ColAccent());
-        StrokeRect(BRect(1, lane.top + 1, kHeaderWidth - 2, lane.bottom - 1));
+        StrokeRect(BRect(Themed(1), lane.top + Themed(1), HeaderWidth() - Themed(2), lane.bottom - Themed(1)));
     }
 
     SetHighColor(ColText());
-    DrawString(t.name.c_str(), BPoint(10, lane.top + 14));
+    DrawString(t.name.c_str(), BPoint(Themed(10), lane.top + Themed(14)));
 
     // Mute / Solo / Record / Input-monitor: rounded state buttons.
     DrawButton(this, MuteRect(lane), "M", t.muted,        ColMute());
@@ -2048,7 +2069,7 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     if (t.soloSafe) {   // solo-safe: a small dot on the Solo button
         BRect s = SoloRect(lane);
         SetHighColor(ColSolo());
-        FillEllipse(BPoint(s.right - 3, s.top + 3), 2, 2);
+        FillEllipse(BPoint(s.right - Themed(3), s.top + Themed(3)), Themed(2), Themed(2));
     }
 
     // Pan knob (value ring in the track-type accent).
@@ -2064,15 +2085,15 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     SetHighColor(ColBtnBorder());  StrokeRect(g);
 
     // Per-track stereo meter at the header's right edge.
-    const float mx0 = kHeaderWidth - kHdrMeterW;
-    BRect meterBox(mx0, lane.top + 2, kHeaderWidth - 2, lane.bottom - 2);
+    const float mx0 = HeaderWidth() - HdrMeterW();
+    BRect meterBox(mx0, lane.top + Themed(2), HeaderWidth() - Themed(2), lane.bottom - Themed(2));
     SetHighColor(Rgb(16, 16, 20));
     FillRect(meterBox);
     float mPeakL = 0.0f, mPeakR = 0.0f;
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
         mPeakL = it->second.first; mPeakR = it->second.second;
     }
-    const float bw = (meterBox.Width() - 3) * 0.5f;
+    const float bw = (meterBox.Width() - Themed(3)) * 0.5f;
     auto meterBar = [&](float x0, float level) {
         if (level < 0.0f) level = 0.0f; if (level > 1.0f) level = 1.0f;
         const float h = meterBox.Height() * level;
@@ -2080,8 +2101,8 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
         SetHighColor(MeterColor(level));
         FillRect(b);
     };
-    meterBar(meterBox.left + 1, mPeakL);
-    meterBar(meterBox.left + 2 + bw, mPeakR);
+    meterBar(meterBox.left + Themed(1), mPeakL);
+    meterBar(meterBox.left + Themed(2) + bw, mPeakR);
 }
 
 // --- Automation editing --------------------------------------------------
@@ -2104,14 +2125,14 @@ bool TimelineView::AutoRefFor(const Track& t, int mode, AutoRef* out) const {
 }
 
 float TimelineView::AutoValueToY(BRect lane, float mn, float mx, float v) const {
-    const float top = lane.top + 4, bot = lane.bottom - 4;
+    const float top = lane.top + Themed(4), bot = lane.bottom - Themed(4);
     float t = (mx > mn) ? (v - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
     return bot - t * (bot - top);
 }
 
 float TimelineView::AutoYToValue(BRect lane, float mn, float mx, float y) const {
-    const float top = lane.top + 4, bot = lane.bottom - 4;
+    const float top = lane.top + Themed(4), bot = lane.bottom - Themed(4);
     float t = (bot - y) / (bot - top);
     if (t < 0) t = 0; if (t > 1) t = 1;
     return mn + t * (mx - mn);
@@ -2122,7 +2143,7 @@ int TimelineView::AutoPointAt(const AutomationLane& al, BRect lane, float mn,
     for (size_t i = 0; i < al.Count(); i++) {
         const float x = FrameToX(al.At(i).frame);
         const float y = AutoValueToY(lane, mn, mx, al.At(i).value);
-        if (std::fabs(x - where.x) <= 5.0f && std::fabs(y - where.y) <= 5.0f)
+        if (std::fabs(x - where.x) <= Themed(5.0f) && std::fabs(y - where.y) <= Themed(5.0f))
             return (int)i;
     }
     return -1;
@@ -2132,7 +2153,7 @@ void TimelineView::DrawAutomation(const Track& t, BRect lane, int mode) {
     AutoRef ref;
     if (!AutoRefFor(t, mode, &ref)) return;
     const AutomationLane& al = *ref.lane;
-    const float x0 = kHeaderWidth, x1 = lane.right;
+    const float x0 = HeaderWidth(), x1 = lane.right;
 
     SetHighColor(Rgb(230, 200, 90));
     float px = x0, py = AutoValueToY(lane, ref.mn, ref.mx,
@@ -2148,7 +2169,7 @@ void TimelineView::DrawAutomation(const Track& t, BRect lane, int mode) {
         const float x = FrameToX(al.At(i).frame);
         if (x < x0 || x > x1) continue;
         const float y = AutoValueToY(lane, ref.mn, ref.mx, al.At(i).value);
-        FillRect(BRect(x - 3, y - 3, x + 3, y + 3));
+        FillRect(BRect(x - Themed(3), y - Themed(3), x + Themed(3), y + Themed(3)));
     }
 }
 
@@ -2215,7 +2236,7 @@ void TimelineView::HandleAutoMouseDown(const Track& t, BRect lane, int idx,
 // CrossfadeOverlap the renderers use, so this can't disagree with what sounds.
 void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
     if (t.clips.size() < 2) return;
-    const float top = lane.top + 3, bot = lane.bottom - 3;
+    const float top = lane.top + Themed(3), bot = lane.bottom - Themed(3);
 
     for (std::size_t i = 0; i + 1 < t.clips.size(); i++) {
         const Clip& a = t.clips[i];
@@ -2225,8 +2246,8 @@ void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
 
         float x0 = FrameToX(b.startFrame);
         float x1 = FrameToX(b.startFrame + ov);
-        if (x1 < kHeaderWidth || x0 > lane.right) continue;
-        if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+        if (x1 < HeaderWidth() || x0 > lane.right) continue;
+        if (x0 < HeaderWidth()) x0 = HeaderWidth();
         if (x1 > lane.right)   x1 = lane.right;
         if (x1 <= x0) continue;
 
@@ -2249,16 +2270,16 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
                             Frame fadeIn, Frame fadeOut, BRect update) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
-    if (x1 < kHeaderWidth || x0 > lane.right)
+    if (x1 < HeaderWidth() || x0 > lane.right)
         return;                       // fully outside the content area
     // ...and nothing of it is being repainted.
     if (x1 < update.left || x0 > update.right)
         return;
-    if (x0 < kHeaderWidth) x0 = kHeaderWidth;
+    if (x0 < HeaderWidth()) x0 = HeaderWidth();
 
-    BRect block(x0, lane.top + 3, x1, lane.bottom - 3);
+    BRect block(x0, lane.top + Themed(3), x1, lane.bottom - Themed(3));
     SetHighColor(base);
-    FillRoundRect(block, 5, 5);        // Logic-style rounded region
+    FillRoundRect(block, Themed(5), Themed(5));        // Logic-style rounded region
 
     DrawClipWave(c, block, update);
 
@@ -2281,7 +2302,7 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
 
     // Per-clip gain: a horizontal line across the block at the gain level
     // (top = kMaxGain, bottom = 0), plus a dB label when not at unity.
-    if (block.Width() > 24) {
+    if (block.Width() > Themed(24)) {
         float gf = c.gain / kMaxGain; if (gf < 0) gf = 0; if (gf > 1) gf = 1;
         const float gy = block.bottom - gf * block.Height();
         SetHighColor(Rgb(255, 232, 120));
@@ -2291,14 +2312,14 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
             const float dB = c.gain > 0.0001f ? 20.0f * std::log10(c.gain)
                                               : -99.0f;
             std::snprintf(db, sizeof(db), "%+.1f dB", dB);
-            DrawString(db, BPoint(block.left + 4, block.bottom - 4));
+            DrawString(db, BPoint(block.left + Themed(4), block.bottom - Themed(4)));
         }
     }
 
     // Name strip across the top (darker shade of the track color), like Logic.
-    const float stripH = 15.0f;
-    if (block.Height() > stripH + 2 && block.Width() > 10) {
-        BRect strip(block.left + 1, block.top + 1, block.right - 1,
+    const float stripH = Themed(15.0f);
+    if (block.Height() > stripH + Themed(2) && block.Width() > Themed(10)) {
+        BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
                     block.top + stripH);
         SetHighColor(Rgb((uint8)(base.red * 0.5f), (uint8)(base.green * 0.5f),
                          (uint8)(base.blue * 0.5f)));
@@ -2307,33 +2328,33 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         size_t slash = p.find_last_of('/');
         std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
         SetHighColor(Rgb(245, 246, 248));
-        DrawString(name.c_str(), BPoint(strip.left + 12, strip.top + 11));
+        DrawString(name.c_str(), BPoint(strip.left + Themed(12), strip.top + Themed(11)));
     }
 
     // Fade grips: small triangles at the top corners (drag left corner for
     // fade-in, right for fade-out). Always shown on wide clips so the gesture
     // is discoverable; the diagonal ramps above show the current fade.
-    if (block.Width() > 30) {
+    if (block.Width() > Themed(30)) {
         SetHighColor(Rgb(232, 238, 248));
-        BPoint li[3] = { BPoint(block.left + 1, block.top + 1),
-                         BPoint(block.left + 8, block.top + 1),
-                         BPoint(block.left + 1, block.top + 8) };
+        BPoint li[3] = { BPoint(block.left + Themed(1), block.top + Themed(1)),
+                         BPoint(block.left + Themed(8), block.top + Themed(1)),
+                         BPoint(block.left + Themed(1), block.top + Themed(8)) };
         FillPolygon(li, 3);
-        BPoint ri[3] = { BPoint(block.right - 1, block.top + 1),
-                         BPoint(block.right - 8, block.top + 1),
-                         BPoint(block.right - 1, block.top + 8) };
+        BPoint ri[3] = { BPoint(block.right - Themed(1), block.top + Themed(1)),
+                         BPoint(block.right - Themed(8), block.top + Themed(1)),
+                         BPoint(block.right - Themed(1), block.top + Themed(8)) };
         FillPolygon(ri, 3);
     }
 
     // Border / selection highlight (rounded).
     if (ClipSelected(c.id)) {
         SetHighColor(Rgb(255, 255, 255));
-        StrokeRoundRect(block, 5, 5);
-        StrokeRoundRect(block.InsetByCopy(1, 1), 4, 4);
+        StrokeRoundRect(block, Themed(5), Themed(5));
+        StrokeRoundRect(block.InsetByCopy(Themed(1), Themed(1)), Themed(4), Themed(4));
     } else {
         SetHighColor(Rgb((uint8)(base.red * 0.7f), (uint8)(base.green * 0.7f),
                          (uint8)(base.blue * 0.7f)));
-        StrokeRoundRect(block, 5, 5);
+        StrokeRoundRect(block, Themed(5), Themed(5));
     }
 }
 
@@ -2346,27 +2367,27 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             continue;   // only the active take of a group is drawn
         float x0 = FrameToX(mc.startFrame);
         float x1 = FrameToX(mc.startFrame + mc.lengthFrames);
-        if (x1 < kHeaderWidth || x0 > lane.right)
+        if (x1 < HeaderWidth() || x0 > lane.right)
             continue;
-        BRect block(std::max(x0, (float)kHeaderWidth), lane.top + 3,
-                    std::min(x1, lane.right),         lane.bottom - 3);
+        BRect block(std::max(x0, (float)HeaderWidth()), lane.top + Themed(3),
+                    std::min(x1, lane.right),         lane.bottom - Themed(3));
 
         rgb_color base = TrackColor(mc.colorIndex ? mc.colorIndex : t.colorIndex);
         SetHighColor(Rgb((uint8)(base.red * 0.55f), (uint8)(base.green * 0.55f),
                          (uint8)(base.blue * 0.55f)));
-        FillRoundRect(block, 5, 5);
+        FillRoundRect(block, Themed(5), Themed(5));
         // Name strip across the top.
-        if (block.Height() > 17 && block.Width() > 10) {
-            BRect strip(block.left + 1, block.top + 1, block.right - 1,
-                        block.top + 15);
+        if (block.Height() > Themed(17) && block.Width() > Themed(10)) {
+            BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
+                        block.top + Themed(15));
             SetHighColor(Rgb((uint8)(base.red * 0.32f), (uint8)(base.green * 0.32f),
                              (uint8)(base.blue * 0.32f)));
             FillRect(strip);
             SetHighColor(Rgb(240, 242, 245));
-            DrawString(t.name.c_str(), BPoint(strip.left + 4, strip.top + 11));
+            DrawString(t.name.c_str(), BPoint(strip.left + Themed(4), strip.top + Themed(11)));
         }
         // "T k/N" take badge on the active region of a loop-record group.
-        if (mc.takeGroup > 0 && block.Width() > 26) {
+        if (mc.takeGroup > 0 && block.Width() > Themed(26)) {
             int n = 0, k = 0;
             for (const MidiClip& o : t.midiClips)
                 if (o.takeGroup == mc.takeGroup) {
@@ -2376,14 +2397,14 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             char tb[16];
             std::snprintf(tb, sizeof(tb), "T%d/%d", k, n);
             SetHighColor(Rgb(240, 220, 120));
-            DrawString(tb, BPoint(block.left + 4, block.bottom - 5));
+            DrawString(tb, BPoint(block.left + Themed(4), block.bottom - Themed(5)));
         }
 
         // In-window notes as a light preview below the name strip.
-        const float noteTop = block.top + 16;
+        const float noteTop = block.top + Themed(16);
         const float noteH   = block.bottom - noteTop;
         for (const MidiNote& n : mc.notes) {
-            if (n.startFrame < 0 || n.startFrame >= mc.lengthFrames || noteH < 4)
+            if (n.startFrame < 0 || n.startFrame >= mc.lengthFrames || noteH < Themed(4))
                 continue;
             const Frame a = mc.startFrame + n.startFrame;
             float nx0 = FrameToX(a);
@@ -2396,7 +2417,7 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             if (p < 0) p = 0;
             if (p >= kMidiRange) p = kMidiRange - 1;
             const float ny = block.bottom - (float)p / kMidiRange * noteH;
-            const float nh = noteH / kMidiRange + 1.0f;
+            const float nh = noteH / kMidiRange + Themed(1.0f);
             const float s = 0.55f + 0.45f * (n.velocity / 127.0f);
             SetHighColor(Rgb((uint8)(235 * s), (uint8)(240 * s), (uint8)(245 * s)));
             FillRect(BRect(nx0, ny - nh, nx1, ny));
@@ -2416,25 +2437,25 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
                 StrokeLine(BPoint(std::max(fx, block.left), block.top),
                            BPoint(block.right, block.bottom));
         }
-        if (block.Width() > 30) {
-            BPoint li[3] = { BPoint(block.left + 1, block.top + 1),
-                             BPoint(block.left + 8, block.top + 1),
-                             BPoint(block.left + 1, block.top + 8) };
+        if (block.Width() > Themed(30)) {
+            BPoint li[3] = { BPoint(block.left + Themed(1), block.top + Themed(1)),
+                             BPoint(block.left + Themed(8), block.top + Themed(1)),
+                             BPoint(block.left + Themed(1), block.top + Themed(8)) };
             FillPolygon(li, 3);
-            BPoint ri[3] = { BPoint(block.right - 1, block.top + 1),
-                             BPoint(block.right - 8, block.top + 1),
-                             BPoint(block.right - 1, block.top + 8) };
+            BPoint ri[3] = { BPoint(block.right - Themed(1), block.top + Themed(1)),
+                             BPoint(block.right - Themed(8), block.top + Themed(1)),
+                             BPoint(block.right - Themed(1), block.top + Themed(8)) };
             FillPolygon(ri, 3);
         }
 
         if (ClipSelected(mc.id)) {           // selection highlight (shared)
             SetHighColor(Rgb(255, 255, 255));
-            StrokeRoundRect(block, 5, 5);
-            StrokeRoundRect(block.InsetByCopy(1, 1), 4, 4);
+            StrokeRoundRect(block, Themed(5), Themed(5));
+            StrokeRoundRect(block.InsetByCopy(Themed(1), Themed(1)), Themed(4), Themed(4));
         } else {
             SetHighColor(Rgb((uint8)(base.red * 0.75f), (uint8)(base.green * 0.75f),
                              (uint8)(base.blue * 0.75f)));
-            StrokeRoundRect(block, 5, 5);
+            StrokeRoundRect(block, Themed(5), Themed(5));
         }
     }
 }
@@ -2452,7 +2473,7 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
     const PeakCache& pc = it->second;
 
     const float mid  = (block.top + block.bottom) * 0.5f;
-    const float half = (block.bottom - block.top) * 0.5f - 1.0f;
+    const float half = (block.bottom - block.top) * 0.5f - Themed(1.0f);
 
     // Timeline frames are at the project rate; the envelope indexes source
     // frames. Scale by source/project rate so the waveform tracks the audio
@@ -2469,7 +2490,7 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
     // when a sliver was visible.
     float lo = block.left  > update.left  ? block.left  : update.left;
     float hi = block.right < update.right ? block.right : update.right;
-    if (lo < kHeaderWidth) lo = kHeaderWidth;
+    if (lo < HeaderWidth()) lo = HeaderWidth();
     const int xL = static_cast<int>(lo);
     const int xR = static_cast<int>(hi);
     // Batch the columns: one BeginLineArray per chunk, not one app_server call
