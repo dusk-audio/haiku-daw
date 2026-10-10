@@ -1,9 +1,9 @@
 #include "RenameWindow.h"
 
 #include "UiMetrics.h"
+#include "widgets/DawButton.h"      // the kit (M1.3)
+#include "widgets/DawTextField.h"
 
-#include <Button.h>
-#include <TextControl.h>
 #include <View.h>
 
 namespace daw {
@@ -21,14 +21,19 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
     root->SetViewColor(ColHeader());
     AddChild(root);
 
-    fText = new BTextControl(BRect(8, 10, Bounds().right - 8, 32),
+    // Design pixels through Themed(): the window is sized by its caller, so
+    // only the INSETS scale (M1.2 slice B's rule).
+    const float pad = Themed(8.0f);
+    fText = new DawTextField(BRect(pad, Themed(10.0f), Bounds().right - pad,
+                                   Themed(32.0f)),
                              "name", "Name:", current, new BMessage(MSG_OK));
     root->AddChild(fText);
     fText->MakeFocus(true);
 
-    BButton* ok = new BButton(BRect(Bounds().right - 80, 40,
-                                    Bounds().right - 8, 62),
-                              "ok", "OK", new BMessage(MSG_OK));
+    DawButton* ok = new DawButton(BRect(Bounds().right - Themed(80.0f),
+                                        Themed(40.0f),
+                                        Bounds().right - pad, Themed(62.0f)),
+                                  "ok", "OK", new BMessage(MSG_OK));
     ok->MakeDefault(true);
     root->AddChild(ok);
 }
