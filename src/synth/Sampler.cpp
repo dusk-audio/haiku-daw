@@ -338,6 +338,16 @@ void Sampler::Render(const std::vector<MidiNote>& notes,
         };
         // Where the note-off lands in that measure. Constant per voice, and it
         // uses the block's own ratio, so it agrees with the per-sample walk.
+        //
+        // Exact in the block that contains the note-off (which is where a
+        // sustain voice first leaves its loop). In a later block it is an
+        // extrapolation with that block's mean ratio, so a bend MOVING during a
+        // loop_sustain voice's release tail shifts this anchor by
+        // (off − blockStart) × (this block's mean − the note-off's) — under a
+        // frame of read position for any musical bend, and zero whenever the
+        // wheel is held still. Recorded as a known limit rather than carrying
+        // per-note state, which is what keeps a block a pure function of its
+        // start frame.
         const double playedOff = playedAt(v.off);
 
         float pl, pr;

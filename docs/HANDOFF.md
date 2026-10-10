@@ -272,6 +272,20 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
   Recover? alert on the window thread and every locked check times out. Delete
   it before a run.
+- **A faulted run leaves Haiku's crash dialog on the screen, and a dialog wedges
+  every later run** (the next team's windows never get the focus, so their
+  locked checks time out). Look at the VM before and after a run —
+  `virsh -c qemu:///system screenshot haiku-beta6 /tmp/x.ppm` — and clear a
+  dialog with `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp
+  'sendkey ret'` (an input event, so it is allowed). The fault itself is named in
+  the syslog: `grep -A 12 DEBUGGER /boot/system/var/log/syslog` prints the
+  faulting frame and the test function, which beats bisecting a hang.
+  A `BView` method called from a test thread without the window lock is the
+  commonest cause — `BView::Invalidate()` trips `BLooper::check_lock()`, which
+  is a `debugger()` call, so the team dies with the crash dialog up. Every view
+  call in `tests/ui_functional_tests.cpp` holds the window's lock
+  (`if (win->LockWithTimeout(1000000) == B_OK) { ...; win->Unlock(); }`), or goes
+  through a posted message.
 - **Green tests did not mean a working UI.** M1.3/M1.4 merged with the main
   window visibly broken and every check passing. `docs/UI_GUIDELINES.md` is
   the rule that came out of it.

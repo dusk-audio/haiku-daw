@@ -283,6 +283,12 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
 // directly, and then the lane itself is driven through a real click -- a click
 // in the strip has to add a controller point and post the region's events, and
 // the model's events have to build the expression a voice renders through.
+//
+// Every touch of the view is under the roll's lock: a BView method belongs to
+// its window's thread, and SetLaneCc invalidates, so calling it raw from the
+// test thread trips BLooper::check_lock() -- which is a debugger() call, i.e.
+// Haiku's crash dialog on the screen and a killed team here (found the hard
+// way; the syslog names BView::Invalidate + PianoRollView::SetLaneCc).
 static void TestPianoRollCcLane(MainWindow* win, Project& project) {
     std::printf("test_piano_roll_cc_lane\n");
     Track t = MakeMidiTrack(project, { { 60, 100, 0, 8000 } }, "cc-synth");
@@ -297,23 +303,46 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
                                     BMessenger(win));
     roll->Show();
     snooze(300000);
-    PianoRollView* rv = dynamic_cast<PianoRollView*>(roll->FindView("roll"));
+    PianoRollView* rv = nullptr;
+    if (roll->LockWithTimeout(1000000) == B_OK) {
+        rv = dynamic_cast<PianoRollView*>(roll->FindView("roll"));
+        roll->Unlock();
+    }
     CHECK(rv != nullptr);
     if (!rv) { roll->Lock(); roll->Quit(); return; }
 
+    // The lane the strip shows (-1 = velocity), through the roll's lock.
+    auto setLane = [&](int cc) {
+        if (roll->LockWithTimeout(1000000) == B_OK) {
+            rv->SetLaneCc(cc);
+            roll->Unlock();
+        }
+    };
+    auto laneCc = [&]() -> int {
+        int cc = -2;
+        if (roll->LockWithTimeout(1000000) == B_OK) {
+            cc = rv->LaneCc();
+            roll->Unlock();
+        }
+        return cc;
+    };
+
     // It opens on velocity, and every controller number is offered -- including
     // ones no voice acts on yet (74) and the pedal (64).
-    CHECK(rv->LaneCc() == -1);
-    rv->SetLaneCc(64);
-    CHECK(rv->LaneCc() == 64);
-    rv->SetLaneCc(74);
-    CHECK(rv->LaneCc() == 74);
-    rv->SetLaneCc(1);                      // the mod wheel: one a voice DOES act on
+    CHECK(laneCc() == -1);
+    setLane(64);
+    CHECK(laneCc() == 64);
+    setLane(74);
+    CHECK(laneCc() == 74);
+    setLane(1);                            // the mod wheel: one a voice DOES act on
+    CHECK(laneCc() == 1);
     Shot("pianoroll-cc-lane");
 
     // A click in the strip is the whole flow: the view hit-tests the lane
     // (including the snapped frame and the value from the click's height),
-    // appends a point, and posts kMsgApplyEvents to the main window.
+    // appends a point, and posts kMsgApplyEvents to the main window. Posted
+    // messages are dispatched by the roll's own thread, so the click itself
+    // needs no lock -- only converting the point does.
     auto clickLane = [&](float x, float y) {
         BPoint screen(x, y);
         if (roll->LockWithTimeout(1000000) == B_OK) {
@@ -332,7 +361,11 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
     };
     // Inside the bottom lane, near its top (a full-height value), at x just
     // right of the keyboard column (frame 0 on the 16th grid).
-    const BRect b = rv->Bounds();
+    BRect b(0, 0, 0, 0);
+    if (roll->LockWithTimeout(1000000) == B_OK) {
+        b = rv->Bounds();
+        roll->Unlock();
+    }
     clickLane(60.0f, b.bottom - 60.0f);
 
     auto laneEvents = [&](std::vector<MidiClipEvent>* out) {
@@ -354,6 +387,13 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
     for (const MidiClipEvent& e : events)
         if (e.type == MidiClipEvent::CC && e.data == 1) sawCc1 = true;
     CHECK(sawCc1);                          // the lane's controller, in the model
+
+    // The point the click drew, on screen: the lane's staircase and its handle.
+    if (roll->LockWithTimeout(1000000) == B_OK) {
+        rv->Invalidate();
+        roll->Unlock();
+    }
+    Shot("pianoroll-cc-point");
 
     // The lane reaches the VOICES: the model's events are what the engine and
     // the exporter turn into a VoiceExpression (model/MidiExpression.h), so a
@@ -383,9 +423,11 @@ static void TestPianoRollCcLane(MainWindow* win, Project& project) {
     CHECK(differs);                         // the lane's wheel wobbles the voice
 
     // Back to velocity, the lane the roll opens on.
-    rv->SetLaneCc(-1);
-    CHECK(rv->LaneCc() == -1);
-    roll->Lock(); roll->Quit();
+    setLane(-1);
+    CHECK(laneCc() == -1);
+    roll->Lock();
+    roll->Quit();
+    snooze(200000);
 }
 
 // --- 2. package 04's path, minus the mouse ---------------------------------

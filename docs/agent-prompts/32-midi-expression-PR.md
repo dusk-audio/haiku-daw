@@ -53,9 +53,9 @@ Branch `feature/midi-expression` off `master`. Spec: `32-midi-expression.md`.
 | check | result |
 | --- | --- |
 | host `cmake --build build-host` | exit 0 |
-| host `ctest --test-dir build-host` | TBD |
-| ASan/UBSan (`b-asan`) | TBD |
-| `scripts/haiku_syntax_check.sh` | TBD |
+| host `ctest --test-dir build-host` | 53/53 green (`midi_expression_tests` 61 checks, `sampler_tests` 122, `exporter_tests` 91, `projectio_tests` 156, `synth_tests` and `midicontrol_tests` unchanged and green) |
+| ASan/UBSan (`b-asan`, clean reconfigure) | build exit 0, 53/53 green |
+| `scripts/haiku_syntax_check.sh` | stock list on `master`'s copy: 9 OK + 1 pre-existing FAIL (`src/ui/EffectsWindow.cpp`, `<Screen.h>` → `<Accelerant.h>` is not on its include path — `feature/lv2-state` fixes that, and the file is untouched here). The equivalent sweep of **all 65 Haiku-compiled sources** with that fix plus `-DDAW_HAVE_LV2=1` (also from `feature/lv2-state`'s copy, and not cherry-pickable onto master's older script): **0 FAIL**. |
 | VM `build` ctest | TBD |
 | VM `build-off` ctest | TBD |
 | VM `ui_functional_tests` | TBD |
@@ -86,6 +86,27 @@ device) — the live path's evidence is that it renders through the same
 
 TBD — shots and what was fixed.
 
+## The first run of the new UI test faulted (and what it taught)
+
+The first VM run wedged inside `test_piano_roll_cc_lane` and left Haiku's crash
+dialog on the screen for the next agent. The syslog named it exactly:
+
+```
+KERN: DEBUGGER: Looper must be locked.
+KERN:   BView::Invalidate() + 0x1d
+KERN:   daw::PianoRollView::SetLaneCc(int) + 0x60
+KERN:   TestPianoRollCcLane(MainWindow*, Project&) + 0x546
+```
+
+i.e. the test called the view from the test thread without the roll's lock, and
+`BView::Invalidate()` inside `SetLaneCc` tripped `BLooper::check_lock()` — which
+is a `debugger()` call, not an exception. Fixed by holding the roll's lock at
+every call site (`setLane`/`laneCc`/`Bounds`/`Invalidate` helpers), which is the
+rule the file already states for `RunMidiOp`. The lesson is now in
+`docs/HANDOFF.md`'s dev-loop lessons (a faulted run leaves the dialog, it wedges
+later runs, `sendkey ret` clears it, and
+`grep -A 12 DEBUGGER /boot/system/var/log/syslog` names the frame).
+
 ## Known limits / decisions
 
 - **Live channel controllers are engine-wide**, not per MIDI endpoint: route
@@ -107,3 +128,14 @@ TBD — shots and what was fixed.
 - The vibrato's ±1 semitone wobble is not reflected in the PolyBLEP residual
   (the block's bend ratio is), which is a deliberate approximation; it only
   affects saw/square at the extremes.
+- For a `loop_sustain` sample voice in its release tail, the read position the
+  tail starts from is anchored with the current block's ratio, so a bend that is
+  actively MOVING during that tail shifts it by under a frame of read position
+  (zero whenever the wheel is held still). Commented where it lives
+  (`Sampler::Render`); the alternative is per-voice state, which would break the
+  "a block is a pure function of its start frame" contract.
+- `VoiceExpression` itself lives in its own tiny header
+  (`src/model/VoiceExpression.h`) so `synth/IInstrument.h` can take one without
+  pulling the project model into every voice translation unit; the evaluators
+  that fill it from a track's events are in `src/model/MidiExpression.h` (the
+  spec's "expression descriptor" item, split for that reason).
