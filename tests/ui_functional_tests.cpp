@@ -615,6 +615,18 @@ static void TestExportFormats(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
     std::printf("test_export_formats\n");
 
+    // One second of audio, not the eight the suite has accumulated by now.
+    // This test is about the CONTAINERS; encoding a long project on the VM's
+    // debug build is slow enough (the codecs are unoptimised there) that the
+    // first cut of this test blew its own file timeout while the bounce was
+    // still running -- and left the export bar up over every test after it.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.loopEnabled = true;
+        project.transport.loopStart   = 0;
+        project.transport.loopEnd     = 48000;   // 1 s at the project's rate
+        win->Unlock();
+    }
+
     struct Case { AudioFileFormat fmt; const char* name; };
     const Case cases[] = {
         { AudioFileFormat::Wav,  "haiku_daw_ui_fmt.wav" },
@@ -639,7 +651,7 @@ static void TestExportFormats(MainWindow* win, Project& project) {
         opts.AddFloat("lufs", -14.0f);
         opts.AddFloat("ceil", -1.0f);
         opts.AddBool("lim", false);
-        opts.AddInt32("range", 0);
+        opts.AddInt32("range", 1);      // the one-second loop window above
         opts.AddInt32("stems", 0);
         win->PostMessage(&opts);
         CHECK(WaitFor([&] { return VisibleWindows() >= windowsBefore + 1; }));
@@ -652,10 +664,10 @@ static void TestExportFormats(MainWindow* win, Project& project) {
         ref.AddString("name", k.name);
         win->PostMessage(&ref);
 
-        // 30 s per container, not the 60 s the single WAV bounce above uses:
-        // this loops over three of them, and the suite has a 300 s ctest
-        // timeout to stay inside even when every one of them fails.
-        CHECK(WaitFor([&] { return FileExists(path); }, 30000000));
+        // 60 s per container is ample for one second of audio even with the
+        // VM's unoptimised codecs, and still bounds the whole loop so a broken
+        // encode fails three checks instead of hanging the suite.
+        CHECK(WaitFor([&] { return FileExists(path); }, 60000000));
         CHECK(FileExists(path));
         CHECK(!FileExists(path + ".part"));
         // The bytes decide: a FLAC export is a FLAC whatever it was called.
