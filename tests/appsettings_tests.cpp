@@ -59,6 +59,18 @@ int main() {
     CHECK(b.bottomVisible == true);
     CHECK(std::fabs(b.bottomHeight - 300.0f) < 1e-3);
 
+    // The dock's page (T2).
+    {
+        AppSettings d;
+        d.dockPage = 2;
+        AppSettings d2;
+        CHECK(d2.Deserialize(d.Serialize()));
+        CHECK(d2.dockPage == 2);
+        AppSettings plain;
+        CHECK(plain.Deserialize("buffer 512\n"));
+        CHECK(plain.dockPage == 0);
+    }
+
     // The look (T1): the mode survives, and a file that has no theme line --
     // or a hand-edited one -- stays on System, which is the mode the app is
     // allowed to draw anywhere.

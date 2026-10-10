@@ -56,6 +56,12 @@ constexpr uint32 kMsgFxLive = 'fxlv';
 // is applied asynchronously and the editor's insert may be gone (or replaced by
 // a different plugin at the same index) by the time it arrives.
 constexpr uint32 kMsgFxParamCommit = 'fxpc';
+// Point the (single-instance) window at a different chain: the whole chain,
+// the track it belongs to, which insert to focus (-1 = the whole chain) and the
+// title to show. Fields are those of kMsgFxChain plus int64 "track", int32
+// "focus" and string "title".
+constexpr uint32 kMsgFxRetarget = 'fxrt';
+
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';
@@ -143,6 +149,10 @@ public:
     // current one. Ignored while a drag is in flight: the indices the drag holds
     // would move under it, and its own mouse-up commit is the edit in progress.
     void SetChain(std::vector<EffectDesc> chain);
+    // Point the view at another chain (T2, the single-instance window). Unlike
+    // SetChain this is a deliberate retarget, so an in-flight drag or a pending
+    // wheel commit is dropped: they belong to the chain that is going away.
+    void Retarget(std::vector<EffectDesc> chain, TrackId track, int focusSlot);
 
     // Commit a wheel edit whose debounce timer has not fired yet. The window
     // calls this on close: the engine already heard the change (kMsgFxLive), so
@@ -228,9 +238,17 @@ private:
 
 class EffectsWindow : public BWindow {
 public:
+    // The title for a chain (the insert it opened on, plus the track it belongs
+    // to) and the fit-to-content height: both are needed again on a retarget.
+    static std::string WindowTitleFor(const std::vector<EffectDesc>& chain,
+                                      int focusSlot, const char* trackName);
+    void FitToContent();
     // focusSlot >= 0 opens on one insert alone; -1 shows the whole chain.
+    // `trackName` goes into the title ("<insert> — <track>"), which is how two
+    // chains are told apart when there is only ever one window (T2).
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
-                  BMessenger apply, int focusSlot = -1);
+                  BMessenger apply, int focusSlot = -1,
+                  const char* trackName = nullptr);
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
     bool QuitRequested() override;

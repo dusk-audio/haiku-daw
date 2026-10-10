@@ -4,11 +4,19 @@
 // shows each with its DAW:duration / DAW:bpm attributes, and double-click
 // imports the file into the timeline (posts kMsgBrowserImport to the main
 // window). A BPM field tags the selected file's DAW:bpm attribute so a library
-// can be built up. Haiku-only (Storage + Interface Kits).
+// can be built up.
+//
+// Two pieces since T2: `SampleBrowserView` is the content and `SampleBrowser`
+// is a window hosting it, so the dock can show the same view. The window used
+// absolute rectangles measured from its own bounds; the view is built with the
+// Layout Kit, which is what lets it live in a pane of any size.
+// Haiku-only (Storage + Interface Kits).
 #pragma once
 
 
 #include "Theme.h"   // ThemeAware + the well colours (T1)
+
+#include <GroupView.h>
 #include <Messenger.h>
 #include <Window.h>
 
@@ -28,14 +36,15 @@ constexpr uint32 kMsgBrowserImport = 'bimp';
 // drop. Field: string "path".
 constexpr uint32 kMsgSampleDrag = 'bsdg';
 
-class SampleBrowser : public BWindow, public ThemeAware {
+class SampleBrowserView : public BGroupView, public ThemeAware {
 public:
+    explicit SampleBrowserView(BMessenger target);
+
     // The list is a stock BListView subclass: without this it keeps the
     // system's list colour in Dark mode (T1).
     void ApplyTheme() override;
 
-public:
-    SampleBrowser(BRect frame, BMessenger target);
+    void AttachedToWindow() override;
 
     void MessageReceived(BMessage* msg) override;
 
@@ -44,11 +53,20 @@ private:
     std::string SelectedPath() const;
 
     BMessenger                fTarget;      // -> main window (import)
-    BListView*                fList;
+    BListView*                fList = nullptr;
     BScrollView*              fScroll = nullptr;
-    BTextControl*             fFilter;      // name filter
-    BTextControl*             fBpm;         // BPM to tag onto the selection
+    BTextControl*             fFilter = nullptr;   // name filter
+    BTextControl*             fBpm = nullptr;      // BPM to tag onto the selection
     std::vector<std::string>  fPaths;       // parallel to list items
+};
+
+// The standalone window (File ▸ Sample Browser, View ▸ Sample Browser).
+class SampleBrowser : public BWindow {
+public:
+    SampleBrowser(BRect frame, BMessenger target);
+
+private:
+    SampleBrowserView* fView = nullptr;
 };
 
 } // namespace daw

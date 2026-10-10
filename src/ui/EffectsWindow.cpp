@@ -367,6 +367,22 @@ void EffectsView::Apply() {
     fApply.SendMessage(&m);
 }
 
+void EffectsView::Retarget(std::vector<EffectDesc> chain, TrackId track,
+                           int focusSlot) {
+    // A deliberate retarget: whatever was in flight belongs to the chain that
+    // is leaving (a drag works from indices into ITS copy, and a pending wheel
+    // commit would Apply() it).
+    fDragEffect = -1;
+    fDragKind   = -1;
+    DropPendingEdit();
+    fChain = std::move(chain);
+    fTrack = track;
+    fFocus = (focusSlot >= 0 && focusSlot < (int)fChain.size()) ? focusSlot : -1;
+    fHits.clear();
+    UpdateScrollRange();
+    Invalidate();
+}
+
 void EffectsView::SetChain(std::vector<EffectDesc> chain) {
     // A drag works from indices into the copy it started with; moving them
     // under it would edit the wrong insert. Its own mouse-up posts the commit
@@ -761,6 +777,21 @@ void EffectsView::Draw(BRect) {
                                tr.left + 1 + (tr.Width() - 2) * t, tr.bottom - 1);
                     if (fill.right > fill.left) {
                         SetHighColor(ColAccent()); FillRect(fill);
+                    }
+                    // The handle. Without it the row at its minimum -- which is
+                    // where most parameters of a fresh insert sit -- was an
+                    // empty trough that said nothing about where the value was
+                    // or that it could be dragged at all (M1.4 leftover).
+                    {
+                        const float hw = Themed(3.0f);
+                        float hx = tr.left + 1 + (tr.Width() - 2) * t;
+                        if (hx - hw < tr.left + 1) hx = tr.left + 1 + hw;
+                        if (hx + hw > tr.right - 1) hx = tr.right - 1 - hw;
+                        BRect handle(hx - hw, tr.top + 1, hx + hw, tr.bottom - 1);
+                        SetHighColor(ColText());
+                        FillRoundRect(handle, Themed(2.0f), Themed(2.0f));
+                        SetHighColor(ColBtnBorder());
+                        StrokeRoundRect(handle, Themed(2.0f), Themed(2.0f));
                     }
                     // kind 9: a horizontal drag across THIS rect, so the rect
                     // is what the drag has to map against (see MouseDown).
@@ -1206,15 +1237,42 @@ void EffectsView::MessageReceived(BMessage* msg) {
 
 // --- window ---------------------------------------------------------------
 
+// The window's title: the insert it opened on (when it opened on one) and the
+// track the chain belongs to, so one window can still say what it is editing.
+std::string EffectsWindow::WindowTitleFor(const std::vector<EffectDesc>& chain,
+                                          int focusSlot, const char* trackName) {
+    std::string title;
+    if (focusSlot >= 0 && focusSlot < (int)chain.size())
+        title = EffectDisplayName(chain[(size_t)focusSlot]);
+    else
+        title = "Effects";
+    if (trackName != nullptr && trackName[0] != '\0')
+        title += std::string(" \xE2\x80\x94 ") + trackName;   // em dash
+    return title;
+}
+
+void EffectsWindow::FitToContent() {
+    // As tall as the chain and no taller, and never off the bottom of the
+    // screen: the callers' frame is a guess, and a short chain left most of a
+    // screen-high window empty under a scroll bar with nothing to scroll.
+    const float ch = fView->ContentHeight();
+    const BRect sf = BScreen(this).Frame();
+    const float maxH = std::max(160.0f, sf.bottom - 12.0f - Frame().top);
+    const float h = std::min(std::max(ch, 160.0f), maxH);
+    ResizeTo(Bounds().Width(), h);
+    fView->UpdateScrollRange();
+}
+
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
-                             TrackId track, BMessenger apply, int focusSlot)
+                             TrackId track, BMessenger apply, int focusSlot,
+                             const char* trackName)
     : BWindow(frame, "Effects", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTrack(track), fApply(apply) {
-    // Name the window after the insert when it opens on one, so several open
-    // editors are told apart by their title bars.
-    if (focusSlot >= 0 && focusSlot < (int)chain.size())
-        SetTitle(EffectDisplayName(chain[(size_t)focusSlot]).c_str());
+    // Name the window after the insert AND the track it belongs to: there is
+    // one effects window now (T2), so the title is what says which chain is in
+    // it, and an LV2 editor's title names the track for the same reason.
+    SetTitle(WindowTitleFor(chain, focusSlot, trackName).c_str());
 
     BRect b = Bounds();
     BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
@@ -1222,17 +1280,7 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
     BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);
     AddChild(sv);
-    // As tall as the chain and no taller, and never off the bottom of the
-    // screen: the callers' frame is a guess, and a short chain left most of a
-    // screen-high window empty under a scroll bar with nothing to scroll.
-    {
-        const float ch = fView->ContentHeight();
-        const BRect sf = BScreen(this).Frame();
-        const float maxH = std::max(160.0f, sf.bottom - 12.0f - Frame().top);
-        const float h = std::min(std::max(ch, 160.0f), maxH);
-        ResizeTo(Bounds().Width(), h);
-    }
-    fView->UpdateScrollRange();
+    FitToContent();
     // Tell the main window to meter this track's effects while we're open.
     BMessage open(kMsgFxWinOpen);
     open.AddInt64("track", (int64)track);
@@ -1264,6 +1312,29 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
         if (pending) EncodeFxChain(reply, fView->Chain());
         msg->SendReply(&reply);
         if (pending) fView->DropPendingEdit();   // applied by the caller now
+        return;
+    }
+    if (msg->what == kMsgFxRetarget) {
+        // Single instance (T2): the window is pointed at another chain instead
+        // of a new one being opened. Retarget() drops anything in flight, so
+        // this is safe mid-drag as well -- the drag belonged to the old chain.
+        int64 tid = 0; int32 focus = -1;
+        const char* title = nullptr;
+        msg->FindInt64("track", &tid);
+        msg->FindInt32("focus", &focus);
+        msg->FindString("title", &title);
+        std::vector<EffectDesc> chain = DecodeFxChain(*msg);
+        fTrack = (TrackId)tid;
+        if (title != nullptr && title[0] != '\0') SetTitle(title);
+        fView->Retarget(std::move(chain), fTrack, focus);
+        FitToContent();               // the new chain is a different height
+        if (IsHidden()) Show();
+        Activate(true);               // "show and activate the existing one"
+        // Re-announce: the main window meters whichever track is in here now.
+        BMessage open(kMsgFxWinOpen);
+        open.AddInt64("track", (int64)fTrack);
+        open.AddMessenger("msgr", BMessenger(this));
+        fApply.SendMessage(&open);
         return;
     }
     if (msg->what == kMsgFxChain) {
