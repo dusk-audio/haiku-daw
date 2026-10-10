@@ -58,9 +58,12 @@ For that number to be meaningful the consumer's OWN material has to be placed
 at its `InLat`, because a keyed node is the first node that has both its own
 material and an input: the engine delays it with `Bus::inDelay`, the Exporter
 places clips/notes at that offset. `InLat == 0` for every ordinary track, so
-nothing changes for projects that use no key, and a keyed insert never changes
-the MIX's latency (the key source's latency already reached the master through
-its own routing, so `masterInLat` does not move).
+nothing changes for projects that use no key, and a keyed insert cannot change
+the mix's ALIGNMENT — the source's own latency already reached the master
+through its routing. It can raise the graph's leading latency (`masterInLat`,
+and with it the engine's output delay) by up to the CONSUMER's own fx latency,
+when that consumer is keyed from a source slower than its other inputs; the
+Exporter trims exactly that much, so the bounce is unaffected either way.
 
 The guarantee, as tested: a `LookaheadLimiter` (240 frames at 48 k) upstream on
 the key path leaves the whole bounce **bit-identical** to the same project
@@ -107,7 +110,8 @@ pan-invariant instead, the change is one expression.
 | `src/ui/EffectsWindow.{h,cpp}` | A "Key:" source row on Compressor/Gate panels (a `BPopUpMenu` of "None" + track names) that sets `sidechainSource` and the `extKey` slot, committed through the normal `kMsgApplyFx` snapshot; `EncodeFxChain`/`DecodeFxChain` carry the source (int64 "es"). |
 | `src/ui/MainWindow.cpp` | `SidechainCandidates()` and the three `EffectsWindow` call sites. |
 | `tests/sidechain_tests.cpp` (new) | 90 checks — the DoD's four cases plus the cycle case, the keyed bus, the pre-feature descriptor, and block-size invariance. |
-| `tests/ui_functional_tests.cpp` | `test_sidechain_picker`: the picker's commit path through `kMsgApplyFx` (source in, source cleared), and a shot of the panel. |
+| `tests/ui_functional_tests.cpp` | `test_sidechain_picker`: the picker's commit path through `kMsgApplyFx` (source in, source cleared), and a shot of the panel. Its includes moved out of the file's `DAW_HAVE_LV2` block so it also builds in `-DDAW_LV2=OFF`. |
+| `tests/projectio_fuzz_tests.cpp` | The fuzz corpus's base project gains a keyed insert, so truncation-at-every-byte and numeric-token poisoning also chew on an `fxsc` line. |
 | `scripts/haiku_syntax_check.sh` | Adds `os/add-ons/*/` to the include path. Pre-existing: `EffectsWindow.cpp` includes `<Screen.h>`, which includes `<Accelerant.h>`, which lives two levels below the `os/*/` glob the script added — so the ONE file this package touches was also the one file the check could never pass. One line; no product behaviour. |
 
 Also: `CMakeLists.txt` registers `sidechain_tests` right after `exporter_pdc_tests`
@@ -122,13 +126,28 @@ single block.
 cmake --build build-host                       # exit 0
 ctest --test-dir build-host                    # 53/53  (52 on master + sidechain_tests)
 ./build-host/sidechain_tests                   # 90 checks, 0 failures
+./build-host/projectio_fuzz_tests              # 3071 checks, 0 failures
 cmake -B b-asan -DDAW_SANITIZE=ON && cmake --build b-asan -j8 && ctest --test-dir b-asan  # 53/53, clean
 sh scripts/haiku_syntax_check.sh               # 10 OK, 0 FAIL
-# On the VM (2 vCPU, -j2), configure and build exit 0:
-ctest --test-dir build                         # <fill in>  (LV2 on)
-ctest --test-dir build-off                     # <fill in>  (-DDAW_LV2=OFF)
-DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests  # shots reviewed: <list>
+sh scripts/haiku_syntax_check.sh tests/ui_functional_tests.cpp   # OK (not in the default list)
+# On the VM (2 vCPU, -j2), both configurations configure and build clean:
+ctest --test-dir build                         # 55/55  (LV2 on; ui_functional_tests 17.7 s)
+ctest --test-dir build-off                     # 51/51  (-DDAW_LV2=OFF; ui_functional_tests 16.2 s)
+DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests  # 217 checks, 0 failures, 25 shots
 ```
+
+Two honesty notes on the numbers. The first ASan run reported
+`exporter_job_tests` failing two checks ("the two files' sizes differ"); the
+immediate re-run was clean, and the cause is on the host, not in the code: the
+three agents working from this machine share `/tmp`, and the suite's fixed
+temporary path (`/tmp/haiku_daw_export_job.wav`) is written by whichever run is
+in flight. The final ASan run above is the clean one.
+
+The VM counts are from the branch's last commit that changes CODE (`6be53b4`);
+the commits after it are this record and one code-comment correction, which
+cannot change what was built or what the suites did. The shot pass ran twice —
+the first run's `fx-panel-sidechain` shot is what exposed the empty row (see
+"What the screenshot pass found"), the second is the one with the fix.
 
 **Mutation testing** — every mutation was applied, the suite run, and the code
 restored. "checks" is how many failed while mutated:
@@ -165,6 +184,31 @@ leak into later blocks. Both hosts then feed the effect through the same
 `RunInsertSlot` (already covered by `insertslot_tests`). What remains a code
 reading, not a measurement, is the engine's own block loop (see below).
 
+## What the screenshot pass found
+
+Shots opened and checked at full size (VM, `DAW_UI_SHOTS`, screen unlocked):
+`19-fx-panel-sidechain` (the change, both rounds), `08-lv2-param-panel` (an
+LV2 insert must NOT get the row — it does not) and `00-startup` (the main
+window, unchanged). Two rounds, because the first round found a real defect:
+
+- **Round 1** showed the Compressor panel with the picker's row *reserved and
+  empty* — a band of dead space between the transfer curve and the knob row.
+  Cause: the row was written as the last arm of the draw `if/else` ladder, and a
+  Compressor matches its own arm first, so the row was drawn for a Gate but
+  never for a Compressor, while `PanelHeight` counted it for both. Fixed
+  (`fix(ui): the key row must not be an arm of the selector ladder`): the row is
+  now drawn after the ladder. This is exactly the failure mode the guidelines
+  exist for — every test was green in round 1 (217 checks).
+- **Round 2** (the fix): the row draws for both types, "Key: None" in dim text
+  under the graph, the dropdown arrow at the right, and the knobs sit directly
+  under it with no band of empty panel. Nothing else in the reviewed shots
+  changed.
+
+Geometry note: the effects panels' metrics (`kTitleH`, `kGraphH`, `kSelH`, the
+knobs) are fixed pixel constants and do not scale with `Themed()` — pre-existing
+for every row in this window, and the new row follows it. The 150% shot
+(`13-theme-150`) is the main window, which this package does not touch.
+
 ## What is NOT verified
 
 - **The RT engine's key path, live.** `Engine.cpp` is Haiku-only: it compiles
@@ -181,7 +225,8 @@ reading, not a measurement, is the engine's own block loop (see below).
   mutation check. They are named here rather than implied.
 - **The picker's menu itself.** A `BPopUpMenu` is modal, so the functional test
   drives what the picker POSTS (`kMsgApplyFx`), not the click that chooses an
-  item; the shot shows the row, its label and its dot.
+  item; the shot shows the row, its label (accent-coloured when a key is
+  routed, dim for "None") and its arrow.
 - **Audible result**: nothing is audible on the VM. The ducking is measured
   (numbers, not ears).
 
@@ -203,6 +248,19 @@ package-05 half:
 
 ## Known, not fixed
 
+- The Exporter builds one full-length key buffer per keyed insert (a route's
+  content depends only on its source and its edge delay, so two inserts keyed
+  from the same track do duplicate it). That is in the file's existing spirit —
+  offline rendering spends RAM for exactness, and destination nodes already own
+  a full-length buffer each — but it is a new multiplier: a long render with
+  many keyed inserts allocates proportionally more. Deduplicating by
+  (source, edge) is a small change if it ever matters.
+- Placing a node's own material at its PDC input latency ALSO fixes a
+  pre-existing case the UI cannot currently create: a track that receives an
+  aux send (or an output edge) from a latent node while carrying clips of its
+  own used to have its own material and its incoming signal misaligned by that
+  latency, in both hosts, in opposite directions. No test covered it; the new
+  behaviour is the consistent one, and the keyed cases pin it.
 - A key source with no material of its own gets a synthesised empty node in the
   engine (see the code comment) — otherwise the engine would treat the key as
   unrouted while the Exporter would route the track's silence, and the two

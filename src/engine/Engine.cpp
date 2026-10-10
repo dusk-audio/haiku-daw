@@ -555,9 +555,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         // least the key source's output latency, which is what makes
         // "consumer's own material delayed by its input latency" and "key
         // delayed by EdgeDelay(source, consumer)" the same number of frames —
-        // i.e. what makes the detector see audio and key from one moment. (It
-        // never delays the MIX: the key's latency already reached the master
-        // through the source's own routing, so masterInLat does not move.)
+        // i.e. what makes the detector see audio and key from one moment. (The
+        // key cannot move the mix's ALIGNMENT: the source's latency already
+        // reached the master through its own routing. It can raise the graph's
+        // leading latency — masterInLat — by up to the CONSUMER's own fx
+        // latency, in the case where that consumer is keyed from a source
+        // slower than its other inputs; the Exporter trims that much and the
+        // engine simply runs proportionally later, so the audible result does
+        // not change.)
         for (const auto& e : keyEdges) edges.push_back(e);
         pdcKnown = ComputePdc(pnodes, edges, pdc);
         const bool ok = pdcKnown;
