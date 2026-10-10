@@ -72,18 +72,20 @@ From `ui_functional_tests` / `TestBigProjectPlayback` (39 tracks / 320 clips —
 the project the earlier tests have left by then; the test's own rows print 32
 tracks / 320 clips):
 
-| what | before | after |
+| what | before | after (two runs) |
 |---|---|---|
-| play: the WINDOW thread is free again (Plan bound 300 ms) | 3.1 s, blocked | **20 ms** |
-| play: the graph is in place (audio starts) | ~3.1 s | **2592 ms** |
+| play: the WINDOW thread is free again (Plan bound 300 ms) | 3.1 s, blocked | **20 ms**, 20 ms |
+| play: the graph is in place (audio starts) | ~3.1 s | **2592 ms**, **2632 ms** |
 | a structural edit during playback | stop, then 3.1 s of rebuild: audible gap + frozen window | graph swapped under a rolling transport; no stop, no device re-open |
 
 The "before" number is the one recorded on 2026-10-09 in
 `23-offscreen-and-icons.md`/`README.md` (M1.5), measured with the same test on
-the same VM. The two "after" numbers are printed by the test itself:
+the same VM. The two "after" numbers are printed by the test itself, in two
+separate runs (`298c636`, and the final pass at `08f08da`):
 
 ```
   big project: 39 tracks, 320 clips, window rolls in 20 ms, graph swapped in 2592 ms
+  big project: 39 tracks, 320 clips, window rolls in 20 ms, graph swapped in 2632 ms
 ```
 
 So M4.1 meets the plan's 300 ms bar for what it set out to move (the window
@@ -113,10 +115,20 @@ the cherry-picked script fix — none of them compile into the targets):
 | VM ctest (`build`, LV2 on) | `ctest --test-dir build` | **55/55 passed** |
 | VM `ui_functional_tests` | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | **224 checks, 0 failures** |
 | VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | **51/51 passed** |
-| screenshots | every `Shot()` of the run fetched and opened | <!-- --> |
+| screenshots | `DAW_UI_SHOTS=/tmp/shots3 ./ui_functional_tests`, then all 25 fetched and opened | ok — see below |
 
 `ui_functional_tests` was 210 checks on master; the new `TestEngineGraphSwap`
 adds 14.
+
+**Shots reviewed** (this package draws nothing new, so the pass is "did the
+window survive it"): `00-startup` (an empty Untitled project, correct),
+`13-theme-150`, `16-docked-editor`, `19-engine-graph-swap` (playing, the two
+`swap-N` tracks with their clips, the transport lit, the playhead sweeping),
+`20-big-project-playing` (the 320-clip project rolling at 00:02.603 — i.e. the
+transport ran straight through the swap), `21-save-as-panel`,
+`24-opened-project`. Nothing overlapping, clipped or stale; nothing to fix.
+(One earlier pass ran with a stale crash alert from another agent's killed test
+process on the shared desktop; that run's shots are not the ones reviewed here.)
 
 One VM caveat, stated because it cost time and will bite the next agent:
 `~/haiku-daw/build` is **shared mutable state**. It holds whatever a sibling
