@@ -48,6 +48,13 @@ static std::string baseProject() {
       n.lengthFrames = 480; mc.notes.push_back(n); }
     s.Execute(std::make_unique<AddMidiClipCommand>(t2, mc), a);
     s.Execute(std::make_unique<AddMarkerCommand>(1000, "A"), a);
+    // A KEYED insert as well, so the corruptors below also chew on an `fxsc`
+    // line (package 05): every truncation of it, every numeric token poisoned.
+    { EffectDesc cp = CompressorDesc(-18.0f, 4.0f, 5.0f, 80.0f, 0.0f);
+      cp.params.resize(6, 0.0f);     // slot 5 = extKey (see model/Effect.h)
+      cp.params[5] = 1.0f;
+      cp.sidechainSource = t1;
+      s.Execute(std::make_unique<AddEffectCommand>(t2, cp), a); }
 
     const char* tmp = "projfuzz_base_tmp.dawproj";
     if (!ProjectIO::Save(a, tmp)) return "";
