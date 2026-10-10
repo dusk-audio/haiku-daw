@@ -342,6 +342,15 @@ add_executable(framedelay_tests tests/framedelay_tests.cpp)
 target_link_libraries(framedelay_tests PRIVATE daw_model)
 add_test(NAME framedelay_tests COMMAND framedelay_tests)
 
+# The engine-graph swap's kit-free half (M4.1): the atomic graph slot + its
+# reclaim thread (where a bug is a use-after-free or a leaked graph, so the
+# stress loop is meant to run under ASan), the stream-rebase arithmetic, and
+# RingBuffer::Skip. Header-only, no library needed — but the reclaim thread
+# needs a threading library, which daw_model's link already carries.
+add_executable(engine_graph_tests tests/engine_graph_tests.cpp)
+target_link_libraries(engine_graph_tests PRIVATE daw_model)
+add_test(NAME engine_graph_tests COMMAND engine_graph_tests)
+
 add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)

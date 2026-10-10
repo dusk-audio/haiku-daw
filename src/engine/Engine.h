@@ -1,4 +1,4 @@
-// Engine — milestone 2 playback engine.
+// Engine — the playback engine.
 //
 // Pulls decoded audio from disk (WavSource) through a lock-free RingBuffer
 // filled by a per-track disk thread, and mixes it in the BSoundPlayer
@@ -11,14 +11,35 @@
 //   - Disk threads do all file reading and fill the rings.
 //   - The main thread starts/stops and polls IsFinished().
 //
+// M4.1 — the graph is built OFF the window thread:
+//   - Everything a rebuild replaces lives in one Engine::Graph (streams, buses,
+//     FX, buffers, the mix order, the meter scratch). A rebuild is: snapshot
+//     the project on the caller's thread, build a Graph on the builder thread,
+//     publish it with ONE atomic pointer exchange (GraphSwap), and free the
+//     graph it replaced on the reclaim thread once no callback can hold it.
+//   - The RT callback loads that pointer exactly once per block and renders the
+//     whole block from it; it never allocates, locks, logs or opens anything.
+//   - The BSoundPlayer is persistent: it is created once per output format and
+//     survives every rebuild, so an edit during playback has no device gap and
+//     no `BSoundPlayer` re-create. Only Start/Stop bracket playback.
+//   - A position-changing rebuild (`LoadMode::NewPosition`: play, seek, loop
+//     wrap, record start) detaches the active graph first — the RT goes silent
+//     and the playhead stands still until the new graph is in, which is what a
+//     seek did before, minus the frozen window. A content rebuild
+//     (`LoadMode::InPlace`: a structural edit while playing) leaves the old
+//     graph playing and lets the new one join at the current playhead through
+//     the per-stream rebase (StreamRebase.h), so the edit is heard with no gap.
+//
 // Haiku-only: depends on the Media Kit (BSoundPlayer + WavSource).
 #pragma once
 
+#include "GraphSwap.h"
 #include "RingBuffer.h"
 #include "WavSource.h"
 #include "Resampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
+#include "StreamRebase.h"
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
@@ -34,7 +55,9 @@
 #include <SoundPlayer.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -62,6 +85,9 @@ public:
     // `out`. Never blocks; on underrun it contributes silence. Always drains
     // the ring inside the clip window (even when inaudible) so an unmute
     // mid-playback stays sample-aligned with the playhead.
+    //
+    // The FIRST call after this stream's graph was published also re-aligns the
+    // ring: see RebaseTo.
     void Mix(float* out, size_t frames, Frame blockStart);
 
     // Live mix update from the UI thread: recompute per-channel gains and the
@@ -82,6 +108,14 @@ public:
     bool  Valid() const { return fSource.IsValid(); }
     float SourceRate() const { return fSource.FrameRate(); }
 
+    // Drop the frames this stream would have consumed since the graph was built
+    // (the ring's origin is fStart + fSeekDelta) up to `timelineFrame`, so an
+    // in-place rebuild joins the running transport in sync instead of playing
+    // that far behind it for the life of the clip. RT thread only, from Mix;
+    // RingBuffer::Skip is O(1) and anything the ring does not hold yet is
+    // carried in the existing under-run debt (fSkipDebt).
+    void RebaseTo(Frame timelineFrame);
+
 private:
     void DiskLoop();             // producer thread body
 
@@ -96,6 +130,12 @@ private:
     Frame       fFadeOut;       // fade-out length (timeline frames)
     float       fClipGain = 1.0f;  // per-clip linear gain
     int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
+    // One-shot: the first Mix after this stream's graph became active re-aligns
+    // the ring (the publisher set nothing else; the origin is derivable from
+    // fStart + fSeekDelta). Written by the builder before the graph is
+    // published, cleared by the RT thread on first use — the atomic publish of
+    // the graph orders those two.
+    bool        fRebasePending = true;
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
@@ -110,30 +150,319 @@ private:
 
 class Engine {
 public:
-    Engine() {
-        for (int i = 0; i < kMeterFxMax; i++)
-            fMeterGr[i].store(0.0f, std::memory_order_relaxed);
-        // A watch slot that has published nothing yet -- which is what
-        // WatchedFxParams reports as "0 values, generation untouched" rather
-        // than "0 values, generation 0".
-        for (int s = 0; s < kWatchSlots; s++)
-            fWatchN[s].store(-1, std::memory_order_relaxed);
-    }
+    Engine();
     ~Engine();
 
-    // Build streams from the project's audio clips and open the output.
-    // Playback (and each clip's source) is aligned to start at `startFrame`,
-    // so seeking is just a reload at a new start. `minEndFrame` extends the
-    // playback end past the last clip/note (used for looping past content, so
-    // the playhead keeps advancing through silence up to the loop point).
-    // Returns B_ENTRY_NOT_FOUND when there is nothing to play and the caller
-    // did not extend the range -- that is not an error to show anyone; every
-    // other failure is the output device.
+    // ------------------------------------------------------------------
+    // The graph: everything a rebuild replaces (M4.1).
+    //
+    // Built on the builder thread from a project snapshot and published to the
+    // RT callback with a single atomic exchange. Its data is public on purpose:
+    // it is the engine's private working set (the RT body, the UI-side live
+    // updates and the builder all read it), not an API.
+    //
+    // After publication the only writers are the UI thread's live-parameter
+    // paths (UpdateMix, SyncFx, SetFxParamLive) — the same atomics-only rule as
+    // before the split — and the RT thread itself, which owns everything else.
+    // ------------------------------------------------------------------
+    class Graph {
+    public:
+        // One mix bus per track (audio / midi / bus). It sums its content (and,
+        // for a bus, its upstream inputs), applies its FX, and routes into
+        // `output` (another bus) or the master.
+        struct Bus {
+            TrackId                               id;
+            TrackId                               output = kInvalidTrackId;  // 0 = master
+            std::vector<TrackStream*>             streams;   // audio, owned by fStreams
+            std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
+            std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
+            std::unique_ptr<IInstrument>          instrument;// voice (MIDI)
+            // Live mix params: written by the UI thread (UpdateMix) and read by
+            // the RT callback (FillBuffer). Atomic + relaxed so a concurrent
+            // fader move can't tear a float into a NaN/garbage gain.
+            // Independent scalars with no cross-field invariant, so relaxed
+            // ordering is sufficient.
+            std::atomic<float>                    midiGainL{1.0f};  // equal-power
+            std::atomic<float>                    midiGainR{1.0f};
+            std::atomic<float>                    busGainL{1.0f};   // bus fader
+            std::atomic<float>                    busGainR{1.0f};
+            bool                                  isBus   = false;
+            std::atomic<bool>                     audible{true};
+            bool                                  liveMonitor = false;  // armed MIDI: synth live input
+            // Live-input route for this track: which endpoint (Midi Kit producer
+            // id, 0 = any) and which MIDI channel (1..16, 0 = all) its monitored
+            // notes may come from, so two keyboards drive two tracks
+            // independently. Atomic because arming/assignment can change while
+            // the player runs.
+            std::atomic<int32_t>                  inEndpoint{0};
+            std::atomic<int>                      inChannel{0};
+            // This bus's share of the live voices, rebuilt per block on the RT
+            // thread from the shared voice pool. Reserved at build so the RT
+            // rebuild never allocates.
+            std::vector<MidiNote>                 liveNotes;
+            std::vector<std::unique_ptr<IEffect>> fx;
+            std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
+            // Per-insert slot state, parallel to fx (see model/Effect.h). Atomic
+            // because the UI thread pushes them through SyncFx while the RT
+            // callback reads them per block — like the fader gains above:
+            // independent scalars with no cross-field invariant, so relaxed
+            // ordering is sufficient. Held as arrays rather than
+            // std::vector<std::atomic<>> (which cannot grow, an atomic being
+            // neither copyable nor movable), sized once at build, the same shape
+            // as fNodePeakL/R.
+            std::unique_ptr<std::atomic<bool>[]>  fxBypass;
+            std::unique_ptr<std::atomic<float>[]> fxMix;
+            // Per-insert dry-path delay of that effect's own LatencySamples().
+            // Both the soft-bypass path and the wet/dry blend need the dry
+            // signal delayed by exactly that, and they are mutually exclusive,
+            // so one line serves both. Length 0 (a plain accumulate, no cost)
+            // for every zero-latency effect — which is every built-in but the
+            // look-ahead limiter.
+            std::vector<FrameDelay>               fxDryDelay;
+            // Aux sends: destination node index into fBuses, linear level, and a
+            // PDC delay line aligning this send to the dest's input latency.
+            // Taps this node's post-FX output. Dest node indices are resolved at
+            // build, so the RT callback does no id lookups. The topo order
+            // (built over output + send edges) guarantees each dest is processed
+            // after us.
+            struct SendTarget {
+                size_t     dest;
+                float      level;
+                FrameDelay delay;   // PDC: aligns this send to dest.inputLatency
+            };
+            std::vector<SendTarget>               sendTargets;
+            // PDC delay line on this node's OUTPUT edge (into `output` or the
+            // master sink), aligning it to that destination's input latency.
+            // Zero-length (a plain accumulate) when nothing on the path is
+            // latent.
+            FrameDelay                            outDelay;
+            // Gain/pan automation (RT-owned snapshot, copied from the Track at
+            // build). When a lane has points, the engine drives this node's
+            // gain/pan per block from the lane (absolute, overriding the static
+            // fader); UpdateMix leaves automated nodes alone.
+            AutomationLane                        gainAuto;
+            AutomationLane                        panAuto;
+            std::vector<FxAutoLane>               fxAuto;   // effect-param automation
+            float                                 statGain = 1.0f;  // ValueAt default
+            float                                 statPan  = 0.0f;
+            bool                                  hasAuto  = false;
+            // Last MIDI channel gains (CC7 x CC11, placed by CC10) applied at
+            // the end of the previous block. The next block ramps from here to
+            // its own target so a stepped controller glides instead of clicking.
+            // Negative = not yet established (first block after a build/seek),
+            // which snaps instead of gliding from a stale value.
+            float                                 chanL    = -1.0f;
+            float                                 chanR    = -1.0f;
+
+            // The atomic members make Bus non-copyable and suppress the implicit
+            // move, but fBuses is a std::vector<Bus> that moves on growth/erase.
+            // Hand-write a noexcept move that transfers the atomics by value
+            // (all moves happen at build, single-threaded, before the build is
+            // published).
+            Bus() = default;
+            Bus(Bus&& o) noexcept
+                : id(o.id), output(o.output),
+                  streams(std::move(o.streams)), notes(std::move(o.notes)),
+                  events(std::move(o.events)),
+                  instrument(std::move(o.instrument)),
+                  midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
+                  midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
+                  busGainL(o.busGainL.load(std::memory_order_relaxed)),
+                  busGainR(o.busGainR.load(std::memory_order_relaxed)),
+                  isBus(o.isBus),
+                  audible(o.audible.load(std::memory_order_relaxed)),
+                  liveMonitor(o.liveMonitor),
+                  inEndpoint(o.inEndpoint.load(std::memory_order_relaxed)),
+                  inChannel(o.inChannel.load(std::memory_order_relaxed)),
+                  liveNotes(std::move(o.liveNotes)),
+                  fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
+                  fxBypass(std::move(o.fxBypass)), fxMix(std::move(o.fxMix)),
+                  fxDryDelay(std::move(o.fxDryDelay)),
+                  sendTargets(std::move(o.sendTargets)),
+                  outDelay(std::move(o.outDelay)),
+                  gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
+                  fxAuto(std::move(o.fxAuto)),
+                  statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto),
+                  chanL(o.chanL), chanR(o.chanR) {}
+            Bus& operator=(Bus&& o) noexcept {
+                if (this == &o) return *this;
+                id = o.id; output = o.output;
+                streams = std::move(o.streams); notes = std::move(o.notes);
+                events = std::move(o.events);
+                instrument = std::move(o.instrument);
+                midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                busGainL.store(o.busGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                busGainR.store(o.busGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                isBus = o.isBus;
+                audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                liveMonitor = o.liveMonitor;
+                inEndpoint.store(o.inEndpoint.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                liveNotes = std::move(o.liveNotes);
+                fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
+                fxBypass = std::move(o.fxBypass); fxMix = std::move(o.fxMix);
+                fxDryDelay = std::move(o.fxDryDelay);
+                sendTargets = std::move(o.sendTargets);
+                outDelay = std::move(o.outDelay);
+                gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
+                fxAuto = std::move(o.fxAuto);
+                statGain = o.statGain; statPan = o.statPan; hasAuto = o.hasAuto;
+                chanL = o.chanL; chanR = o.chanR;
+                return *this;
+            }
+        };
+
+        // A live-monitored note held on the keyboard (or in its release tail).
+        struct LiveVoice {
+            bool    active    = false;
+            bool    releasing = false;   // note-off seen; ringing out the tail
+            uint8_t pitch     = 0;
+            uint8_t vel       = 0;
+            uint8_t channel   = 0;
+            Frame   start     = 0;       // engine frame the note-on landed on
+            Frame   off       = 0;       // engine frame of note-off (if releasing)
+            int32_t source    = 0;       // endpoint the note-on arrived from
+        };
+        static constexpr int kMaxLiveVoices = 64;
+
+        // The RT body. `e` supplies the state that outlives this graph (the
+        // transport, the live toggles, the UI-facing publishing storage).
+        void Render(Engine& e, float* out, size_t frames);
+
+        // Drop every live voice, so a note held at Stop can't sustain (up to
+        // kHeld) or re-sound if the same engine restarts. Safe once the player
+        // is stopped.
+        void ResetVoices() {
+            for (LiveVoice& v : fVoices) v.active = false;
+            fLiveNotes.clear();
+        }
+
+        // Worker thread, just before the graph is published: write the current
+        // per-track live-input routes onto the buses (atomics).
+        void ApplyRoutes(const std::vector<MidiInputRoute>& routes);
+
+        Frame BuildStart() const { return fBuildStart; }
+        Frame EndFrame()   const { return fEndFrame; }
+        float OutputRate() const { return fOutputRate; }
+
+        // Everything below is the graph's working set (see the class comment).
+        Frame                                     fBuildStart = 0;   // ring origins
+        Frame                                     fEndFrame   = 0;
+        float                                     fOutputRate = 48000.0f;
+        std::vector<std::unique_ptr<TrackStream>> fStreams;
+        std::vector<Bus>                          fBuses;
+        std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
+        std::vector<size_t>                       fOrder;     // node indices, topo order
+        std::unique_ptr<std::atomic<float>[]>     fNodePeakL; // per-node output peak
+        std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
+        std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
+        std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
+        // Master-chain insert state, same shape and rules as Bus::fxBypass/
+        // fxMix/fxDryDelay above. Note fMasterFx DROPS effects that fail to
+        // build, so these are parallel to fMasterFx, not to project.masterFx.
+        std::unique_ptr<std::atomic<bool>[]>      fMasterFxBypass;
+        std::unique_ptr<std::atomic<float>[]>     fMasterFxMix;
+        std::vector<FrameDelay>                   fMasterFxDelay;
+        // One block of dry signal, held while an insert's wet leg is computed
+        // in place. Preallocated at build (RT never allocates); nodes and the
+        // master run sequentially inside one callback, so a single buffer
+        // serves them all.
+        std::vector<float>                        fScratch;
+        Frame                                     fMonFrame = 0;  // monitor clock
+        LiveVoice                                 fVoices[kMaxLiveVoices];
+        std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
+        Metronome                                 fMetronome; // click generator
+        TempoMap                                  fTempoMap;  // for tempo-synced fx
+        double                                    fLastFxBpm = 0.0;  // last pushed bpm
+        Loudness                                  fLoudness;  // master BS.1770 meter
+        std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
+        // Resampled-monitor state (when the monitor rate != output rate): a
+        // linear pull-resampler carried across blocks. RT-only.
+        std::vector<float>                        fMonSrc;   // source-rate scratch
+        double                                    fMonPhase = 0.0;
+        float                                     fMonPrevL = 0.0f, fMonPrevR = 0.0f;
+
+    private:
+        // RT-only helpers, split out of Render for readability.
+        void UpdateLiveVoices(Engine& e, Frame blockStart);
+        void RenderMonitorOnly(Engine& e, float* out, size_t frames);
+    };
+
+    // ------------------------------------------------------------------
+    // Loading.
+    // ------------------------------------------------------------------
+
+    // What a rebuild request means for the transport:
+    enum class LoadMode {
+        // The transport is (re)positioning: play, seek, loop wrap, record
+        // start, monitor start. The active graph is detached at request time —
+        // its content belongs to the old position — so the RT renders silence
+        // and the playhead stands still until the new graph is published.
+        NewPosition,
+        // The content changed at an unchanged position (a structural edit
+        // during playback). The active graph keeps playing and keeps advancing;
+        // the new graph joins at the current playhead through its per-stream
+        // rebase, so the edit is heard with no gap.
+        InPlace,
+    };
+
+    // Make sure the output device is open for this project. Runs on the CALLER's
+    // thread (the window thread): opening the device is the one part of
+    // starting playback whose failure the user is shown synchronously. The
+    // player is then kept: a rebuild never re-creates it, so every rebuild
+    // after the first is device-free. Re-created only when the requested sample
+    // rate or SetBufferFrames value differs from the live one.
+    status_t EnsurePlayer(const Project& project);
+
+    // Snapshot the project, queue a rebuild and return — the window thread is
+    // free immediately; the graph lands when the builder is done. A newer
+    // request replaces a queued one (superseding a build already in flight,
+    // whose result is then discarded rather than published stale). The
+    // synchronous wrapper below waits.
+    void RequestLoad(const Project& project, Frame startFrame, Frame minEndFrame,
+                     LoadMode mode);
+
+    // Old synchronous entry point (prototypes and the monitor path): ensure the
+    // player, request, wait, and return the build's status.
     status_t Load(const Project& project, Frame startFrame = 0,
                   Frame minEndFrame = 0);
 
+    // Wait for every request issued so far to have completed. False on timeout.
+    bool WaitForLoad(bigtime_t timeoutUs = 10000000);
+
     void Start();
     void Stop();
+
+    // ---- counters for the tests (M4.1) --------------------------------
+    // Graphs published to the RT side (each is one completed successful load).
+    uint64_t GraphsPublished() const {
+        return fGraphsPublished.load(std::memory_order_relaxed);
+    }
+    // Requests whose build has finished, successful or not.
+    uint64_t LoadsCompleted() const {
+        return fCompletedGen.load(std::memory_order_acquire);
+    }
+    // The most recent completed build's status (B_OK, B_ENTRY_NOT_FOUND, ...).
+    status_t LastLoadStatus() const {
+        return (status_t)fLoadStatus.load(std::memory_order_relaxed);
+    }
+    // How many BSoundPlayers have been opened (a rebuild must not move this).
+    uint64_t PlayersOpened() const {
+        return fPlayersOpened.load(std::memory_order_relaxed);
+    }
+    // How many times the player has been started (a rebuild must not move this
+    // either: stop/start is what would make an edit audible as a gap).
+    uint64_t PlayerStarts() const {
+        return fPlayerStarts.load(std::memory_order_relaxed);
+    }
+    // Is a graph in place for the RT side to render?
+    bool HasGraph() const { return fGraphs->Active() != nullptr; }
+    // Is a rebuild in flight?
+    bool GraphPending() const {
+        return fRequestGen.load(std::memory_order_acquire)
+               > fCompletedGen.load(std::memory_order_acquire);
+    }
 
     // Recompute every stream's gain/pan/audibility from the model, live,
     // without rebuilding the graph. Safe to call from the UI thread while
@@ -143,9 +472,10 @@ public:
     // Push effect-parameter edits into the running graph without a rebuild, so
     // knob tweaks take effect during playback. Only chains whose structure still
     // matches (same effect types, same count) are updated via SetParam (RT-safe);
-    // add/remove/reorder still needs the next Load. Returns true if every chain
-    // matched and was synced; false if any chain's structure changed (the caller
-    // should rebuild). Safe to call from the UI thread while playing.
+    // add/remove/reorder still needs a rebuild (the caller requests one, in
+    // place or at a new position). Returns true if every chain matched and was
+    // synced; false if any chain's structure changed. Safe to call from the UI
+    // thread while playing.
     bool SyncFx(const Project& project);
 
     // Tell every effect the current tempo (for tempo-synced params, e.g. a
@@ -252,11 +582,9 @@ public:
     // track's endpoint NAME to a Midi Kit producer id when it opens the input
     // and pushes the result here; the RT thread then filters purely on ids. A
     // track with no entry stays permissive (hears every source), so this is a
-    // no-op until inputs are actually assigned. Safe to call while playing.
+    // no-op until inputs are actually assigned. Safe to call while playing; the
+    // worker re-applies the list to a graph it is about to publish.
     void SetMidiRoutes(const std::vector<MidiInputRoute>& routes);
-private:
-    void ApplyMidiRoutes();   // push fMidiRoutes onto the current buses
-public:
 
     // After detaching a monitor/live-MIDI source (SetMonitorSource(nullptr) or
     // SetLiveMidi(nullptr)), call this before destroying that source object.
@@ -274,8 +602,9 @@ public:
     // live voices through each armed MIDI track's instrument + fader.
     void SetMonitorOnly(bool on) { fMonitorOnly.store(on); }
 
-    // Output buffer size in frames (per channel); applied at the next Load.
-    // Smaller = lower latency, higher xrun risk. Call before Load().
+    // Output buffer size in frames (per channel); applied when the player is
+    // next (re)created, i.e. before the device opens. Smaller = lower latency,
+    // higher xrun risk. Call before Load().
     void SetBufferFrames(size_t n) { if (n >= 32) fBufferFrames = n; }
 
     // True once the playhead has passed the end of all clips.
@@ -334,6 +663,34 @@ public:
     }
 
 private:
+    // One queued rebuild: the model SNAPSHOT (taken on the caller's thread —
+    // the window thread owns the model and may be editing it while the worker
+    // builds), the position, and the transport intent.
+    struct BuildRequest {
+        Project      project;
+        Frame        startFrame  = 0;
+        Frame        minEndFrame = 0;
+        LoadMode     mode        = LoadMode::NewPosition;
+        bool         monitorOnly = false;
+        uint64_t     gen         = 0;
+        // The device format the graph must be built for, captured with the
+        // request (the player cannot be swapped out from under a build).
+        float        outputRate  = 48000.0f;
+        size_t       playerBufferBytes = 0;
+    };
+
+    // Builder thread: wait for a request, build a Graph from its snapshot,
+    // publish it if it is still the newest one, and record the result.
+    void BuilderLoop();
+    void PublishCompletion(uint64_t gen, status_t rc);
+    void PublishGraph(std::unique_ptr<Graph> g);
+    void DetachGraph();
+
+    // Build the whole graph from a snapshot. Builder thread only: it opens
+    // files, spawns disk threads, allocates and primes rings. Returns nullptr
+    // on failure (or on shutdown, mid-build) with *rc set.
+    std::unique_ptr<Graph> BuildGraph(const BuildRequest& req, status_t* rc);
+
     // RT helper: copy the given chain's meters into the flat UI storage. The
     // spectrum write is bracketed by a seqlock generation bump (odd while
     // writing) so the UI reader can detect a torn copy and retry.
@@ -385,230 +742,87 @@ private:
 
     static void PlayTrampoline(void* cookie, void* buffer, size_t size,
                                const media_raw_audio_format& format);
+    // The RT callback body: ONE acquire load of the active graph, then render
+    // the whole block from it. No graph -> silence, and no playhead advance
+    // (a rebuild that has not landed yet must not run the transport ahead of
+    // the audio).
     void FillBuffer(float* out, size_t frames);
 
-    // Drain the live-MIDI ring, advance the held-voice pool, and rebuild
-    // fLiveNotes for this block. RT-only; called once per FillBuffer.
-    void UpdateLiveVoices(Frame blockStart);
+    // RT-only tempo push into the graph's effect chains.
+    void ApplyTempo(Graph& g, double bpm);
 
-    // A live-monitored note held on the keyboard (or in its release tail).
-    struct LiveVoice {
-        bool    active    = false;
-        bool    releasing = false;   // note-off seen; ringing out the tail
-        uint8_t pitch     = 0;
-        uint8_t vel       = 0;
-        uint8_t channel   = 0;
-        Frame   start     = 0;       // engine frame the note-on landed on
-        Frame   off       = 0;       // engine frame of note-off (if releasing)
-        int32_t source    = 0;       // endpoint the note-on arrived from
-    };
-    static constexpr int kMaxLiveVoices = 64;
+    // ---- device ---------------------------------------------------------
+    std::unique_ptr<BSoundPlayer> fPlayer;
+    float  fOutputRate = 48000.0f;
+    size_t fBufferFrames = 512;   // output buffer frames/channel (~10.7ms@48k)
+    // What the live player was opened for, so EnsurePlayer can tell a rebuild
+    // (keep it) from a format change (re-create it).
+    double fPlayerRequestRate   = 0.0;
+    size_t fPlayerRequestFrames = 0;
+    size_t fPlayerBufferBytes   = 0;   // what the device actually negotiated
+    std::atomic<uint64_t> fPlayersOpened{0};
+    std::atomic<uint64_t> fPlayerStarts{0};
 
-    // One mix bus per audio track: its clips' streams summed into a scratch
-    // buffer, then the track's effect chain applied, then added to master.
-    // One mix node per track (audio / midi / bus). It sums its content (and,
-    // for a bus, its upstream inputs), applies its FX, and routes into `output`
-    // (another bus) or the master.
-    struct Bus {
-        TrackId                               id;
-        TrackId                               output = kInvalidTrackId;  // 0 = master
-        std::vector<TrackStream*>             streams;   // audio, owned by fStreams
-        std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
-        std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
-        std::unique_ptr<IInstrument>          instrument;// voice (MIDI)
-        // Live mix params: written by the UI thread (UpdateMix) and read by the
-        // RT callback (FillBuffer). Atomic + relaxed so a concurrent fader move
-        // can't tear a float into a NaN/garbage gain. Independent scalars with no
-        // cross-field invariant, so relaxed ordering is sufficient.
-        std::atomic<float>                    midiGainL{1.0f};  // equal-power
-        std::atomic<float>                    midiGainR{1.0f};
-        std::atomic<float>                    busGainL{1.0f};   // bus fader
-        std::atomic<float>                    busGainR{1.0f};
-        bool                                  isBus   = false;
-        std::atomic<bool>                     audible{true};
-        bool                                  liveMonitor = false;  // armed MIDI: synth live input
-        // Live-input route for this track: which endpoint (Midi Kit producer
-        // id, 0 = any) and which MIDI channel (1..16, 0 = all) its monitored
-        // notes may come from, so two keyboards drive two tracks independently.
-        // Atomic because arming/assignment can change while the player runs.
-        std::atomic<int32_t>                  inEndpoint{0};
-        std::atomic<int>                      inChannel{0};
-        // This bus's share of the live voices, rebuilt per block on the RT
-        // thread from the shared voice pool. Reserved at Load so the RT rebuild
-        // never allocates.
-        std::vector<MidiNote>                 liveNotes;
-        std::vector<std::unique_ptr<IEffect>> fx;
-        std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
-        // Per-insert slot state, parallel to fx (see model/Effect.h). Atomic
-        // because the UI thread pushes them through SyncFx while the RT callback
-        // reads them per block — like the fader gains above: independent scalars
-        // with no cross-field invariant, so relaxed ordering is sufficient. Held
-        // as arrays rather than std::vector<std::atomic<>> (which cannot grow,
-        // an atomic being neither copyable nor movable), sized once at Load, the
-        // same shape as fNodePeakL/R.
-        std::unique_ptr<std::atomic<bool>[]>  fxBypass;
-        std::unique_ptr<std::atomic<float>[]> fxMix;
-        // Per-insert dry-path delay of that effect's own LatencySamples(). Both
-        // the soft-bypass path and the wet/dry blend need the dry signal delayed
-        // by exactly that, and they are mutually exclusive, so one line serves
-        // both. Length 0 (a plain accumulate, no cost) for every zero-latency
-        // effect — which is every built-in but the look-ahead limiter.
-        std::vector<FrameDelay>               fxDryDelay;
-        // Aux sends: destination node index into fBuses, linear level, and a PDC
-        // delay line aligning this send to the dest's input latency. Taps this
-        // node's post-FX output. Dest node indices are resolved at Load, so the
-        // RT callback does no id lookups. The topo order (built over output +
-        // send edges) guarantees each dest is processed after us.
-        struct SendTarget {
-            size_t     dest;
-            float      level;
-            FrameDelay delay;   // PDC: aligns this send to dest.inputLatency
-        };
-        std::vector<SendTarget>               sendTargets;
-        // PDC delay line on this node's OUTPUT edge (into `output` or the master
-        // sink), aligning it to that destination's input latency. Zero-length
-        // (a plain accumulate) when nothing on the path is latent.
-        FrameDelay                            outDelay;
-        // Gain/pan automation (RT-owned snapshot, copied from the Track at
-        // Load). When a lane has points, the engine drives this node's gain/pan
-        // per block from the lane (absolute, overriding the static fader);
-        // UpdateMix leaves automated nodes alone.
-        AutomationLane                        gainAuto;
-        AutomationLane                        panAuto;
-        std::vector<FxAutoLane>               fxAuto;   // effect-param automation
-        float                                 statGain = 1.0f;  // ValueAt default
-        float                                 statPan  = 0.0f;
-        bool                                  hasAuto  = false;
-        // Last MIDI channel gains (CC7 x CC11, placed by CC10) applied at the end
-        // of the previous block. The next block ramps from here to its own target
-        // so a stepped controller glides instead of clicking. Negative = not yet
-        // established (first block after Load/seek), which snaps instead of
-        // gliding from a stale value.
-        float                                 chanL    = -1.0f;
-        float                                 chanR    = -1.0f;
+    // ---- the swappable graph --------------------------------------------
+    // Held by pointer so teardown can be explicit: the destructor stops the
+    // player and joins the builder, THEN resets this, which drains the reclaim
+    // thread while the engine it reads (fPlayerRunning, fCallbackGen) is still
+    // alive.
+    std::unique_ptr<GraphSwap<Graph>> fGraphs;
 
-        // The atomic members make Bus non-copyable and suppress the implicit
-        // move, but fBuses is a std::vector<Bus> that moves on growth/erase.
-        // Hand-write a noexcept move that transfers the atomics by value (all
-        // moves happen at Load, single-threaded, before the RT thread starts).
-        Bus() = default;
-        Bus(Bus&& o) noexcept
-            : id(o.id), output(o.output),
-              streams(std::move(o.streams)), notes(std::move(o.notes)),
-              events(std::move(o.events)),
-              instrument(std::move(o.instrument)),
-              midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
-              midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
-              busGainL(o.busGainL.load(std::memory_order_relaxed)),
-              busGainR(o.busGainR.load(std::memory_order_relaxed)),
-              isBus(o.isBus),
-              audible(o.audible.load(std::memory_order_relaxed)),
-              liveMonitor(o.liveMonitor),
-              inEndpoint(o.inEndpoint.load(std::memory_order_relaxed)),
-              inChannel(o.inChannel.load(std::memory_order_relaxed)),
-              liveNotes(std::move(o.liveNotes)),
-              fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
-              fxBypass(std::move(o.fxBypass)), fxMix(std::move(o.fxMix)),
-              fxDryDelay(std::move(o.fxDryDelay)),
-              sendTargets(std::move(o.sendTargets)),
-              outDelay(std::move(o.outDelay)),
-              gainAuto(std::move(o.gainAuto)), panAuto(std::move(o.panAuto)),
-              fxAuto(std::move(o.fxAuto)),
-              statGain(o.statGain), statPan(o.statPan), hasAuto(o.hasAuto),
-              chanL(o.chanL), chanR(o.chanR) {}
-        Bus& operator=(Bus&& o) noexcept {
-            if (this == &o) return *this;
-            id = o.id; output = o.output;
-            streams = std::move(o.streams); notes = std::move(o.notes);
-            events = std::move(o.events);
-            instrument = std::move(o.instrument);
-            midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            busGainL.store(o.busGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            busGainR.store(o.busGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            isBus = o.isBus;
-            audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            liveMonitor = o.liveMonitor;
-            inEndpoint.store(o.inEndpoint.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            liveNotes = std::move(o.liveNotes);
-            fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
-            fxBypass = std::move(o.fxBypass); fxMix = std::move(o.fxMix);
-            fxDryDelay = std::move(o.fxDryDelay);
-            sendTargets = std::move(o.sendTargets);
-            outDelay = std::move(o.outDelay);
-            gainAuto = std::move(o.gainAuto); panAuto = std::move(o.panAuto);
-            fxAuto = std::move(o.fxAuto);
-            statGain = o.statGain; statPan = o.statPan; hasAuto = o.hasAuto;
-            chanL = o.chanL; chanR = o.chanR;
-            return *this;
-        }
-    };
-
-    std::unique_ptr<BSoundPlayer>             fPlayer;
-    std::vector<std::unique_ptr<TrackStream>> fStreams;
-    std::vector<Bus>                          fBuses;
-    std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
-    std::vector<size_t>                       fOrder;     // node indices, topo order
-    std::unique_ptr<std::atomic<float>[]>     fNodePeakL; // per-node output peak
-    std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
-    std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
-    std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
-    // Master-chain insert state, same shape and rules as Bus::fxBypass/fxMix/
-    // fxDryDelay above. Note fMasterFx DROPS effects that fail to build, so
-    // these are parallel to fMasterFx, not to project.masterFx.
-    std::unique_ptr<std::atomic<bool>[]>      fMasterFxBypass;
-    std::unique_ptr<std::atomic<float>[]>     fMasterFxMix;
-    std::vector<FrameDelay>                   fMasterFxDelay;
-    // One block of dry signal, held while an insert's wet leg is computed in
-    // place. Preallocated at Load (RT never allocates); nodes and the master run
-    // sequentially inside one callback, so a single buffer serves them all.
-    std::vector<float>                        fScratch;
-    std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
-    // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
-    // the engine at the loop seam, which rebuilds every Bus; without this the
-    // demux would silently revert to "every track hears everything" mid-take.
-    std::vector<MidiInputRoute>               fMidiRoutes;
-    std::atomic<bool>                         fMonitorOnly{false}; // idle monitor mode
-    Frame                                     fMonFrame = 0;       // free-running monitor clock
-    LiveVoice                                 fVoices[kMaxLiveVoices];
-    std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
-    Metronome                                 fMetronome; // click generator
-    TempoMap                                  fTempoMap;  // for tempo-synced fx
-    double                                     fLastFxBpm = 0.0;  // last pushed bpm
-    Loudness                                  fLoudness;  // master BS.1770 meter
-    std::atomic<bool>                         fMetronomeOn{false};
-    std::atomic<bool>                         fMonitorDim{false};
-    std::atomic<bool>                         fMonitorMono{false};
-    std::atomic<IMonitorSource*>              fMonSource{nullptr};
-    std::atomic<bool>                         fInputMonitor{false};
-    // Bumped once per completed RT callback; QuiesceMonitorInput() waits on it
-    // to bound the monitor/live-MIDI source teardown UAF window.
-    std::atomic<uint64_t>                     fCallbackGen{0};
-    // True only while the BSoundPlayer is actually running: set BEFORE
-    // fPlayer->Start() and cleared AFTER fPlayer->Stop() returns (Stop blocks
-    // until the last callback exits). Unlike fPlaying — which Stop() clears
-    // before the player has drained — this is a sound "no callback in flight"
-    // signal for QuiesceMonitorInput()'s fast path.
-    std::atomic<bool>                         fPlayerRunning{false};
-    std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
-    // Resampled-monitor state (when the monitor rate != output rate): a linear
-    // pull-resampler carried across blocks. RT-only.
-    std::vector<float>                        fMonSrc;   // source-rate scratch
-    double                                    fMonPhase = 0.0;
-    float                                     fMonPrevL = 0.0f, fMonPrevR = 0.0f;
-    std::atomic<float>                        fLufsM{Loudness::kSilenceLufs};
-    std::atomic<float>                        fLufsS{Loudness::kSilenceLufs};
-    std::atomic<float>                        fTpDb{Loudness::kSilenceDb};
-
+    // ---- transport + live state the swap must not touch ------------------
     std::atomic<Frame> fPlayhead{0};
     std::atomic<bool>  fPlaying{false};
     std::atomic<bool>  fFinished{false};
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
     std::atomic<float> fMasterGain{1.0f};
+    std::atomic<bool>  fMetronomeOn{false};
+    std::atomic<bool>  fMonitorDim{false};
+    std::atomic<bool>  fMonitorMono{false};
+    std::atomic<IMonitorSource*> fMonSource{nullptr};
+    std::atomic<bool>  fInputMonitor{false};
+    std::atomic<IMidiInput*> fLiveMidi{nullptr};  // live-monitor input
+    std::atomic<bool>  fMonitorOnly{false};       // idle monitor mode
+    // Bumped once per completed RT callback; QuiesceMonitorInput() waits on it
+    // to bound the monitor/live-MIDI source teardown UAF window, and the graph
+    // reclaimer waits on it to know a retired graph is out of the callback.
+    std::atomic<uint64_t> fCallbackGen{0};
+    // True only while the BSoundPlayer is actually running: set BEFORE
+    // fPlayer->Start() and cleared AFTER fPlayer->Stop() returns (Stop blocks
+    // until the last callback exits). Unlike fPlaying — which Stop() clears
+    // before the player has drained — this is a sound "no callback in flight"
+    // signal for QuiesceMonitorInput()'s fast path and for the reclaimer.
+    std::atomic<bool>  fPlayerRunning{false};
+    // The callback generation at the most recent graph publish. A graph retired
+    // after it may be freed once two further boundaries have passed (the
+    // callback that could still have loaded the old pointer has run to
+    // completion) or immediately when the player is not running. See the
+    // reclaim predicate in Engine::Engine.
+    std::atomic<uint64_t> fRetireGen{0};
+    std::atomic<float> fLufsM{Loudness::kSilenceLufs};
+    std::atomic<float> fLufsS{Loudness::kSilenceLufs};
+    std::atomic<float> fTpDb{Loudness::kSilenceDb};
+    Frame  fStartFrame = 0;   // playhead position playback begins at
 
-    // Effect meter focus + flat storage (RT writes, UI reads).
+    // ---- the builder -----------------------------------------------------
+    std::mutex              fBuildMutex;
+    std::condition_variable fBuildCv;
+    std::unique_ptr<BuildRequest> fRequest;   // the newest queued request
+    std::atomic<uint64_t>   fRequestGen{0};   // requests issued
+    std::atomic<uint64_t>   fCompletedGen{0}; // requests whose build finished
+    std::atomic<int>        fLoadStatus{(int)B_OK};
+    std::atomic<uint64_t>   fGraphsPublished{0};
+    std::atomic<bool>       fShutdown{false};
+    std::thread             fBuilder;
+    // Live-input routes, kept so a rebuild re-applies them. Guarded by
+    // fRouteMutex: SetMidiRoutes runs on the window thread while the builder
+    // reads them for a graph it is about to publish (neither is the RT thread).
+    std::mutex fRouteMutex;
+    std::vector<MidiInputRoute> fMidiRoutes;
+
+    // ---- UI-facing publishing storage (engine-owned: an editor's watch must
+    // survive every rebuild) ----------------------------------------------
     std::atomic<TrackId> fMeterTrack{kInvalidTrackId};
     std::atomic<float>   fMeterGr[kMeterFxMax];   // per-fx scalar meter (GR dB)
     static constexpr int kMeterSpecMax = 256;
@@ -630,10 +844,6 @@ private:
     float                 fWatchValues[kWatchSlots][kWatchMax] = {};
     std::atomic<int>      fWatchN[kWatchSlots] {};
     std::atomic<uint32_t> fWatchGen[kWatchSlots] {};   // seqlock (odd = writing)
-    Frame  fStartFrame = 0;   // playhead position playback begins at
-    Frame  fEndFrame   = 0;
-    float  fOutputRate = 48000.0f;
-    size_t fBufferFrames = 512;   // output buffer frames/channel (~10.7ms@48k)
 };
 
 } // namespace daw

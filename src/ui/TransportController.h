@@ -5,6 +5,11 @@
 // drives every one of them. The method moves (play, stop, rebuild, seek,
 // loop) land on top of this in the same item, tightening the seams as they go;
 // keeping the state in one place first is what makes those moves mechanical.
+//
+// M4.1: the engine is created on first use and KEPT — its BSoundPlayer survives
+// every rebuild, and a rebuild is a graph built on the engine's worker thread
+// and swapped in (Engine::RequestLoad), so nothing here blocks the window
+// thread on a load and an edit during playback causes no gap.
 #pragma once
 
 #include "../engine/Engine.h"
@@ -34,7 +39,19 @@ public:
     void ReloadActiveEngine();               // rebuild the running engine
     bool StartRecordEngine(Frame engineStart);   // engine for overdub monitoring
 
-    // Rebuilt per Play today (RT-safe graph swap later).
+    // The engine, created on first use. The window owns it from then on: it is
+    // deliberately NOT re-created per play (the device stays open).
+    Engine* EnsureEngine();
+
+    // Polled from the window's 60 Hz pulse: a build that failed on the worker
+    // stops the transport here, with the same report the synchronous load used
+    // to make. Nothing to do while every load succeeds.
+    void PollEngineLoad();
+
+    // The play range for the current transport state: to the loop end when
+    // looping, plus the metronome-only extension the old Load call computed.
+    Frame PlayRangeEnd(bool looping) const;
+
     std::unique_ptr<Engine> fEngine;
     bool        fPlaying = false;
     bool        fMonitoring = false;   // idle live-monitor engine up
@@ -46,6 +63,9 @@ public:
 
 private:
     MainWindow* fWin = nullptr;
+    // LoadsCompleted() as of the last poll, so a completed build is noticed
+    // once. Reset whenever a NEW engine object takes over.
+    uint64_t    fSeenLoads = 0;
 };
 
 } // namespace daw

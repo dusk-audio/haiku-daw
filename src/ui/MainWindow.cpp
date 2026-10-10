@@ -1689,6 +1689,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // A rebuild runs on the engine's worker thread now (M4.1): its
+            // outcome -- failure included -- is picked up here, where the UI may
+            // be touched, instead of blocking the window on the load.
+            fTransportCtl.PollEngineLoad();
             // An export reports through the pulse: the worker writes only
             // atomics (the codebase's pattern for streamed values), and the bar
             // is a window this looper owns a messenger to.
