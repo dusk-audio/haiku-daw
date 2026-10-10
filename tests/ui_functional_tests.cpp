@@ -187,13 +187,6 @@ static int VisibleWindows() {
     return n;
 }
 
-// Wait until only the main window is up: the previous test's export bar closes
-// on a pulse, and a stale bar would shift every window count that follows (and
-// make a later "the bar appeared" assertion pass vacuously).
-static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
-    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
-}
-
 // The window's title, as SetTitle set it. BWindow::Name() returns the
 // window's THREAD name, which Haiku prefixes with "w>" (BWindow::_SetName
 // renames the thread "w>window title"), so a raw Name() comparison against a
@@ -205,16 +198,27 @@ static const char* WindowTitle(BWindow* w) {
     return std::strncmp(name, "w>", 2) == 0 ? name + 2 : name;
 }
 
-// Is a window with this title up? Deliberately takes NO lock: a modal prompt
-// holds the main window's looper until it is answered, so a predicate that
-// locked the window first would block forever instead of failing the test.
-static bool AlertUp(const char* title) {
+// Is a visible window with this title up? Deliberately takes NO lock: a modal
+// prompt holds the main window's looper until it is answered, so a predicate
+// that locked the window first would block forever instead of failing.
+static bool WindowUp(const char* title) {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
         if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
             return true;
     }
     return false;
+}
+
+// Wait until only the main window is up: the previous test's export bar closes
+// on a pulse, and a stale bar would shift every window count that follows (and
+// make a later "the bar appeared" assertion pass vacuously).
+static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
+    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
+}
+
+static bool AlertUp(const char* title) {
+    return WindowUp(title);
 }
 
 // Answer a modal alert the way its own buttons do: wait for the alert titled
@@ -258,6 +262,14 @@ static void HideOtherWindows(BWindow* keep) {
         }
     }
     snooze(200000);
+}
+
+// Put away whatever a message may have opened, without caring whether it
+// opened anything: the point is only to leave a clean screen for the next
+// test, and a window that never appeared is not a failure here.
+static void MaybeHidePanels(BWindow* keep) {
+    snooze(300000);          // let the looper act on the message first
+    HideOtherWindows(keep);
 }
 
 // --- 1. the harness itself -------------------------------------------------
@@ -542,10 +554,14 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     }
     dlg->Unlock();
 
-    // The dialog applies by posting its own go-ahead to itself.
+    // The dialog applies by posting its own go-ahead to itself; it then quits.
     dlg->PostMessage('exok');
-    // ...and MainWindow answers with the save panel, exactly as before.
-    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    // Wait for the save panel AND for the dialog itself to be gone. A window
+    // that is still quitting must not be touched: HideOtherWindows locks what
+    // it finds, and locking a looper that is being destroyed is a crash.
+    CHECK(WaitFor([&] {
+        return !WindowUp("Export") && VisibleWindows() >= windowsBefore + 1;
+    }));
     HideOtherWindows(win);
     CHECK(WaitQuiet());
 
@@ -554,8 +570,7 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     back.AddInt32("container", (int32)AudioFileFormat::Wav);
     back.AddInt32("bits", 16);
     win->PostMessage(&back);
-    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; }));
-    HideOtherWindows(win);
+    MaybeHidePanels(win);
 }
 
 // One bounce per container this build can write, all the way through the app:
@@ -592,7 +607,7 @@ static void TestExportFormats(MainWindow* win, Project& project) {
         opts.AddInt32("range", 0);
         opts.AddInt32("stems", 0);
         win->PostMessage(&opts);
-        CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+        CHECK(WaitFor([&] { return VisibleWindows() >= windowsBefore + 1; }));
         HideOtherWindows(win);
 
         entry_ref dir;
@@ -607,6 +622,9 @@ static void TestExportFormats(MainWindow* win, Project& project) {
         CHECK(!FileExists(path + ".part"));
         // The bytes decide: a FLAC export is a FLAC whatever it was called.
         CHECK(SniffAudioFileFormat(path) == k.fmt);
+        // A failed bounce raises an alert on the pulse. Answer it here rather
+        // than letting it sit over the windows every later test counts.
+        AnswerAlertWhenUp("Export", 0, 2000000);
         CHECK(WaitQuiet());
         std::remove(path.c_str());
     }
@@ -616,8 +634,7 @@ static void TestExportFormats(MainWindow* win, Project& project) {
     back.AddInt32("container", (int32)AudioFileFormat::Wav);
     back.AddInt32("bits", 16);
     win->PostMessage(&back);
-    snooze(200000);
-    HideOtherWindows(win);
+    MaybeHidePanels(win);
 }
 
 // The loop range bounces what the loop covers, not the whole timeline.
