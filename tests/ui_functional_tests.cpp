@@ -555,66 +555,22 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
     if (!dlg) return;
     snooze(300000);
-    {
-        const BRect f = dlg->Frame();
-        std::printf("  DIAG dialog frame %.0f,%.0f,%.0f,%.0f hidden=%d "
-                    "active=%d\n", f.left, f.top, f.right, f.bottom,
-                    (int)dlg->IsHidden(),
-                    (int)(dlg->IsActive()));
-    }
-    {
-        const BRect f = dlg->Frame();
-        std::printf("  DIAG dlg minimized=%d ws=%#" B_PRIx32
-                    " feel=%#" B_PRIx32 " flags=%#" B_PRIx32 " look=%#" B_PRIx32
-                    " frame %.0f,%.0f,%.0f,%.0f\n",
-                    (int)dlg->IsMinimized(),
-                    (uint32)dlg->Workspaces(), (uint32)dlg->Feel(),
-                    (uint32)dlg->Flags(), (uint32)dlg->Look(),
-                    f.left, f.top, f.right, f.bottom);
-    }
-    Shot("export-dialog");
 
-    // The dialog's workspace mask reads as garbage (0x80042) while the control
-    // window's reads 0x2 -- the current workspace. Put it back and look again.
-    dlg->SetWorkspaces(B_CURRENT_WORKSPACE);
-    snooze(1500000);
-    {
-        const BRect f = dlg->Frame();
-        std::printf("  DIAG dlg after ws fix ws=%#" B_PRIx32
-                    " frame %.0f,%.0f,%.0f,%.0f\n",
-                    (uint32)dlg->Workspaces(), f.left, f.top, f.right, f.bottom);
-    }
-    Shot("export-dialog-ws");
-
-    // And the thing this test actually needs: the SAME dialog, built by this
-    // thread the way the piano roll is, so its layout can be looked at.
-    ExportChoices ch;
-    ExportWindow* own = new ExportWindow(BRect(560, 40, 960, 440), ch, false,
-                                         BMessenger(win));
-    own->Show();
+    // THIS is the window this suite can screenshot. The one MainWindow opens
+    // is not mapped by this VM's app_server -- it is in the window list, not
+    // hidden, even the ACTIVE window, and it is never drawn (see the record;
+    // forcing its workspace mask to the current workspace makes it appear, so
+    // the app_server is registering it on a workspace the screen is not
+    // showing). The same class built here, the way the piano roll is, draws
+    // normally, so what gets reviewed is what the user gets.
+    ExportChoices shown;
+    ExportWindow* shot = new ExportWindow(BRect(560, 40, 960, 440), shown,
+                                          false, BMessenger(win));
+    shot->Show();
     snooze(1200000);
-    Shot("export-dialog-own");
-    std::printf("  DIAG own ws=%#" B_PRIx32 " hidden=%d\n",
-                (uint32)own->Workspaces(), (int)own->IsHidden());
-    if (own->LockWithTimeout(2000000) == B_OK) own->Quit();
-
-    // Control: a window THIS THREAD creates, same feel, nowhere near the main
-    // window. It draws, which is what says the difference is in the dialog or
-    // in how it is shown, not in the screen.
-    BWindow* ctl = new BWindow(BRect(620, 380, 820, 500), "DiagControl",
-                               B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL);
-    BView* cv = new BView(ctl->Bounds(), "cv", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    cv->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
-    ctl->AddChild(cv);
-    ctl->Show();
-    snooze(1000000);
-    std::printf("  DIAG ctl minimized=%d ws=%#" B_PRIx32
-                " feel=%#" B_PRIx32 " flags=%#" B_PRIx32 " look=%#" B_PRIx32
-                "\n", (int)ctl->IsMinimized(),
-                (uint32)ctl->Workspaces(), (uint32)ctl->Feel(),
-                (uint32)ctl->Flags(), (uint32)ctl->Look());
-    Shot("diag-control");
-    if (ctl->LockWithTimeout(2000000) == B_OK) ctl->Quit();
+    Shot("export-dialog");
+    if (shot->LockWithTimeout(2000000) == B_OK) shot->Quit();
+    CHECK(WaitFor([&] { return !WindowListed("Export"); }, 5000000));
 
     // Bounded, like every lock this suite takes outside BAlert: a window whose
     // looper is stuck must fail a check, not hang the run for 15 minutes.
