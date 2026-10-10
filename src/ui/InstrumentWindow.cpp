@@ -3,11 +3,13 @@
 #include "UiMetrics.h"
 #include "../synth/SampleBank.h"
 
+#include "widgets/DawButton.h"      // the kit (M1.3)
+#include "widgets/DawMenuField.h"
+#include "widgets/DawSlider.h"
+
 #include <Application.h>
 #include <Cursor.h>
-#include <Button.h>
 #include <Entry.h>
-#include <MenuField.h>
 #include <MenuItem.h>
 #include <Path.h>
 #include <PopUpMenu.h>
@@ -177,7 +179,7 @@ static BSlider* AdsrRow(BRect r, const char* label, int slot,
     m->AddInt32("slot", slot);
     m->AddFloat("min", mn);
     m->AddFloat("max", mx);
-    BSlider* s = new BSlider(r, label, label, m, 0, 1000, B_HORIZONTAL);
+    BSlider* s = new DawSlider(r, label, label, m, 0, 1000, B_HORIZONTAL);
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
     s->SetValue((int32)(t * 1000.0f));
@@ -205,8 +207,8 @@ void InstrumentWindow::Build() {
             it->SetTarget(this);
             menu->AddItem(it);
         }
-        fRoot->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20), "md",
-                                       "Voice:", menu));
+        fRoot->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "md",
+                                         "Voice:", menu));
         y += 30;
     }
 
@@ -237,8 +239,8 @@ void InstrumentWindow::Build() {
         add("Release (s)", 3, 0.0f, 2.0f, fDesc.synth.release);
     } else {
         // --- soundfont: file, preset, status ------------------------------
-        BButton* pick = new BButton(BRect(8, y, 88, y + 24), "pick", "Load...",
-                                    new BMessage(MSG_PICK));
+        DawButton* pick = new DawButton(BRect(8, y, 88, y + 24), "pick",
+                                        "Load...", new BMessage(MSG_PICK));
         pick->SetTarget(this);
         fRoot->AddChild(pick);
 
@@ -264,8 +266,8 @@ void InstrumentWindow::Build() {
                 it->SetTarget(this);
                 menu->AddItem(it);
             }
-            fRoot->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20), "ps",
-                                           "Preset:", menu));
+            fRoot->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "ps",
+                                             "Preset:", menu));
             y += 30;
         }
 

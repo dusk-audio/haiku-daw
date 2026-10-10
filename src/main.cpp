@@ -140,6 +140,10 @@ public:
         set_ui_color(B_MENU_SELECTED_BACKGROUND_COLOR, ColAccent());
         set_ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR, Rgb(255, 255, 255));
         set_ui_color(B_SCROLL_BAR_THUMB_COLOR,        ColHeaderHi());
+        set_ui_color(B_LIST_BACKGROUND_COLOR,         ColLane());
+        set_ui_color(B_LIST_SELECTED_BACKGROUND_COLOR, ColAccent());
+        set_ui_color(B_LIST_ITEM_TEXT_COLOR,          ColText());
+        set_ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR, Rgb(255, 255, 255));
         set_ui_color(B_KEYBOARD_NAVIGATION_COLOR,     ColAccent());
     }
 

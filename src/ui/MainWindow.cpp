@@ -22,6 +22,8 @@
 #include "../app/AppSettings.h"
 #include "RenameWindow.h"
 #include "UiMetrics.h"
+#include "widgets/DawSlider.h"      // the kit (M1.3)
+#include "widgets/DawTextField.h"
 
 #include "../engine/DeviceLatency.h"
 #include "../engine/WavSource.h"

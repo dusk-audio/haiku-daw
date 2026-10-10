@@ -3,7 +3,7 @@
 #include "ExportWindow.h"   // kMsgExportProgress / kMsgExportCancel
 #include "UiMetrics.h"
 
-#include <Button.h>
+#include "widgets/DawButton.h"   // the kit (M1.3)
 #include <StatusBar.h>
 #include <View.h>
 
@@ -25,7 +25,7 @@ ExportProgressWindow::ExportProgressWindow(BRect frame, BMessenger main,
     fBar->SetBarColor(ColAccent());
     root->AddChild(fBar);
 
-    BButton* cancel = new BButton(BRect(w - 90, 40, w - 8, 64), "cx", "Cancel",
+    DawButton* cancel = new DawButton(BRect(w - 90, 40, w - 8, 64), "cx", "Cancel",
                                   new BMessage(kMsgExportCancel));
     cancel->SetTarget(fMain);   // straight to MainWindow, which owns the job
     root->AddChild(cancel);

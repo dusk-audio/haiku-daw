@@ -2,16 +2,17 @@
 
 #include "UiMetrics.h"
 
-#include <Button.h>
+#include "widgets/DawButton.h"      // the kit (M1.3)
+#include "widgets/DawCheckBox.h"
+#include "widgets/DawMenuField.h"
+#include "widgets/DawTextField.h"
+
 
 #include <cmath>
 #include <cstdlib>
-#include <CheckBox.h>
-#include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
 #include <String.h>
-#include <TextControl.h>
 #include <View.h>
 
 namespace daw {
@@ -76,7 +77,7 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
 
     // What to render.
     {
-        fStems = new BCheckBox(BRect(8, y, w - 8, y + 20), "st",
+        fStems = new DawCheckBox(BRect(8, y, w - 8, y + 20), "st",
                                "Separate stems (one file per track)", nullptr);
         fStems->SetValue(stems ? B_CONTROL_ON : B_CONTROL_OFF);
         root->AddChild(fStems);
@@ -84,7 +85,7 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     }
     {
         fRange = PickMenu("range", kRangeLabels, 2, current.range);
-        root->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20), "rg",
+        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "rg",
                                       "Range:", fRange));
         y += 30.0f;
     }
@@ -93,7 +94,7 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
         for (int i = 0; i < 4; i++)
             if (kRates[i] == current.sampleRate) marked = i;
         fRate = PickMenu("rate", kRateLabels, 4, marked);
-        root->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20), "sr",
+        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "sr",
                                       "Sample rate:", fRate));
         y += 30.0f;
     }
@@ -102,19 +103,19 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
         for (int i = 0; i < 3; i++)
             if (kBitDepths[i] == current.bitDepth) marked = i;
         fBits = PickMenu("bits", kBitLabels, 3, marked);
-        root->AddChild(new BMenuField(BRect(8, y, w - 8, y + 20), "bd",
+        root->AddChild(new DawMenuField(BRect(8, y, w - 8, y + 20), "bd",
                                       "Bit depth:", fBits));
         y += 30.0f;
     }
 
     // What to do to it on the way out.
-    fDither = new BCheckBox(BRect(8, y, w - 8, y + 20), "dt",
+    fDither = new DawCheckBox(BRect(8, y, w - 8, y + 20), "dt",
                             "Dither (16-bit only)", nullptr);
     fDither->SetValue(current.dither ? B_CONTROL_ON : B_CONTROL_OFF);
     root->AddChild(fDither);
     y += 28.0f;
 
-    fNorm = new BCheckBox(BRect(8, y, w - 8, y + 20), "nz",
+    fNorm = new DawCheckBox(BRect(8, y, w - 8, y + 20), "nz",
                           "Normalize loudness", nullptr);
     fNorm->SetValue(current.normalize ? B_CONTROL_ON : B_CONTROL_OFF);
     root->AddChild(fNorm);
@@ -126,13 +127,13 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     {
         BString v;
         v << current.targetLufs;
-        fLufs = new BTextControl(BRect(8, y, w - 8, y + 22), "lf",
+        fLufs = new DawTextField(BRect(8, y, w - 8, y + 22), "lf",
                                  "Target LUFS:", v.String(), nullptr);
         root->AddChild(fLufs);
         y += 30.0f;
     }
 
-    fLim = new BCheckBox(BRect(8, y, w - 8, y + 20), "lm",
+    fLim = new DawCheckBox(BRect(8, y, w - 8, y + 20), "lm",
                          "True-peak limiter", nullptr);
     fLim->SetValue(current.limiter ? B_CONTROL_ON : B_CONTROL_OFF);
     root->AddChild(fLim);
@@ -141,16 +142,16 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     {
         BString v;
         v << current.truePeak;
-        fCeil = new BTextControl(BRect(8, y, w - 8, y + 22), "cl",
+        fCeil = new DawTextField(BRect(8, y, w - 8, y + 22), "cl",
                                  "Ceiling dBTP:", v.String(), nullptr);
         root->AddChild(fCeil);
         y += 30.0f;
     }
 
-    BButton* cancel = new BButton(BRect(w - 186, y, w - 96, y + 24), "cx",
+    DawButton* cancel = new DawButton(BRect(w - 186, y, w - 96, y + 24), "cx",
                                   "Cancel", new BMessage(B_QUIT_REQUESTED));
     root->AddChild(cancel);
-    BButton* go = new BButton(BRect(w - 90, y, w - 8, y + 24), "ok",
+    DawButton* go = new DawButton(BRect(w - 90, y, w - 8, y + 24), "ok",
                               stems ? "Export stems" : "Export",
                               new BMessage(MSG_GO));
     go->MakeDefault(true);

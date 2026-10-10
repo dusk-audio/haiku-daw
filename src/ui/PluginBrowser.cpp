@@ -10,7 +10,7 @@
 #include <ListView.h>
 #include <ScrollView.h>
 #include <StringItem.h>
-#include <TextControl.h>
+#include "widgets/DawTextField.h"   // the kit (M1.3)
 
 #include <algorithm>
 #include <cctype>
@@ -59,7 +59,7 @@ PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
     AddChild(root);
 
     const float w = Bounds().Width();
-    fFilter = new BTextControl(BRect(8, 8, w - 8, 30), "filter", "Find:", "",
+    fFilter = new DawTextField(BRect(8, 8, w - 8, 30), "filter", "Find:", "",
                                new BMessage(MSG_FILTER));
     fFilter->SetDivider(36.0f);
     // Fire on every keystroke rather than only on Enter, so the list narrows as

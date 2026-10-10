@@ -3,14 +3,14 @@
 #include "UiMetrics.h"
 #include "../storage/BfsAttr.h"
 
-#include <Button.h>
+#include "widgets/DawButton.h"      // the kit (M1.3)
 #include <Entry.h>
 #include <ListView.h>
 #include <Path.h>
 #include <Query.h>
 #include <ScrollView.h>
 #include <StringItem.h>
-#include <TextControl.h>
+#include "widgets/DawTextField.h"
 #include <Volume.h>
 #include <VolumeRoster.h>
 
@@ -59,11 +59,11 @@ SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
     AddChild(root);
 
     const float w = Bounds().Width();
-    fFilter = new BTextControl(BRect(8, 8, w - 96, 30), "filter", "Find:",
+    fFilter = new DawTextField(BRect(8, 8, w - 96, 30), "filter", "Find:",
                                "", new BMessage(MSG_SEARCH));
     fFilter->SetDivider(36.0f);
     root->AddChild(fFilter);
-    BButton* search = new BButton(BRect(w - 88, 6, w - 8, 30), "search",
+    DawButton* search = new DawButton(BRect(w - 88, 6, w - 8, 30), "search",
                                   "Search", new BMessage(MSG_SEARCH));
     root->AddChild(search);
 
@@ -78,11 +78,11 @@ SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
     root->AddChild(sv);
 
     const float by = Bounds().Height() - 34;
-    fBpm = new BTextControl(BRect(8, by, 150, by + 22), "bpm", "BPM:", "",
+    fBpm = new DawTextField(BRect(8, by, 150, by + 22), "bpm", "BPM:", "",
                             new BMessage(MSG_TAGBPM));
     fBpm->SetDivider(34.0f);
     root->AddChild(fBpm);
-    BButton* tag = new BButton(BRect(158, by - 2, 260, by + 22), "tag",
+    DawButton* tag = new DawButton(BRect(158, by - 2, 260, by + 22), "tag",
                                "Tag BPM", new BMessage(MSG_TAGBPM));
     root->AddChild(tag);
 
