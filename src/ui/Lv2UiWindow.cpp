@@ -18,6 +18,7 @@
 #include <lv2/urid/urid.h>
 
 #include <MessageRunner.h>
+#include <Screen.h>
 #include <View.h>
 
 #include <dlfcn.h>
@@ -651,12 +652,12 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
 
     // --- the window -------------------------------------------------------
 
-    // Say which mode this editor is in. Both are live now, but they are not
-    // the same promise: a direct-access editor's values are mirrored through
-    // the host, which is worth naming rather than glossing as "live".
+    // Say which mode this editor is in when it is the unusual one: an editor
+    // driving the playing insert is what every editor is expected to do, but
+    // a direct-access editor's values are mirrored through the host, which is
+    // worth naming rather than glossing over.
     std::string title = displayName.empty() ? "Plugin UI" : displayName;
-    title += directAccess ? "  (live - mirrored through the host)"
-                          : "  (live - drives the playing insert)";
+    if (directAccess) title += "  (mirrored)";
 
     Lv2UiWindow* win = new Lv2UiWindow(frame, title.c_str());
     win->fImpl = d;
@@ -727,6 +728,44 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                  &widget, d->features.data());
     if (!d->ui) {
         winLock.Unlock(); win->PostMessage(B_QUIT_REQUESTED); return nullptr;
+    }
+
+    // Fit the window to what the plugin built. The frame it was opened with is
+    // only a guess made before the UI existed; a plugin GUI is a fixed size,
+    // and the guess left a large empty margin round it (or cut it off). The
+    // plugin's view is a child of the container now -- its union is the size.
+    {
+        BRect content;
+        for (int32 i = 0; i < d->container->CountChildren(); i++) {
+            BView* v = d->container->ChildAt(i);
+            content = content.IsValid() ? (content | v->Frame()) : v->Frame();
+        }
+        if (content.IsValid() && content.Width() >= 32.0f
+            && content.Height() >= 32.0f) {
+            // The plugin's view follows its parent's edges, so a plain resize
+            // would shrink it by exactly the margin being removed. Pinned for
+            // the fit, then handed its own resizing mode back.
+            std::vector<uint32> modes;
+            for (int32 i = 0; i < d->container->CountChildren(); i++) {
+                BView* v = d->container->ChildAt(i);
+                modes.push_back(v->ResizingMode());
+                v->SetResizingMode(B_FOLLOW_LEFT_TOP);
+            }
+            win->ResizeTo(content.right, content.bottom);
+            for (int32 i = 0; i < d->container->CountChildren(); i++)
+                d->container->ChildAt(i)->SetResizingMode(modes[(size_t)i]);
+            // Kept on screen: a large GUI opened near the bottom right would
+            // otherwise hang off it.
+            BScreen screen(win);
+            const BRect sf = screen.Frame();
+            BRect wf = win->Frame();
+            float dx = 0.0f, dy = 0.0f;
+            if (wf.right > sf.right - 8.0f)   dx = sf.right - 8.0f - wf.right;
+            if (wf.bottom > sf.bottom - 8.0f) dy = sf.bottom - 8.0f - wf.bottom;
+            if (wf.left + dx < sf.left + 8.0f)  dx = sf.left + 8.0f - wf.left;
+            if (wf.top + dy < sf.top + 30.0f)   dy = sf.top + 30.0f - wf.top;
+            if (dx != 0.0f || dy != 0.0f) win->MoveBy(dx, dy);
+        }
     }
 
     if (d->desc->extension_data)

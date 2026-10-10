@@ -88,6 +88,7 @@ private:
     Frame Snapped(Frame f) const;
     int   NoteAt(BPoint where) const;   // -1 none
     float VelLaneTop() const;           // y where the bottom lane begins
+    void  DrawKeyboard(float velTop);   // the piano column
     int   VelNoteAtX(float x) const;    // nearest note to a velocity-lane click
     void  SetVelocityFromLane(float y); // set dragged/selected note velocity
     void  Apply();

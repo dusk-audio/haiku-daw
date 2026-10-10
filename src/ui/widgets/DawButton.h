@@ -42,8 +42,16 @@ public:
             SetPenSize(1.0f);
         }
         // States the shared drawing has no opinion about: a light wash under
-        // the cursor, a dark one while the button is held down.
-        if (IsPressed() || IsHover()) {
+        // the cursor, a dark one while the button is held down, and a disabled
+        // button sunk most of the way into the background.
+        if (!IsEnabled()) {
+            SetDrawingMode(B_OP_ALPHA);
+            rgb_color veil = ColBackground();
+            veil.alpha = 150;
+            SetHighColor(veil);
+            FillRoundRect(Bounds(), Themed(3.0f), Themed(3.0f));
+            SetDrawingMode(B_OP_COPY);
+        } else if (IsPressed() || IsHover()) {
             SetDrawingMode(B_OP_ALPHA);
             if (IsPressed()) SetHighColor(0, 0, 0, 70);
             else             SetHighColor(255, 255, 255, 26);

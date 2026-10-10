@@ -44,7 +44,6 @@
 #include <SplitView.h>
 #include <SpaceLayoutItem.h>
 #include <StringView.h>
-#include <TabView.h>
 #include <Alert.h>
 #include <Application.h>
 #include <OS.h>   // system_time() for MIDI event timestamping
@@ -116,6 +115,57 @@ enum {
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
+
+// A pane's title strip (the dock's, M1.4): a fixed-height bar in the panel
+// colour with a hairline under it, laid out by a horizontal group. BGroupView
+// would do the layout but never draws, and the line is what separates the
+// strip from the editor below it.
+class PaneHeader : public BView {
+public:
+    explicit PaneHeader(const char* name)
+        : BView(name, B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE) {
+        SetViewColor(ColHeader());
+        BGroupLayout* g = new BGroupLayout(B_HORIZONTAL, Themed(4.0f));
+        SetLayout(g);
+        g->SetInsets(Themed(10.0f), Themed(3.0f), Themed(4.0f), Themed(4.0f));
+        SetExplicitMinSize(BSize(B_SIZE_UNSET, Themed(26.0f)));
+        SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, Themed(26.0f)));
+    }
+    void Draw(BRect) override {
+        const BRect b = Bounds();
+        SetHighColor(ColGrid());
+        StrokeLine(BPoint(b.left, b.bottom), BPoint(b.right, b.bottom));
+    }
+};
+
+// A header button sized to its label and the strip, never stretched by the
+// group it sits in.
+static DawButton* HeaderButton(const char* name, const char* label,
+                               uint32 what) {
+    DawButton* b = new DawButton(name, label, new BMessage(what));
+    float w = 0.0f, h = 0.0f;
+    b->GetPreferredSize(&w, &h);
+    const BSize sz(std::max(w, Themed(22.0f)), Themed(18.0f));
+    b->SetExplicitMinSize(sz);
+    b->SetExplicitMaxSize(sz);
+    return b;
+}
+
+// Show a file panel titled for what it is doing ("Export Mix", not the stock
+// "<app>: Save"), with a save panel's name field prefilled when there is an
+// obvious name to offer. The panels are kept and reused, so both are set on
+// every showing.
+static void ShowPanel(BFilePanel* panel, const char* title,
+                      const std::string& saveText = std::string()) {
+    if (BWindow* w = panel->Window()) {
+        if (w->Lock()) {
+            w->SetTitle(title);
+            w->Unlock();
+        }
+    }
+    if (!saveText.empty()) panel->SetSaveText(saveText.c_str());
+    panel->Show();
+}
 
 // Snapshot the mixer strip state from the model (used to open the mixer and to
 // refresh it live when the model changes elsewhere).
@@ -402,9 +452,16 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // Loudness readout (momentary / short-term LUFS + true peak dBTP).
     fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
                                       Themed(kTransportH) - Themed(6)),
-                                "loud", "M -- S -- TP --");
+                                "loud", "M --  S --  TP --");
     fLoudView->SetViewColor(ColChrome());
     fLoudView->SetHighColor(ColText());
+    {
+        // A size down from the bar's labels: the readout has to hold three
+        // signed figures in the room between the tempo field and the meter.
+        BFont small(be_plain_font);
+        small.SetSize(Themed(10.5f));
+        fLoudView->SetFont(&small);
+    }
     bar->AddChild(fLoudView);
 
     // Master output meter, pinned to the right of the transport bar.
@@ -418,7 +475,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // the timeline. Bottom: the dock, which hosts the MIDI editor and the
     // browsers and starts collapsed. A window-level layout drives both, so
     // resizing the window is the layout's business now, not FrameResized's.
-    fPaneSplit = new BSplitView(B_HORIZONTAL, 1.0f);
+    fPaneSplit = new BSplitView(B_HORIZONTAL, 0.0f);
     fInspector = new InspectorView(BRect(0, 0, InspectorWidth(), 100),
                                    project, stack);
     fTimeline = new TimelineView(BRect(0, 0, 400, 100), project, stack);
@@ -427,24 +484,58 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fPaneSplit->AddChild(fTimeline, 1.0f);    // ...the timeline takes the rest
     fPaneSplit->SetCollapsible(0, true);
 
-    fDock = new BTabView("dock", B_WIDTH_FROM_WIDEST);
-    fEditorPane = new BGroupView(B_VERTICAL, Themed(4.0f));
-    fEditorPane->SetViewColor(ColHeader());
+    // The dock is a title strip over a body, the way the bottom editor panel
+    // reads in other DAWs: the strip names what is open and carries the pane's
+    // own buttons, the body is the editor or, until a region is opened, a hint
+    // saying how to open one. No tab bar while there is only one thing to
+    // show -- a lone unlabelled tab was all the old BTabView added.
+    fDock = new BGroupView("dock", B_VERTICAL, 0.0f);
+    fDock->SetViewColor(ColBackground());
     {
-        BGroupView* head = new BGroupView(B_HORIZONTAL, Themed(6.0f));
-        head->SetViewColor(ColHeader());
-        BStringView* title = new BStringView("edtitle", "Editor");
-        title->SetHighColor(ColTextDim());
-        head->GroupLayout()->AddView(title);
-        head->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
-        DawButton* pop = new DawButton("popout", "Pop out",
-                                       new BMessage(MSG_POP_OUT_EDITOR));
-        head->GroupLayout()->AddView(pop);
-        fEditorPane->GroupLayout()->AddView(head);
-        fEditorPane->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        PaneHeader* head = new PaneHeader("dockhead");
+        fDockTitle = new BStringView("edtitle", "Editor");
+        fDockTitle->SetHighColor(ColText());
+        BFont bold(be_bold_font);
+        bold.SetSize(Themed(11.5f));
+        fDockTitle->SetFont(&bold);
+        fDockTitle->SetTruncation(B_TRUNCATE_END);
+        fDockTitle->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+        head->GetLayout()->AddView(fDockTitle);
+        fDockPop = HeaderButton("popout", "Pop out", MSG_POP_OUT_EDITOR);
+        fDockPop->SetEnabled(false);          // nothing to pop out yet
+        head->GetLayout()->AddView(fDockPop);
+        head->GetLayout()->AddView(
+            HeaderButton("dockclose", "\xC3\x97", MSG_TOGGLE_DOCK));   // x
+        fDock->GetLayout()->AddView(head);
     }
-    fDock->AddTab(fEditorPane);
-    fRootSplit = new BSplitView(B_VERTICAL, 1.0f);
+    fEditorPane = new BGroupView(B_VERTICAL, 0.0f);
+    fEditorPane->SetViewColor(ColBackground());
+    {
+        BStringView* hint = new BStringView("dockhint",
+            "Double-click a MIDI region to edit it here");
+        hint->SetHighColor(ColTextDim());
+        hint->SetAlignment(B_ALIGN_CENTER);
+        hint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+        // Glue either side centres it (a BStringView stretched to the body
+        // draws its text at the bottom), and the group is what the roll swaps
+        // with, so the glue goes when the hint does.
+        BGroupView* empty = new BGroupView("dockempty", B_VERTICAL, 0.0f);
+        empty->SetViewColor(ColBackground());
+        empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        empty->GroupLayout()->AddView(hint);
+        empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        fDockEmpty = empty;
+        fEditorPane->GroupLayout()->AddView(empty, 1.0f);
+    }
+    fDock->GetLayout()->AddView(fEditorPane);
+    // Room for a usable editor: a pane dragged smaller than this is a header
+    // and a sliver, which is the look this replaces. Hiding it is J or the x.
+    fDock->SetExplicitMinSize(BSize(B_SIZE_UNSET, Themed(160.0f)));
+
+    // Thin dividers with a few pixels to grab (DawControlLook draws them).
+    fRootSplit = new BSplitView(B_VERTICAL, 0.0f);
+    fRootSplit->SetSplitterSize(Themed(5.0f));
+    fPaneSplit->SetSplitterSize(Themed(5.0f));
     fRootSplit->AddChild(fPaneSplit, 1.0f);   // the dock joins on demand
 
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f)
@@ -673,14 +764,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                                  new BMessage(MSG_EXPORT_STEMS_REF));
                     fStemsPanel->SetSaveText("stems");   // subfolder name
                 }
-                fStemsPanel->Show();
+                ShowPanel(fStemsPanel, "Export Stems");
             } else {
                 if (!fExportPanel) {
                     BMessenger to(this);
                     fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                                   new BMessage(MSG_EXPORT_REF));
                 }
-                fExportPanel->Show();
+                ShowPanel(fExportPanel, "Export Mix", ProjectDocument::DisplayName(fDoc.Path()) + ".wav");
             }
             break;
         }
@@ -717,7 +808,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fMidiImportPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0,
                     false, new BMessage(MSG_IMPORT_MIDI_REF));
             }
-            fMidiImportPanel->Show();
+            ShowPanel(fMidiImportPanel, "Import MIDI");
             break;
         case MSG_IMPORT_MIDI_REF: {
             entry_ref ref;
@@ -733,7 +824,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fMidiExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0,
                     false, new BMessage(MSG_EXPORT_MIDI_REF));
             }
-            fMidiExportPanel->Show();
+            ShowPanel(fMidiExportPanel, "Export MIDI", ProjectDocument::DisplayName(fDoc.Path()) + ".mid");
             break;
         case MSG_EXPORT_MIDI_REF: {
             entry_ref dir; const char* name = nullptr;
@@ -1520,7 +1611,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fSavePanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                             new BMessage(MSG_SAVE_REF));
             }
-            fSavePanel->Show();
+            ShowPanel(fSavePanel, "Save Project", ProjectDocument::DisplayName(fDoc.Path()) + ".dawproj");
             break;
         case MSG_RELINK_REF: {
             entry_ref ref;
@@ -1561,7 +1652,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fOpenPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0, false,
                                             new BMessage(MSG_OPEN_REF));
             }
-            fOpenPanel->Show();
+            ShowPanel(fOpenPanel, "Open Project");
             break;
         case MSG_SAVE_REF: {
             entry_ref dir; const char* name = nullptr;
@@ -1587,7 +1678,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fImportPanel = new BFilePanel(B_OPEN_PANEL, &to, NULL, 0, false,
                                               new BMessage(MSG_IMPORT_REF));
             }
-            fImportPanel->Show();
+            ShowPanel(fImportPanel, "Import Audio");
             break;
         case MSG_IMPORT_REF: {
             entry_ref ref;
@@ -1813,10 +1904,14 @@ void MainWindow::SetInspectorShown(bool shown) {
 // Show or hide the docked bottom pane, the same way and for the same reason.
 void MainWindow::SetDockShown(bool shown) {
     if (fRootSplit == nullptr || fDock == nullptr) return;
-    if (shown && fDock->Parent() == nullptr)
+    if (shown && fDock->Parent() == nullptr) {
         fRootSplit->AddChild(fDock, 0.0f);
-    else if (!shown && fDock->Parent() != nullptr)
+        // Not collapsible: a collapsed item keeps its preferred size here (see
+        // above), and dragging the pane away is what J and the x are for.
+        fRootSplit->SetCollapsible(fRootSplit->CountChildren() - 1, false);
+    } else if (!shown && fDock->Parent() != nullptr) {
         fDock->RemoveSelf();
+    }
     if (fDockItem != nullptr) fDockItem->SetMarked(shown);
 }
 
@@ -1829,11 +1924,7 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     const MidiClip* c = t->FindMidiClip(clip);
     if (c == nullptr) return;
 
-    if (fDockRoll != nullptr) {
-        fDockRoll->RemoveSelf();
-        delete fDockRoll;
-        fDockRoll = nullptr;
-    }
+    ClearDockedEditor();
     // The roll fills the pane below the header row; the split gives it its
     // real size, so the frame here is only a hint.
     fDockRoll = new PianoRollView(BRect(0, 0, 600, Themed(200.0f)), track, clip,
@@ -1842,12 +1933,16 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
                                   fProject->sampleRate,
                                   fProject->transport.playhead,
                                   BMessenger(this));
+    fDockEmpty->RemoveSelf();
     fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
     fDockTrack = track;
     fDockClip  = clip;
+    BString title("Piano Roll \xE2\x80\x94 ");   // em dash
+    title << t->name.c_str();
+    fDockTitle->SetText(title.String());
+    fDockPop->SetEnabled(true);
 
     SetDockShown(true);
-    fDock->Select(0);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
 }
@@ -1875,14 +1970,24 @@ void MainWindow::PopOutEditor() {
     m.AddMessenger("m", BMessenger(roll));
     PostMessage(&m);
 
+    ClearDockedEditor();
+    SetDockShown(false);
+}
+
+// Empty the dock's body: the roll goes, the hint comes back, and the strip
+// stops naming a region (Pop out has nothing to act on until the next one).
+void MainWindow::ClearDockedEditor() {
     if (fDockRoll != nullptr) {
         fDockRoll->RemoveSelf();
         delete fDockRoll;
         fDockRoll = nullptr;
-        fDockTrack = kInvalidTrackId;
-        fDockClip  = kInvalidClipId;
     }
-    SetDockShown(false);
+    fDockTrack = kInvalidTrackId;
+    fDockClip  = kInvalidClipId;
+    if (fDockEmpty->Parent() == nullptr)
+        fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
+    fDockTitle->SetText("Editor");
+    fDockPop->SetEnabled(false);
 }
 
 void MainWindow::FrameResized(float newWidth, float newHeight) {
@@ -2251,14 +2356,27 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
         RebuildRecentMenu();
     }
     UpdateTitle();
-    CollectMissingMedia();    // gone media: one dialog, Skip or Locate…
     PrimeSoundfonts();        // decode MIDI-track soundfonts BEFORE the engine
     RebuildPeaks();           // waveform envelopes for the loaded clips
+    ShowReplacedProject(fProject->transport.playhead);
+    // After the views show the new project: the prompt is modal, and whatever
+    // is behind it while it waits should be what it is asking about.
+    CollectMissingMedia();    // gone media: one dialog, Skip or Locate…
+}
+
+// Point every view at the project that just replaced the old one (Open, New).
+// Anything holding a track or clip id from before is reset rather than left to
+// address whatever reuses that id: the inspector, the docked editor, the arms.
+void MainWindow::ShowReplacedProject(Frame playhead) {
+    fRecCtl.fRecTracks.clear();
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
-    fTimeline->SetProject(fProject);
-    fTimeline->SetPlayhead(fProject->transport.playhead);
-    UpdateTimeReadout(fProject->transport.playhead);
+    if (fInspector) fInspector->SetTrack(kInvalidTrackId);
+    if (fDockRoll != nullptr) ClearDockedEditor();
+    fTimeline->SetProject(fProject);   // same object, new content
+    fTimeline->SetPlayhead(playhead);
+    UpdateTimeReadout(playhead);
     fTimeline->Invalidate();
+    UpdateIfNeeded();
 }
 
 void MainWindow::UpdateTitle() {
@@ -2307,7 +2425,8 @@ void MainWindow::CollectMissingMedia() {
     list += "\nLocate them, or skip and leave those clips silent.";
 
     BAlert* a = new BAlert("Missing Media", list.c_str(), "Skip",
-                           "Locate" B_UTF8_ELLIPSIS);
+                           "Locate" B_UTF8_ELLIPSIS, nullptr,
+                           B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
     if (a->Go() == 1) StartRelinkWalk(std::move(missing));
 }
@@ -2337,7 +2456,9 @@ void MainWindow::RelinkNext() {
             BPath dir(c->sourcePath.substr(0, slash).c_str());
             fRelinkPanel->SetPanelDirectory(dir.Path());
         }
-        fRelinkPanel->Show();
+        const std::string file = slash == std::string::npos
+                               ? c->sourcePath : c->sourcePath.substr(slash + 1);
+        ShowPanel(fRelinkPanel, ("Locate " + file).c_str());
         return;
     }
     FinishRelink();
@@ -2372,14 +2493,9 @@ void MainWindow::NewProject() {
     fStack->Clear();
     fDoc.NoteNew();               // no path, and nothing to lose
     fRecCtl.fTakeDir.clear();
-    fRecCtl.fRecTracks.clear();           // arms addressed the old project's tracks
     UpdateTitle();
     RebuildPeaks();
-    fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
-    fTimeline->SetProject(fProject);   // same object, new content
-    fTimeline->SetPlayhead(0);
-    UpdateTimeReadout(0);
-    fTimeline->Invalidate();
+    ShowReplacedProject(0);
 }
 
 // Record a project in the recent list, refresh the menu, persist it (the list
@@ -2963,7 +3079,7 @@ bool MainWindow::OpenNativeEditor(TrackId tid, int fx) {
     // The title names the track: two tracks can hold the same plugin, and with
     // both editors open the plugin's name alone would not say which is which.
     std::string title = EffectDisplayName(d);
-    title += master ? "  -  Master" : ("  -  " + t->name);
+    title += master ? " \xE2\x80\x94 Master" : (" \xE2\x80\x94 " + t->name);
 
     BRect uw(160, 160, 160 + 960, 160 + 680);
     Lv2UiWindow::Open(uw, d.pluginName, title, d.params, tid, fx,
@@ -3001,7 +3117,9 @@ void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
     fmt(m,  sizeof(m),  "M",  momLufs,    Loudness::kSilenceLufs);
     fmt(s,  sizeof(s),  "S",  shortLufs,  Loudness::kSilenceLufs);
     fmt(tp, sizeof(tp), "TP", truePeakDb, Loudness::kSilenceDb);
-    std::snprintf(buf, sizeof(buf), "%s  %s  %s dBTP", m, s, tp);
+    // No unit suffix: it pushed the true-peak figure out of the box, and TP is
+    // dB by definition.
+    std::snprintf(buf, sizeof(buf), "%s  %s  %s", m, s, tp);
     fLoudView->SetText(buf);
 }
 

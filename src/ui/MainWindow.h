@@ -45,8 +45,8 @@ class BTextControl;
 class BMenu;
 
 class BSplitView;   // Haiku classes live in the global namespace
-class BTabView;
 class BGroupView;
+class BView;
 
 namespace daw {
 
@@ -54,6 +54,7 @@ class TimelineView;
 class InspectorView;
 class PianoRollView;
 class MeterView;
+class DawButton;
 
 // Message ids that are part of the app's wiring rather than MainWindow's
 // private business: the menus, the file panels and the pulse post them, and so
@@ -180,8 +181,11 @@ private:
     BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
     BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
     BSplitView*     fRootSplit = nullptr;   // the panes over the dock
-    BTabView*       fDock      = nullptr;
-    BGroupView*     fEditorPane = nullptr;   // the dock's Editor tab content
+    BView*          fDock      = nullptr;   // header strip over the body
+    BGroupView*     fEditorPane = nullptr;   // the dock's body: roll or hint
+    BStringView*    fDockTitle  = nullptr;   // what the dock is showing
+    BView*          fDockEmpty  = nullptr;   // the hint while nothing is open
+    DawButton*      fDockPop    = nullptr;   // Pop out (only with a region)
     PianoRollView*  fDockRoll   = nullptr;   // the docked MIDI editor, or null
     TrackId         fDockTrack  = kInvalidTrackId;
     ClipId          fDockClip   = kInvalidClipId;
@@ -189,6 +193,8 @@ private:
     void SetInspectorShown(bool shown);
     void SetDockShown(bool shown);
     void OpenDockedEditor(TrackId track, ClipId clip);
+    void ClearDockedEditor();                // back to the empty hint
+    void ShowReplacedProject(Frame playhead);   // after Open / New
     void PopOutEditor();                     // dock -> its own window
 
     TimelineView*   fTimeline;

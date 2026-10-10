@@ -30,6 +30,18 @@ void TransportBar::GetPreferredSize(float* width, float* height) {
     if (height) *height = Themed(kDesignTransportH);
 }
 
+// The preferred height alone is only a hint: a plain BView's maximum is
+// unlimited, so the window's group layout handed the bar a share of every
+// spare pixel and the strip grew a dead band under the buttons. Min and max
+// pin it to the strip's height; the width still follows the window.
+BSize TransportBar::MinSize() {
+    return BSize(0.0f, Themed(kDesignTransportH));
+}
+
+BSize TransportBar::MaxSize() {
+    return BSize(B_SIZE_UNLIMITED, Themed(kDesignTransportH));
+}
+
 static void DrawButton(BView* v, BRect r, rgb_color fill, bool lit) {
     v->SetHighColor(lit ? fill : ColChromeHi());
     v->FillRoundRect(r, 4, 4);

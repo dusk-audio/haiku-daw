@@ -9,6 +9,8 @@
 #include <Control.h>
 #include <View.h>
 
+#include <cmath>
+
 namespace daw {
 
 // --- helpers -------------------------------------------------------------
@@ -425,14 +427,25 @@ void DawControlLook::DrawTabFrame(BView* view, BRect& rect, const BRect&,
 
 void DawControlLook::DrawSplitter(BView* view, BRect& rect, const BRect&,
         const rgb_color&, orientation orientation, uint32 flags, uint32) {
-    const rgb_color c = (flags & B_ACTIVATED) != 0 ? ColAccent() : ColGrid();
-    if (orientation == B_HORIZONTAL) {
-        rect.bottom = rect.top + Themed(1.0f);
-        FillRounded(view, rect, 0.0f, c);
+    // The whole grab area is painted (the split view's own colour showed
+    // through it otherwise), with a hairline down the middle; the line turns
+    // the accent while it is being dragged. `orientation` is the SPLIT's, not
+    // the bar's: a horizontal split lays its items side by side, so its bar
+    // runs vertically.
+    FillRounded(view, rect, 0.0f, ColGrid());
+    const bool active = (flags & B_ACTIVATED) != 0;
+    const float t = active ? Themed(2.0f) : Themed(1.0f);
+    BRect line = rect;
+    if (orientation == B_VERTICAL) {
+        const float cy = floorf((rect.top + rect.bottom) * 0.5f);
+        line.top = cy;
+        line.bottom = cy + t - 1.0f;
     } else {
-        rect.right = rect.left + Themed(1.0f);
-        FillRounded(view, rect, 0.0f, c);
+        const float cx = floorf((rect.left + rect.right) * 0.5f);
+        line.left = cx;
+        line.right = cx + t - 1.0f;
     }
+    FillRounded(view, line, 0.0f, active ? ColAccent() : Rgb(52, 52, 60));
 }
 
 void DawControlLook::DrawBorder(BView* view, BRect& rect, const BRect&,
@@ -459,19 +472,44 @@ void DawControlLook::DrawTextControlBorder(BView* view, BRect& rect,
 
 // --- labels --------------------------------------------------------------
 
-void DawControlLook::DrawLabel(BView* view, const char* label, BRect rect,
-        const BRect&, const rgb_color&, uint32 flags, const rgb_color*) {
-    if (label == nullptr) return;
-    view->SetHighColor((flags & B_DISABLED) != 0 ? ColTextDim() : ColText());
-    view->DrawString(label, BPoint(rect.left,
-                                   rect.top + (rect.Height()
-                                               + ThemeFontSize()) * 0.5f));
+// Where a label goes in `rect`, honouring the caller's alignment: a stock
+// BButton asks for centred, a check box or a menu field for left. Vertical
+// placement uses the view's real font metrics, so the text sits in the middle
+// of the box whatever the font size.
+static BPoint LabelOrigin(BView* view, const char* label, const BRect& rect,
+                          const BAlignment& align) {
+    font_height fh;
+    view->GetFontHeight(&fh);
+    const float w = view->StringWidth(label);
+    const float textH = ceilf(fh.ascent) + ceilf(fh.descent);
+    float x = rect.left;
+    if (align.horizontal == B_ALIGN_CENTER)
+        x = floorf(rect.left + (rect.Width() - w) * 0.5f);
+    else if (align.horizontal == B_ALIGN_RIGHT)
+        x = rect.right - w;
+    float y;
+    if (align.vertical == B_ALIGN_TOP)
+        y = rect.top + ceilf(fh.ascent);
+    else if (align.vertical == B_ALIGN_BOTTOM)
+        y = rect.bottom - ceilf(fh.descent);
+    else
+        y = floorf(rect.top + (rect.Height() - textH) * 0.5f + ceilf(fh.ascent));
+    return BPoint(x, y);
 }
 
 void DawControlLook::DrawLabel(BView* view, const char* label, BRect rect,
         const BRect& updateRect, const rgb_color& base, uint32 flags,
-        const BAlignment&, const rgb_color* textColor) {
-    DrawLabel(view, label, rect, updateRect, base, flags, textColor);
+        const rgb_color* textColor) {
+    DrawLabel(view, label, rect, updateRect, base, flags,
+              DefaultLabelAlignment(), textColor);
+}
+
+void DawControlLook::DrawLabel(BView* view, const char* label, BRect rect,
+        const BRect&, const rgb_color&, uint32 flags,
+        const BAlignment& alignment, const rgb_color*) {
+    if (label == nullptr) return;
+    view->SetHighColor((flags & B_DISABLED) != 0 ? ColTextDim() : ColText());
+    view->DrawString(label, LabelOrigin(view, label, rect, alignment));
 }
 
 void DawControlLook::DrawLabel(BView* view, const char* label,
@@ -484,8 +522,8 @@ void DawControlLook::DrawLabel(BView* view, const char* label,
 
 void DawControlLook::DrawLabel(BView* view, const char* label, const BBitmap*,
         BRect rect, const BRect& updateRect, const rgb_color& base,
-        uint32 flags, const BAlignment&, const rgb_color* textColor) {
-    DrawLabel(view, label, rect, updateRect, base, flags, textColor);
+        uint32 flags, const BAlignment& alignment, const rgb_color* textColor) {
+    DrawLabel(view, label, rect, updateRect, base, flags, alignment, textColor);
 }
 
 } // namespace daw

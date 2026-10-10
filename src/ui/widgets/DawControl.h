@@ -17,6 +17,21 @@
 
 namespace daw {
 
+
+// A kit control sits on its parent's colour rather than painting its own box
+// in the bar colour: the inspector, the dock and the dialogs are not all the
+// same shade, and a mismatched tile behind every control is what that looked
+// like. A parent that paints itself (transparent) gets the bar colour.
+inline void AdoptPanelColors(BView* v) {
+    rgb_color c = ColChrome();
+    if (BView* p = v->Parent()) {
+        const rgb_color pc = p->ViewColor();
+        if (pc != B_TRANSPARENT_COLOR) c = pc;
+    }
+    v->SetViewColor(c);
+    v->SetLowColor(c);
+}
+
 class DawControl : public BControl {
 public:
     // Positioning by rectangle, the way today's windows build their controls;
@@ -32,6 +47,7 @@ public:
 
     void AttachedToWindow() override {
         BControl::AttachedToWindow();
+        AdoptPanelColors(this);
         // BButton does this and BControl does not: with no target of its own,
         // a control's message goes to its window. Without it a kit control's
         // Invoke() lands nowhere -- which is exactly how the kit's first test

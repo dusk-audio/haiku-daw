@@ -62,7 +62,11 @@ public:
     void Draw(BRect) override {
         const BRect b = Bounds();
         const float lineH = ThemeFontSize() + Themed(2.0f);
-        const float dialH = std::max(b.Height() - lineH * 1.5f, Themed(12.0f));
+        // Room for exactly the text lines drawn under the dial (the value, and
+        // the label when there is one); reserving less clipped the label.
+        const bool hasLabel = Label() != nullptr && Label()[0] != '\0';
+        const float textH = lineH * (hasLabel ? 2.0f : 1.0f) + Themed(2.0f);
+        const float dialH = std::max(b.Height() - textH, Themed(12.0f));
         const float d = std::min(b.Width(), dialH);
         BRect dial(b.left + (b.Width() - d) * 0.5f, b.top, 0, b.top + d);
         dial.right = dial.left + d;
@@ -77,11 +81,12 @@ public:
         const float tw = StringWidth(text);
         DrawString(text, BPoint((b.left + b.right) * 0.5f - tw * 0.5f,
                                 dial.bottom + ThemeFontSize()));
-        if (Label() != nullptr && Label()[0] != '\0' && b.Height() > lineH * 2.2f) {
+        const float labelY = dial.bottom + ThemeFontSize() + lineH;
+        if (hasLabel && labelY <= b.bottom) {
             SetHighColor(ColTextDim());
             const float lw = StringWidth(Label());
             DrawString(Label(), BPoint((b.left + b.right) * 0.5f - lw * 0.5f,
-                                       dial.bottom + ThemeFontSize() * 2.0f));
+                                       labelY));
         }
         DrawFocusRing(b);
     }

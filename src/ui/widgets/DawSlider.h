@@ -6,6 +6,8 @@
 // behaving exactly like the one it replaces.
 #pragma once
 
+#include "DawControl.h"   // AdoptPanelColors
+
 #include "../Theme.h"
 
 #include <Slider.h>
@@ -37,8 +39,7 @@ public:
     void AttachedToWindow() override {
         BSlider::AttachedToWindow();
         if (Target() == nullptr && Window() != nullptr) SetTarget(Window());
-        SetViewColor(ColChrome());
-        SetLowColor(ColChrome());
+        AdoptPanelColors(this);
         SetHighColor(ColText());
         if (Label() != nullptr && Label()[0] != '\0' && ToolTip() == nullptr)
             SetToolTip(Label());

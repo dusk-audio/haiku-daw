@@ -27,7 +27,10 @@ namespace daw {
 
 InspectorView::InspectorView(BRect frame, Project* project, CommandStack* stack)
     : BView(frame, "inspector", B_FOLLOW_LEFT | B_FOLLOW_TOP_BOTTOM,
-            B_WILL_DRAW | B_SUPPORTS_LAYOUT),
+            // Full update on resize: the bottom rows are anchored to the
+            // bottom edge, so a pane resize moves everything below the pan
+            // knob, not just the strip it exposes.
+            B_WILL_DRAW | B_SUPPORTS_LAYOUT | B_FULL_UPDATE_ON_RESIZE),
       fProject(project), fStack(stack) {
     SetViewColor(ColHeader());
 }
@@ -313,9 +316,12 @@ void InspectorView::Draw(BRect) {
     const float d = GainToDb(t->gain);
     if (d <= -80.0f) std::snprintf(db, sizeof(db), "-inf");
     else             std::snprintf(db, sizeof(db), "%+.1f dB", d);
+    // In the gap between the fader and the record row, centred under the
+    // fader + meter pair -- not at the bottom edge, which is the mute row.
     SetHighColor(ColText());
     const float tw = StringWidth(db);
-    DrawString(db, BPoint(fFaderR.left, Bounds().bottom - 8));
+    const float cx = (fFaderR.left + fMeterR.right) * 0.5f;
+    DrawString(db, BPoint(cx - tw * 0.5f, fArmR.top - 6.0f));
 }
 
 void InspectorView::MouseDown(BPoint where) {

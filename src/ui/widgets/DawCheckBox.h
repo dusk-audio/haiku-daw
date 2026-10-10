@@ -6,6 +6,8 @@
 // panel).
 #pragma once
 
+#include "DawControl.h"   // AdoptPanelColors
+
 #include "../Theme.h"
 
 #include <CheckBox.h>
@@ -27,8 +29,7 @@ public:
     void AttachedToWindow() override {
         BCheckBox::AttachedToWindow();
         if (Target() == nullptr && Window() != nullptr) SetTarget(Window());
-        SetViewColor(ColChrome());
-        SetLowColor(ColChrome());
+        AdoptPanelColors(this);
         SetHighColor(ColText());
         if (Label() != nullptr && Label()[0] != '\0' && ToolTip() == nullptr)
             SetToolTip(Label());

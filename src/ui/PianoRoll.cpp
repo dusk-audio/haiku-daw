@@ -84,7 +84,10 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
                              std::vector<MidiClipEvent> events,
                              TempoMap tempo, double sampleRate, Frame playhead,
                              BMessenger apply)
-    : BView(frame, "roll", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
+    // Full update on resize: the velocity lane hangs off the bottom edge, and
+    // the docked roll is resized by its split as well as by a window.
+    : BView(frame, "roll", B_FOLLOW_ALL_SIDES,
+            B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE),
       fNotes(std::move(notes)), fEvents(std::move(events)),
       fTrack(track), fClip(clip),
       fClipStart(clipStart), fClipLen(clipLength), fTempo(tempo),
@@ -170,6 +173,53 @@ Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
 
 float PianoRollView::VelLaneTop() const { return Bounds().Height() - kVelLaneH; }
 
+// The keyboard column, drawn as a piano rather than as one stripe per row: the
+// white keys are one surface whose seams fall where a real keyboard's do (on
+// the row edge between B|C and E|F, under the middle of the black key
+// everywhere else), and the black keys are shorter, rounded, and on top.
+void PianoRollView::DrawKeyboard(float velTop) {
+    const float right = kKbdW - 2.0f;
+    const float blackW = std::floor(kKbdW * 0.6f);
+    PushState();
+    ClipToRect(BRect(0, kToolbarH, right, velTop));
+
+    SetHighColor(Rgb(222, 225, 230));                         // the white keys
+    FillRect(BRect(0, kToolbarH, right, velTop));
+
+    SetHighColor(Rgb(150, 154, 162));                         // their seams
+    for (float y = kToolbarH; y < velTop; y += kRowH) {
+        const int pitch = YToPitch(y + 1);
+        if (IsBlackKey(pitch)) continue;
+        // The seam below this white key: on the row edge when the next key
+        // down is white too, else through the black key's middle.
+        const float seam = IsBlackKey(pitch - 1) ? y + kRowH * 1.5f
+                                                 : y + kRowH;
+        StrokeLine(BPoint(0, seam), BPoint(right, seam));
+    }
+
+    for (float y = kToolbarH; y < velTop; y += kRowH) {       // the black keys
+        const int pitch = YToPitch(y + 1);
+        if (!IsBlackKey(pitch)) continue;
+        const BRect key(0, y + 1, blackW, y + kRowH - 1);
+        SetHighColor(Rgb(30, 32, 37));
+        FillRoundRect(key, 2.0f, 2.0f);
+        SetHighColor(Rgb(70, 74, 82));                         // a lit edge
+        StrokeLine(BPoint(key.left, key.top), BPoint(key.right - 2, key.top));
+    }
+
+    for (float y = kToolbarH; y < velTop; y += kRowH) {       // C labels
+        const int pitch = YToPitch(y + 1);
+        if (((pitch % 12) + 12) % 12 != 0) continue;
+        char nb[8]; NoteName(pitch, nb, sizeof(nb));
+        SetHighColor(Rgb(70, 74, 82));
+        DrawString(nb, BPoint(right - 3 - StringWidth(nb), y + kRowH - 2));
+    }
+    PopState();
+
+    SetHighColor(Rgb(20, 20, 24));                            // keyboard edge
+    StrokeLine(BPoint(right + 1, kToolbarH), BPoint(right + 1, velTop));
+}
+
 void PianoRollView::Draw(BRect) {
     const float w = Bounds().Width(), h = Bounds().Height();
     const float velTop = VelLaneTop();
@@ -183,18 +233,8 @@ void PianoRollView::Draw(BRect) {
             SetHighColor(ColGrid());
             StrokeLine(BPoint(kKbdW, y + kRowH), BPoint(w, y + kRowH));
         }
-        // Keyboard key + a dark separator line so adjacent white keys read as
-        // distinct keys (not one white blob).
-        SetHighColor(IsBlackKey(pitch) ? Rgb(28, 30, 35) : Rgb(214, 218, 224));
-        FillRect(BRect(0, y, kKbdW - 2, y + kRowH));
-        SetHighColor(Rgb(20, 20, 24));
-        StrokeLine(BPoint(0, y + kRowH - 1), BPoint(kKbdW - 2, y + kRowH - 1));
-        if (((pitch % 12) + 12) % 12 == 0) {   // label C notes
-            char nb[8]; NoteName(pitch, nb, sizeof(nb));
-            SetHighColor(Rgb(40, 44, 50));
-            DrawString(nb, BPoint(4, y + kRowH - 2));
-        }
     }
+    DrawKeyboard(velTop);
     SetHighColor(ColGrid());
     StrokeLine(BPoint(kKbdW, kToolbarH), BPoint(kKbdW, velTop));
 

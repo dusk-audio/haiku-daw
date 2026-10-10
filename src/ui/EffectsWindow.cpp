@@ -15,6 +15,7 @@
 #include "Lv2UiWindow.h"
 #endif
 
+#include <Screen.h>
 #include <MenuItem.h>
 #include <String.h>
 #include <MessageRunner.h>
@@ -1217,11 +1218,17 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
     BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);
     AddChild(sv);
-    if (BScrollBar* bar = sv->ScrollBar(B_VERTICAL)) {
+    // As tall as the chain and no taller, and never off the bottom of the
+    // screen: the callers' frame is a guess, and a short chain left most of a
+    // screen-high window empty under a scroll bar with nothing to scroll.
+    {
         const float ch = fView->ContentHeight();
-        bar->SetRange(0, std::max(0.0f, ch - vr.Height()));
-        bar->SetSteps(16, vr.Height());
+        const BRect sf = BScreen(this).Frame();
+        const float maxH = std::max(160.0f, sf.bottom - 12.0f - Frame().top);
+        const float h = std::min(std::max(ch, 160.0f), maxH);
+        ResizeTo(Bounds().Width(), h);
     }
+    fView->UpdateScrollRange();
     // Tell the main window to meter this track's effects while we're open.
     BMessage open(kMsgFxWinOpen);
     open.AddInt64("track", (int64)track);

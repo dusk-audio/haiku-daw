@@ -15,6 +15,7 @@
 #include <MenuItem.h>
 #include <Path.h>
 #include <PopUpMenu.h>
+#include <String.h>
 #include <Window.h>
 
 #include <algorithm>
@@ -2321,9 +2322,16 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         FillRect(strip);
         const std::string& p = c.sourcePath;
         size_t slash = p.find_last_of('/');
-        std::string name = (slash == std::string::npos) ? p : p.substr(slash + 1);
-        SetHighColor(Rgb(245, 246, 248));
-        DrawString(name.c_str(), BPoint(strip.left + Themed(12), strip.top + Themed(11)));
+        // Truncated to the strip: a name runs into the next region otherwise.
+        BString name((slash == std::string::npos) ? p.c_str()
+                                                  : p.c_str() + slash + 1);
+        const float room = strip.Width() - Themed(14);
+        if (room > Themed(8)) {
+            TruncateString(&name, B_TRUNCATE_END, room);
+            SetHighColor(Rgb(245, 246, 248));
+            DrawString(name.String(), BPoint(strip.left + Themed(12),
+                                             strip.top + Themed(11)));
+        }
     }
 
     // Fade grips: small triangles at the top corners (drag left corner for
@@ -2378,8 +2386,14 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
             SetHighColor(Rgb((uint8)(base.red * 0.32f), (uint8)(base.green * 0.32f),
                              (uint8)(base.blue * 0.32f)));
             FillRect(strip);
-            SetHighColor(Rgb(240, 242, 245));
-            DrawString(t.name.c_str(), BPoint(strip.left + Themed(4), strip.top + Themed(11)));
+            BString name(t.name.c_str());
+            const float room = strip.Width() - Themed(6);
+            if (room > Themed(8)) {
+                TruncateString(&name, B_TRUNCATE_END, room);
+                SetHighColor(Rgb(240, 242, 245));
+                DrawString(name.String(), BPoint(strip.left + Themed(4),
+                                                 strip.top + Themed(11)));
+            }
         }
         // "T k/N" take badge on the active region of a loop-record group.
         if (mc.takeGroup > 0 && block.Width() > Themed(26)) {

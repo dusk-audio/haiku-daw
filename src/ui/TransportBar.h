@@ -18,6 +18,8 @@ public:
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
     void GetPreferredSize(float* width, float* height) override;
+    BSize MinSize() override;
+    BSize MaxSize() override;
 
     void SetPlaying(bool p)   { if (p != fPlaying)   { fPlaying = p;   Invalidate(); } }
     void SetRecording(bool r) { if (r != fRecording) { fRecording = r; Invalidate(); } }
