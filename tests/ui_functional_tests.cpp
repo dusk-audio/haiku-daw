@@ -1683,12 +1683,6 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 
-// M1.5's measurement: a project the size the plan names (32 tracks, ~300
-// clips) must start playing quickly, and the timeline must draw it in under
-// 4 ms a frame. The draw time is reported by TimelineView itself under
-// DAW_TIMELINE_TIMING (see the DrawTimer); this check builds the project,
-// starts the transport, and asserts what the test can see -- that playback
-// started, and started promptly.
 // M4.1: a rebuild during playback builds the graph on the engine's worker
 // thread and swaps it in — the transport must not stop, the device must not be
 // re-opened (no BSoundPlayer re-create) and the playhead must keep advancing
@@ -1792,6 +1786,12 @@ static void TestEngineGraphSwap(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return !win->IsPlaying(); }));
 }
 
+// M1.5's measurement: a project the size the plan names (32 tracks, ~300
+// clips) must start playing quickly, and the timeline must draw it in under
+// 4 ms a frame. The draw time is reported by TimelineView itself under
+// DAW_TIMELINE_TIMING (see the DrawTimer); this check builds the project,
+// starts the transport, and asserts what the test can see -- that playback
+// started, and started promptly.
 static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     std::printf("big project playback ...\n");
 

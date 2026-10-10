@@ -46,9 +46,10 @@ void TransportController::StartPlayback() {
     if (fWin->fRecCtl.fRecMode)
         return;   // recording runs its own engine (overdub)
     fWin->fRecCtl.StopMidiMonitor();   // playback owns the engine + MIDI input
-    // Rebuild the engine from the current model each time (RT-safe: no live
-    // mutation of a running graph). Playback begins at the current playhead;
-    // if it's already at/after the end (and not looping), rewind first.
+    // The graph is rebuilt from the current model (RT-safe: the running one is
+    // never mutated) — on the engine's worker thread now. Playback begins at
+    // the current playhead; if it's already at/after the end (and not looping),
+    // rewind first.
     const Transport& tr = fWin->fProject->transport;
     const bool looping = tr.loopEnabled && tr.loopEnd > tr.loopStart;
     if (!looping && fWin->fProject->transport.playhead >= ProjectEndFrame(*fWin->fProject)) {
