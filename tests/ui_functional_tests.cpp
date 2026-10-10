@@ -563,8 +563,33 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
                     (int)(dlg->IsActive()));
     }
     Shot("export-dialog");
-    snooze(2000000);
-    Shot("export-dialog-late");
+
+    // Move the dialog clear of the main window: if it appears there, it was
+    // being drawn UNDER the main window rather than never reaching the screen.
+    if (dlg->LockWithTimeout(2000000) == B_OK) {
+        dlg->MoveTo(560, 40);
+        dlg->Unlock();
+    }
+    snooze(1500000);
+    {
+        const BRect f = dlg->Frame();
+        std::printf("  DIAG dialog after move %.0f,%.0f,%.0f,%.0f hidden=%d\n",
+                    f.left, f.top, f.right, f.bottom, (int)dlg->IsHidden());
+    }
+    Shot("export-dialog-moved");
+
+    // Control: a window THIS THREAD creates, same feel, nowhere near the main
+    // window. If this one draws and the dialog does not, the difference is in
+    // the dialog or where it is created; if neither draws, it is the screen.
+    BWindow* ctl = new BWindow(BRect(620, 380, 820, 500), "DiagControl",
+                               B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL);
+    BView* cv = new BView(ctl->Bounds(), "cv", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
+    cv->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
+    ctl->AddChild(cv);
+    ctl->Show();
+    snooze(1000000);
+    Shot("diag-control");
+    if (ctl->LockWithTimeout(2000000) == B_OK) ctl->Quit();
 
     // Bounded, like every lock this suite takes outside BAlert: a window whose
     // looper is stuck must fail a check, not hang the run for 15 minutes.
