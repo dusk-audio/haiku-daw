@@ -305,7 +305,10 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Midi)
             continue;
-        std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
+        // Playback notes, not the raw ones: the CC64 pedal is applied to each
+        // region here (a key-up under the pedal keeps the note sounding), so the
+        // voices need no sustain logic of their own. Absolute-timeline frames.
+        std::vector<MidiNote> notes = t.CollectPlaybackNotes();
         const bool monitor = t.armed || t.inputMonitor;   // live input synth
         const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if ((notes.empty() && !monitor) || (!audible && !monitor))
@@ -315,8 +318,14 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         for (const MidiNote& n : notes)
             if (n.startFrame + n.lengthFrames > fEndFrame)
                 fEndFrame = n.startFrame + n.lengthFrames;
-        b.notes = std::move(notes);
         b.events = t.CollectEvents();         // channel CC/PB (absolute frames)
+        // Bend is integrated, not per-note retuned: digest the track's bend
+        // events once here (off the RT thread) and stamp each note with the
+        // phase it starts at, so a voice can keep its phase continuous across a
+        // bend step by plain subtraction (see model/MidiExpression.h).
+        b.bend = BuildBendTimeline(b.events);
+        AnnotateBendPhase(notes, b.bend);
+        b.notes = std::move(notes);
         // The voice is built here, off the RT thread. A soundfont one resolves
         // against the SoundfontCache and never decodes — see InstrumentFactory.
         b.instrument = MakeInstrument(t.instrument, fOutputRate);
@@ -711,9 +720,15 @@ void Engine::Stop() {
     fPlayerRunning.store(false, std::memory_order_release);
     // MIDI panic: release every live monitor voice so a note held at stop can't
     // sustain (up to kHeld ~1 h) or re-sound if the same engine restarts. Safe
-    // now that the player is stopped and no callback is running.
+    // now that the player is stopped and no callback is running. The live
+    // controllers are cleared with them: a bend or a pedal left "down" by a
+    // keyboard that is no longer sending would otherwise colour the next start.
     for (LiveVoice& v : fVoices) v.active = false;
     fLiveNotes.clear();
+    for (int i = 0; i < 128; i++) fLiveCc[i] = 0;
+    fLiveBendRatio = 1.0f;
+    fLiveBendPhase = 0.0;
+    fSustain.Reset();
 }
 
 void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
@@ -775,9 +790,34 @@ void Engine::ApplyMidiRoutes() {
     }
 }
 
-void Engine::UpdateLiveVoices(Frame blockStart) {
+void Engine::ReleaseSustained(Frame at) {
+    for (LiveVoice& v : fVoices)
+        if (v.active && v.sustained && !v.releasing) {
+            v.sustained = false;
+            v.releasing = true;
+            v.off       = at;
+        }
+}
+
+VoiceExpression Engine::LiveExpression() const {
+    VoiceExpression x;
+    x.bendRatio = fLiveBendRatio;
+    x.bendPhase = fLiveBendPhase;
+    x.modWheel  = (float)fLiveCc[1] / 127.0f;
+    return x;
+}
+
+void Engine::UpdateLiveVoices(Frame blockStart, size_t frames) {
     fLiveNotes.clear();
     for (Bus& b : fBuses) b.liveNotes.clear();
+
+    // Advance the live bend phase by the block just elapsed, at the ratio it was
+    // rendered with. A note-on below is then stamped with this value and the
+    // render is handed the same one: the phase of a sounding voice moves by
+    // whatever ratio each block carries, and a wheel move never jumps it — the
+    // live twin of the recorded path's integrated bend (MidiExpression.h).
+    fLiveBendPhase += ((double)fLiveBendRatio - 1.0) * (double)frames;
+
     IMidiInput* in = fLiveMidi.load(std::memory_order_relaxed);
     if (!in) {                       // monitoring off: release every voice
         for (LiveVoice& v : fVoices) v.active = false;
@@ -785,13 +825,41 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
     }
 
     // Drain events (RT-safe: stack buffer, lock-free ring). A note-on takes a
-    // free voice (or steals the oldest); a note-off starts that voice's release.
+    // free voice (or steals the oldest); a note-off starts that voice's release;
+    // CC64 defers that release instead, and the wheel/pedal reach the voices
+    // that are already sounding.
     MidiEvent ev[64];
     std::size_t n;
     while ((n = in->ReadEvents(ev, 64)) > 0) {
         for (std::size_t i = 0; i < n; i++) {
             const MidiEvent& e = ev[i];
+
+            // Continuous controllers: kept in the engine's fixed arrays and
+            // handed to every voice this block through the VoiceExpression
+            // (below), so a wheel or pedal move is audible on notes already
+            // down instead of only on the next one.
+            if (e.type == MidiEvent::kControlChange) {
+                fLiveCc[e.data1 & 0x7f] = e.data2;
+                if ((e.data1 & 0x7f) == 64 && fSustain.SetValue((int)e.data2))
+                    ReleaseSustained(blockStart);   // pedal up: let go of what it held
+                continue;
+            }
+            if (e.type == MidiEvent::kPitchBend) {
+                fLiveBendRatio = BendRatio((int)e.bend + 8192);
+                continue;
+            }
+
             if (e.IsNoteOn()) {
+                // A re-strike of a key the pedal is holding: release what it took
+                // (so the strike is a fresh voice, not a doubling) and retrigger.
+                if (fSustain.Retrigger(VoiceKey(e.channel, e.data1)))
+                    for (LiveVoice& v : fVoices)
+                        if (v.active && v.sustained && !v.releasing
+                            && v.pitch == e.data1 && v.channel == e.channel) {
+                            v.sustained = false;
+                            v.releasing = true;
+                            v.off       = blockStart;
+                        }
                 int slot = -1;
                 for (int k = 0; k < kMaxLiveVoices; k++)
                     if (!fVoices[k].active) { slot = k; break; }
@@ -800,8 +868,9 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
                     for (int k = 1; k < kMaxLiveVoices; k++)
                         if (fVoices[k].start < fVoices[slot].start) slot = k;
                 }
-                fVoices[slot] = LiveVoice{ true, false, e.data1, e.data2,
-                                           e.channel, blockStart, 0, e.source };
+                fVoices[slot] = LiveVoice{ true, false, false, e.data1, e.data2,
+                                           e.channel, blockStart, 0, e.source,
+                                           fLiveBendPhase };
             } else if (e.IsNoteOff()) {
                 // Match the source too: the same key on a second keyboard is a
                 // different voice, and letting its note-off close this one would
@@ -811,8 +880,14 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
                         && fVoices[k].pitch == e.data1
                         && fVoices[k].channel == e.channel
                         && fVoices[k].source == e.source) {
-                        fVoices[k].releasing = true;
-                        fVoices[k].off       = blockStart;
+                        // CC64 down takes the release instead of the key: the
+                        // pedal decides when this note stops (Sustain.h).
+                        if (fSustain.DeferNoteOff(VoiceKey(e.channel, e.data1)))
+                            fVoices[k].sustained = true;
+                        else {
+                            fVoices[k].releasing = true;
+                            fVoices[k].off       = blockStart;
+                        }
                         break;
                     }
             }
@@ -834,7 +909,10 @@ void Engine::UpdateLiveVoices(Frame blockStart) {
         }
         Frame len = v.releasing ? (v.off - v.start) : kHeld;
         if (len < 1) len = 1;
-        const MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        // The bend phase this voice was born with: the render subtracts it from
+        // the block's, so the wheel moves the note from where it is.
+        note.bendPhaseFrames = v.bend;
         fLiveNotes.push_back(note);
         // Hand the voice to each monitored bus whose route accepts it, so two
         // keyboards drive two tracks instead of both tracks hearing everything.
@@ -862,8 +940,9 @@ void Engine::FillBuffer(float* out, size_t frames) {
     if (fMonitorOnly.load(std::memory_order_relaxed)) {
         const Frame bs = fMonFrame;
         fMonFrame += (Frame)frames;
-        UpdateLiveVoices(bs);
+        UpdateLiveVoices(bs, frames);
         const size_t nfloats = frames * 2;
+        const VoiceExpression liveExpr = LiveExpression();
         for (size_t i = 0; i < fBuses.size(); i++) {        // reset track meters
             fNodePeakL[i].store(0.0f, std::memory_order_relaxed);
             fNodePeakR[i].store(0.0f, std::memory_order_relaxed);
@@ -875,7 +954,8 @@ void Engine::FillBuffer(float* out, size_t frames) {
             float* nb = fNodeBufs[idx].data();
             std::memset(nb, 0, nfloats * sizeof(float));
             if (b.instrument)
-                b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f);
+                b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f,
+                                     liveExpr);
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
@@ -926,7 +1006,7 @@ void Engine::FillBuffer(float* out, size_t frames) {
 
     // Live MIDI monitoring: drain incoming events and advance held voices, then
     // rebuild fLiveNotes for this block. Rendered per armed MIDI bus below.
-    UpdateLiveVoices(blockStart);
+    UpdateLiveVoices(blockStart, frames);
 
     // Tempo-synced effects (e.g. a delay) follow the tempo MAP: push the BPM at
     // this block to every effect when it changes (RT-safe: integer retune, no
@@ -994,14 +1074,26 @@ void Engine::FillBuffer(float* out, size_t frames) {
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (b.chanL < 0.0f) ? to
                                                          : StereoGain{b.chanL, b.chanR};
+                // Bend and the mod wheel for this block: the recorded lane's, so
+                // a stored controller is what a bounced file would render too.
+                const VoiceExpression expr =
+                    ExpressionAt(b.bend, b.events, blockStart,
+                                 blockStart + (Frame)frames);
                 if (b.instrument)
-                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to);
+                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to,
+                                         expr);
                 b.chanL = cgl;
                 b.chanR = cgr;
             }
-            if (live)                        // live keyboard through this voice
+            if (live) {                      // live keyboard through this voice
+                // Live notes carry the expression from the keyboard: the same
+                // path a recorded lane takes, built from what arrived instead of
+                // from the event list.
+                const VoiceExpression liveExpr = LiveExpression();
                 if (b.instrument)
-                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f);
+                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f,
+                                         liveExpr);
+            }
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {

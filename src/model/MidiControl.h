@@ -43,6 +43,23 @@ inline int PitchBendAt(const std::vector<MidiClipEvent>& events, Frame at) {
     return best;
 }
 
+// CC1 (mod wheel) at `at`, 0..127; absent = 0 (wheel all the way down). The
+// voices turn this into vibrato depth — see model/MidiExpression.h.
+inline int ModWheelAt(const std::vector<MidiClipEvent>& events, Frame at) {
+    return CcValueAt(events, 1, at, 0);
+}
+
+// The value a controller is at when the region has no event for it — what the
+// piano roll's lane draws before its first point, and what the engine renders
+// there. It has to agree with the evaluators above: 127 for the two gain
+// controllers and 64 for pan, and 0 for everything else (a switch is "off", and
+// an unmodelled controller does not move a voice at all).
+inline int CcDefault(int cc) {
+    if (cc == 10)       return 64;    // pan   -> centre
+    if (cc == 7 || cc == 11) return 127;   // volume / expression -> unity
+    return 0;
+}
+
 // Channel gain from CC7 (volume) x CC11 (expression) at `at`, each 0..127 mapped
 // linearly to 0..1; absent controllers default to 127 (unity). This is the
 // scalar the synth renders a MIDI track's notes through, so a MIDI file's volume

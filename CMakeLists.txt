@@ -346,6 +346,13 @@ add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)
 
+# MIDI expression (package 32): bend as an integrated ratio (verified against a
+# sample-by-sample reference, so a phase jump cannot pass), the mod wheel's
+# vibrato depth, and the CC64 sustain policy in both its live and offline forms.
+add_executable(midi_expression_tests tests/midi_expression_tests.cpp)
+target_link_libraries(midi_expression_tests PRIVATE daw_model)
+add_test(NAME midi_expression_tests COMMAND midi_expression_tests)
+
 # The MIDI transform math (package 04): quantize strength/swing/triplets and
 # tempo changes, humanize determinism, legato, and the region-window rules.
 add_executable(midiops_tests tests/midiops_tests.cpp)

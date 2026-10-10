@@ -254,6 +254,7 @@ void Sampler::GatherVoices(const std::vector<MidiNote>& notes, Frame blockStart,
                      * std::pow(10.0f, r.volumeDb / 20.0f);
             v.ratio  = ratio;
             v.order  = noteOrder;
+            v.bend   = n.bendPhaseFrames;
 
             // Choke: a later note in a group this region is off_by silences it.
             if (r.offBy != 0) {
@@ -276,7 +277,8 @@ void Sampler::GatherVoices(const std::vector<MidiNote>& notes, Frame blockStart,
 
 void Sampler::Render(const std::vector<MidiNote>& notes,
                      float* out, size_t frames, Frame blockStart,
-                     StereoGain from, StereoGain to) {
+                     StereoGain from, StereoGain to,
+                     const VoiceExpression& expr) {
     if (!fInst || fInst->regions.empty() || frames == 0)
         return;
 
@@ -297,6 +299,14 @@ void Sampler::Render(const std::vector<MidiNote>& notes,
     const double sr        = fSampleRate;
     const double chokeSpan = kChokeSeconds * sr;
 
+    // Expression, constant across the block (the caller evaluates it once per
+    // block like every other controller). Both terms skip out entirely when the
+    // track has no bend and the wheel is down, so untracked playback is
+    // bit-identical to before.
+    const bool   bending  = (expr.bendRatio != 1.0f) || (expr.bendPhase != 0.0);
+    const double bendStep = (double)expr.bendRatio - 1.0;
+    const double vibDepth = (double)expr.modWheel;
+
     for (const Voice& v : fVoices) {
         const Region&     r = *v.region;
         const SampleData& s = fInst->samples[(size_t)r.sampleIndex];
@@ -310,6 +320,25 @@ void Sampler::Render(const std::vector<MidiNote>& notes,
         const double      held = (double)(v.off - v.start) / sr;
         // Frames the note is held for, used to freeze the loop at note-off.
         const double      heldFrames = (double)(v.off - v.start);
+        // Bend's phase advance up to this block, less the part owed before the
+        // note began: what the voice's own read position is offset by.
+        const double      bendRel0 = expr.bendPhase - v.bend;
+
+        // The expression-adjusted age of the note at any absolute frame — the
+        // same "phase integral" trick the Synth uses, so a bend slides the read
+        // position instead of retuning the region (which would step at every
+        // block seam and skip a sample's transient).
+        auto playedAt = [&](Frame g) {
+            const double real = (double)(g - v.start);
+            double p = real;
+            if (bending) p += bendRel0 + bendStep * (double)(g - blockStart);
+            // The LFO's own phase runs on the note's real age, as in Synth.
+            if (vibDepth > 0.0) p += VibratoPhaseFrames(real, sr, vibDepth);
+            return p;
+        };
+        // Where the note-off lands in that measure. Constant per voice, and it
+        // uses the block's own ratio, so it agrees with the per-sample walk.
+        const double playedOff = playedAt(v.off);
 
         float pl, pr;
         PanGains(r.pan, &pl, &pr);
@@ -328,9 +357,10 @@ void Sampler::Render(const std::vector<MidiNote>& notes,
             }
             if (env <= 0.0) continue;
 
-            // Read position in source frames. Pure arithmetic on the block's
-            // global frame — this is what keeps the sampler stateless.
-            double pos = (double)r.offset + rel * v.ratio;
+            // Read position in source frames, from the note's expression-adjusted
+            // age — this is what keeps the sampler stateless.
+            const double played = playedAt(g);
+            double pos = (double)r.offset + played * v.ratio;
             bool   wrapping = loops;
             if (sustain && rel > heldFrames) {
                 // Past note-off: leave the loop and run forward to the sample
@@ -338,14 +368,15 @@ void Sampler::Render(const std::vector<MidiNote>& notes,
                 // computed here rather than carried — that keeps the voice a
                 // pure function of the block, so a bounce still matches
                 // playback and a seek lands in the same place.
-                double atOff = (double)r.offset + heldFrames * v.ratio;
+                double atOff = (double)r.offset + playedOff * v.ratio;
                 if (atOff > (double)r.loopEnd) {
                     const double over = atOff - (double)r.loopStart;
                     atOff = (double)r.loopStart + std::fmod(over, loopSpan);
                 }
-                pos = atOff + (rel - heldFrames) * v.ratio;
+                pos = atOff + (played - playedOff) * v.ratio;
                 wrapping = false;
-                // `pos` only ever advances (ratio > 0), so once it is past the
+                // `pos` only ever advances (every ratio here is > 0: bend is at
+                // most ±2 semitones and the vibrato ±1), so once it is past the
                 // end this voice is done for the whole block — break rather
                 // than re-testing every remaining frame. A sustain voice with a
                 // long release outlives its sample by design, so this is the

@@ -21,6 +21,8 @@
 #include "../src/ui/widgets/DawKnob.h"
 #include "../src/ui/widgets/DawSlider.h"
 #include "../src/model/MidiOps.h"       // QuantGrid
+#include "../src/model/MidiExpression.h"  // the lane's path into a voice
+#include "../src/synth/Synth.h"           // ...rendered, to prove it arrives
 #include "../src/model/Project.h"
 #include "../src/model/ProjectIO.h"   // the Open flow's fixture file
 #include "../src/model/Command.h"
@@ -271,6 +273,119 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
         win->Unlock();
         return now == before + 1;
     }));
+}
+
+// --- package 32: the CC lane offers ANY controller, and it reaches a voice ---
+//
+// The lane used to cycle a fixed four-entry list (velocity, vol, expr, pan).
+// It now shows any of the 128, picked from the button's menu; the menu is a
+// popup a test cannot open, so each item's action (SetLaneCc) is driven
+// directly, and then the lane itself is driven through a real click -- a click
+// in the strip has to add a controller point and post the region's events, and
+// the model's events have to build the expression a voice renders through.
+static void TestPianoRollCcLane(MainWindow* win, Project& project) {
+    std::printf("test_piano_roll_cc_lane\n");
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 8000 } }, "cc-synth");
+    CHECK(LockedAddTrack(win, project, t));
+    const ClipId cid = t.midiClips.front().id;
+    const TrackId tid = t.id;
+
+    PianoRoll* roll = new PianoRoll(BRect(90, 90, 810, 570), tid, cid, 0,
+                                    t.midiClips.front().lengthFrames,
+                                    t.midiClips.front().notes, {},
+                                    project.tempoMap, project.sampleRate, -1,
+                                    BMessenger(win));
+    roll->Show();
+    snooze(300000);
+    PianoRollView* rv = dynamic_cast<PianoRollView*>(roll->FindView("roll"));
+    CHECK(rv != nullptr);
+    if (!rv) { roll->Lock(); roll->Quit(); return; }
+
+    // It opens on velocity, and every controller number is offered -- including
+    // ones no voice acts on yet (74) and the pedal (64).
+    CHECK(rv->LaneCc() == -1);
+    rv->SetLaneCc(64);
+    CHECK(rv->LaneCc() == 64);
+    rv->SetLaneCc(74);
+    CHECK(rv->LaneCc() == 74);
+    rv->SetLaneCc(1);                      // the mod wheel: one a voice DOES act on
+    Shot("pianoroll-cc-lane");
+
+    // A click in the strip is the whole flow: the view hit-tests the lane
+    // (including the snapped frame and the value from the click's height),
+    // appends a point, and posts kMsgApplyEvents to the main window.
+    auto clickLane = [&](float x, float y) {
+        BPoint screen(x, y);
+        if (roll->LockWithTimeout(1000000) == B_OK) {
+            screen = rv->ConvertToScreen(BPoint(x, y));
+            roll->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 1);
+            m.AddPoint("where", BPoint(x, y));
+            m.AddPoint("screen_where", screen);
+            BMessenger(rv).SendMessage(&m);
+        }
+    };
+    // Inside the bottom lane, near its top (a full-height value), at x just
+    // right of the keyboard column (frame 0 on the 16th grid).
+    const BRect b = rv->Bounds();
+    clickLane(60.0f, b.bottom - 60.0f);
+
+    auto laneEvents = [&](std::vector<MidiClipEvent>* out) {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const Track* tr = project.FindTrack(tid);
+        const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
+        if (c) *out = c->events;
+        win->Unlock();
+        return c != nullptr;
+    };
+    std::vector<MidiClipEvent> events;
+    CHECK(WaitFor([&] {
+        std::vector<MidiClipEvent> e;
+        if (!laneEvents(&e)) return false;
+        events = e;
+        return !e.empty();
+    }));
+    bool sawCc1 = false;
+    for (const MidiClipEvent& e : events)
+        if (e.type == MidiClipEvent::CC && e.data == 1) sawCc1 = true;
+    CHECK(sawCc1);                          // the lane's controller, in the model
+
+    // The lane reaches the VOICES: the model's events are what the engine and
+    // the exporter turn into a VoiceExpression (model/MidiExpression.h), so a
+    // note rendered through it is not the bare tone any more.
+    std::vector<MidiNote> notes;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        const Track* tr = project.FindTrack(tid);
+        if (tr) notes = tr->CollectPlaybackNotes();
+        win->Unlock();
+    }
+    CHECK(notes.size() == 1);
+    Instrument inst;
+    inst.waveform = (int)Waveform::Sine;
+    inst.attack = 0.005f; inst.decay = 0.0f;
+    inst.sustain = 1.0f;  inst.release = 0.0f;
+    const size_t n = 4096;
+    std::vector<float> plain(n * 2, 0.0f), played(n * 2, 0.0f);
+    Synth synth(project.sampleRate);
+    const std::vector<BendPoint> tl = BuildBendTimeline(events);
+    synth.Render(notes, inst, plain.data(), n, 0, 1.0f);
+    synth.Render(notes, inst, played.data(), n, 0,
+                 StereoGain{1.0f, 1.0f}, StereoGain{1.0f, 1.0f},
+                 ExpressionAt(tl, events, 0, (Frame)n));
+    bool differs = false;
+    for (size_t i = 0; i < plain.size() && !differs; i++)
+        if (std::fabs(played[i] - plain[i]) > 1e-4f) differs = true;
+    CHECK(differs);                         // the lane's wheel wobbles the voice
+
+    // Back to velocity, the lane the roll opens on.
+    rv->SetLaneCc(-1);
+    CHECK(rv->LaneCc() == -1);
+    roll->Lock(); roll->Quit();
 }
 
 // --- 2. package 04's path, minus the mouse ---------------------------------
@@ -1798,6 +1913,7 @@ static int32 TestThread(void*) {
 
     TestMessageRoundTrip(win, project);
     TestPianoRollQuantize(win, project, stack);
+    TestPianoRollCcLane(win, project);
     TestPianoRollTransforms(win, project, stack);
     TestExportFlow(win, project);
     TestDeviceLatency();

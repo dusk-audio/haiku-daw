@@ -7,6 +7,8 @@
 #include "../src/engine/WavSource.h"
 #include "../src/dsp/Loudness.h"
 #include "../src/model/Project.h"
+#include "../src/model/MidiExpression.h"
+#include "../src/synth/IInstrument.h"   // kModWheelVibratoHz
 
 #include <cmath>
 #include <cstdio>
@@ -661,6 +663,108 @@ int main() {
             CHECK(tp <= -1.0f + 0.3f);                  // limiter held the ceiling
             std::remove(path.c_str());
         }
+    }
+
+    // --- MIDI expression reaches the bounce --------------------------------
+    // The Exporter is the executable spec: whatever a voice does with a
+    // controller, a bounced file has to do it too (and the engine renders
+    // through the same helper — model/MidiExpression.h). One sine note, bounced
+    // with different controller content, so each check is about the controller.
+    {
+        auto bounce = [&](const std::vector<MidiClipEvent>& events,
+                          Frame noteLen, Frame regionLen = 0) -> std::vector<float> {
+            Project pr;
+            pr.sampleRate = SR;
+            pr.masterGain = 1.0f;
+            Track m;
+            m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+            m.gain = 1.0f; m.pan = 0.0f;
+            // A steady tone: the envelope must not disguise the phase checks.
+            m.instrument.synth.waveform = (int)Waveform::Sine;
+            m.instrument.synth.attack = 0.001f;
+            m.instrument.synth.decay = 0.0f;
+            m.instrument.synth.sustain = 1.0f;
+            m.instrument.synth.release = 0.0f;
+            MidiNote n = note;
+            n.lengthFrames = noteLen;
+            PutNote(m, n);
+            m.midiClips.front().events = events;
+            if (regionLen > 0) m.midiClips.front().lengthFrames = regionLen;
+            pr.AddTrack(m);
+
+            const std::string p = "/tmp/haiku_daw_export_expr.wav";
+            std::remove(p.c_str());
+            if (!ExportWav(pr, p, SR, {ExportFormat{32}})) return {};
+            WavSource s;
+            std::vector<float> out;
+            if (s.Open(p)) {
+                const float* c = nullptr; size_t f = 0;
+                while (s.ReadChunk(&c, &f))
+                    for (size_t i = 0; i < f * 2; i++) out.push_back(c[i]);
+            }
+            std::remove(p.c_str());
+            return out;
+        };
+        // Upward zero crossings in [from, to) — a pitch meter good enough to
+        // tell "the bend bent it" from "the bend did nothing".
+        auto crossings = [](const std::vector<float>& b, size_t from, size_t to) {
+            int n = 0;
+            for (size_t f = from; f + 1 < to; f++)
+                if (b[f * 2 + 1] <= 0.0f && b[(f + 1) * 2 + 1] > 0.0f) n++;
+            return n;
+        };
+        auto event = [](int type, Frame at, int data, int value) {
+            MidiClipEvent e;
+            e.type = type; e.startFrame = at; e.data = data; e.value = value;
+            return e;
+        };
+
+        const Frame kNote = SR / 2;                 // 0.5 s
+        const auto flat = bounce({}, kNote);
+        CHECK(!flat.empty());
+
+        // A bend parked at centre is not expression: bit-identical.
+        const auto centre = bounce({ event(MidiClipEvent::PitchBend, 0, 0, 8192) },
+                                   kNote);
+        CHECK(centre == flat);
+
+        // +2 semitones across the note: ~12% more cycles in the same time.
+        const auto bent = bounce({ event(MidiClipEvent::PitchBend, 0, 0, 16383) },
+                                 kNote);
+        const int cFlat = crossings(flat, 1000, 20000);
+        const int cBent = crossings(bent, 1000, 20000);
+        CHECK(cFlat > 100);
+        CHECK(cBent > cFlat);                        // it really went up
+        CHECK(std::fabs((double)cBent / cFlat - BendRatio(16383)) < 0.02);
+
+        // The pedal: a key-up under CC64 keeps the note sounding past its own
+        // end, until the pedal lifts — inside the region, which is the window
+        // that bounds it.
+        const Frame kRegion = SR;                   // 1 s of region
+        const Frame kLift   = 40000;
+        const auto pedal = bounce({ event(MidiClipEvent::CC, 0, 64, 127),
+                                    event(MidiClipEvent::CC, kLift, 64, 0) },
+                                  kNote, kRegion);
+        auto peak = [](const std::vector<float>& b, size_t from, size_t to) {
+            float p = 0.0f;
+            for (size_t f = from; f < to && f * 2 + 1 < b.size(); f++)
+                p = std::max(p, std::fabs(b[f * 2 + 1]));
+            return p;
+        };
+        const size_t kAfter = (size_t)(kNote + 2000);   // past the note's own end
+        CHECK(peak(flat,  kAfter, (size_t)kLift - 1000) < 1e-6f);   // silence
+        CHECK(peak(pedal, kAfter, (size_t)kLift - 1000) > 0.01f);   // ringing
+        CHECK(peak(pedal, (size_t)kLift + 1000, (size_t)kLift + 4000) < 1e-6f);
+
+        // The mod wheel: the same note wobbles. One whole LFO period later the
+        // pitch is back where it started — the wheel bends the note, it does
+        // not detune it — so the crossing count over a period matches, while
+        // the audio plainly does not.
+        const auto wheel = bounce({ event(MidiClipEvent::CC, 0, 1, 127) }, kNote);
+        CHECK(wheel != flat);
+        const size_t kPeriod = (size_t)(SR / kModWheelVibratoHz);
+        CHECK(std::abs(crossings(wheel, 1000, 1000 + kPeriod)
+                       - crossings(flat, 1000, 1000 + kPeriod)) <= 1);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
