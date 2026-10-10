@@ -557,7 +557,9 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     snooze(300000);
     Shot("export-dialog");
 
-    dlg->Lock();
+    // Bounded, like every lock this suite takes outside BAlert: a window whose
+    // looper is stuck must fail a check, not hang the run for 15 minutes.
+    if (dlg->LockWithTimeout(2000000) != B_OK) return;
     BMenuField* fmt  = dynamic_cast<BMenuField*>(dlg->FindView("fm"));
     BMenuField* qual = dynamic_cast<BMenuField*>(dlg->FindView("vq"));
     CHECK(fmt != nullptr);
