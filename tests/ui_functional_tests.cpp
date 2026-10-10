@@ -574,16 +574,29 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     }
     Shot("export-dialog");
 
-    // Does ACTIVATING it put it on screen? That is the difference between "the
-    // app_server never mapped it" and "it is there, just not in front".
-    dlg->Activate(true);
+    // The dialog's workspace mask reads as garbage (0x80042) while the control
+    // window's reads 0x2 -- the current workspace. Put it back and look again.
+    dlg->SetWorkspaces(B_CURRENT_WORKSPACE);
     snooze(1500000);
     {
         const BRect f = dlg->Frame();
-        std::printf("  DIAG dlg after activate active=%d frame %.0f,%.0f,%.0f,%.0f\n",
-                    (int)dlg->IsActive(), f.left, f.top, f.right, f.bottom);
+        std::printf("  DIAG dlg after ws fix ws=%#" B_PRIx32
+                    " frame %.0f,%.0f,%.0f,%.0f\n",
+                    (uint32)dlg->Workspaces(), f.left, f.top, f.right, f.bottom);
     }
-    Shot("export-dialog-activated");
+    Shot("export-dialog-ws");
+
+    // And the thing this test actually needs: the SAME dialog, built by this
+    // thread the way the piano roll is, so its layout can be looked at.
+    ExportChoices ch;
+    ExportWindow* own = new ExportWindow(BRect(560, 40, 960, 440), ch, false,
+                                         BMessenger(win));
+    own->Show();
+    snooze(1200000);
+    Shot("export-dialog-own");
+    std::printf("  DIAG own ws=%#" B_PRIx32 " hidden=%d\n",
+                (uint32)own->Workspaces(), (int)own->IsHidden());
+    if (own->LockWithTimeout(2000000) == B_OK) own->Quit();
 
     // Control: a window THIS THREAD creates, same feel, nowhere near the main
     // window. It draws, which is what says the difference is in the dialog or
