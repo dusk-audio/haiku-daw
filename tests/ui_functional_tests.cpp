@@ -1472,12 +1472,39 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     t.midiClips.push_back(mc);
     CHECK(LockedAddTrack(win, project, t));
 
+    // ...and an AUDIO track under it, because two of the pointer feed-backs
+    // (gain, slip) are audio-only by design: asking for them over a MIDI region
+    // asks for a gesture that does not exist there. A real (tiny) wav, so the
+    // engine can load it if a later test plays the project.
+    const char* kArrangeWav = "/tmp/haiku_daw_ui_arrange.wav";
+    {
+        std::remove(kArrangeWav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 3000, -3000 };
+        CHECK(w.Open(kArrangeWav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+    }
+    Track ta;
+    ta.id = project.NextTrackId();
+    ta.type = TrackType::Audio;
+    ta.name = "arrange-audio";
+    Clip ac;
+    ac.id = project.NextClipId();
+    ac.startFrame   = 48000;
+    ac.lengthFrames = 48000;
+    ac.sourcePath   = kArrangeWav;
+    ta.clips.push_back(ac);
+    CHECK(LockedAddTrack(win, project, ta));
+
     TimelineView* tv = nullptr;
-    int laneIdx = -1;
+    int laneIdx = -1;        // the MIDI track
+    int laneIdxAudio = -1;   // the audio track under it
     bool dockWasOpen = false;
     if (win->LockWithTimeout(1000000) == B_OK) {
         tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
         laneIdx = project.IndexOfTrack(t.id);
+        laneIdxAudio = project.IndexOfTrack(ta.id);
         dockWasOpen = win->FindView("dock") != nullptr;
         win->Unlock();
     }
@@ -1588,6 +1615,11 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     const float laneTop = TimelineContentTop() - scrollY
                         + (float)laneIdx * (TrackHeight() + TrackGap());
     const float laneMid = laneTop + TrackHeight() * 0.7f;   // below the top band
+    const float laneTopAudio = TimelineContentTop() - scrollY
+                             + (float)laneIdxAudio * (TrackHeight() + TrackGap());
+    const float laneMidAudio = laneTopAudio + TrackHeight() * 0.7f;
+    const float audioLeft  = frameX(ac.startFrame);
+    const float audioMid   = frameX(ac.startFrame + ac.lengthFrames / 2);
     const float clipLeft  = frameX(mc.startFrame);
     const float clipRight = frameX(mc.startFrame + mc.lengthFrames);
     // The whole lane must be on screen, or the clicks below are not delivered.
@@ -1655,6 +1687,9 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         // fade, gain, move, split, slip).
         const BPoint mid((clipLeft + clipRight) * 0.5f, laneMid);
         const BPoint left(clipLeft + Themed(2.0f), laneMid);
+        // The audio clip's body and edge: the gain and slip zones live there.
+        const BPoint audioBody(audioMid, laneMidAudio);
+        const BPoint audioLeft2(audioLeft + Themed(2.0f), laneMidAudio);
         auto cursorAt = [&](const BPoint& p, uint32 mods, int tool) {
             TimelineView::Pointer c = TimelineView::Pointer::Default;
             if (win->LockWithTimeout(1000000) == B_OK) {
@@ -1671,8 +1706,10 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         CHECK(cursorAt(left, 0, 0) == TimelineView::Pointer::Trim);
         CHECK(cursorAt(BPoint(left.x, laneTop + Themed(5.0f)), 0, 0)
               == TimelineView::Pointer::Fade);
-        CHECK(cursorAt(mid, B_CONTROL_KEY, 0) == TimelineView::Pointer::Gain);
-        CHECK(cursorAt(mid, B_OPTION_KEY, 0) == TimelineView::Pointer::Slip);
+        CHECK(cursorAt(audioBody, B_CONTROL_KEY, 0) == TimelineView::Pointer::Gain);
+        CHECK(cursorAt(audioBody, B_OPTION_KEY, 0) == TimelineView::Pointer::Slip);
+        CHECK(cursorAt(audioLeft2, 0, 0) == TimelineView::Pointer::Trim);
+        CHECK(cursorAt(audioBody, 0, 0) == TimelineView::Pointer::Move);
         CHECK(cursorAt(mid, 0, 2) == TimelineView::Pointer::Split);   // scissors
         CHECK(cursorAt(mid, 0, 5) == TimelineView::Pointer::Fade);    // fade tool
         // Restore the pointer tool through the same path.

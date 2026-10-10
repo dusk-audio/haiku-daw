@@ -445,7 +445,6 @@ const char* TimelineView::ToolName(Tool t) {
 
 void TimelineView::SetTool(Tool t) {
     if (fTool == t) return;
-    return;   // MUTATION: the tool never changes
     fTool = t;
     // The tool decides what the pointer means now: recompute the cursor and the
     // tooltip for wherever the pointer was last seen, so the change is visible
