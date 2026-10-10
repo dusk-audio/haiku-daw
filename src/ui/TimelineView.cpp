@@ -535,6 +535,11 @@ void TimelineView::OpenGridMenu() {
 // Which clip/region is under `where`, and which part of it. This is the ONE
 // answer the click path, the hover highlight and the cursor all use.
 TimelineView::Hit TimelineView::HitTest(BPoint where) const {
+    return HitTest(where, EventModifiers(Window() ? Window()->CurrentMessage()
+                                                  : nullptr));
+}
+
+TimelineView::Hit TimelineView::HitTest(BPoint where, uint32 mods) const {
     Hit h;
     if (!fProject || where.x < HeaderWidth() || where.y < ContentTop())
         return h;
@@ -546,8 +551,6 @@ TimelineView::Hit TimelineView::HitTest(BPoint where) const {
 
     const BRect lane = LaneRect(idx);
     const Frame at = XToFrame(where.x);
-    const uint32 mods = EventModifiers(Window() ? Window()->CurrentMessage()
-                                                : nullptr);
     // Audio clips and MIDI regions share the geometry; a MIDI region's is the
     // same block DrawMidiNotes paints.
     auto zoneFor = [&](Frame start, Frame len, bool midi,
@@ -591,26 +594,26 @@ TimelineView::Pointer TimelineView::CursorFor(BPoint where, uint32 mods) const {
     if (where.y < ToolbarHeight()) return Pointer::Default;
     switch (fTool) {
         case Tool::Scissors:
-            return HitTest(where).clip != kInvalidClipId ? Pointer::Split
-                                                         : Pointer::Default;
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Split
+                                                               : Pointer::Default;
         case Tool::Glue:
-            return HitTest(where).clip != kInvalidClipId ? Pointer::Glue
-                                                         : Pointer::Default;
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Glue
+                                                               : Pointer::Default;
         case Tool::Mute:
             return (where.y >= ContentTop() && where.x >= HeaderWidth())
                  ? Pointer::Mute : Pointer::Default;
         case Tool::Pencil: {
-            const Hit h = HitTest(where);
+            const Hit h = HitTest(where, mods);
             const Track* t = fProject ? fProject->FindTrack(h.track) : nullptr;
             if (t && t->type == TrackType::Midi) return Pointer::Pencil;
             return Pointer::Default;
         }
         case Tool::Fade:
-            return HitTest(where).clip != kInvalidClipId ? Pointer::Fade
-                                                         : Pointer::Default;
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Fade
+                                                               : Pointer::Default;
         default: break;
     }
-    const Hit h = HitTest(where);
+    const Hit h = HitTest(where, mods);
     if (h.clip == kInvalidClipId) return Pointer::Default;
     switch (h.zone) {
         case Zone::TrimLeft: case Zone::TrimRight: return Pointer::Trim;

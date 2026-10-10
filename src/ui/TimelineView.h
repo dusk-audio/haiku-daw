@@ -94,7 +94,11 @@ public:
     static const char* ToolName(Tool t);
 
     // What a press at `where` would act on -- one answer, shared by MouseDown,
-    // the hover highlight and the cursor, so the three cannot disagree.
+    // the hover highlight and the cursor, so the three cannot disagree. The
+    // zone depends on the modifiers (Ctrl = gain, Alt = slip), so they are a
+    // parameter: the one-argument form reads the event's, and CursorFor passes
+    // the state it was handed (a caller that asks for the Alt variant must get
+    // the Alt answer, not whatever the keyboard happens to be doing).
     enum class Zone { None, Body, TrimLeft, TrimRight, FadeIn, FadeOut, Gain, Slip };
     struct Hit {
         int     lane  = -1;                    // track index, -1 = none
@@ -104,6 +108,8 @@ public:
         Zone    zone  = Zone::None;
     };
     Hit HitTest(BPoint where) const;
+    Hit HitTest(BPoint where, uint32 mods) const;
+    std::size_t SelectionCount() const { return fSelClips.size(); }
 
     // The cursor this pointer state wants. `mods` is passed rather than read so
     // a test can ask for the Alt/Ctrl variants without a keyboard.

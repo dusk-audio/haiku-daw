@@ -1474,9 +1474,11 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
 
     TimelineView* tv = nullptr;
     int laneIdx = -1;
+    bool dockWasOpen = false;
     if (win->LockWithTimeout(1000000) == B_OK) {
         tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
         laneIdx = project.IndexOfTrack(t.id);
+        dockWasOpen = win->FindView("dock") != nullptr;
         win->Unlock();
     }
     CHECK(tv != nullptr);
@@ -1569,25 +1571,6 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     BMessenger(tv).SendMessage(&topWheel);
     snooze(120000);
 
-    BMessage focusClick(B_MOUSE_DOWN);
-    focusClick.AddInt32("buttons", 1);
-    focusClick.AddPoint("where", BPoint(HeaderWidth() + 40.0f,
-                                       TimelineContentTop() + 40.0f));
-    if (win->LockWithTimeout(1000000) == B_OK) {
-        focusClick.AddPoint("screen_where",
-                            tv->ConvertToScreen(BPoint(
-                                HeaderWidth() + 40.0f,
-                                TimelineContentTop() + 40.0f)));
-        win->Unlock();
-    }
-    BMessenger(tv).SendMessage(&focusClick);
-    CHECK(WaitFor([&] {
-        if (win->LockWithTimeout(1000000) != B_OK) return false;
-        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus()) != nullptr;
-        win->Unlock();
-        return ok;
-    }));
-
     // The lane's geometry, as the view computes it. The track is the last one
     // added and earlier tests have filled the stack, so scroll to the BOTTOM of
     // it first: at 0 the lane would be below the pane and a synthetic click's
@@ -1615,6 +1598,21 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     }
     CHECK(laneTop >= TimelineContentTop());
     CHECK(laneTop + TrackHeight() <= viewH + 1.0f);
+
+    // Focus the timeline the way a user would -- a FULL click on this track's
+    // empty lane. A lone mouse-down (the first version) left a rubber-band
+    // gesture or a clip drag hanging; the next click's mouse-up then committed a
+    // band-select over a zero-height rect, which SELECTED a clip nobody meant
+    // and silently restricted split-at-playhead to it. The click must also leave
+    // an empty selection, which every section below assumes.
+    click(frameX(mc.startFrame + 60000), laneMid);   // empty lane, in view
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        TimelineView* v = dynamic_cast<TimelineView*>(win->CurrentFocus());
+        const bool ok = v != nullptr && v->SelectionCount() == 0;
+        win->Unlock();
+        return ok;
+    }));
 
     // --- 1. The tool palette: the keys select, and the palette button does too.
     std::printf("  arrange: tools\n");
@@ -1959,29 +1957,45 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
             }
             win->Unlock();
         }
-        BMessage zoom(B_MOUSE_WHEEL_CHANGED);
-        zoom.AddFloat("be:wheel_delta_y", 1.0f);
-        zoom.AddInt32("modifiers", B_CONTROL_KEY);
-        BMessenger(tv).SendMessage(&zoom);
-        CHECK(WaitFor([&] {
-            bool ok = false;
+        // Haiku's wheel delta is positive rolling DOWN (toward the user), so
+        // up (negative) zooms in -- fewer frames per pixel -- and down zooms
+        // out. Both directions are driven, and the anchor must survive both.
+        auto ctrlWheel = [&](float delta) {
+            BMessage zoom(B_MOUSE_WHEEL_CHANGED);
+            zoom.AddFloat("be:wheel_delta_y", delta);
+            zoom.AddInt32("modifiers", B_CONTROL_KEY);
+            BMessenger(tv).SendMessage(&zoom);
+        };
+        auto fpp = [&] {
+            double f = 0.0;
             if (win->LockWithTimeout(1000000) == B_OK) {
                 if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
-                    ok = v->FramesPerPixel() < fppBefore;   // zoomed in
+                    f = v->FramesPerPixel();
                 win->Unlock();
             }
-            return ok;
-        }));
-        {
+            return f;
+        };
+        auto anchorError = [&] {
             float x = 0.0f;
             if (win->LockWithTimeout(1000000) == B_OK) {
                 if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
                     x = v->FrameToX(anchor);
                 win->Unlock();
             }
-            std::printf("  zoom anchor: x=%.1f (was %.1f)\n", x, anchorX);
-            CHECK(std::fabs(x - anchorX) < 2.0f);
-        }
+            return std::fabs(x - anchorX);
+        };
+
+        ctrlWheel(-1.0f);                       // wheel up: zoom in
+        CHECK(WaitFor([&] { return fpp() < fppBefore; }));
+        std::printf("  zoom in: fpp %.0f -> %.0f, anchor off by %.1f\n",
+                    fppBefore, fpp(), anchorError());
+        CHECK(anchorError() < 2.0f);
+        const double zoomedIn = fpp();
+        ctrlWheel(1.0f);                        // wheel down: back out
+        CHECK(WaitFor([&] { return fpp() > zoomedIn; }));
+        std::printf("  zoom out: fpp %.0f -> %.0f, anchor off by %.1f\n",
+                    zoomedIn, fpp(), anchorError());
+        CHECK(anchorError() < 2.0f);
     }
 
     // --- 10. ... and on the playhead for the keyboard's +/-.
@@ -2068,11 +2082,23 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         CHECK(hbar != nullptr);
         CHECK(vbar != nullptr);
         CHECK(std::fabs(rangeMax - (float)end) < 2.0f);
-        if (hbar) {           // dragging it to the left scrolls the view
+        if (hbar) {
+            // Send the thumb to the far end first, so the drag below is a real
+            // change: BScrollBar::SetValue ignores a value it is already at.
+            float barBefore = -1.0f, barAfter = -1.0f, scrollAfter = -1.0f;
             if (win->LockWithTimeout(1000000) == B_OK) {
+                hbar->SetValue(rangeMax);
+                barBefore = hbar->Value();
                 hbar->SetValue(0.0f);
+                barAfter = hbar->Value();
+                if (TimelineView* v =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                    scrollAfter = (float)v->ScrollFrame();
                 win->Unlock();
             }
+            std::printf("  hbar: %.0f -> %.0f, scroll now %.0f\n",
+                        barBefore, barAfter, scrollAfter);
+            CHECK(barAfter == 0.0f);
             CHECK(WaitFor([&] {
                 bool ok = false;
                 if (win->LockWithTimeout(1000000) == B_OK) {
@@ -2126,6 +2152,30 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
             CHECK(scroll1 <= rel && rel <= scroll1 + span);  // it is in view
             Shot("arrange-roll-follow");
         }
+    }
+
+    // Leave the window roughly as it was found. The test AFTER this one measures
+    // this window (the big-project play-start budget), and an open dock pane, a
+    // non-pointer tool and a far-out horizontal scroll are not part of that
+    // baseline.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+            v->SetTool(TimelineView::Tool::Pointer);
+            v->ScrollToFrame(0);
+        }
+        win->Unlock();
+    }
+    bool dockOpen = false;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        dockOpen = win->FindView("dock") != nullptr;
+        win->Unlock();
+    }
+    if (dockOpen != dockWasOpen) win->PostMessage(MSG_TOGGLE_DOCK);
+    snooze(200000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        const bool nowOpen = win->FindView("dock") != nullptr;
+        win->Unlock();
+        CHECK(nowOpen == dockWasOpen);   // left as it was found
     }
 }
 
