@@ -116,9 +116,17 @@ lilv's world is not thread-safe.
 | Host build (exit 0) + `ctest --test-dir build-host` | 56/56 (was 53) |
 | ASan+UBSan `b-asan` | 56/56 |
 | `scripts/haiku_syntax_check.sh` | 0 FAIL (67 files) |
-| VM `build` ctest | TBD |
-| VM `build-off` ctest | TBD |
-| `ui_functional_tests` + screenshot pass | TBD |
+| VM `build` (LV2 on) build exit 0 + ctest | 58/58 (was 55) |
+| VM `build-off` (`-DDAW_LV2=OFF`) build exit 0 + ctest | 53/53 (was 51) |
+| `ui_functional_tests` on the VM | **240 checks, 0 failures** (was 236) |
+| Screenshot pass, Dark mode (33 shots) | the 3 shots showing the effects window reviewed |
+
+Screenshots reviewed (`docs/agent-prompts/shots-27/dark/`): `09` the new
+LV2-insert shot — the Preset box sits between Byp and Mix with even spacing, its
+label and caret fit the box, the parameter list below is untouched, the window
+fits the screen; `24` (a built-in insert) and `25` (the whole-chain view) confirm
+the header row is byte-for-byte what it was for everything that is not an LV2
+insert. Nothing needed fixing.
 
 New suites: `fx_state_io_tests` (56 checks — the base64 codec and the
 `fxstate`/`masterfxstate` lines, round trip and patched-file compat both
@@ -188,8 +196,9 @@ Each broken on purpose, seen to fail, restored:
 ## For Marc
 
 - The engine-side rules (a state change is structural; capture reaches the model
-  from a live instance) are covered by `lv2_live_editor_tests` on the VM, since
-  `Engine.cpp` links the Media Kit.
+  from a live instance, and only into the descriptor the instance was built from)
+  are covered by `lv2_live_editor_tests` on the VM, since `Engine.cpp` links the
+  Media Kit; that suite passed 58/58's run here with 4K EQ 2 installed.
 - Untestable without a person: the preset menu itself (it blocks in
   `BPopUpMenu::Go`), so what a preset *choice* does is host-tested while the
   panel's look is a screenshot.
