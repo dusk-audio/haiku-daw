@@ -647,13 +647,15 @@ Engine::Engine() {
     for (int s = 0; s < kWatchSlots; s++)
         fWatchN[s].store(-1, std::memory_order_relaxed);
     // The graph slot + its reclaim thread. The predicate is the engine's proof
-    // that no callback can still be holding a retired graph:
-    //   - the player is not running (fPlayerRunning is cleared only after
-    //     BSoundPlayer::Stop() has returned, i.e. no callback is in flight), or
-    //   - two callback boundaries have passed since the last publish — the
-    //     callback that may have loaded the old pointer has run to completion
-    //     (the same proof QuiesceMonitorInput uses).
+    // that no thread can still be holding a retired graph:
+    //   - no off-RT user is inside it (GraphPin — see the header),
+    //   - and either the player is not running (fPlayerRunning is cleared only
+    //     after BSoundPlayer::Stop() has returned, i.e. no callback is in
+    //     flight), or two callback boundaries have passed since the last
+    //     publish — the callback that may have loaded the old pointer has run
+    //     to completion (the same proof QuiesceMonitorInput uses).
     fGraphs.reset(new GraphSwap<Graph>([this] {
+        if (fGraphUsers.load(std::memory_order_acquire) != 0) return false;
         if (!fPlayerRunning.load(std::memory_order_acquire)) return true;
         return fCallbackGen.load(std::memory_order_acquire)
                >= fRetireGen.load(std::memory_order_relaxed) + 2;
@@ -841,7 +843,8 @@ void Engine::DetachGraph() {
 void Engine::Start() {
     if (!fPlayer) return;   // no device: the caller has already reported it
     fPlayhead.store(fStartFrame);
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     fFinished.store(g != nullptr && fStartFrame >= g->EndFrame());
     if (g) g->fMonFrame = fStartFrame;   // monitor-only clock restarts here
     // The loudness readout starts from silence, as it did when every start was
@@ -867,7 +870,8 @@ void Engine::Stop() {
     // MIDI panic: release every live monitor voice so a note held at stop can't
     // sustain (up to kHeld ~1 h) or re-sound if the same engine restarts. Safe
     // now that the player is stopped and no callback is running.
-    if (Graph* g = fGraphs->Active()) g->ResetVoices();
+    GraphPin pin(*this);
+    if (Graph* g = pin.Active()) g->ResetVoices();
 }
 
 void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
@@ -923,7 +927,8 @@ bool Engine::QuiesceMonitorInput() {
 }
 
 float Engine::TrackPeakL(TrackId id) const {
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g || !g->fNodePeakL) return 0.0f;
     for (size_t i = 0; i < g->fBuses.size(); i++)
         if (g->fBuses[i].id == id)
@@ -931,7 +936,8 @@ float Engine::TrackPeakL(TrackId id) const {
     return 0.0f;
 }
 float Engine::TrackPeakR(TrackId id) const {
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g || !g->fNodePeakR) return 0.0f;
     for (size_t i = 0; i < g->fBuses.size(); i++)
         if (g->fBuses[i].id == id)
@@ -946,12 +952,14 @@ void Engine::SetMidiRoutes(const std::vector<MidiInputRoute>& routes) {
     }
     // A graph being built picks the list up at publication (PublishGraph); the
     // live one is updated here, atomically per bus.
-    if (Graph* g = fGraphs->Active()) g->ApplyRoutes(routes);
+    GraphPin pin(*this);
+    if (Graph* g = pin.Active()) g->ApplyRoutes(routes);
 }
 
 void Engine::UpdateMix(const Project& project) {
     fMasterGain.store(project.masterGain, std::memory_order_relaxed);
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g) return;   // a rebuild is in flight: the model reaches the next graph
     bool anySolo = false;
     for (const Track& t : project.Tracks())
@@ -1004,7 +1012,8 @@ bool Engine::SyncFx(const Project& project) {
     // the caller triggers a rebuild. With no active graph (a rebuild in flight)
     // there is nothing to sync and the graph being built predates the model, so
     // report a mismatch and let the caller request one.
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g) return false;
     bool allMatched = true;
     auto sync = [&](std::vector<std::unique_ptr<IEffect>>& fx,
@@ -1050,12 +1059,14 @@ void Engine::ApplyTempo(Graph& g, double bpm) {
 }
 
 void Engine::SetFxTempo(double bpm) {
-    if (Graph* g = fGraphs->Active()) ApplyTempo(*g, bpm);
+    GraphPin pin(*this);
+    if (Graph* g = pin.Active()) ApplyTempo(*g, bpm);
 }
 
 void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
                             float value) {
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g) return;
     std::vector<std::unique_ptr<IEffect>>* chain = nullptr;
     if (master) {
@@ -1074,7 +1085,8 @@ void Engine::PublishFxWatchNow() {
     // the same arrays every block); this exists for the stopped transport, where
     // there is no block and no second writer.
     if (fPlayerRunning.load(std::memory_order_acquire)) return;
-    Graph* g = fGraphs->Active();
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
     if (!g) return;   // no graph yet: the model is the only source of truth
     CaptureFxWatches(kInvalidTrackId, true, g->fMasterFx);
     for (Graph::Bus& b : g->fBuses)

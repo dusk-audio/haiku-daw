@@ -663,6 +663,39 @@ public:
     }
 
 private:
+    // ------------------------------------------------------------------
+    // Off-RT access to the active graph.
+    //
+    // The RT callback is protected by the callback-generation rule (see
+    // fRetireGen): a graph retired at generation R is freed only after R+2
+    // boundaries. The UI thread's live-parameter and meter paths have no such
+    // bound — a window thread preempted for two audio blocks while holding the
+    // pointer would be reading (and writing atomics into) a graph the reclaimer
+    // had freed. So they count themselves in first, and the reclaimer waits for
+    // the count to fall back to zero.
+    //
+    // Pin BEFORE loading the pointer — that ordering is what makes a reclaimer
+    // that reads zero safe: if it did not see this pin, the pin came after its
+    // read, and the graph it is about to free was already replaced by the
+    // publish that preceded that read, so this load returns the new graph.
+    // ------------------------------------------------------------------
+    class GraphPin {
+    public:
+        explicit GraphPin(const Engine& e) : fEngine(e) {
+            fEngine.fGraphUsers.fetch_add(1, std::memory_order_acquire);
+        }
+        ~GraphPin() {
+            fEngine.fGraphUsers.fetch_sub(1, std::memory_order_release);
+        }
+        GraphPin(const GraphPin&) = delete;
+        GraphPin& operator=(const GraphPin&) = delete;
+
+        Graph* Active() const { return fEngine.fGraphs->Active(); }
+
+    private:
+        const Engine& fEngine;
+    };
+
     // One queued rebuild: the model SNAPSHOT (taken on the caller's thread —
     // the window thread owns the model and may be editing it while the worker
     // builds), the position, and the transport intent.
@@ -798,8 +831,11 @@ private:
     // after it may be freed once two further boundaries have passed (the
     // callback that could still have loaded the old pointer has run to
     // completion) or immediately when the player is not running. See the
-    // reclaim predicate in Engine::Engine.
+    // reclaim predicate in the Engine constructor.
     std::atomic<uint64_t> fRetireGen{0};
+    // Off-RT users of the active graph (GraphPin). The reclaimer waits for this
+    // to be zero as well. Mutable: the meter readers are const.
+    mutable std::atomic<int> fGraphUsers{0};
     std::atomic<float> fLufsM{Loudness::kSilenceLufs};
     std::atomic<float> fLufsS{Loudness::kSilenceLufs};
     std::atomic<float> fTpDb{Loudness::kSilenceDb};
