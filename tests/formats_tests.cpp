@@ -384,8 +384,10 @@ static void TestAiffClampsAndCorrupt() {
     // Not a FORM at all.
     {
         const char* path = "formats_test_notaiff.bin";
+        static const char kNotAudio[] =
+            "this is not an audio file at all, not even close";
         std::ofstream f(path, std::ios::binary);
-        f.write("this is not an audio file at all, not even close", 50);
+        f.write(kNotAudio, (std::streamsize)std::strlen(kNotAudio));
         f.close();
         AiffSource a;
         CHECK(!a.Open(path));
