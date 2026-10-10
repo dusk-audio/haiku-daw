@@ -89,6 +89,67 @@ there — checked against the control's own `Value()`, not only the message.
   dark sliders with hash marks, a dark tick box and a dark grid field; the
   Sends window the same, with the accent arrow on each `To:` field.
 
+## Slice 3 — the knob and the dark control look
+
+| File | What it is |
+|---|---|
+| `src/ui/widgets/DawKnob.h` | the rotary. The dial is `Widgets.h`'s `DrawKnob()`, which grew a `fromCentre` flag so a unipolar knob lights its ring from the minimum end and a bipolar one from 12 o'clock. The control adds the vertical drag (Shift-fine), the wheel, arrow keys, Home/End, a double-click back to the default, a tooltip, and an `Invoke()` that carries the value as a float (`"value"`) beside `BControl`'s own `"be:value"` — a knob's value does not fit in an int32 |
+| `src/ui/widgets/DawControlLook.{h,cpp}` | the dark look for everything the kit has not replaced: menus, menu bars, menu items, scroll fields, scrollbars and their arrows, tabs, splitters, borders, group frames, status bars, check boxes, radio buttons, sliders, text-control borders and labels. The header declares EVERY virtual the API has, so a Haiku that adds one breaks the build rather than silently using a light default |
+| `CMakeLists.txt` | `DawControlLook.cpp` joins `daw_ui` |
+| `src/main.cpp` | the look is installed (`be_control_look`) before the first window exists |
+
+Two things the VM caught that the syntax check cannot:
+
+- The header's `_ReservedControlLook6..10` are declared but never defined by the
+  base. Overriding them put symbols in the vtable that do not exist, and only
+  the LINK saw it (`undefined reference to daw::DawControlLook::_ReservedControlLook7()`).
+  They are not overridden now. This is M1.1's lesson in a new costume: the
+  syntax check compiles one file at a time.
+- Nothing else: the app links, the suites pass, and the menus/alerts that draw
+  through the look do not crash the functional run.
+
+## Slice 4 — the rest of the windows
+
+| File | Change |
+|---|---|
+| `InstrumentWindow.cpp` | the ADSR row builder returns a `DawSlider`; three `DawMenuField`s; `Load...` is a `DawButton` |
+| `ExportWindow.cpp` | four `DawCheckBox`, three `DawMenuField`, two `DawTextField`, both buttons |
+| `ExportProgressWindow.cpp` | Cancel is a `DawButton` (the bar itself draws through the look's `DrawStatusBar`) |
+| `PluginBrowser.cpp`, `SampleBrowser.cpp` | filter/BPM fields and the buttons |
+| `MainWindow.cpp` | the master slider is a `DawSlider`, the tempo field a `DawTextField` |
+| `src/main.cpp` | the `B_LIST_*` system colours join `ApplyThemeColors`, so the browsers' stock `BListView` rows come out dark without a subclass |
+
+That last row is a deviation from the spec worth stating: `DawListView`,
+`DawProgress` and `DawAlert` were dropped as separate classes. A stock
+`BListView`, `BStatusBar` and `BAlert` already draw from the system colours and
+the control look, which is the same result with three fewer subclasses to keep
+in step. `TransportBar`'s play/stop/record lamps are custom-drawn already (not
+stock light controls), so nothing there needs the kit; its internals stay
+M3.1's rebuild.
+
+## Slice 5 — the slider's own five behaviours
+
+`BSlider`'s drag maps the pointer's absolute position, which leaves no room for
+a fine rate. `DawSlider` now takes the grab point on mouse-down and moves the
+value by the distance dragged — a tenth of the rate while Shift is held —
+keeping click-to-jump (a click outside the thumb still jumps there first) and
+adding a double-click back to `SetDefaultValue()`. With that, the kit's own
+value controls (knob, slider) have all five behaviours; the stock-subclass
+controls (`DawCheckBox`, `DawMenuField`, `DawTextField`) keep the stock
+interaction, which is what "a conversion must not change behaviour" asks for.
+
+### Verification (slices 3–5)
+
+- Host suite: **52/52**. `haiku_syntax_check.sh`: **10 OK, 0 FAIL**.
+- VM `build`: ctest **54/54**, `ui_functional_tests` **165 checks, 0 failures**
+  (the knob drag and its float value join the probe).
+- VM `build-off`: ctest **50/50**.
+- Click list for Marc: menus, scrollbars, alerts and any remaining stock control
+  now draw dark; the quantize/sends/instrument/export dialogs and the master
+  slider and tempo field are kit controls; the knob is not on screen yet (the
+  effects panel gets it in M1.4) — the probe window in the test suite is where
+  it is exercised today.
+
 ## Process note
 
 Slice 2's two commits were made while HEAD was on `master` (the branch was left
@@ -100,8 +161,9 @@ master, and slice 3 continues on the branch as the plan's rule says.
 
 ## Still to come
 
-Slices 2+ per the spec: `DawSlider`/`DawFader`/`DawKnob`/`DawCheckBox`/
-`DawMenuField`/`DawListView`/`DawProgress`/`DawAlert` and the `BControlLook`
-subclass, then the window conversions (QuantizeWindow, SendsWindow,
-SampleBrowser, PluginBrowser, InstrumentWindow, ExportWindow,
-ExportProgressWindow, TransportBar internals).
+- `DawFader` (a vertical channel fader for the mixer strips) — M1.4 restyles the
+  mixer, so it lands there rather than here.
+- `EffectsWindow`'s hand-rolled knob becomes a `DawKnob` when that window is
+  rebuilt (M1.4), so the two do not drift in the meantime.
+- The transport bar's internals are M3.1's rebuild (they are custom-drawn, not
+  stock controls).
