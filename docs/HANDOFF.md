@@ -3,6 +3,9 @@
 Read this first, then `docs/ARCHITECTURE.md`. This is a working project with
 a running audio engine; you are continuing it, not starting it.
 
+**Touching the UI?** Read `docs/UI_GUIDELINES.md` first. Reviewing screenshots
+of every window you change is part of done — tests passing is not enough.
+
 ## What this is
 
 A native **digital audio workstation for Haiku OS**, C++, built on the
@@ -237,6 +240,18 @@ pushed goes over in a `git bundle`. `sh scripts/vm.sh ssh '<cmd>'` runs a
 command there, `build`/`test` sync and build. The host is authoritative; the VM
 never commits.
 
+**Running an uncommitted tree on the VM** (to look at a change before
+committing it): `vm.sh sync` carries commits, not a dirty tree. Make a
+throwaway commit object without touching the branch, and sync that:
+```
+git add -A && CT=$(git commit-tree $(git write-tree) -p HEAD -m wip) \
+  && git reset -q --mixed HEAD && git update-ref refs/heads/_vmwt $CT
+VM_REF=_vmwt sh scripts/vm.sh build
+git update-ref -d refs/heads/_vmwt        # afterwards
+```
+(`git stash create` misses untracked files; keep scratch build dirs out of
+the repo root or `git add -A` sweeps them in.)
+
 The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
 2026-10-09). Push branches and master; never force-push.
 
@@ -248,6 +263,18 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `scripts/vm.sh` and the functional tests drive the machine).
 - The VM decode failure was the missing media plugins (above), not the
   code — verified by MediaPlayer also failing and by `media_probe.sh`.
+- **A locked VM screen draws nothing.** The app_server never asks a window to
+  draw while the screen is locked: draw timings print nothing and screenshots
+  show the lock screen. Visual review and draw measurements need it unlocked
+  (or the hardware box, 192.168.1.186).
+- **A killed dirty run wedges the next one.** Killing `ui_functional_tests` or
+  the app with unsaved changes leaves
+  `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
+  Recover? alert on the window thread and every locked check times out. Delete
+  it before a run.
+- **Green tests did not mean a working UI.** M1.3/M1.4 merged with the main
+  window visibly broken and every check passing. `docs/UI_GUIDELINES.md` is
+  the rule that came out of it.
 
 ## Commit rules
 

@@ -76,3 +76,7 @@ click list is only needed where a human eye or ear is genuinely the instrument.
 3. Assert on the model, on a file, or on window counts — never on a pixel.
 4. If it needs a widget-only path (a drag), stop: extract the decision into
    kit-free code and test that instead, per the project's kit-free rule.
+5. A window the test brings up gets a `Shot("name")` call while it is on
+   screen, and a model change made under the lock is followed by
+   `kMsgUiRefresh`. Assertions never read pixels, but a person (or agent)
+   reviewing the `DAW_UI_SHOTS` run does — see `docs/UI_GUIDELINES.md`.

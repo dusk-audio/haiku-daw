@@ -57,3 +57,10 @@ whoever picks this up:
 
 Either way the icon belongs in the rdef, and the recipe's `PROVIDES`/install
 step should not need to change.
+
+## Verifying either half
+
+Both change what the screen shows. Before calling either done, run the
+screenshot pass in `docs/UI_GUIDELINES.md` (section 1) and look at every shot
+the change touches; for the back-buffer, compare the shots against a run
+without it — they must be identical.

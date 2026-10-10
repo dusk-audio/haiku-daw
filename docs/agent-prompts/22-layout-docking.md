@@ -58,3 +58,11 @@ makes a new instance of itself every time it is opened.
   `docs/agent-prompts/README.md` gets the item.
 - A click list for the parts that need eyes: the panes at 100% and 150% font,
   the splitter drag, the dock's editor, the single-instance windows.
+
+> **Superseded (2026-10-10).** This package merged at 172 green checks with the
+> main window visibly broken — the transport bar stretched to a third of the
+> window, the dock was an unlabelled tab over a stretched button, the dB
+> readout sat inside the Mute row. A click list deferred the looking to Marc,
+> and nobody looked. Any UI package now follows `docs/UI_GUIDELINES.md`: the
+> implementer reviews screenshots of every window it touches before calling it
+> done.

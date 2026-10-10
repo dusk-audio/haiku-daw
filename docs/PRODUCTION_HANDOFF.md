@@ -219,6 +219,9 @@ checks still need Marc at the VM** (see "What's next" item 1).
   our own WAV I/O. Compressed formats need a bundled/own decoder.
 - Kit-free code is host-tested (`ctest`); engine/UI needs `haiku_syntax_check.sh`
   then VM runtime. **Every P0/P1 fix ships a regression test.**
+- **UI changes are reviewed on screen**, not only by tests: the
+  `DAW_UI_SHOTS` screenshot pass and the checklist in `docs/UI_GUIDELINES.md`
+  are part of done for anything under `src/ui/`.
 - Commits: `marc@duskaudio.com`, conventional-commit subjects, **no AI trailer**.
   There IS a GitHub remote now (`dusk-audio/haiku-daw`, public since
   2026-10-09); push branches, never force-push, and `scripts/vm.sh` moves a

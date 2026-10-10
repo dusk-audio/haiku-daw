@@ -84,6 +84,10 @@ M1.4 — until then leave it alone so the two do not drift in one commit.
 - `ui_functional_tests` green at the same check count (a conversion adds no
   behaviour); any NEW behaviour (hover/press visuals) that cannot be asserted
   programmatically goes on the PR's click list for Marc.
+- Screenshots of every converted window reviewed per `docs/UI_GUIDELINES.md`
+  (added after this package shipped: the kit's controls painted a darker tile
+  than their panel, the knob clipped its label and every stock button's label
+  sat flush left — all with the suite green).
 - Host suite untouched (Haiku-only code); counts in the record.
 - PR record `docs/agent-prompts/21-widget-kit-PR.md`; the status table in
   `docs/agent-prompts/README.md` gets each converted window as it lands.
