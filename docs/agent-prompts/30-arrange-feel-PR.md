@@ -333,5 +333,8 @@ test on the real target), and the tooltip pop-ups (Haiku shows them from the
 tooltip manager on a real hover+idle; the suite sets them, and the shots cannot
 show that). Both are on the click list for the desktop.
 
-The fixture cleanup at the end of `TestArrangeFeel` runs after its last `Shot`,
-so every shot above is of the state the test set up.
+`TestArrangeFeel` leaves its two fixture tracks in the project (the next test,
+`TestBigProjectPlayback`, measures its play start against that project). Removing
+them at the end of the test is a change I did not get verified on the VM — the
+shared lock was taken by another agent's pass — so it is not in this revision;
+the number that test prints is inside its own bound either way (see above).
