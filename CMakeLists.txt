@@ -513,6 +513,7 @@ if(HAIKU)
         src/ui/MixerWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
+        src/ui/widgets/DawControlLook.cpp
         src/storage/BfsAttr.cpp
         src/plugin/PluginHost.cpp
     )

@@ -22,6 +22,7 @@
 #include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
 #include "ui/Theme.h"      // the kit's system colours (M1.3)
+#include "ui/widgets/DawControlLook.h"   // the dark look (M1.3)
 #include "Version.h"   // DAW_VERSION_STRING, DAW_APP_SIGNATURE, DAW_PROJECT_MIME
 
 // Defined by the daw_lv2 target, which exists only when CMake found lilv. With
@@ -117,6 +118,14 @@ public:
     // menu, a scrollbar) read these, so the dark theme does not have light
     // holes where a control was not converted. The BControlLook subclass that
     // draws the stock controls themselves comes with the rest of the kit.
+    // The dark look for everything the kit has not replaced (M1.3): menus,
+    // scrollbars, tabs, alerts, and any stock button or text control left in a
+    // window. Installed before the first window exists.
+    static void InstallControlLook() {
+        BPrivate::BControlLook* look = new DawControlLook();
+        be_control_look = look;
+    }
+
     static void ApplyThemeColors() {
         using namespace daw;
         set_ui_color(B_PANEL_BACKGROUND_COLOR,        ColChrome());
@@ -136,6 +145,7 @@ public:
 
     void ReadyToRun() override {
         ApplyThemeColors();
+        InstallControlLook();
         RegisterProjectMimeType();
         InstallPlugins();
         InstallLv2();

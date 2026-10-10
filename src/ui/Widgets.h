@@ -19,7 +19,10 @@ namespace daw {
 // as a thick stroked arc) from 12 o'clock to the value, and a crisp white
 // pointer. `val` in [-1,1] (bipolar, e.g. pan; 0 = 12 o'clock). `accent` colors
 // the value ring. The knob sweeps +/- 140 degrees from top.
-inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent) {
+// `fromCentre`: a bipolar knob (pan, gain trim) lights its ring from 12
+// o'clock; a unipolar one (a 0..100% amount) lights it from the minimum end.
+inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent,
+                     bool fromCentre = true) {
     if (!(val >= -1.0f)) val = -1.0f;   // NaN/low -> -1
     if (val > 1.0f) val = 1.0f;
     const float cx = (r.left + r.right) * 0.5f;
@@ -34,7 +37,10 @@ inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent) {
     v->SetHighColor(ColGrid());
     v->StrokeArc(BPoint(cx, cy), ringR, ringR, -50.0f, 280.0f);   // full track
     v->SetHighColor(accent);
-    v->StrokeArc(BPoint(cx, cy), ringR, ringR, 90.0f, -val * 140.0f);
+    if (fromCentre)
+        v->StrokeArc(BPoint(cx, cy), ringR, ringR, 90.0f, -val * 140.0f);
+    else
+        v->StrokeArc(BPoint(cx, cy), ringR, ringR, -50.0f, (val + 1.0f) * 140.0f);
     v->SetPenSize(1.0f);
 
     // Body.

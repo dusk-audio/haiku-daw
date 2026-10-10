@@ -16,6 +16,7 @@
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawCheckBox.h"
+#include "../src/ui/widgets/DawKnob.h"
 #include "../src/ui/widgets/DawSlider.h"
 #include "../src/model/MidiOps.h"       // QuantGrid
 #include "../src/model/Project.h"
@@ -1395,6 +1396,7 @@ constexpr uint32 kMsgKitButton = 'kbt1';
 constexpr uint32 kMsgKitToggle = 'ktg1';
 constexpr uint32 kMsgKitCheck  = 'kck1';
 constexpr uint32 kMsgKitSlider = 'ksl1';
+constexpr uint32 kMsgKitKnob   = 'knb1';
 
 class KitProbeWindow : public BWindow {
 public:
@@ -1404,11 +1406,13 @@ public:
 
     void MessageReceived(BMessage* msg) override {
         if (msg->what == kMsgKitButton || msg->what == kMsgKitToggle
-            || msg->what == kMsgKitCheck || msg->what == kMsgKitSlider) {
+            || msg->what == kMsgKitCheck || msg->what == kMsgKitSlider
+            || msg->what == kMsgKitKnob) {
             fLast = msg->what;
             int32 v = -1;
             msg->FindInt32("be:value", &v);
             fValue = v;
+            msg->FindFloat("value", &fFloat);
             return;   // consumed: the probe only observes
         }
         BWindow::MessageReceived(msg);
@@ -1416,6 +1420,7 @@ public:
 
     uint32 fLast  = 0;
     int32  fValue = -1;
+    float  fFloat = -1.0f;   // the kit's own "value" on knobs
 };
 
 } // namespace
@@ -1437,28 +1442,37 @@ static void TestWidgetKit(MainWindow* win) {
     DawSlider* slider = new DawSlider(BRect(10, 100, 240, 130), "kit-sld",
                                       "Level", new BMessage(kMsgKitSlider),
                                       0, 100);
+    DawKnob* knob = new DawKnob(BRect(180, 5, 255, 95), "kit-knob", "Gain",
+                                new BMessage(kMsgKitKnob), 0.0f, 100.0f);
     root->AddChild(button);
     root->AddChild(toggle);
     root->AddChild(check);
     root->AddChild(slider);
+    root->AddChild(knob);
     probe->Show();
     snooze(250000);
 
-    auto click = [&](BView* view, BPoint at) {
+    auto postMouse = [&](BView* view, uint32 what, BPoint at, int32 clicks) {
         BPoint screen(at);
         if (probe->LockWithTimeout(1000000) == B_OK) {
             screen = view->ConvertToScreen(at);
             probe->Unlock();
         }
-        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
-        for (uint32 what : whats) {
-            BMessage m(what);
-            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
-            m.AddInt32("clicks", 1);
-            m.AddPoint("where", at);
-            m.AddPoint("screen_where", screen);
-            BMessenger(view).SendMessage(&m);
-        }
+        BMessage m(what);
+        m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+        m.AddInt32("clicks", clicks);
+        m.AddPoint("where", at);
+        m.AddPoint("screen_where", screen);
+        BMessenger(view).SendMessage(&m);
+    };
+    auto click = [&](BView* view, BPoint at) {
+        postMouse(view, B_MOUSE_DOWN, at, 1);
+        postMouse(view, B_MOUSE_UP, at, 1);
+    };
+    auto drag = [&](BView* view, BPoint from, BPoint to) {
+        postMouse(view, B_MOUSE_DOWN, from, 1);
+        postMouse(view, B_MOUSE_MOVED, to, 1);
+        postMouse(view, B_MOUSE_UP, to, 1);
     };
     auto probeState = [&](uint32 what, int32 value) {
         return WaitFor([&] {
@@ -1503,6 +1517,23 @@ static void TestWidgetKit(MainWindow* win) {
         probe->Unlock();
     }
     CHECK(sliderValue > 50);
+
+    // The knob: a vertical drag up raises the value, and the message carries
+    // it as a float as well as BControl's own be:value.
+    drag(knob, BPoint(37, 45), BPoint(37, 15));
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->fLast == kMsgKitKnob && probe->fFloat > 10.0f;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    float knobValue = -1.0f;
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        if (DawKnob* k = dynamic_cast<DawKnob*>(probe->FindView("kit-knob")))
+            knobValue = k->FloatValue();
+        probe->Unlock();
+    }
+    CHECK(knobValue > 10.0f);
 
     // Pressed, then released outside the control: no invocation. The point is
     // outside the button but inside the window, so the message is dispatched.
