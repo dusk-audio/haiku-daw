@@ -22,6 +22,8 @@
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
+#include "../model/MidiExpression.h"   // BendPoint / VoiceExpression
+#include "../model/Sustain.h"         // SustainLatch (CC64, live form)
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
 #include "../synth/IInstrument.h"
@@ -389,18 +391,44 @@ private:
 
     // Drain the live-MIDI ring, advance the held-voice pool, and rebuild
     // fLiveNotes for this block. RT-only; called once per FillBuffer.
-    void UpdateLiveVoices(Frame blockStart);
+    void UpdateLiveVoices(Frame blockStart, size_t frames);
+
+    // The pedal lifted at `at`: every voice it was holding stops ringing there.
+    // A voice the player is still holding down is untouched — the pedal only
+    // releases what it took (model/Sustain.h).
+    void ReleaseSustained(Frame at);
+
+    // The live channel expression for this block: the bend ratio and phase the
+    // accumulator has reached, plus CC1. Recorded notes get theirs from the
+    // track's events (MidiExpression.h); a live note uses this instead.
+    VoiceExpression LiveExpression() const;
+
+    // The key a live voice is held under: channel * 128 + pitch, so the latch
+    // tracks two keyboards' channels apart. (Two endpoints on the same channel
+    // share a key; the note-off match below still tells those voices apart by
+    // source.)
+    static int VoiceKey(uint8_t channel, uint8_t pitch) {
+        return (int)channel * 128 + (int)pitch;
+    }
 
     // A live-monitored note held on the keyboard (or in its release tail).
     struct LiveVoice {
         bool    active    = false;
         bool    releasing = false;   // note-off seen; ringing out the tail
+        // The pedal (CC64) took this voice's note-off instead of releasing it:
+        // it stays silent-free until the pedal lifts, or until the key is struck
+        // again. Never true for a voice already `releasing`. See model/Sustain.h.
+        bool    sustained = false;
         uint8_t pitch     = 0;
         uint8_t vel       = 0;
         uint8_t channel   = 0;
         Frame   start     = 0;       // engine frame the note-on landed on
         Frame   off       = 0;       // engine frame of note-off (if releasing)
         int32_t source    = 0;       // endpoint the note-on arrived from
+        // Bend phase the voice was born with (engine frames): the live
+        // accumulator at its note-on, so a wheel move bends it from where it
+        // started rather than jumping its phase (see UpdateLiveVoices).
+        double  bend      = 0.0;
     };
     static constexpr int kMaxLiveVoices = 64;
 
@@ -415,6 +443,10 @@ private:
         std::vector<TrackStream*>             streams;   // audio, owned by fStreams
         std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
         std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
+        // The track's bend events, digested at Load (sorted, phase-summed) so
+        // the RT thread evaluates the bend for a block with a binary search and
+        // never scans the event list. Empty for a track with no pitch bend.
+        std::vector<BendPoint>                bend;
         std::unique_ptr<IInstrument>          instrument;// voice (MIDI)
         // Live mix params: written by the UI thread (UpdateMix) and read by the
         // RT callback (FillBuffer). Atomic + relaxed so a concurrent fader move
@@ -496,6 +528,7 @@ private:
             : id(o.id), output(o.output),
               streams(std::move(o.streams)), notes(std::move(o.notes)),
               events(std::move(o.events)),
+              bend(std::move(o.bend)),
               instrument(std::move(o.instrument)),
               midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
               midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
@@ -521,6 +554,7 @@ private:
             id = o.id; output = o.output;
             streams = std::move(o.streams); notes = std::move(o.notes);
             events = std::move(o.events);
+            bend = std::move(o.bend);
             instrument = std::move(o.instrument);
             midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
             midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -565,6 +599,21 @@ private:
     // sequentially inside one callback, so a single buffer serves them all.
     std::vector<float>                        fScratch;
     std::atomic<IMidiInput*>                  fLiveMidi{nullptr};  // live-monitor input
+    // Live channel controllers, kept from the incoming event stream so a bend, a
+    // wheel or the pedal reaches the voices that are already sounding. Fixed
+    // arrays written and read only on the RT thread — no allocation, no locks.
+    //
+    // These are ENGINE-wide, not per endpoint: a second keyboard's wheel would
+    // move every monitored track (the note path demuxes by endpoint, this does
+    // not). Stated in the record as the known limit of live expression.
+    uint8_t                                   fLiveCc[128] = {};   // 0..127, CC64 = pedal
+    float                                     fLiveBendRatio = 1.0f;
+    // ∫(bendRatio − 1) dt over the engine's life, in frames: the live twin of
+    // MidiExpression's Δ, advanced once per block from fLiveBendRatio. A note-on
+    // stamps its value into the new voice, so a wheel move never jumps the phase
+    // of a note that is already sounding.
+    double                                    fLiveBendPhase = 0.0;
+    SustainLatch                              fSustain;            // live CC64 latch
     // Live-input routes, kept so a rebuild re-applies them. Loop-record restarts
     // the engine at the loop seam, which rebuilds every Bus; without this the
     // demux would silently revert to "every track hears everything" mid-take.

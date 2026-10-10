@@ -421,6 +421,80 @@ int main() {
         std::remove(apath);
     }
 
+    // The CC lane's round trip for ANY controller. The piano roll can show and
+    // edit all 128 now (package 32), and the `mev` record already carries the
+    // controller number, so this is a regression guard on that: a pedal lane and
+    // an arbitrary "some synth's CC74" lane come back byte for byte, and a file
+    // written before the lane existed (no `mev` lines at all) still loads.
+    {
+        const char* cpath = "cc_lane_roundtrip.dawproj";
+        Project p;
+        Track t; t.id = p.NextTrackId(); t.type = TrackType::Midi; t.name = "cc";
+        MidiClip c; c.id = p.NextClipId(); c.startFrame = 0;
+        c.lengthFrames = 96000;
+        c.notes.push_back(MidiNote{ 60, 100, 0, 12000 });
+        c.events.push_back({ MidiClipEvent::CC, 0,     64, 127 });   // pedal
+        c.events.push_back({ MidiClipEvent::CC, 24000, 64, 0   });
+        c.events.push_back({ MidiClipEvent::CC, 1000,  74, 42  });   // no name
+        c.events.push_back({ MidiClipEvent::CC, 5000,  1,  127 });   // mod wheel
+        c.events.push_back({ MidiClipEvent::CC, 9000,  31, 7   });   // LSB bank
+        t.midiClips.push_back(c);
+        CHECK(p.AddTrack(t));
+
+        CHECK(ProjectIO::Save(p, cpath));
+        Project q;
+        CHECK(ProjectIO::Load(q, cpath));
+        std::remove(cpath);
+        CHECK(q.Tracks().size() == 1);
+        const MidiClip* r = q.Tracks()[0].FindMidiClip(c.id);
+        CHECK(r != nullptr);
+        if (r) {
+            CHECK(r->events.size() == 5);
+            bool ok[128] = {};
+            for (const MidiClipEvent& e : r->events)
+                if (e.type == MidiClipEvent::CC && e.data >= 0 && e.data < 128)
+                    ok[e.data] = true;
+            CHECK(ok[1] && ok[31] && ok[64] && ok[74]);   // every lane survived
+            // The values and frames too, not just the numbers.
+            for (const MidiClipEvent& e : r->events) {
+                if (e.data == 64 && e.startFrame == 0)     CHECK(e.value == 127);
+                if (e.data == 64 && e.startFrame == 24000) CHECK(e.value == 0);
+                if (e.data == 74) CHECK(e.startFrame == 1000 && e.value == 42);
+            }
+            // And with the lane in place, the render path reads the pedal out of
+            // it: the note's key-up under CC64 is held to the lift.
+            std::vector<MidiNote> played = q.Tracks()[0].CollectNotes();
+            CHECK(played.size() == 1);
+            CHECK(played[0].lengthFrames == 12000);       // raw: the key-up
+            played = q.Tracks()[0].CollectPlaybackNotes();
+            CHECK(played.size() == 1);
+            CHECK(played[0].lengthFrames == 24000);       // pedal-up cuts it here
+        }
+    }
+
+    // A project saved before the CC lane could offer anything still loads: the
+    // `mev` lines are optional, and no `mev` line at all is a clean file.
+    {
+        const char* oldpath = "no_mev_lines.dawproj";
+        std::ofstream f(oldpath);
+        f << "DAW 1 1\n"
+          << "track 1 midi 1 0 0 0 0 0 \"T\" 0 60 0 0 0\n"
+          << "midiclip 1 0 96000 0 0 0 0 1\n"
+          << "note 60 100 0 4800\n"
+          << "endtrack\nenddaw\n";
+        f.close();
+        Project q;
+        CHECK(ProjectIO::Load(q, oldpath));
+        std::remove(oldpath);
+        const MidiClip* c = q.Tracks().empty() ? nullptr
+                                               : q.Tracks()[0].FindMidiClip(1);
+        CHECK(c != nullptr);
+        if (c) {
+            CHECK(c->notes.size() == 1);
+            CHECK(c->events.empty());
+        }
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

@@ -36,11 +36,18 @@ public:
 
     void Render(const std::vector<MidiNote>& notes,
                 float* out, size_t frames, Frame blockStart,
-                StereoGain from, StereoGain to) override;
+                StereoGain from, StereoGain to,
+                const VoiceExpression& expr = {}) override;
 
     using IInstrument::Render;   // keep the constant-gain convenience overloads
 
     const char* Name() const override { return "Sampler"; }
+
+    // On top of the interface's contract: pitch bend and the mod wheel move the
+    // voice's READ POSITION, not the region's tuning, so a bend slides the
+    // sample exactly as an oscillator's phase slides (see model/MidiExpression.h
+    // and IInstrument.h). The position is derived from the note's own age, so a
+    // bent voice is still a pure function of its block.
 
     // Simultaneously sounding region-voices. A single note can open several
     // (SFZ layers every matching region), so this is well above a polyphony
@@ -68,6 +75,7 @@ private:
         float         amp     = 1.0f; // velocity x volume, pre-pan
         double        ratio   = 1.0;  // source frames per output frame
         int           order   = 0;    // note index, for a deterministic voice cap
+        double        bend    = 0.0;  // the note's bend phase at its start (MidiExpression)
     };
 
     // Rebuild fVoices for the block, applying round-robin selection, choke

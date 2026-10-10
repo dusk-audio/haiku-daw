@@ -63,6 +63,18 @@ public:
 
     void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
 
+    // Which controller the bottom lane shows: -1 = note velocity, else a CC
+    // number 0..127. The lane's own popup is where a person picks it (the menu
+    // lists the controllers this region already has, then all 128), and this is
+    // what each menu item calls — public so a test can drive it without opening
+    // a popup, exactly like RunMidiOp below.
+    void SetLaneCc(int cc);
+    int  LaneCc() const { return fLaneCc; }
+    // The lane button's caption ("Vel", "Mod", "CC74", ...): what the button
+    // draws, readable so a test can require the caption to agree with the lane
+    // (the two disagreed once, and only a screenshot noticed).
+    const char* LaneLabel() const { return fLaneLabel; }
+
     // --- MIDI transforms ---------------------------------------------------
     // The transform runs here, on the snapshot, and the result is posted as one
     // undoable step (kMsgApplyMidiOp). `param` is the semitone count for
@@ -101,14 +113,21 @@ private:
     void  OpenQuantizeWindow();         // settings, remembered in fQuant
 
     // --- bottom lane ------------------------------------------------------
-    // The strip under the grid shows either note velocity or one continuous
-    // controller. Only the CCs the synth actually renders are offered, so an
-    // edit here is always audible: CC7 volume x CC11 expression is the channel
-    // gain and CC10 is the pan (see model/MidiControl.h).
-    struct LaneDef { const char* label; int cc; };   // cc < 0 = velocity
-    static const LaneDef kLanes[4];
-    int   fLane = 0;                    // index into kLanes (0 = velocity)
+    // The strip under the grid shows either note velocity or ONE controller.
+    // Any of the 128 can be shown (the lane button opens a menu of them), so a
+    // recorded pedal or a synth's CC74 is editable here; the controllers the
+    // voices actually act on today are CC1 (mod-wheel vibrato), CC7 x CC11
+    // (channel gain), CC10 (pan) and CC64 (sustain) — see model/MidiControl.h,
+    // model/MidiExpression.h and model/Sustain.h. The rest are recorded, drawn
+    // and saved (and exported to SMF) without an audible effect of their own.
+    int   fLaneCc = -1;                 // -1 = velocity
+    char  fLaneLabel[16] = "Vel";       // the lane button's short caption
     int   fHoverTool = -1;              // the tool button under the cursor
+    // Fills `buf` with that caption: "Vel", or an abbreviation for a controller
+    // people know by one ("Mod", "Vol", "Pan", "Expr", "Sus"), else "CC n".
+    // Static + buffer-taking so it is safe to call while another label lives.
+    static const char* LaneLabelFor(int cc, char* buf, size_t n);
+    void  LaneMenu();                   // the lane button's popup
     BRect LanePickRect() const;         // the lane selector button
     // CC-lane geometry + editing.
     float CcValueToY(int value) const;  // 0..127 -> y inside the lane

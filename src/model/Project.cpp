@@ -1,10 +1,31 @@
 #include "Project.h"
 
+#include "Sustain.h"
+
 #include <algorithm>
 
 namespace daw {
 
 // --- Track ------------------------------------------------------------
+
+// The playback view of the MIDI content: the same flattening CollectNotes does,
+// with the CC64 pedal applied to each region in its own frame base first, so the
+// extension is bounded by the region window (and a re-strike of the key cuts it,
+// exactly as the live latch does).
+std::vector<MidiNote> Track::CollectPlaybackNotes() const {
+    std::vector<MidiNote> out;
+    for (const MidiClip& c : midiClips) {
+        if (c.takeGroup > 0 && !c.takeActive)
+            continue;   // inactive loop-record take: silent
+        std::vector<MidiNote> region = FlattenMidiClip(c);
+        ApplySustain(region, c.events, c.lengthFrames);
+        for (MidiNote n : region) {
+            n.startFrame += c.startFrame;
+            out.push_back(n);
+        }
+    }
+    return out;
+}
 
 Clip* Track::FindClip(ClipId id) {
     for (auto& c : clips)
