@@ -14,6 +14,7 @@
 #include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
+#include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/model/MidiOps.h"       // QuantGrid
 #include "../src/model/Project.h"
 #include "../src/model/ProjectIO.h"   // the Open flow's fixture file
@@ -1382,6 +1383,111 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     SetThemeScaleOverride(0.0f);   // back to the real font
 }
 
+// M1.3: the kit's controls are real BControls. A click lands on them the way
+// the server delivers one (see TestThemeScale for why a synthetic click needs
+// "screen_where"), a DawButton delivers its message, and a DawToggle reports
+// the new value it flipped to.
+namespace {
+
+constexpr uint32 kMsgKitButton = 'kbt1';
+constexpr uint32 kMsgKitToggle = 'ktg1';
+
+class KitProbeWindow : public BWindow {
+public:
+    KitProbeWindow()
+        : BWindow(BRect(300, 300, 500, 400), "kit-probe", B_TITLED_WINDOW_LOOK,
+                  B_NORMAL_WINDOW_FEEL, B_AVOID_FOCUS) {}
+
+    void MessageReceived(BMessage* msg) override {
+        if (msg->what == kMsgKitButton || msg->what == kMsgKitToggle) {
+            fLast = msg->what;
+            int32 v = -1;
+            msg->FindInt32("be:value", &v);
+            fValue = v;
+            return;   // consumed: the probe only observes
+        }
+        BWindow::MessageReceived(msg);
+    }
+
+    uint32 fLast  = 0;
+    int32  fValue = -1;
+};
+
+} // namespace
+
+static void TestWidgetKit(MainWindow* win) {
+    std::printf("widget kit ...\n");
+    (void)win;
+
+    KitProbeWindow* probe = new KitProbeWindow();
+    BView* root = new BView(probe->Bounds(), "root", B_FOLLOW_ALL, B_WILL_DRAW);
+    root->SetViewColor(ColHeader());
+    probe->AddChild(root);
+    DawButton* button = new DawButton(BRect(10, 10, 100, 32), "kit-btn",
+                                      "Press", new BMessage(kMsgKitButton));
+    DawToggle* toggle = new DawToggle(BRect(10, 40, 100, 62), "kit-tog",
+                                      "Latch", new BMessage(kMsgKitToggle));
+    root->AddChild(button);
+    root->AddChild(toggle);
+    probe->Show();
+    snooze(250000);
+
+    auto click = [&](BView* view, BPoint at) {
+        BPoint screen(at);
+        if (probe->LockWithTimeout(1000000) == B_OK) {
+            screen = view->ConvertToScreen(at);
+            probe->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 1);
+            m.AddPoint("where", at);
+            m.AddPoint("screen_where", screen);
+            BMessenger(view).SendMessage(&m);
+        }
+    };
+    auto probeState = [&](uint32 what, int32 value) {
+        return WaitFor([&] {
+            if (probe->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = probe->fLast == what && probe->fValue == value;
+            probe->Unlock();
+            return ok;
+        }, 5000000);
+    };
+
+    // A push button keeps its value at off; the point is that its message
+    // arrives here at all.
+    click(button, BPoint(45, 11));   // the control's own coordinates
+    CHECK(probeState(kMsgKitButton, B_CONTROL_OFF));
+
+    // The toggle reports the value it flipped TO: off -> on -> off.
+    click(toggle, BPoint(45, 11));
+    CHECK(probeState(kMsgKitToggle, B_CONTROL_ON));
+    click(toggle, BPoint(45, 11));
+    CHECK(probeState(kMsgKitToggle, B_CONTROL_OFF));
+
+    // Pressed, then released outside the control: no invocation. The point is
+    // outside the button but inside the window, so the message is dispatched.
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        probe->fLast = 0;
+        probe->Unlock();
+    }
+    click(button, BPoint(55, 80));
+    snooze(200000);
+    bool invokedOutside = true;
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        invokedOutside = probe->fLast != 0;
+        probe->Unlock();
+    }
+    CHECK(!invokedOutside);
+
+    probe->Lock();
+    probe->Quit();
+    snooze(150000);
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1414,6 +1520,7 @@ static int32 TestThread(void*) {
     TestErrorReports(win, project, stack);
     TestKeyboardFocus(win, project);
     TestThemeScale(win, project);
+    TestWidgetKit(win);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
