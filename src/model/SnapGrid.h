@@ -50,11 +50,22 @@ inline double SnapStepsPerBeat(SnapKind kind) {
     }
 }
 
+// A bar's length in BEATS for the meter segment containing `f`: the governing
+// MeterChange's `num` beats of `4/denom` quarter notes each, counted from that
+// change's frame, matching TempoMap::BarBeat. Shared by SnapFrame and SnapStep
+// so the grid line and the grid STEP cannot disagree about the bar.
+inline double SnapBarBeats(const TempoMap& tm, Frame f) {
+    double barBeats = 4.0;
+    for (const MeterChange& m : tm.Meters()) {
+        if (m.frame > f) break;
+        const double denom = m.denom > 0 ? m.denom : 4;
+        barBeats = (double)(m.num > 0 ? m.num : 4) * 4.0 / denom;
+    }
+    return barBeats > 0.0 ? barBeats : 4.0;
+}
+
 // Snap a timeline frame to the nearest grid line. `Off` and a Shift-held edit
 // are the caller's business -- this returns `f` unchanged when the grid is off.
-//
-// A bar is metered: the governing MeterChange's `num` beats of `4/denom` quarter
-// notes each, counted from that change's frame, matching TempoMap::BarBeat.
 inline Frame SnapFrame(const TempoMap& tm, Frame f, SnapGrid grid) {
     if (!grid.On()) return f;
     if (f < 0) f = 0;
@@ -63,15 +74,12 @@ inline Frame SnapFrame(const TempoMap& tm, Frame f, SnapGrid grid) {
 
     if (grid.kind == SnapKind::Bar) {
         // The meter segment containing this frame, and the bar length in beats.
-        double barBeats = 4.0;
-        double segBeat  = 0.0;
+        double segBeat = 0.0;
         for (const MeterChange& m : tm.Meters()) {
             if (m.frame > f) break;
-            segBeat  = tm.BeatAt(m.frame);
-            const double denom = m.denom > 0 ? m.denom : 4;
-            barBeats = (double)(m.num > 0 ? m.num : 4) * 4.0 / denom;
+            segBeat = tm.BeatAt(m.frame);
         }
-        if (barBeats <= 0.0) return f;
+        const double barBeats = SnapBarBeats(tm, f);
         const double bars  = std::floor((beat - segBeat) / barBeats + 0.5);
         const Frame  out   = tm.FrameAt(segBeat + bars * barBeats);
         return out < 0 ? 0 : out;
@@ -83,6 +91,28 @@ inline Frame SnapFrame(const TempoMap& tm, Frame f, SnapGrid grid) {
     const double snapped = std::floor(beat * steps + 0.5) / steps;
     const Frame  out     = tm.FrameAt(snapped);
     return out < 0 ? 0 : out;
+}
+
+// The frame distance between two adjacent grid lines near `at` — what the
+// keyboard's nudge (`,` `.`) moves a clip by. `Off` nudges by a 1/16 note (the
+// editor's historical step), so a nudge always moves by something musical
+// rather than by a single frame nobody can see.
+inline Frame SnapStep(const TempoMap& tm, Frame at, SnapGrid grid) {
+    if (at < 0) at = 0;
+    const SnapGrid g = grid.On() ? grid
+                                 : SnapGrid{ SnapKind::Sixteenth, false };
+    const double fpb = tm.FramesPerBeatAt(at);
+    double beats;
+    if (g.kind == SnapKind::Bar) {
+        beats = SnapBarBeats(tm, at);
+    } else {
+        double steps = SnapStepsPerBeat(g.kind);
+        if (g.triplet) steps *= 1.5;
+        beats = steps > 0.0 ? 1.0 / steps : 1.0;
+    }
+    Frame step = (Frame)(fpb * beats + 0.5);
+    if (step < 1) step = 1;
+    return step;
 }
 
 // The label the button and the tooltip show. "1/8T" for a triplet, "Off" for no

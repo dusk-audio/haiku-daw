@@ -130,6 +130,31 @@ int main() {
         CHECK(std::strcmp(SnapGridLabel({ SnapKind::ThirtySecond, true }), "1/32T") == 0);
     }
 
+    // SnapStep (M2.5's nudge): the distance between adjacent grid lines at a
+    // frame, in frames. 120 BPM @ 48k = 24000 frames per beat.
+    {
+        TempoMap t;
+        t.sampleRate = SR;
+        t.SetTempoAt(0, 120.0);
+        CHECK(SnapStep(t, 0, { SnapKind::Quarter, false }) == 24000);
+        CHECK(SnapStep(t, 0, { SnapKind::Half, false })    == 48000);
+        CHECK(SnapStep(t, 0, { SnapKind::Eighth, false })  == 12000);
+        CHECK(SnapStep(t, 0, { SnapKind::Sixteenth, false }) == 6000);
+        CHECK(SnapStep(t, 0, { SnapKind::ThirtySecond, false }) == 3000);
+        CHECK(SnapStep(t, 0, { SnapKind::Bar, false })     == 96000);  // 4/4
+        // A triplet is 3 steps in the space of 2: two thirds of the plain step.
+        CHECK(SnapStep(t, 0, { SnapKind::Eighth, true })   == 8000);
+        // Off nudges by the historical 1/16, so it always moves audibly.
+        CHECK(SnapStep(t, 0, { SnapKind::Off, false })     == 6000);
+        // A meter change moves the bar step with it (3/4 = 72000 frames).
+        t.SetMeterAt(0, 3, 4);
+        CHECK(SnapStep(t, 0, { SnapKind::Bar, false })     == 72000);
+        // A tempo change moves it too (240 BPM = 12000 frames per beat).
+        t.SetTempoAt(48000, 240.0);
+        CHECK(SnapStep(t, 48000, { SnapKind::Quarter, false }) == 12000);
+        CHECK(SnapStep(t, 0, { SnapKind::Quarter, false })     == 24000);
+    }
+
     // The menu's division list is the plan's order and matches the labels.
     {
         int n = 0;

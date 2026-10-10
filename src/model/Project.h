@@ -10,6 +10,7 @@
 #include "Automation.h"
 #include "TempoMap.h"
 #include "Instrument.h"
+#include "Fade.h"
 
 #include <string>
 #include <vector>
@@ -31,6 +32,16 @@ struct Clip {
     // alternatives; only the one with takeActive sounds. 0 = an ordinary clip.
     int         takeGroup     = 0;
     bool        takeActive    = true;
+    // Clip depth (M2.5). `name` is the display name (empty = the file's base
+    // name); `colorIndex` 0 = inherit the track's colour, like MidiClip's;
+    // `muted` silences the clip without touching the track (the engine, the
+    // exporter and the crossfade partner rule all honour it); `fadeShape` is
+    // the curve the clip's own fades render with (an auto-crossfade's
+    // contribution renders equal-power regardless -- see Crossfade.h).
+    std::string name;
+    int         colorIndex    = 0;
+    bool        muted         = false;
+    FadeShape   fadeShape     = FadeShape::Linear;
 };
 
 // A single MIDI note. Its position is in frames RELATIVE to the containing
@@ -79,6 +90,10 @@ struct MidiClip {
     // alternatives; only the one with takeActive sounds/draws. 0 = ordinary.
     int                   takeGroup     = 0;
     bool                  takeActive    = true;
+    // M2.5: a region mutes like an audio clip does, so the Mute tool means one
+    // thing whichever block it is pointed at. CollectNotes/CollectEvents skip
+    // a muted region; the timeline draws it dimmed.
+    bool                  muted         = false;
 };
 
 // Shift a region's clip-relative content by `delta` frames, so it keeps its
@@ -175,6 +190,8 @@ struct Track {
         for (const MidiClip& c : midiClips) {
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: silent
+            if (c.muted)
+                continue;   // per-region mute (M2.5): nothing from it sounds
             for (const MidiNote& n : c.notes) {
                 if (n.startFrame < 0 || n.startFrame >= c.lengthFrames)
                     continue;
@@ -211,6 +228,8 @@ struct Track {
         for (const MidiClip& c : midiClips) {
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: silent
+            if (c.muted)
+                continue;   // per-region mute (M2.5)
             for (const MidiClipEvent& e : c.events) {
                 if (e.startFrame < 0 || e.startFrame >= c.lengthFrames)
                     continue;   // outside the region window
