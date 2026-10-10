@@ -222,6 +222,15 @@ static bool WindowListed(const char* title) {
     return false;
 }
 
+// ...and by IDENTITY, for when two windows share a title. Comparing pointers
+// is safe after a Quit: the window is deleted, but comparing its address with
+// the list's never dereferences it.
+static bool WindowListed(BWindow* which) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++)
+        if (be_app->WindowAt(i) == which) return true;
+    return false;
+}
+
 // Wait until only the main window is up: the previous test's export bar closes
 // on a pulse, and a stale bar would shift every window count that follows (and
 // make a later "the bar appeared" assertion pass vacuously).
@@ -570,7 +579,9 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     snooze(1200000);
     Shot("export-dialog");
     if (shot->LockWithTimeout(2000000) == B_OK) shot->Quit();
-    CHECK(WaitFor([&] { return !WindowListed("Export"); }, 5000000));
+    // By identity: the dialog MainWindow opened carries the same title and is
+    // still in the list, so a title lookup would never go quiet.
+    CHECK(WaitFor([&] { return !WindowListed(shot); }, 5000000));
 
     // Bounded, like every lock this suite takes outside BAlert: a window whose
     // looper is stuck must fail a check, not hang the run for 15 minutes.

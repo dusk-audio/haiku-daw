@@ -209,8 +209,64 @@ touch the same region, so expect one trivial conflict there.)
 
 ## Screenshots reviewed
 
-_pending_ — the `DAW_UI_SHOTS` pass runs on the unlocked VM and every shot
-showing the export dialog is opened against `docs/UI_GUIDELINES.md` §3.
+Looked at, at full size and zoomed on the rows (the export dialog is the only
+window this branch changes; `docs/UI_GUIDELINES.md` §3 list):
+
+- **`06-export-dialog`** — the dialog with the new **Format** and **Vorbis
+  quality** rows, at (200,200) in the diagnostic pass and at (560,40) in the
+  pass the suite now takes. Rows read, top to bottom: the stems box; Format
+  showing the remembered choice ("WAV 32-bit float" — the previous test had
+  set 32-bit float, so this is the dialog remembering rather than a default
+  leaking through); Vorbis quality ("Medium"); Range ("Loop range"); Sample
+  rate ("Project rate"); Dither; Normalize loudness; Target LUFS; True-peak
+  limiter; Ceiling dBTP; Cancel / Export. Nothing overlaps, every label and
+  every marked value fits its well, the window is exactly as tall as its
+  contents with no dead band, the title is "Export", and both buttons are
+  centred.
+- **`07-export-dialog-ws`** — the same dialog built by MainWindow, once it
+  could be mapped (see below). Identical content, which is what says the twin
+  the suite shoots is the window the user gets.
+
+Two things I looked at and did **not** change, because neither is this
+branch's and both are the theme work's (T1):
+
+- the **marked value text in the menu wells renders dim** (dark grey on a dark
+  well: "WAV 32-bit float", "Medium", "Loop range", "Project rate", and the
+  two text fields' contents). The pre-existing Range and Sample rate rows look
+  exactly the same, so it is `DawMenuField`/`DawTextField` rendering, not the
+  new rows.
+- the wells are **right-aligned with ragged left edges** (each row's well
+  starts after its own label), which is again how the pre-existing rows
+  already draw.
+
+### An anomaly worth Marc's eyes: the MainWindow-opened dialog is not mapped
+
+The export dialog MainWindow opens is **never drawn in the test harness**. It
+is in the application's window list, `IsHidden()` is false, its frame is sane
+(`200,200,433,572`), and it is even the ACTIVE window — and the screen never
+shows it. What I established, with A/B runs:
+
+- a plain `BWindow` the test creates (same feel, same flags) **does** draw;
+- setting the dialog's `SetWorkspaces(B_CURRENT_WORKSPACE)` makes it appear
+  immediately — so the app_server has it registered on a workspace the screen
+  is not showing (`Workspaces()` reads `0x80042` for it and `0x2`, the current
+  workspace, for the control window);
+- the **same `ExportWindow` class**, built from the test thread the way the
+  piano roll is, draws normally.
+
+I did **not** work around it in the app: the window's construction and `Show()`
+are untouched by this branch (only the menus' contents changed), so I have no
+reason to believe I introduced it, and a speculative
+`SetWorkspaces()` in `OpenExportWindow` would paper over a cause I do not
+understand. I also could not reproduce it outside this harness. **Marc: please
+open File ▸ Export WAV… once in a normal session** — if the dialog appears
+(which I expect), this is a harness/app_server quirk and can be closed; if it
+does not, it is a P1 and this note is the evidence trail.
+
+The suite therefore shoots a **twin** built by the test thread (same class,
+same contents) for the layout review, and still drives the MainWindow-opened
+dialog end to end (menus checked row for row against the format tables,
+applying it opens the save panel), so only its pixels come from the twin.
 
 Note on the theme: `DAW_UI_THEME` does not exist on `master` yet — the theme
 mode is T1's, still unmerged — so the pass runs with the app's current
