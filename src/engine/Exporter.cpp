@@ -657,8 +657,14 @@ bool ExportWav(const Project& project, const std::string& outPath,
     sinkFmt.floatFmt   = (bitDepth == 32);
     sinkFmt.dither     = dither;   // already 16-bit only (see above)
     sinkFmt.quality    = opts.format.vorbisQuality;
-    if (!writer->Open(tmpPath, sinkFmt))
+    if (!writer->Open(tmpPath, sinkFmt)) {
+        // A codec that fails part-way through its own header write can still
+        // have created the temp. Nothing may be left behind -- the same rule
+        // the cancel and write-failure paths below follow.
+        writer->Close();
+        std::remove(tmpPath.c_str());
         return false;
+    }
     // Chunked so progress is real progress and a cancel lands within a chunk.
     // The write is byte-identical to one big call: the dither PRNG lives in the
     // writer and continues across calls.
