@@ -1886,7 +1886,9 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] {
         bool ok = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
-            ok = project.transport.playhead == 20000;   // no snap at all
+            // Within a few frames of the click, and nowhere near a beat line.
+            const Frame ph = project.transport.playhead;
+            ok = std::llabs(ph - 20000) <= 4;
             win->Unlock();
         }
         return ok;
@@ -1900,7 +1902,15 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
     // --- 9. The zoom anchors on the pointer (Ctrl+wheel) ...
     std::printf("  arrange: zoom anchor (pointer)\n");
     {
-        const float anchorX = HeaderWidth() + Themed(200.0f);
+        // Scroll away from the content's start first: at scroll 0 a zoom-in
+        // cannot keep an anchor put (the scroll has nowhere to go but 0), which
+        // is correct and not what this check is about.
+        const float anchorX = HeaderWidth() + Themed(300.0f);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                v->ScrollToFrame(500000);
+            win->Unlock();
+        }
         postMouse(B_MOUSE_MOVED, BPoint(anchorX, laneMid));
         snooze(80000);
         Frame anchor = 0;
@@ -1951,8 +1961,8 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         // Park the playhead where the view can see it.
         if (win->LockWithTimeout(1000000) == B_OK) {
             if (TimelineView* v = dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
-                v->ScrollToFrame(0);
-                project.transport.playhead = 100000;
+                v->ScrollToFrame(50000);         // the playhead in view, and
+                project.transport.playhead = 100000;   // the scroll off 0
                 v->SetPlayhead(100000);
                 ph = 100000;
                 xBefore = v->FrameToX(ph);

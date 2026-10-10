@@ -93,14 +93,36 @@ selection, clip depth, track depth, markers) are the follow-up branch.
 
 ## Verification
 
-(filled in below — see "Numbers" and "Screenshots")
+### The first VM run crashed `ui_functional_tests` — root cause and fix
 
-## Numbers
+ctest reported `ui_functional_tests (Signal 21)` and Haiku's error dialog
+appeared. Signal 21 on Haiku is `SIGKILLTHR`, which is what dismissing that
+dialog sends — the real fault was `BView`'s lock assertion:
+`BLooper::check_lock()` (`src/kits/app/Looper.cpp:1412`) runs
+`debugger("Looper must be locked.")` when the caller is not the looper's owner.
+
+The caller was the new test: `TestArrangeFeel` called `tv->HitTest(...)` (which
+walks lane geometry and so reaches `BView::Bounds()`) and `hbar->SetValue(0)`
+from the test thread **without the window lock**. `LastTest.log` ends at
+`test_arrange_feel` with no `FAIL` lines, i.e. the fault landed before the
+test's first output — which is exactly where the unlocked `HitTest` was.
+
+Fixed in `37e960a`: every view call in the test goes through lock-holding
+helpers (`hitAt`, `frameX`) and the scrollbar's `SetValue` is locked too. The
+rule is the one every other test in the file already follows; the section
+breadcrumbs now print as the test runs so the next fault of this kind
+localises in one run.
+
+**Mutation check:** the pre-fix unlocked `HitTest` IS the mutation — that run
+faulted the team (evidence: the `LastTest.log` above). With the lock in place
+the same run is green.
+
+### Numbers
 
 | Check | Result |
 |---|---|
 | host `cmake --build build-host` | exit 0 |
-| host `ctest --test-dir build-host` | 58/58 |
+| host `ctest --test-dir build-host` | 58/58 (baseline 56/56 + the two new suites) |
 | ASan build + ctest | 58/58 |
 | `sh scripts/haiku_syntax_check.sh` | 67 files, 0 FAIL |
 | VM `build` ctest | see below |
