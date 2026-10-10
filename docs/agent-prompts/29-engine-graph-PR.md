@@ -45,6 +45,15 @@ first item; plan item M4.1 (`docs/PLAN_1.0.md`).
 - **Tests**: new host target `engine_graph_tests` (reclaim semantics under load,
   rebase math edges, `RingBuffer::Skip`); `ui_functional_tests` gains
   `TestEngineGraphSwap` and a tightened `TestBigProjectPlayback`.
+- **Off-RT graph safety** (`GraphPin`, `Engine.h`): the reclaimer's two-boundary
+  rule is a proof about the RT thread only, so every off-RT user of the active
+  graph (UpdateMix, SyncFx, SetFxParamLive, SetFxTempo, PublishFxWatchNow,
+  TrackPeakL/R, SetMidiRoutes, Start/Stop) now counts itself in before loading
+  the pointer, and the reclaim predicate waits for that count to be zero. A
+  window thread preempted for two audio blocks inside one of those calls would
+  otherwise have been reading a graph the reclaimer had freed. Found by review
+  while the build was running; no test fails without it (the window is narrow),
+  so it is named in the record as review-covered, not test-covered.
 - **`scripts/haiku_syntax_check.sh`**: one line — the include set was missing
   `headers/os/add-ons/*/`, so `EffectsWindow.cpp` (which includes `<Screen.h>` →
   `<Accelerant.h>`) always reported FAIL and "0 FAIL" was unreachable.
@@ -63,10 +72,42 @@ first item; plan item M4.1 (`docs/PLAN_1.0.md`).
 
 <!-- counts + commands -->
 
+| suite | command | result |
+|---|---|---|
+| host | `cmake --build build-host`; `ctest --test-dir build-host` | |
+| ASan | `cmake -B b-asan -DDAW_SANITIZE=ON`; `cmake --build b-asan -j8`; `ctest --test-dir b-asan` | |
+| cross-check | `sh scripts/haiku_syntax_check.sh` | |
+| VM build | `flock /tmp/haiku-daw-vm.lock sh scripts/vm.sh build`; `ctest --test-dir build` | |
+| VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | |
+| VM UI | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | |
+
 ## Mutation checks
 
-<!-- break / fail / restore, by name -->
+1. **Free a retired graph without waiting for quiescence** (drop the
+   `while (!fQuiesced())` in `GraphSwap::ReclaimLoop`): `engine_graph_tests`
+   fails 3 checks (`TestNotFreedUntilQuiesced`), and under ASan the stress loop
+   reports `heap-use-after-free ... tests/engine_graph_tests.cpp:144`. Restored.
+2. **`RebaseSkipFrames` returning 0** (the whole rebase disabled): 7 checks in
+   `this engine_graph_tests` fail. Restored.
+3. **The pre-M4.1 rebuild shape** (`ReloadActiveEngine` → `fEngine.reset(new
+   Engine())` + `StartPlayback()`, i.e. throw the engine away instead of
+   swapping): `ui_functional_tests` /
+   `TestEngineGraphSwap` fails — `EnginePlayersOpened() == players0` and
+   `EnginePlayerStarts() == starts0`. Restored.
 
 ## Not verified / for Marc
 
-<!-- -->
+- **The audio start on the big project is still the graph build** (measured
+  above): M4.1 moves it off the window thread and keeps the device open, but
+  one `TrackStream` per clip is still opened and primed per rebuild. The plan's
+  300 ms *audio* budget needs M4.3 (the disk-stream pool / lazy streams).
+- **The rebase keeps a swap in sync by arithmetic** (host-tested); whether a
+  swap during playback is *audibly* seamless is a listening check — nothing is
+  audible on this VM, so it is on the hardware click list: play a busy project,
+  add/remove an insert while it rolls, and listen for a seam.
+- The record start still blocks the window thread on its build (by design, for
+  take alignment) — the same freeze as before M4.1, on that one path.
+- Not covered by a test: a request superseded while a build is in flight (the
+  latest-wins coalescing). The path is small and review-checked; the UI reaches
+  it by seeking twice inside one build.
+

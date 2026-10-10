@@ -138,12 +138,17 @@ audible with **no gap**: the old graph keeps playing until the new one is in.
 8. **Wire every rebuild path.** `TransportController::StartPlayback` →
    `EnsurePlayer` + `RequestLoad(NewPosition)` + `Start` (no `fEngine.reset`, no
    synchronous `Load`); `ReloadActiveEngine` (playing) → `RequestLoad(InPlace)`;
-   `StartRecordEngine` → `EnsurePlayer` + `RequestLoad(NewPosition)` + `Start` +
-   the monitor/route/watch re-application; the pulse polls
+   `StartRecordEngine` → `EnsurePlayer` + `RequestLoad(NewPosition)` + **wait** +
+   `Start` — the one path that still waits, because the take's alignment
+   (`RecordPlan`) is measured from the moment the engine rolls, so the capture
+   must not begin before the graph is in (it blocked on the same build before
+   M4.1, and still does, for the same reason); the pulse polls
    `LoadsCompleted`/`LastLoadStatus` and stops the transport with today's
    `ReportError` wording when a build failed (`B_ENTRY_NOT_FOUND` stays silent).
    `UpdateMix`, `SyncFx`, `SetFxParamLive`, `SetFxTempo`, `PublishFxWatchNow`,
-   `TrackPeakL/R` all address the *active* graph.
+   `TrackPeakL/R` all address the *active* graph — through a `GraphPin`, so the
+   reclaimer cannot free a graph an off-RT caller is inside (the callback
+   generation alone is a proof about the RT thread only).
 9. **Tests on the VM.** `ui_functional_tests` gains `TestEngineGraphSwap`:
    play, force a structural rebuild, assert `GraphsPublished` moved,
    `PlayersOpened` and `PlayerStarts` did not, the transport never stopped, and

@@ -16,7 +16,8 @@
 //     FX, buffers, the mix order, the meter scratch). A rebuild is: snapshot
 //     the project on the caller's thread, build a Graph on the builder thread,
 //     publish it with ONE atomic pointer exchange (GraphSwap), and free the
-//     graph it replaced on the reclaim thread once no callback can hold it.
+//     graph it replaced on the reclaim thread once no thread can hold it (the
+//     callback generation for the RT side, GraphPin for the UI side).
 //   - The RT callback loads that pointer exactly once per block and renders the
 //     whole block from it; it never allocates, locks, logs or opens anything.
 //   - The BSoundPlayer is persistent: it is created once per output format and
