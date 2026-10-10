@@ -7,6 +7,7 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
+#include "../engine/AudioFormats.h"  // SniffAudioFileFormat (the drop filter)
 #include "../engine/Recorder.h" // live capture waveform envelope
 #include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
 #include "Widgets.h"            // shared pan knob draw
@@ -220,7 +221,12 @@ void TimelineView::MessageReceived(BMessage* msg) {
             const char* p = path.Path();
 
             BMessage imp;
-            if (DroppedExtIs(p, "wav")) {
+            // Audio is decided by the file's leading bytes, not its name, so
+            // every format the build can read lands here -- including a WAV
+            // someone renamed and a FLAC named ".wav". MIDI has no magic of
+            // its own ("MThd" does, but the reader is the authority), so the
+            // extension test stays for it.
+            if (SniffAudioFileFormat(p) != AudioFileFormat::Unknown) {
                 TrackId tid = kInvalidTrackId;
                 const int idx = dropIdx >= 0 ? dropIdx + audioPlaced : -1;
                 if (idx >= 0 && idx < (int)fProject->Tracks().size())
@@ -236,8 +242,8 @@ void TimelineView::MessageReceived(BMessage* msg) {
                 imp.AddInt64("start", (int64)start);
             } else {
                 std::fprintf(stderr,
-                             "TimelineView: ignoring dropped '%s' (want .wav/.mid)\n",
-                             p);
+                             "TimelineView: ignoring dropped '%s' "
+                             "(not an audio file or MIDI)\n", p);
                 continue;
             }
             if (Window()) BMessenger(Window()).SendMessage(&imp);

@@ -71,9 +71,79 @@ add_library(daw_model
     src/synth/Sf2ToRegions.cpp  # kit-free SF2 preset -> regions + PCM
     src/synth/InstrumentFactory.cpp # InstrumentDesc -> IInstrument
     src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
+    src/engine/AiffSource.cpp   # native AIFF/AIFF-C reader
+    src/engine/AudioFormats.cpp # sniff + the reader/sink choice tables
+    src/engine/AudioSinkFactory.cpp # MakeAudioSink (the WAV sink lives here)
 )
 target_include_directories(daw_model PUBLIC src)
 target_include_directories(daw_model PUBLIC ${CMAKE_BINARY_DIR}/generated)
+
+# --- compressed audio formats (libFLAC, libvorbis) ---------------------
+# Both on by default and both DEGRADE rather than fail, like DAW_LV2 above: with
+# the library missing (or the option forced OFF) that format's sources are not
+# compiled at all, DAW_HAVE_<FMT> is not defined, the factories refuse the
+# format with an explicit message ("this build has no FLAC support") and the
+# export dialog does not offer it. Nothing half-works: a format is either there
+# end to end or not there.
+#
+# Unlike LV2 these link INTO daw_model, because the Exporter -- which lives
+# there and must stay host-testable -- is what needs the encoders; the codec
+# cannot sit in a target the model layer never sees. The model layer stays
+# kit-free either way (no Haiku library, no Media Kit); it just gains a codec
+# dependency when one is found.
+option(DAW_FLAC "Read and write FLAC via libFLAC (auto-disabled when the library is missing)" ON)
+option(DAW_VORBIS "Read and write Ogg Vorbis via libvorbis (auto-disabled when the library is missing)" ON)
+
+set(DAW_FLAC_ENABLED OFF)
+if(DAW_FLAC)
+    find_path(DAW_FLAC_INCLUDE_DIR FLAC/stream_decoder.h)
+    find_library(DAW_FLAC_LIBRARY FLAC)
+    if(DAW_FLAC_INCLUDE_DIR AND DAW_FLAC_LIBRARY)
+        set(DAW_FLAC_ENABLED ON)
+        message(STATUS "FLAC support enabled (${DAW_FLAC_LIBRARY})")
+    else()
+        message(STATUS "libFLAC not found - building without FLAC support")
+    endif()
+endif()
+
+set(DAW_VORBIS_ENABLED OFF)
+if(DAW_VORBIS)
+    find_path(DAW_VORBIS_INCLUDE_DIR vorbis/vorbisfile.h)
+    find_library(DAW_VORBISFILE_LIBRARY vorbisfile)
+    find_library(DAW_VORBISENC_LIBRARY vorbisenc)
+    find_library(DAW_VORBIS_LIBRARY vorbis)
+    find_library(DAW_OGG_LIBRARY ogg)
+    if(DAW_VORBIS_INCLUDE_DIR AND DAW_VORBISFILE_LIBRARY
+       AND DAW_VORBISENC_LIBRARY AND DAW_VORBIS_LIBRARY AND DAW_OGG_LIBRARY)
+        set(DAW_VORBIS_ENABLED ON)
+        message(STATUS "Ogg Vorbis support enabled (${DAW_VORBISFILE_LIBRARY})")
+    else()
+        message(STATUS "libvorbis not found - building without Ogg Vorbis support")
+    endif()
+endif()
+
+if(DAW_FLAC_ENABLED)
+    target_sources(daw_model PRIVATE
+        src/engine/FlacSource.cpp    # libFLAC stream decoder -> IAudioSource
+        src/engine/FlacSink.cpp)     # libFLAC stream encoder -> IAudioSink
+    target_include_directories(daw_model PRIVATE ${DAW_FLAC_INCLUDE_DIR})
+    target_link_libraries(daw_model PUBLIC ${DAW_FLAC_LIBRARY})
+    # PUBLIC: DAW_HAVE_FLAC is what gates the concrete sinks behind
+    # MakeAudioSink and lets AudioFormats report the format as available, so
+    # everything linking the model layer must see the same answer.
+    target_compile_definitions(daw_model PUBLIC DAW_HAVE_FLAC=1)
+endif()
+
+if(DAW_VORBIS_ENABLED)
+    target_sources(daw_model PRIVATE
+        src/engine/VorbisSource.cpp  # libvorbisfile -> IAudioSource
+        src/engine/VorbisSink.cpp)   # vorbisenc + libogg -> IAudioSink
+    target_include_directories(daw_model PRIVATE ${DAW_VORBIS_INCLUDE_DIR})
+    target_link_libraries(daw_model PUBLIC
+        ${DAW_VORBISFILE_LIBRARY} ${DAW_VORBISENC_LIBRARY}
+        ${DAW_VORBIS_LIBRARY} ${DAW_OGG_LIBRARY})
+    target_compile_definitions(daw_model PUBLIC DAW_HAVE_VORBIS=1)
+endif()
 
 # --- LV2 plugin hosting (lilv) ----------------------------------------
 # On by default, but it DEGRADES rather than fails: with lilv absent no LV2 code
@@ -128,6 +198,13 @@ add_test(NAME takenames_tests COMMAND takenames_tests)
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)
+
+# The other file formats: AIFF/AIFC parsing, the by-content sniff, and the
+# FLAC / Ogg Vorbis round trips through the real sinks (each guarded by its own
+# DAW_HAVE_* define, so the binary is honest about what the build can do).
+add_executable(formats_tests tests/formats_tests.cpp)
+target_link_libraries(formats_tests PRIVATE daw_model)
+add_test(NAME formats_tests COMMAND formats_tests)
 
 add_executable(peak_tests tests/peak_tests.cpp)
 target_link_libraries(peak_tests PRIVATE daw_model)

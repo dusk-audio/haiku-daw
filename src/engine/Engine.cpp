@@ -85,10 +85,14 @@ TrackStream::~TrackStream() {
 }
 
 status_t TrackStream::Prepare() {
-    if (!fSource.Open(fPath))
+    // Whatever container the clip's file is, through the one factory: a WAV
+    // take, an imported FLAC, an AIFF. Each reader seeks by sample through its
+    // own API, which is what makes a seeked playhead land correctly.
+    fSource = OpenAudioSource(fPath);
+    if (!fSource)
         return B_ERROR;
 
-    const float srcRate = fSource.FrameRate();
+    const float srcRate = fSource->FrameRate();
     fResampler.reset(new Resampler(srcRate, fOutputRate));
 
     // Seek the source to match the start playhead. fSeekDelta is in output
@@ -96,9 +100,9 @@ status_t TrackStream::Prepare() {
     if (fSeekDelta > 0 && fOutputRate > 0) {
         const Frame srcSkip = static_cast<Frame>(
             fSeekDelta * (double)srcRate / fOutputRate + 0.5);
-        fSource.Seek(fSourceOffset + srcSkip);
+        fSource->Seek(fSourceOffset + srcSkip);
     } else if (fSourceOffset > 0) {
-        fSource.Seek(fSourceOffset);
+        fSource->Seek(fSourceOffset);
     }
 
     fRunning.store(true);
@@ -129,7 +133,7 @@ void TrackStream::DiskLoop() {
         if (chunkFloats == 0) {
             const float* src = nullptr;
             size_t frames = 0;
-            if (!fSource.ReadChunk(&src, &frames)) {
+            if (!fSource->ReadChunk(&src, &frames)) {
                 // End of file: nothing more to push. Idle until stopped.
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;

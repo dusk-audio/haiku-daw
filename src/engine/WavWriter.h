@@ -9,6 +9,8 @@
 // (negotiated int16 stereo). Little-endian on disk (x86 host + Haiku target).
 #pragma once
 
+#include "Dither.h"
+
 #include <atomic>
 #include <cstdint>
 #include <fstream>
@@ -61,7 +63,7 @@ private:
     int      fBits        = 16;      // bits per sample (16/24/32)
     bool     fFloat       = false;   // true = IEEE float (fBits must be 32)
     int64_t  fDataBytes   = 0;
-    uint32_t fDitherState = 0x1234567u;  // xorshift PRNG for TPDF dither
+    TpdfDither fDither;                  // TPDF at the LSB (see Dither.h)
     std::atomic<int64_t> fFramesWritten{0};
 };
 

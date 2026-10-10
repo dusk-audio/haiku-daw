@@ -27,6 +27,7 @@
 #include "../src/model/Commands.h"   // SetFxCommand
 #include "../src/engine/WavSource.h"   // reading a bounce back
 #include "../src/engine/WavWriter.h"   // ...and writing the Locate… fixture
+#include "../src/engine/AudioFormats.h"   // the format menus + sniffing a bounce
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
@@ -39,6 +40,8 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <MenuField.h>   // the export dialog's Format / Vorbis quality menus
+#include <MenuItem.h>    // ...and the rows inside them
 #include <Directory.h>
 #include <Entry.h>
 #include <Messenger.h>
@@ -184,13 +187,6 @@ static int VisibleWindows() {
     return n;
 }
 
-// Wait until only the main window is up: the previous test's export bar closes
-// on a pulse, and a stale bar would shift every window count that follows (and
-// make a later "the bar appeared" assertion pass vacuously).
-static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
-    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
-}
-
 // The window's title, as SetTitle set it. BWindow::Name() returns the
 // window's THREAD name, which Haiku prefixes with "w>" (BWindow::_SetName
 // renames the thread "w>window title"), so a raw Name() comparison against a
@@ -202,16 +198,48 @@ static const char* WindowTitle(BWindow* w) {
     return std::strncmp(name, "w>", 2) == 0 ? name + 2 : name;
 }
 
-// Is a window with this title up? Deliberately takes NO lock: a modal prompt
-// holds the main window's looper until it is answered, so a predicate that
-// locked the window first would block forever instead of failing the test.
-static bool AlertUp(const char* title) {
+// Is a visible window with this title up? Deliberately takes NO lock: a modal
+// prompt holds the main window's looper until it is answered, so a predicate
+// that locked the window first would block forever instead of failing.
+static bool WindowUp(const char* title) {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
         if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
             return true;
     }
     return false;
+}
+
+// Is a window with this title still in the application's list AT ALL --
+// hidden ones included? A window that is quitting stops being drawn before it
+// leaves the list, so WindowUp() says "gone" while the object is still there.
+// Waiting for THIS to go false is what makes it safe to touch afterwards.
+static bool WindowListed(const char* title) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && std::strcmp(WindowTitle(w), title) == 0) return true;
+    }
+    return false;
+}
+
+// ...and by IDENTITY, for when two windows share a title. Comparing pointers
+// is safe after a Quit: the window is deleted, but comparing its address with
+// the list's never dereferences it.
+static bool WindowListed(BWindow* which) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++)
+        if (be_app->WindowAt(i) == which) return true;
+    return false;
+}
+
+// Wait until only the main window is up: the previous test's export bar closes
+// on a pulse, and a stale bar would shift every window count that follows (and
+// make a later "the bar appeared" assertion pass vacuously).
+static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
+    return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
+}
+
+static bool AlertUp(const char* title) {
+    return WindowUp(title);
 }
 
 // Answer a modal alert the way its own buttons do: wait for the alert titled
@@ -249,12 +277,26 @@ static void HideOtherWindows(BWindow* keep) {
     for (int32 i = be_app->CountWindows() - 1; i >= 0; i--) {
         BWindow* w = be_app->WindowAt(i);
         if (w && w != keep && !w->IsHidden()) {
-            w->Lock();
-            w->Hide();
-            w->Unlock();
+            // LockWithTimeout, never Lock. A window whose looper is quitting
+            // can still be listed, and an unbounded Lock() on one blocks
+            // forever -- which is a hang in a suite that has a five-minute
+            // ctest timeout, not a failure anyone can read. Skipping it is
+            // right: it is on its way out.
+            if (w->LockWithTimeout(2000000) == B_OK) {
+                w->Hide();
+                w->Unlock();
+            }
         }
     }
     snooze(200000);
+}
+
+// Put away whatever a message may have opened, without caring whether it
+// opened anything: the point is only to leave a clean screen for the next
+// test, and a window that never appeared is not a failure here.
+static void MaybeHidePanels(BWindow* keep) {
+    snooze(300000);          // let the looper act on the message first
+    HideOtherWindows(keep);
 }
 
 // --- 1. the harness itself -------------------------------------------------
@@ -471,6 +513,204 @@ static void TestExportStems(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return CountWavs(dir) == expected; }, 60000000));
 
     if (system(rm.c_str()) != 0) return;
+}
+
+// --- 4b. the export dialog's format row (M6) -------------------------------
+
+// A bounce that fails raises an alert TITLED "Export" -- the same title as the
+// dialog this section looks for. Answer it, or the next title lookup finds the
+// alert instead of the window it wants, and the count arithmetic around it
+// goes wrong.
+static void ClearExportAlert() {
+    AnswerAlertWhenUp("Export", 0, 2000000);
+    snooze(200000);
+}
+
+// The export OPTIONS dialog: a plain BWindow titled "Export" (the alert above
+// carries the same title, which is why BAlert is excluded).
+static BWindow* FindExportDialog() {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (!w || w->IsHidden()) continue;
+        if (std::strcmp(WindowTitle(w), "Export") != 0) continue;
+        if (dynamic_cast<BAlert*>(w) != nullptr) continue;
+        return w;
+    }
+    return nullptr;
+}
+
+// Pick a row the way a click in a radio menu does: exactly one marked, so the
+// dialog's FindMarked() reads back what was chosen. (BMenuItem::SetMarked does
+// not unmark the siblings -- that happens in BMenu's own click handling.)
+static void SelectMenuRow(BMenu* menu, int index) {
+    if (!menu || index < 0 || index >= menu->CountItems()) return;
+    for (int i = 0; i < menu->CountItems(); i++)
+        if (BMenuItem* it = menu->ItemAt(i)) it->SetMarked(false);
+    if (BMenuItem* it = menu->ItemAt(index)) it->SetMarked(true);
+}
+
+// The dialog itself: its Format menu must offer exactly what this build can
+// write (AudioFormats' tables), and applying it must reach MainWindow as a
+// container. Ends by putting the remembered choice back to plain WAV, so a
+// later test that posts only "bits" still bounces a .wav.
+static void TestExportFormatDialog(MainWindow* win, Project& project) {
+    ClearExportAlert();
+    CHECK(WaitQuiet());
+    std::printf("test_export_format_dialog\n");
+    const int32 windowsBefore = VisibleWindows();
+    win->PostMessage(MSG_EXPORT);
+
+    BWindow* dlg = nullptr;
+    CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
+    if (!dlg) return;
+    snooze(300000);
+
+    // THIS is the window this suite can screenshot. The one MainWindow opens
+    // is not mapped by this VM's app_server -- it is in the window list, not
+    // hidden, even the ACTIVE window, and it is never drawn (see the record;
+    // forcing its workspace mask to the current workspace makes it appear, so
+    // the app_server is registering it on a workspace the screen is not
+    // showing). The same class built here, the way the piano roll is, draws
+    // normally, so what gets reviewed is what the user gets.
+    ExportChoices shown;
+    ExportWindow* shot = new ExportWindow(BRect(560, 40, 960, 440), shown,
+                                          false, BMessenger(win));
+    shot->Show();
+    snooze(1200000);
+    Shot("export-dialog");
+    if (shot->LockWithTimeout(2000000) == B_OK) shot->Quit();
+    // By identity: the dialog MainWindow opened carries the same title and is
+    // still in the list, so a title lookup would never go quiet.
+    CHECK(WaitFor([&] { return !WindowListed(shot); }, 5000000));
+
+    // Bounded, like every lock this suite takes outside BAlert: a window whose
+    // looper is stuck must fail a check, not hang the run for 15 minutes.
+    if (dlg->LockWithTimeout(2000000) != B_OK) return;
+    BMenuField* fmt  = dynamic_cast<BMenuField*>(dlg->FindView("fm"));
+    BMenuField* qual = dynamic_cast<BMenuField*>(dlg->FindView("vq"));
+    CHECK(fmt != nullptr);
+    CHECK(qual != nullptr);
+    if (fmt && fmt->Menu()) {
+        // Rows are the kit-free tables' rows, in order, with no extras: a
+        // build without libFLAC must not offer FLAC.
+        CHECK(fmt->Menu()->CountItems() == ExportFormatChoiceCount());
+        const int n = std::min(fmt->Menu()->CountItems(),
+                               ExportFormatChoiceCount());
+        for (int i = 0; i < n; i++) {
+            BMenuItem* it = fmt->Menu()->ItemAt(i);
+            CHECK(it != nullptr);
+            if (it) CHECK(std::strcmp(it->Label(),
+                                      ExportFormatChoiceAt(i).label) == 0);
+        }
+        // What a click does in a radio menu: exactly one row marked. (The
+        // items carry no message -- applying is the button's job -- so the
+        // mark is what the dialog reads back.)
+        SelectMenuRow(fmt->Menu(), 1);
+    }
+    if (qual && qual->Menu()) {
+        CHECK(qual->Menu()->CountItems() == VorbisQualityChoiceCount());
+        SelectMenuRow(qual->Menu(), VorbisQualityChoiceCount() - 1);
+    }
+    dlg->Unlock();
+
+    // The dialog applies by posting its own go-ahead to itself; it then quits.
+    dlg->PostMessage('exok');
+    // Wait for the save panel AND for the dialog to have left the application's
+    // window list entirely. "Not visible" is not enough: a window that is
+    // quitting stops being DRAWN before it is removed, and touching one in that
+    // state is how this suite used to hang and, before that, crash.
+    CHECK(WaitFor([&] {
+        return !WindowListed("Export") && VisibleWindows() >= windowsBefore + 1;
+    }));
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+
+    // Put the remembered choice back to WAV (row 0) for whatever runs next.
+    BMessage back(kMsgExportOptions);
+    back.AddInt32("container", (int32)AudioFileFormat::Wav);
+    back.AddInt32("bits", 16);
+    win->PostMessage(&back);
+    MaybeHidePanels(win);
+}
+
+// One bounce per container this build can write, all the way through the app:
+// the dialog's answer, the panel's answer, and the file that lands -- whose
+// format is SNIFFED from its bytes, not assumed from the name it was given.
+static void TestExportFormats(MainWindow* win, Project& project) {
+    ClearExportAlert();
+    CHECK(WaitQuiet());
+    std::printf("test_export_formats\n");
+
+    // One second of audio, not the eight the suite has accumulated by now.
+    // This test is about the CONTAINERS; encoding a long project on the VM's
+    // debug build is slow enough (the codecs are unoptimised there) that the
+    // first cut of this test blew its own file timeout while the bounce was
+    // still running -- and left the export bar up over every test after it.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.loopEnabled = true;
+        project.transport.loopStart   = 0;
+        project.transport.loopEnd     = 48000;   // 1 s at the project's rate
+        win->Unlock();
+    }
+
+    struct Case { AudioFileFormat fmt; const char* name; };
+    const Case cases[] = {
+        { AudioFileFormat::Wav,  "haiku_daw_ui_fmt.wav" },
+        { AudioFileFormat::Flac, "haiku_daw_ui_fmt.flac" },
+        { AudioFileFormat::Ogg,  "haiku_daw_ui_fmt.ogg" },
+    };
+    for (const Case& k : cases) {
+        if (!AudioFileFormatCanWrite(k.fmt))
+            continue;   // not in this build: the dialog would not offer it
+        const std::string path = std::string("/tmp/") + k.name;
+        std::remove(path.c_str());
+        std::remove((path + ".part").c_str());
+
+        const int32 windowsBefore = VisibleWindows();
+        BMessage opts(kMsgExportOptions);
+        opts.AddInt32("bits", 16);
+        opts.AddInt32("container", (int32)k.fmt);
+        opts.AddFloat("vquality", 0.5f);
+        opts.AddBool("dither", false);
+        opts.AddInt32("rate", 0);
+        opts.AddBool("norm", false);
+        opts.AddFloat("lufs", -14.0f);
+        opts.AddFloat("ceil", -1.0f);
+        opts.AddBool("lim", false);
+        opts.AddInt32("range", 1);      // the one-second loop window above
+        opts.AddInt32("stems", 0);
+        win->PostMessage(&opts);
+        CHECK(WaitFor([&] { return VisibleWindows() >= windowsBefore + 1; }));
+        HideOtherWindows(win);
+
+        entry_ref dir;
+        CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+        BMessage ref(MSG_EXPORT_REF);
+        ref.AddRef("directory", &dir);
+        ref.AddString("name", k.name);
+        win->PostMessage(&ref);
+
+        // 60 s per container is ample for one second of audio even with the
+        // VM's unoptimised codecs, and still bounds the whole loop so a broken
+        // encode fails three checks instead of hanging the suite.
+        CHECK(WaitFor([&] { return FileExists(path); }, 60000000));
+        CHECK(FileExists(path));
+        CHECK(!FileExists(path + ".part"));
+        // The bytes decide: a FLAC export is a FLAC whatever it was called.
+        CHECK(SniffAudioFileFormat(path) == k.fmt);
+        // A failed bounce raises an alert on the pulse. Answer it here rather
+        // than letting it sit over the windows every later test counts.
+        AnswerAlertWhenUp("Export", 0, 2000000);
+        CHECK(WaitQuiet());
+        std::remove(path.c_str());
+    }
+
+    // Back to WAV for anything that follows (see TestExportFormatDialog).
+    BMessage back(kMsgExportOptions);
+    back.AddInt32("container", (int32)AudioFileFormat::Wav);
+    back.AddInt32("bits", 16);
+    win->PostMessage(&back);
+    MaybeHidePanels(win);
 }
 
 // The loop range bounces what the loop covers, not the whole timeline.
@@ -1804,6 +2044,10 @@ static int32 TestThread(void*) {
     TestExportCancel(win, project);
     TestExportStems(win, project);
     TestExportLoopRange(win, project);
+    // After the WAV-only flows above, so a non-WAV container left remembered
+    // by these cannot change what they write.
+    TestExportFormatDialog(win, project);
+    TestExportFormats(win, project);
     TestAboutBox(win);
 #ifdef DAW_HAVE_LV2
     TestLv2EditorWiring(win, project, stack);

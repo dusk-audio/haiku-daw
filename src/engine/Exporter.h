@@ -1,18 +1,26 @@
-// Exporter — offline "bounce" of a Project to a stereo WAV file (PCM 16/24-bit
-// or 32-bit IEEE float, selected per export).
+// Exporter — offline "bounce" of a Project to a stereo file in one of the
+// formats this build can write (WAV PCM 16/24-bit or 32-bit IEEE float, FLAC
+// 16/24-bit, Ogg Vorbis at a chosen quality).
 //
 // Renders the whole timeline to disk with no real-time constraints: no
 // BSoundPlayer, no ring buffers, no disk threads. It reuses the same kit-free
-// building blocks the live Engine uses (WavSource, Resampler, Synth,
-// EffectFactory, WavWriter) and replicates the Engine's mix math — equal-power
-// pan, per-track fx chain, master gain — so an export sounds like playback.
+// building blocks the live Engine uses (IAudioSource, Resampler, Synth,
+// EffectFactory) and replicates the Engine's mix math — equal-power pan,
+// per-track fx chain, master gain — so an export sounds like playback.
 //
 // Everything is done in-RAM: offline rendering values simplicity and exactness
-// over memory footprint. Kit-free (STL + the project's own classes only) so it
-// builds and unit-tests on any host.
+// over memory footprint. Kit-free (STL + the project's own classes + whichever
+// codec libraries the build enabled) so it builds and unit-tests on any host.
+//
+// The file is finished by an IAudioSink (src/engine/IAudioSink.h): the WAV,
+// FLAC and Vorbis writers all sit behind that one interface, so the temp file,
+// the rename on success and the cancel path are the same for every container.
+// The entry points below keep their historical names — `ExportWav` is the mix
+// bounce whatever container it is told to write.
 #pragma once
 
 #include "../model/Project.h"
+#include "AudioFormats.h"
 
 #include <atomic>
 #include <functional>
@@ -21,12 +29,23 @@
 namespace daw {
 
 // The output sample format of a bounce.
+//
+// The first two members are in their historical order on purpose: this is an
+// aggregate, and `ExportFormat{32}` / `ExportFormat{16, true}` appear all over
+// the exporter and render tests. A new member goes at the END.
 struct ExportFormat {
-    // 16 or 24 = PCM, 32 = IEEE float; anything else falls back to 16.
+    // 16 or 24 = PCM, 32 = IEEE float (WAV only; FLAC clamps 32 to 24);
+    // anything else falls back to 16. Ignored by Ogg Vorbis, which is lossy.
     int  bitDepth = 16;
-    // TPDF dither at the 16-bit LSB. Ignored at 24/32, which have ample
-    // headroom (the quantizer's own error is ~-144 dBFS there).
+    // TPDF dither at the 16-bit LSB. Ignored at 24/32 (ample headroom: the
+    // quantizer's own error is ~-144 dBFS there) and by Ogg Vorbis.
     bool dither   = true;
+    // Which container to write. FLAC and Ogg need their libraries at build
+    // time; `MakeAudioSink` returns nullptr for a container this build cannot
+    // write and the export fails cleanly rather than writing the wrong file.
+    AudioFileFormat container = AudioFileFormat::Wav;
+    // Ogg Vorbis VBR quality in [0,1]; ignored by WAV and FLAC.
+    float vorbisQuality = 0.5f;
 };
 
 // The timeline window to bounce, in PROJECT frames. The default is the whole
@@ -82,17 +101,19 @@ struct ExportOptions {
     const ExportJob* job = nullptr;
 };
 
-// Render `project` to a stereo WAV at `outPath`, sampled at `outRate` Hz, in
-// the format and window `opts` selects. If `outRate <= 0` the project's own
-// sample rate is used.
+// Render `project` to a stereo file at `outPath` — WAV, FLAC or Ogg Vorbis,
+// per opts.format.container — sampled at `outRate` Hz, in the format and
+// window `opts` selects. If `outRate <= 0` the project's own sample rate is
+// used.
 //
 // The timeline is laid out in *output* frames: a project-frame position p maps
 // to output frame round((p - range.start) * outRate / project.sampleRate), so
 // clip/note placement and fade lengths stay correct at any target rate and any
 // window. Solo overrides mute (any soloed non-muted track mutes the rest).
 // Returns false if there is nothing to render, the output file cannot be
-// written, or the job's cancel flag was raised (in which case nothing is left
-// at `outPath`: the file is written to `outPath.part` and renamed on success).
+// written (including "this build has no that format"), or the job's cancel
+// flag was raised (in which case nothing is left at `outPath`: the file is
+// written to `outPath.part` and renamed on success).
 //
 // Runs with no real-time constraints and may be called from any thread; it
 // reads the project and never mutates it, so a caller that exports off the UI
@@ -100,8 +121,9 @@ struct ExportOptions {
 bool ExportWav(const Project& project, const std::string& outPath,
                double outRate = 0.0, const ExportOptions& opts = {});
 
-// Bounce each non-bus track to its own WAV stem under `dir` (named
-// "NN_<track>.wav"), each rendered through its own fader/fx/bus/master by
+// Bounce each non-bus track to its own stem file under `dir` (named
+// "NN_<track>.<ext>", the extension of opts.format's container), each rendered
+// through its own fader/fx/bus/master by
 // soloing it, in the format/window `opts` selects. Progress spans the whole
 // job (one stem is 1/N of it) and cancellation stops between stems and inside
 // the one in flight. Returns the number of stems written -- a track with

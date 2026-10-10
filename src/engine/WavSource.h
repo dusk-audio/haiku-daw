@@ -4,7 +4,9 @@
 // IEEE float) and streams them out as interleaved stereo float. It does
 // NOT use the Haiku Media Kit, on purpose: some Haiku images ship without
 // the media reader/decoder plugins, and a DAW wants to own its core audio
-// file I/O regardless. Compressed formats (mp3/flac/...) are a later job.
+// file I/O regardless. Other formats implement the same IAudioSource
+// interface (AiffSource, FlacSource, VorbisSource), and the factory in
+// AudioFormats.h picks one by sniffing the file's first bytes.
 //
 // Kit-free (std C++ only) so it builds and unit-tests on any host.
 //
@@ -13,6 +15,8 @@
 // this reads it as such (fine on x86; both host and Haiku target here).
 #pragma once
 
+#include "IAudioSource.h"
+
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -20,28 +24,20 @@
 
 namespace daw {
 
-class WavSource {
+class WavSource : public IAudioSource {
 public:
     WavSource() = default;
 
     // Parse the header. Returns true on success.
     bool Open(const std::string& path);
 
-    bool    IsValid() const { return fValid; }
-    float   FrameRate() const { return fSampleRate; }
-    int     SourceChannels() const { return fChannels; }
-    int64_t TotalFrames() const { return fTotalFrames; }
-
-    // Reposition the read cursor to source frame `frame` (clamped to
-    // [0, TotalFrames]). The next ReadChunk decodes from there. Returns false
-    // if the source is invalid. Used to align a clip to a seeked playhead.
-    bool Seek(int64_t frame);
-
-    // Decode the next block. On success sets *outStereo to an internal
-    // buffer of *outFrames interleaved stereo frames (2 * frames floats)
-    // and returns true. Returns false at end of the data chunk.
-    // The returned pointer is valid until the next ReadChunk call.
-    bool ReadChunk(const float** outStereo, size_t* outFrames);
+    // --- IAudioSource ---
+    bool    IsValid() const override { return fValid; }
+    float   FrameRate() const override { return fSampleRate; }
+    int     SourceChannels() const override { return fChannels; }
+    int64_t TotalFrames() const override { return fTotalFrames; }
+    bool    Seek(int64_t frame) override;
+    bool    ReadChunk(const float** outStereo, size_t* outFrames) override;
 
     // Decode the next block WITHOUT the stereo widening ReadChunk applies: the
     // buffer holds *outFrames * SourceChannels() interleaved floats, exactly

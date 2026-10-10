@@ -1,7 +1,7 @@
 #include "Exporter.h"
 
 #include "WavSource.h"
-#include "WavWriter.h"
+#include "IAudioSink.h"
 #include "Resampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
@@ -637,15 +637,34 @@ bool ExportWav(const Project& project, const std::string& outPath,
     run.Report(0.84f);
 
     // Write to a temporary and rename on success. A cancelled or failed export
-    // must not leave a partial WAV where a finished one is expected, and an
+    // must not leave a partial file where a finished one is expected, and an
     // existing file at `outPath` keeps its old contents until the new one is
     // complete (the writer used to truncate it at open).
+    //
+    // One sink per container, one code path for all of them: the WAV sink wraps
+    // WavWriter body for body, so existing bounces stay byte-identical.
     const std::string tmpPath = outPath + ".part";
-    WavWriter writer;
-    const bool floatOut = (bitDepth == 32);
-    if (!writer.OpenFormat(tmpPath, static_cast<int>(outRate + 0.5), 2,
-                           bitDepth, floatOut))
+    std::unique_ptr<IAudioSink> writer = MakeAudioSink(opts.format.container);
+    if (!writer) {
+        std::fprintf(stderr, "Exporter: this build cannot write %s\n",
+                     AudioFileFormatName(opts.format.container));
         return false;
+    }
+    SinkFormat sinkFmt;
+    sinkFmt.sampleRate = static_cast<int>(outRate + 0.5);
+    sinkFmt.channels   = 2;
+    sinkFmt.bitDepth   = bitDepth;
+    sinkFmt.floatFmt   = (bitDepth == 32);
+    sinkFmt.dither     = dither;   // already 16-bit only (see above)
+    sinkFmt.quality    = opts.format.vorbisQuality;
+    if (!writer->Open(tmpPath, sinkFmt)) {
+        // A codec that fails part-way through its own header write can still
+        // have created the temp. Nothing may be left behind -- the same rule
+        // the cancel and write-failure paths below follow.
+        writer->Close();
+        std::remove(tmpPath.c_str());
+        return false;
+    }
     // Chunked so progress is real progress and a cancel lands within a chunk.
     // The write is byte-identical to one big call: the dither PRNG lives in the
     // writer and continues across calls.
@@ -653,14 +672,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
     const int64_t framesTotal  = static_cast<int64_t>(nfloats / 2);
     for (int64_t f = 0; f < framesTotal; f += kChunkFrames) {
         if (run.Cancelled()) {
-            writer.Close();
+            writer->Close();
             std::remove(tmpPath.c_str());
             return false;
         }
         const int64_t cnt = std::min(kChunkFrames, framesTotal - f);
-        if (!writer.WriteFloat(outp + f * 2, static_cast<size_t>(cnt) * 2,
-                               dither)) {
-            writer.Close();
+        if (!writer->WriteFloat(outp + f * 2, static_cast<size_t>(cnt) * 2)) {
+            writer->Close();
             std::remove(tmpPath.c_str());
             return false;
         }
@@ -669,10 +687,11 @@ bool ExportWav(const Project& project, const std::string& outPath,
         run.Report(0.84f + 0.15f * (float)((double)(f + cnt)
             / (double)std::max<int64_t>(1, framesTotal)));
     }
-    if (!writer.Close()) {
+    if (!writer->Close()) {
         std::remove(tmpPath.c_str());
         return false;
     }
+    writer.reset();
     if (std::rename(tmpPath.c_str(), outPath.c_str()) != 0) {
         std::remove(tmpPath.c_str());
         return false;
@@ -724,7 +743,10 @@ int ExportStems(const Project& project, const std::string& dir, double outRate,
         if (Track* ct = copy.FindTrack(t.id)) ct->muted = false;
         char pre[8];
         std::snprintf(pre, sizeof(pre), "%02d_", idx);
-        const std::string path = dir + "/" + pre + SanitizeName(t.name) + ".wav";
+        // The container decides the extension, so a FLAC stems run does not
+        // leave files named ".wav" that no reader will touch.
+        const std::string path = dir + "/" + pre + SanitizeName(t.name) + "."
+            + AudioFileFormatExtension(opts.format.container);
 
         // Each stem reports 0..1 of itself; rescale that into this stem's band
         // of the whole job, and pass the cancel flag straight through.

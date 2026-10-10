@@ -28,6 +28,7 @@
 
 #include "../engine/DeviceLatency.h"
 #include "../engine/WavSource.h"
+#include "../engine/AudioFormats.h"   // the import factory + format availability
 #include "../engine/WavWriter.h"
 #include "../engine/Exporter.h"
 #include "../engine/Resampler.h"
@@ -748,6 +749,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // settled before a destination is asked for.
             int32 v = 0; bool b = false; float f = 0.0f;
             if (msg->FindInt32("bits", &v) == B_OK) fExportChoices.bitDepth = v;
+            if (msg->FindInt32("container", &v) == B_OK
+                && AudioFileFormatCanWrite((AudioFileFormat)v))
+                fExportChoices.container = (AudioFileFormat)v;
+            if (msg->FindFloat("vquality", &f) == B_OK)
+                fExportChoices.vorbisQuality = f;
             if (msg->FindBool("dither", &b) == B_OK) fExportChoices.dither = b;
             if (msg->FindInt32("rate", &v) == B_OK) fExportChoices.sampleRate = v;
             if (msg->FindBool("norm", &b) == B_OK) fExportChoices.normalize = b;
@@ -771,7 +777,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                                   new BMessage(MSG_EXPORT_REF));
                 }
-                ShowPanel(fExportPanel, "Export Mix", ProjectDocument::DisplayName(fDoc.Path()) + ".wav");
+                // The prefilled name carries the container's own extension, so
+                // a FLAC bounce is not offered as "mix.wav".
+                ShowPanel(fExportPanel, "Export Mix",
+                          ProjectDocument::DisplayName(fDoc.Path()) + "."
+                          + AudioFileFormatExtension(fExportChoices.container));
             }
             break;
         }
@@ -2567,9 +2577,17 @@ void MainWindow::ImportAudio(const char* path) {
 }
 
 void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
-    WavSource src;
-    if (!src.Open(path)) {
-        std::fprintf(stderr, "MainWindow: cannot import '%s'\n", path);
+    // One factory for every format (WAV, AIFF/AIFFC, FLAC, Ogg Vorbis), chosen
+    // by what the file's first bytes are rather than by its name. A format
+    // this build has no library for is reported as exactly that, not as a
+    // corrupt file.
+    std::string why;
+    std::unique_ptr<IAudioSource> src = OpenAudioSource(path, &why);
+    if (!src) {
+        std::fprintf(stderr, "MainWindow: cannot import '%s': %s\n", path,
+                     why.c_str());
+        ReportError("Import Audio", std::string("Cannot read \"")
+                    + path + "\": " + why + ".");
         return;
     }
     // Resolve the target track: the requested one if it's audio, else the first
@@ -2587,11 +2605,11 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
         tid = ap->CreatedId();
     }
 
-    const double srcRate = src.FrameRate();
+    const double srcRate = src->FrameRate();
     const double ratio = srcRate > 0 ? fProject->sampleRate / srcRate : 1.0;
     Clip clip;
     clip.startFrame   = start < 0 ? 0 : start;
-    clip.lengthFrames = (int64_t)llround(src.TotalFrames() * ratio);
+    clip.lengthFrames = (int64_t)llround(src->TotalFrames() * ratio);
     clip.sourceOffset = 0;
     clip.sourcePath   = path;
     fStack->Execute(std::make_unique<AddClipCommand>(tid, clip), *fProject);
@@ -2600,10 +2618,10 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
     // BQuery can find/sort it. BPM/Key are user-set in the browser.
     if (srcRate > 0) {
         EnsureDawIndexes(path);
-        WriteAttrFloat(path, kAttrDuration, (float)(src.TotalFrames() / srcRate));
+        WriteAttrFloat(path, kAttrDuration, (float)(src->TotalFrames() / srcRate));
     }
 
-    (*fPeaks)[path].Build(src);   // waveform envelope (src cursor is at start)
+    (*fPeaks)[path].Build(*src);   // waveform envelope (src cursor is at start)
     fTimeline->Invalidate();
 }
 
@@ -2710,9 +2728,11 @@ void MainWindow::RebuildPeaks() {
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty() || fPeaks->count(c.sourcePath))
                 continue;
-            WavSource src;
-            if (src.Open(c.sourcePath))
-                (*fPeaks)[c.sourcePath].Build(src);
+            // The factory, so a clip pointing at a FLAC or an AIFF gets its
+            // waveform too and not just a flat line.
+            std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
+            if (src)
+                (*fPeaks)[c.sourcePath].Build(*src);
         }
 }
 
@@ -2810,7 +2830,9 @@ void MainWindow::LoadSettings() {
     s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
+    s.exportContainer = (int)fExportChoices.container;
     s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportVorbisQuality = fExportChoices.vorbisQuality;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
     s.exportNormalize = fExportChoices.normalize;
@@ -2845,8 +2867,15 @@ void MainWindow::LoadSettings() {
     fLastDir      = s.lastDir;
     fDoc.SetRecent(s.recentProjects);
     RebuildRecentMenu();
-    // The export dialog reopens on the last choices, not on its defaults.
+    // The export dialog reopens on the last choices, not on its defaults. A
+    // remembered container this build cannot write (a settings file carried
+    // over from a build with FLAC, say) falls back to WAV rather than to a
+    // bounce that could only fail.
+    const AudioFileFormat savedContainer = (AudioFileFormat)s.exportContainer;
+    fExportChoices.container  = AudioFileFormatCanWrite(savedContainer)
+                                ? savedContainer : AudioFileFormat::Wav;
     fExportChoices.bitDepth   = s.exportBitDepth;
+    fExportChoices.vorbisQuality = s.exportVorbisQuality;
     fExportChoices.dither     = s.exportDither;
     fExportChoices.sampleRate = s.exportSampleRate;
     fExportChoices.normalize  = s.exportNormalize;
@@ -2874,7 +2903,9 @@ void MainWindow::SaveSettings() {
     s.monitorInput = fTransportCtl.fMonitorInput;
     s.lastDir      = fLastDir;
     s.recentProjects = fDoc.Recent();
+    s.exportContainer = (int)fExportChoices.container;
     s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportVorbisQuality = fExportChoices.vorbisQuality;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
     s.exportNormalize = fExportChoices.normalize;

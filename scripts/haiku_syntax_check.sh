@@ -10,7 +10,11 @@ INCS="-idirafter $H -idirafter $H/posix"
 for g in build/generated build-off/generated build-host/generated; do
   [ -d "$g" ] && INCS="$INCS -I$g"
 done
-for d in "$H"/os "$H"/os/*/; do INCS="$INCS -I$d"; done
+# The second loop only reaches one level under os/, but some system headers
+# live deeper -- Screen.h pulls <Accelerant.h>, which is in
+# os/add-ons/graphics/. Without that directory every UI file that includes
+# Screen.h reported FAIL for a header that is simply not on the path.
+for d in "$H"/os "$H"/os/*/ "$H"/os/add-ons/graphics; do INCS="$INCS -I$d"; done
 FILES="$*"
 [ -z "$FILES" ] && FILES="src/main.cpp src/ui/TimelineView.cpp src/ui/MainWindow.cpp \
   src/ui/MeterView.cpp src/ui/EffectsWindow.cpp src/ui/SendsWindow.cpp \
