@@ -60,26 +60,52 @@ first item; plan item M4.1 (`docs/PLAN_1.0.md`).
 
 ## Measurements (VM, beta6, 2 vCPU)
 
-<!-- filled in from the VM run -->
+From `ui_functional_tests` / `TestBigProjectPlayback` (39 tracks / 320 clips —
+the project the earlier tests have left by then; the test's own rows print 32
+tracks / 320 clips):
 
 | what | before | after |
 |---|---|---|
-| 32-track/320-clip play, window thread | 3.1 s (blocked; M1.5 record) | |
-| 32-track/320-clip play, graph in place (audio start) | same 3.1 s | |
-| rebuild during playback (structural edit) | stop/rebuild, audible gap + frozen window | |
+| play: the WINDOW thread is free again (Plan bound 300 ms) | 3.1 s, blocked | **20 ms** |
+| play: the graph is in place (audio starts) | ~3.1 s | **2592 ms** |
+| a structural edit during playback | stop, then 3.1 s of rebuild: audible gap + frozen window | graph swapped under a rolling transport; no stop, no device re-open |
+
+The "before" number is the one recorded on 2026-10-09 in
+`23-offscreen-and-icons.md`/`README.md` (M1.5), measured with the same test on
+the same VM. The two "after" numbers are printed by the test itself:
+
+```
+  big project: 39 tracks, 320 clips, window rolls in 20 ms, graph swapped in 2592 ms
+```
+
+So M4.1 meets the plan's 300 ms bar for what it set out to move (the window
+thread), and the audio start is still the disk work — one `TrackStream` per
+clip, each opening its file and priming its ring, now on the worker thread.
+M4.3's disk-stream pool is what brings that under the 300 ms budget; the test
+keeps a generous upper bound on it (12 s) with the measured value in the
+comment, because a bound near 2.6 s would be a flake under two agents sharing
+this VM, not a regression guard.
 
 ## Verification
 
-<!-- counts + commands -->
+All on the branch tip (`ea4fe2c` unless noted); commands as run:
 
 | suite | command | result |
 |---|---|---|
-| host | `cmake --build build-host`; `ctest --test-dir build-host` | |
-| ASan | `cmake -B b-asan -DDAW_SANITIZE=ON`; `cmake --build b-asan -j8`; `ctest --test-dir b-asan` | |
-| cross-check | `sh scripts/haiku_syntax_check.sh` | |
-| VM build | `flock /tmp/haiku-daw-vm.lock sh scripts/vm.sh build`; `ctest --test-dir build` | |
-| VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | |
-| VM UI | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | |
+| host build | `cmake -S . -B build-host && cmake --build build-host -j8` | exit 0 |
+| host ctest | `ctest --test-dir build-host` | **53/53 passed** |
+| ASan build | `cmake -B b-asan -DDAW_SANITIZE=ON && cmake --build b-asan -j8` | exit 0 |
+| ASan ctest | `ctest --test-dir b-asan` | **53/53 passed** |
+| new host target | `./build-host/engine_graph_tests` | 47 checks, 0 failures |
+| cross-check | `sh scripts/haiku_syntax_check.sh` | **0 FAIL** (10 files OK) |
+| VM build | `flock /tmp/haiku-daw-vm.lock sh scripts/vm.sh build` | exit 0 |
+| VM ctest (`build`, LV2 on) | `ctest --test-dir build` | **55/55 passed** |
+| VM `ui_functional_tests` | `DAW_UI_SHOTS=/tmp/shots ./ui_functional_tests` | **224 checks, 0 failures** |
+| VM build-off | `cmake -B build-off -DDAW_LV2=OFF && ctest --test-dir build-off` | <!-- --> |
+| screenshots | every `Shot()` of the run fetched and opened | <!-- --> |
+
+`ui_functional_tests` was 210 checks on master; the new `TestEngineGraphSwap`
+adds 14.
 
 ## Mutation checks
 
@@ -88,12 +114,13 @@ first item; plan item M4.1 (`docs/PLAN_1.0.md`).
    fails 3 checks (`TestNotFreedUntilQuiesced`), and under ASan the stress loop
    reports `heap-use-after-free ... tests/engine_graph_tests.cpp:144`. Restored.
 2. **`RebaseSkipFrames` returning 0** (the whole rebase disabled): 7 checks in
-   `this engine_graph_tests` fail. Restored.
+   `engine_graph_tests` fail. Restored.
 3. **The pre-M4.1 rebuild shape** (`ReloadActiveEngine` → `fEngine.reset(new
    Engine())` + `StartPlayback()`, i.e. throw the engine away instead of
-   swapping): `ui_functional_tests` /
-   `TestEngineGraphSwap` fails — `EnginePlayersOpened() == players0` and
-   `EnginePlayerStarts() == starts0`. Restored.
+   swapping): `ui_functional_tests` / `TestEngineGraphSwap` fails —
+   `EnginePlayersOpened() == players0` and `EnginePlayerStarts() == starts0`.
+   Restored (the mutation was run from a throwaway commit, `refs/heads/_vmwt`,
+   deleted afterwards).
 
 ## Not verified / for Marc
 

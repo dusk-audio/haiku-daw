@@ -1865,10 +1865,12 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     // WINDOW budget below is the one it fixes: the transport rolls without
     // waiting for a single file open.
     CHECK(uiMs < 300000);
-    // The graph still lands (an upper bound, not a budget): MEASURED 2026-10-10
-    // in the PR record. It is the same disk work as before, now off the window
-    // thread; M4.3's stream pool is what brings the AUDIO start under 300 ms.
-    CHECK(readyMs < 20000000);
+    // The graph still lands (an upper bound, not a budget): MEASURED 2026-10-10,
+    // VM, 39 tracks / 320 clips: 2592 ms — the same disk work as before, now
+    // off the window thread. M4.3's stream pool is what brings the AUDIO start
+    // under 300 ms; a bound near the measurement would be a flake on a VM two
+    // agents share, not a regression guard.
+    CHECK(readyMs < 12000000);
     snooze(2000000);            // let the timeline draw it for a while
     Shot("big-project-playing");
     {
