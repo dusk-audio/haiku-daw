@@ -187,6 +187,7 @@ private:
     ClipId          fDockClip   = kInvalidClipId;
     bool            fInspectorShown = true;
     void SetInspectorShown(bool shown);
+    void SetDockShown(bool shown);
     void OpenDockedEditor(TrackId track, ClipId clip);
     void PopOutEditor();                     // dock -> its own window
 

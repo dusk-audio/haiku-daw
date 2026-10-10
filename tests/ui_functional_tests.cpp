@@ -1598,27 +1598,22 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     win->PostMessage(MSG_TOGGLE_INSPECTOR);
     snooze(200000);
     {
-        float inspHidden = -1.0f, inspCollapsed = -1.0f;
+        bool inspGone = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
-            BView* insp = win->FindView("inspector");
+            inspGone = win->FindView("inspector") == nullptr;
             win->Unlock();
-            if (insp) { inspHidden = insp->IsHidden() ? 1.0f : 0.0f;
-                        inspCollapsed = insp->Bounds().Width(); }
         }
-        std::printf("  insp: hidden=%.0f width=%.1f\n", inspHidden, inspCollapsed);
-        CHECK(inspHidden == 1.0f);
+        CHECK(inspGone);
     }
     win->PostMessage(MSG_TOGGLE_INSPECTOR);
     snooze(200000);
     {
-        float inspHidden = -1.0f;
+        bool inspBack = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
-            BView* insp = win->FindView("inspector");
+            inspBack = win->FindView("inspector") != nullptr;
             win->Unlock();
-            if (insp) inspHidden = insp->IsHidden() ? 1.0f : 0.0f;
         }
-        std::printf("  insp: back hidden=%.0f\n", inspHidden);
-        CHECK(inspHidden == 0.0f);
+        CHECK(inspBack);
     }
 
     const int before = VisibleWindows();
@@ -1647,8 +1642,7 @@ static void TestDockedEditor(MainWindow* win, Project& project,
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         BView* roll = win->FindView("roll");
         BView* dock = win->FindView("dock");
-        const bool ok = roll == nullptr && dock != nullptr
-                     && dock->Bounds().Height() < Themed(20.0f);
+        const bool ok = roll == nullptr && dock == nullptr;
         win->Unlock();
         return ok;
     }));

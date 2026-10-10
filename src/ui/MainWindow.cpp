@@ -445,10 +445,7 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     }
     fDock->AddTab(fEditorPane);
     fRootSplit = new BSplitView(B_VERTICAL, 1.0f);
-    fRootSplit->AddChild(fPaneSplit, 1.0f);
-    fRootSplit->AddChild(fDock, 0.0f);
-    fRootSplit->SetCollapsible(1, true);
-    fRootSplit->SetItemCollapsed(1, true);    // the dock starts hidden
+    fRootSplit->AddChild(fPaneSplit, 1.0f);   // the dock joins on demand
 
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f)
         .Add(menuBar)
@@ -635,12 +632,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_POP_OUT_EDITOR:
             PopOutEditor();
             break;
-        case MSG_TOGGLE_DOCK: {
-            const bool collapsed = fRootSplit->IsItemCollapsed(1);
-            fRootSplit->SetItemCollapsed(1, !collapsed);
-            if (fDockItem) fDockItem->SetMarked(collapsed);
+        case MSG_TOGGLE_DOCK:
+            SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
             break;
-        }
         case MSG_FOLLOW: {
             const bool on = !(fFollowItem && fFollowItem->IsMarked());
             if (fFollowItem) fFollowItem->SetMarked(on);
@@ -1773,14 +1767,28 @@ void MainWindow::LayoutTransportBar() {
 // its 60 Hz meter updates stop painting into a collapsed column.
 void MainWindow::SetInspectorShown(bool shown) {
     fInspectorShown = shown;
-    if (fPaneSplit != nullptr)
-        fPaneSplit->SetItemCollapsed(0, !shown);
-    if (fInspector != nullptr) {
-        if (shown) fInspector->Show();
-        else       fInspector->Hide();
+    // The item LEAVES the split when hidden: a collapsed BSplitView item keeps
+    // its preferred size in this Haiku, which left an empty strip where the
+    // inspector used to be. Removing it hands the width back to the timeline,
+    // and re-adding puts it back where it was.
+    if (fPaneSplit != nullptr && fInspector != nullptr) {
+        if (shown && fInspector->Parent() == nullptr)
+            fPaneSplit->AddChild(0, fInspector, 0.0f);
+        else if (!shown && fInspector->Parent() != nullptr)
+            fInspector->RemoveSelf();
     }
     if (fInspectorItem != nullptr) fInspectorItem->SetMarked(shown);
     if (fTimeline != nullptr) fTimeline->Invalidate();
+}
+
+// Show or hide the docked bottom pane, the same way and for the same reason.
+void MainWindow::SetDockShown(bool shown) {
+    if (fRootSplit == nullptr || fDock == nullptr) return;
+    if (shown && fDock->Parent() == nullptr)
+        fRootSplit->AddChild(fDock, 0.0f);
+    else if (!shown && fDock->Parent() != nullptr)
+        fDock->RemoveSelf();
+    if (fDockItem != nullptr) fDockItem->SetMarked(shown);
 }
 
 // Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
@@ -1809,9 +1817,7 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     fDockTrack = track;
     fDockClip  = clip;
 
-    if (fDock) fDock->Show();
-    fRootSplit->SetItemCollapsed(1, false);
-    if (fDockItem) fDockItem->SetMarked(true);
+    SetDockShown(true);
     fDock->Select(0);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
@@ -1847,11 +1853,7 @@ void MainWindow::PopOutEditor() {
         fDockTrack = kInvalidTrackId;
         fDockClip  = kInvalidClipId;
     }
-    // Collapse and hide: the split reclaims the height, and hiding keeps an
-    // empty tab view from drawing its frame into a collapsed strip.
-    fRootSplit->SetItemCollapsed(1, true);
-    if (fDock) fDock->Hide();
-    if (fDockItem) fDockItem->SetMarked(false);
+    SetDockShown(false);
 }
 
 void MainWindow::FrameResized(float newWidth, float newHeight) {
@@ -2687,9 +2689,7 @@ void MainWindow::LoadSettings() {
     if (fRootSplit != nullptr && fDock != nullptr) {
         const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
         fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
-        fRootSplit->SetItemCollapsed(1, !s.bottomVisible);
-        if (s.bottomVisible) fDock->Show(); else fDock->Hide();
-        if (fDockItem != nullptr) fDockItem->SetMarked(s.bottomVisible);
+        SetDockShown(s.bottomVisible);
     }
 
     fTransportCtl.fBufferFrames = (size_t)s.bufferFrames;
@@ -2744,9 +2744,9 @@ void MainWindow::SaveSettings() {
     s.inspectorVisible = fInspectorShown;
     if (fInspector != nullptr && fInspector->Bounds().Width() > 1.0f)
         s.inspectorWidth = fInspector->Bounds().Width();
-    if (fRootSplit != nullptr) {
-        s.bottomVisible = !fRootSplit->IsItemCollapsed(1);
-        if (fDock != nullptr && fDock->Bounds().Height() > 1.0f)
+    if (fRootSplit != nullptr && fDock != nullptr) {
+        s.bottomVisible = fDock->Parent() != nullptr;
+        if (fDock->Bounds().Height() > 1.0f)
             s.bottomHeight = fDock->Bounds().Height();
     }
 
