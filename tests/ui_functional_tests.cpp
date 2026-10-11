@@ -2443,15 +2443,21 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         Frame a = -1, b = -1;
         CHECK(!range(&a, &b));          // the focusing click left none
         // The drag itself: press, move, release -- the pointer events a mouse
-        // sends, with the release far enough for the 4 px threshold.
-        const float x0 = frameX(60000), x1 = frameX(90000);
+        // sends, with the release far enough for the 4 px threshold. It must
+        // start on EMPTY content: a press inside a clip is a clip drag (which
+        // is what the first cut of this test did, and it quietly moved the
+        // fixture 30000 frames right for every section after it).
+        const float x0 = frameX(200000), x1 = frameX(212000);
         postMouse(B_MOUSE_DOWN, BPoint(x0, laneMidA));
         postMouse(B_MOUSE_MOVED, BPoint(x1, laneMidA));
         postMouse(B_MOUSE_UP, BPoint(x1, laneMidA));
         CHECK(WaitFor([&] { return range(&a, &b); }));
         // Snapped to the 1/16 grid (6000 frames at this tempo).
-        CHECK(a == 60000);
-        CHECK(b == 90000);
+        CHECK(a == 198000);
+        CHECK(b == 210000);
+        // ... and the clip under the drag is untouched: this was a range, not
+        // a clip move.
+        CHECK(clipOf(ta.id, ac.id).startFrame == ac.startFrame);
         Shot("depth-range");   // the band over the lanes + the ruler marks
     }
 
