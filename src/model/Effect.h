@@ -63,6 +63,19 @@ struct EffectDesc {
     bool               bypassed = false;
     float              mix      = 1.0f;
 
+    // The plugin's OWN state, opaque to the model: what IEffect::SaveState()
+    // produced (for an LV2 plugin, a lilv state document covering everything its
+    // state:interface saves — a synth's patch, an amp sim's cabinet — which is
+    // NOT reachable through the control ports `params` stores, and used to be
+    // lost on save). Empty for anything but a plugin-backed type, and empty for
+    // a plugin that has no state to save. `params` stays the source of truth for
+    // control ports; this carries only what they cannot.
+    //
+    // `state` participates in serialization (`fxstate` / `masterfxstate`,
+    // ProjectIO) and in EncodeFxChain/DecodeFxChain — a path that copies
+    // descriptors without it silently destroys it on the next chain edit.
+    std::string        state;
+
     // Read a param with a safe default for missing slots.
     float p(size_t i) const { return i < params.size() ? params[i] : 0.0f; }
 };

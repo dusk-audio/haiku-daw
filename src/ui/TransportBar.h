@@ -4,13 +4,17 @@
 // message to the window; SetPlaying/SetRecording light them.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include <Messenger.h>
 #include <View.h>
 
 namespace daw {
 
-class TransportBar : public BView {
+class TransportBar : public BView, public ThemeAware {
 public:
+    void ApplyTheme() override;   // T1: the cached bar colour
+
     TransportBar(BRect frame, BMessenger target,
                  uint32 playWhat, uint32 stopWhat, uint32 recWhat,
                  uint32 zoomOutWhat, uint32 zoomInWhat);

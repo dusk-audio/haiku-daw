@@ -34,9 +34,17 @@ std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d, double sampleRate) {
             // or an unresolvable URI yields nullptr.
             if (!gLv2Factory) return nullptr;
             std::unique_ptr<IEffect> e(gLv2Factory(d, sampleRate));
-            if (e)   // apply stored params
+            if (e) {
+                // Restore the plugin's own state BEFORE the stored params: the
+                // key is applied to the instance the caller is about to run, so
+                // a load (and every engine rebuild) comes up on the patch the
+                // project holds instead of the plugin's factory default. The
+                // order matters where a plugin's state:interface changes its own
+                // control ports: params are the user's, so they go on last.
+                if (!d.state.empty()) e->LoadState(d.state);
                 for (size_t i = 0; i < d.params.size(); i++)
                     e->SetParam((int)i, d.params[i]);
+            }
             return e;
         }
         case EffectType::Biquad: {

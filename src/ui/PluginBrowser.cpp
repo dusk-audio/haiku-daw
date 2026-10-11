@@ -7,10 +7,14 @@
 #include "../plugin/Lv2Host.h"
 #endif
 
+#include <LayoutBuilder.h>
 #include <ListView.h>
 #include <ScrollView.h>
 #include <StringItem.h>
+#include "widgets/DawStringItem.h"   // rows in the theme text colour
 #include "widgets/DawTextField.h"   // the kit (M1.3)
+
+#include <GroupLayout.h>
 
 #include <algorithm>
 #include <cctype>
@@ -49,30 +53,36 @@ const BuiltIn kBuiltIns[] = {
 
 } // namespace
 
-PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
-                             BMessenger main)
-    : BWindow(frame, "Add Effect", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
-      fTarget(target), fMain(main), fTrack(track) {
-    BView* root = new BView(Bounds(), "root", B_FOLLOW_ALL_SIDES, B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
-    AddChild(root);
+void PluginBrowserView::ApplyTheme() {
+    ThemedGroupView::ApplyTheme();   // the panel colour
+    ApplyWellColors(fList);
+    ApplyWellColors(fScroll);
+}
 
-    const float w = Bounds().Width();
-    fFilter = new DawTextField(BRect(8, 8, w - 8, 30), "filter", "Find:", "",
-                               new BMessage(MSG_FILTER));
+PluginBrowserView::PluginBrowserView(TrackId track, BMessenger target)
+    : ThemedGroupView("pluginbrowserview", B_VERTICAL, 0.0f), fTarget(target),
+      fTrack(track) {
+    // The field and the list, laid out the way the window used to place them:
+    // inside a real window the group's own layout does the work, inside the
+    // dock the dock's. The window host hands this view the whole frame. The
+    // panel colour is the themed group's (taken at attach and on a mode
+    // switch); the ctor only builds.
+    BGroupLayout* g = GroupLayout();
+    g->SetInsets(8.0f, 8.0f, 8.0f, 8.0f);
+    g->SetSpacing(6.0f);
+
+    fFilter = new DawTextField("filter", "Find:", "", new BMessage(MSG_FILTER));
     fFilter->SetDivider(36.0f);
     // Fire on every keystroke rather than only on Enter, so the list narrows as
     // the user types -- the point of a filter over a menu.
     fFilter->SetModificationMessage(new BMessage(MSG_FILTER));
-    root->AddChild(fFilter);
+    fFilter->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, Themed(24.0f)));
+    g->AddView(fFilter);
 
-    BRect lr(8, 38, w - 8 - B_V_SCROLL_BAR_WIDTH, Bounds().Height() - 8);
-    fList = new BListView(lr, "list", B_SINGLE_SELECTION_LIST,
-                          B_FOLLOW_ALL_SIDES);
+    fList = new BListView("list", B_SINGLE_SELECTION_LIST);
     fList->SetInvocationMessage(new BMessage(MSG_PICK));
-    root->AddChild(new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0,
-                                   false, true));
+    fScroll = new BScrollView("sv", fList, 0, false, true);
+    g->AddView(fScroll, 1.0f);
 
     // Build the full catalogue once. The hosts scan at startup and their
     // listings do not change while the app runs, so re-reading them per
@@ -97,7 +107,19 @@ PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
     Rebuild();
 }
 
-void PluginBrowser::Rebuild() {
+void PluginBrowserView::AttachedToWindow() {
+    ThemedGroupView::AttachedToWindow();   // applies the theme (panel + wells)
+    // The filter and the list post to THIS view. Left alone they take the
+    // window as their target (BControl/BListView::AttachedToWindow set that),
+    // and neither the dock's MainWindow nor the PluginBrowser window handles
+    // 'pbfl'/'pbpk' -- typing and picking were dead in both (T2 review). Set
+    // after the base call: the base is what attaches the children, and the
+    // kit's own AttachedToWindow is what puts the window target there.
+    fFilter->SetTarget(this);
+    fList->SetTarget(this);
+}
+
+void PluginBrowserView::Rebuild() {
     fList->MakeEmpty();
     fShown.clear();
 
@@ -108,12 +130,12 @@ void PluginBrowser::Rebuild() {
         if (!needle.empty() && e.search.find(needle) == std::string::npos)
             continue;
         fShown.push_back(e);
-        fList->AddItem(new BStringItem(e.label.c_str()));
+        fList->AddItem(new DawStringItem(e.label.c_str()));
     }
     if (!fShown.empty()) fList->Select(0);   // Enter works without a click
 }
 
-void PluginBrowser::PostChoice(int32 index) {
+void PluginBrowserView::PostChoice(int32 index) {
     // Prefer the index carried by the invocation itself. The list can be
     // rebuilt between the double-click and this message arriving -- type a
     // character straight after picking and MSG_FILTER runs first, re-selecting
@@ -123,15 +145,23 @@ void PluginBrowser::PostChoice(int32 index) {
     if (sel < 0 || sel >= (int32)fShown.size()) return;
     const Entry& e = fShown[(size_t)sel];
 
+    // No track selected (the dock's page before the user picks one): the rows
+    // are inert rather than inserting into whatever track happened to be first.
+    if (fTrack == kInvalidTrackId)
+        return;
+
     BMessage m(kMsgPluginChosen);
     m.AddInt64("track", (int64)fTrack);
     m.AddInt32("type", (int32)(int)e.type);
     m.AddString("name", e.id.c_str());
     fTarget.SendMessage(&m);
-    PostMessage(B_QUIT_REQUESTED);   // one pick per opening, like a dialog
+    // One pick per opening when this view IS a window (the host quits on this);
+    // docked, the page stays where the user put it.
+    if (BWindow* w = Window())
+        w->PostMessage(kMsgBrowserDone);
 }
 
-void PluginBrowser::MessageReceived(BMessage* msg) {
+void PluginBrowserView::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_FILTER: Rebuild(); break;
         case MSG_PICK: {
@@ -141,14 +171,39 @@ void PluginBrowser::MessageReceived(BMessage* msg) {
             PostChoice(idx);
             break;
         }
-        default: BWindow::MessageReceived(msg); break;
+        default: BGroupView::MessageReceived(msg); break;
     }
+}
+
+// --- the standalone window -------------------------------------------------
+
+PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
+                             BMessenger main)
+    : BWindow(frame, "Add Effect", B_TITLED_WINDOW,
+              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
+      fMain(main) {
+    fView = new PluginBrowserView(track, target);
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f).Add(fView).End();
+}
+
+void PluginBrowser::ApplyTheme() {
+    if (fView != nullptr) fView->ApplyTheme();   // the content is the window
+}
+
+void PluginBrowser::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgBrowserDone) {   // one pick per opening (a dialog)
+        PostMessage(B_QUIT_REQUESTED);
+        return;
+    }
+    BWindow::MessageReceived(msg);
 }
 
 void PluginBrowser::DispatchMessage(BMessage* m, BHandler* h) {
     // Space must reach the transport from any window. Not while the filter field
     // has focus, though -- there a space is a space.
-    if (fFilter && fFilter->TextView() && !fFilter->TextView()->IsFocus())
+    BTextControl* filter = dynamic_cast<BTextControl*>(FindView("filter"));
+    if (ForwardUndoRedo(m, fMain)) return;           // Cmd-Z from a child window
+    if (filter && filter->TextView() && !filter->TextView()->IsFocus())
         if (ForwardSpaceToTransport(m, fMain)) return;
     BWindow::DispatchMessage(m, h);
 }

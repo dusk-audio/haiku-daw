@@ -10,6 +10,7 @@
 #include "Automation.h"
 #include "TempoMap.h"
 #include "Instrument.h"
+#include "Fade.h"
 
 #include <string>
 #include <vector>
@@ -31,6 +32,16 @@ struct Clip {
     // alternatives; only the one with takeActive sounds. 0 = an ordinary clip.
     int         takeGroup     = 0;
     bool        takeActive    = true;
+    // Clip depth (M2.5). `name` is the display name (empty = the file's base
+    // name); `colorIndex` 0 = inherit the track's colour, like MidiClip's;
+    // `muted` silences the clip without touching the track (the engine, the
+    // exporter and the crossfade partner rule all honour it); `fadeShape` is
+    // the curve the clip's own fades render with (an auto-crossfade's
+    // contribution renders equal-power regardless -- see Crossfade.h).
+    std::string name;
+    int         colorIndex    = 0;
+    bool        muted         = false;
+    FadeShape   fadeShape     = FadeShape::Linear;
 };
 
 // A single MIDI note. Its position is in frames RELATIVE to the containing
@@ -40,6 +51,12 @@ struct MidiNote {
     int   velocity     = 100;   // 1..127
     Frame startFrame   = 0;     // relative to the clip start
     Frame lengthFrames = 0;
+    // Render-only, never serialized, 0 for every note a user edits: the pitch
+    // bend's phase advance (frames) up to this note's start, so a voice can keep
+    // its oscillator phase continuous across a bend step without carrying any
+    // history. Filled when the notes are flattened for playback (see
+    // model/MidiExpression.h); ProjectIO neither writes nor reads it.
+    double bendPhaseFrames = 0.0;
 };
 
 // A non-note MIDI channel event stored on a MIDI region: control change, pitch
@@ -79,6 +96,10 @@ struct MidiClip {
     // alternatives; only the one with takeActive sounds/draws. 0 = ordinary.
     int                   takeGroup     = 0;
     bool                  takeActive    = true;
+    // M2.5: a region mutes like an audio clip does, so the Mute tool means one
+    // thing whichever block it is pointed at. CollectNotes/CollectEvents skip
+    // a muted region; the timeline draws it dimmed.
+    bool                  muted         = false;
 };
 
 // Shift a region's clip-relative content by `delta` frames, so it keeps its
@@ -124,6 +145,39 @@ struct FxAutoLane {
     AutomationLane lane;
 };
 
+// One region's notes, clip-relative: in-window content only, with the region's
+// velocity fades applied and each note clamped to the window (a region trim or a
+// loop-take boundary bounds a note — MidiOps.h relies on that). The shared body
+// of CollectNotes() and CollectPlaybackNotes().
+inline std::vector<MidiNote> FlattenMidiClip(const MidiClip& c) {
+    std::vector<MidiNote> out;
+    out.reserve(c.notes.size());
+    for (const MidiNote& n : c.notes) {
+        if (n.startFrame < 0 || n.startFrame >= c.lengthFrames)
+            continue;
+        // Velocity fade by the note's start position within the region.
+        float f = 1.0f;
+        if (c.fadeInFrames > 0 && n.startFrame < c.fadeInFrames)
+            f = (float)n.startFrame / (float)c.fadeInFrames;
+        if (c.fadeOutFrames > 0) {
+            const Frame fo = c.lengthFrames - c.fadeOutFrames;
+            if (n.startFrame > fo)
+                f *= (float)(c.lengthFrames - n.startFrame)
+                     / (float)c.fadeOutFrames;
+        }
+        int vel = (int)(n.velocity * f + 0.5f);
+        if (vel < 1) vel = 1; if (vel > 127) vel = 127;
+        // Clamp the note to the region window: a note must not sound past
+        // its clip's end (a region trim / loop-take boundary bounds it).
+        Frame len = n.lengthFrames;
+        const Frame room = c.lengthFrames - n.startFrame;
+        if (len > room) len = room;
+        if (len < 1)    len = 1;
+        out.push_back({ n.pitch, vel, n.startFrame, len });
+    }
+    return out;
+}
+
 struct Track {
     TrackId           id    = kInvalidTrackId;
     TrackType         type  = TrackType::Audio;
@@ -139,6 +193,10 @@ struct Track {
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     int               colorIndex = 0;   // index into the UI track-color palette
     int               height     = 72;  // lane height in pixels (UI)
+    // M2.6: the lane folds to a title strip (the header's fold triangle). A
+    // property of the track, not of the view: it persists with the project
+    // (`trackfold`), undoes, and the drawing/geometry read it in one place.
+    bool              collapsed  = false;
     std::vector<Clip>       clips;      // audio clips, kept sorted by startFrame
     std::vector<MidiClip>   midiClips;  // MIDI regions (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
@@ -175,29 +233,11 @@ struct Track {
         for (const MidiClip& c : midiClips) {
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: silent
-            for (const MidiNote& n : c.notes) {
-                if (n.startFrame < 0 || n.startFrame >= c.lengthFrames)
-                    continue;
-                // Velocity fade by the note's start position within the region.
-                float f = 1.0f;
-                if (c.fadeInFrames > 0 && n.startFrame < c.fadeInFrames)
-                    f = (float)n.startFrame / (float)c.fadeInFrames;
-                if (c.fadeOutFrames > 0) {
-                    const Frame fo = c.lengthFrames - c.fadeOutFrames;
-                    if (n.startFrame > fo)
-                        f *= (float)(c.lengthFrames - n.startFrame)
-                             / (float)c.fadeOutFrames;
-                }
-                int vel = (int)(n.velocity * f + 0.5f);
-                if (vel < 1) vel = 1; if (vel > 127) vel = 127;
-                // Clamp the note to the region window: a note must not sound past
-                // its clip's end (a region trim / loop-take boundary bounds it).
-                Frame len = n.lengthFrames;
-                const Frame room = c.lengthFrames - n.startFrame;
-                if (len > room) len = room;
-                if (len < 1)    len = 1;
-                out.push_back({ n.pitch, vel,
-                                c.startFrame + n.startFrame, len });
+            if (c.muted)
+                continue;   // per-region mute (M2.5): nothing from it sounds
+            for (MidiNote n : FlattenMidiClip(c)) {
+                n.startFrame += c.startFrame;
+                out.push_back(n);
             }
         }
         return out;
@@ -211,6 +251,8 @@ struct Track {
         for (const MidiClip& c : midiClips) {
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: silent
+            if (c.muted)
+                continue;   // per-region mute (M2.5)
             for (const MidiClipEvent& e : c.events) {
                 if (e.startFrame < 0 || e.startFrame >= c.lengthFrames)
                     continue;   // outside the region window
@@ -221,6 +263,15 @@ struct Track {
         }
         return out;
     }
+
+    // The PLAYBACK form of CollectNotes(): the same notes with the CC64 pedal
+    // applied per region, so a key-up that lands while the pedal is down keeps
+    // the note sounding until the pedal lifts (or the key is struck again) —
+    // bounded by the region window, exactly as the live input path behaves.
+    // Editing, drawing and SMF export use the raw notes; the engine and the
+    // Exporter render these. Defined in Project.cpp (model/Sustain.h and this
+    // header include each other's types). See model/Sustain.h for the policy.
+    std::vector<MidiNote> CollectPlaybackNotes() const;
 };
 
 // A named position marker on the timeline (absolute frames). Kept sorted by

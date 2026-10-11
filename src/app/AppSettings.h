@@ -6,6 +6,8 @@
 // can grow.
 #pragma once
 
+#include "ThemePalette.h"   // ThemeMode
+
 #include <string>
 #include <vector>
 
@@ -28,6 +30,16 @@ struct AppSettings {
     float inspectorWidth   = 190.0f;
     bool  bottomVisible    = false;
     float bottomHeight     = 260.0f;
+    // Which dock page was showing (T2): 0 Editor, 1 Samples, 2 Plugins.
+    int   dockPage         = 0;
+    // Whether the arrangement shows the marker lane (M2.6): a view
+    // preference like the panes above, not project data.
+    bool  markerLaneVisible = false;
+
+    // How the app looks: the user's own colours and the stock Haiku look
+    // (System), or the DAW's dark palette in the DAW's windows only (Dark).
+    // System is the default; the app never writes a system colour (T1).
+    ThemeMode themeMode = ThemeMode::System;
 
     std::vector<std::string> recentProjects;
     static constexpr size_t kMaxRecent = 10;

@@ -4,6 +4,7 @@
 #include "UiMetrics.h"
 #include "Widgets.h"
 #include "widgets/DawIcons.h"   // the tool glyphs (M1.6)
+#include "../model/MidiControl.h"   // CcDefault: the lane's value-in-force fallback
 
 #include <OS.h>   // system_time(): the humanize seed
 #include <PopUpMenu.h>
@@ -69,14 +70,60 @@ static const char* NoteName(int pitch, char* buf, size_t n) {
     return buf;
 }
 
-// Bottom-lane choices. Velocity plus the controllers the synth actually renders
-// (CC7 x CC11 = channel gain, CC10 = pan), so editing one is always audible.
-const PianoRollView::LaneDef PianoRollView::kLanes[4] = {
-    { "Vel",  -1 },
-    { "Vol",   7 },
-    { "Expr", 11 },
-    { "Pan",  10 },
-};
+// The name a controller is known by, or nullptr when it has no common one.
+static const char* CcCommonName(int cc) {
+    switch (cc) {
+        case 0:   return "Bank";
+        case 1:   return "Mod";
+        case 2:   return "Breath";
+        case 4:   return "Foot";
+        case 5:   return "Porta";
+        case 7:   return "Vol";
+        case 10:  return "Pan";
+        case 11:  return "Expr";
+        case 64:  return "Sus";
+        case 65:  return "Porta";
+        case 66:  return "Sost";
+        case 67:  return "Soft";
+        case 68:  return "Legato";
+        case 71:  return "Reso";
+        case 74:  return "Cutoff";
+        case 84:  return "Porta";
+        case 91:  return "Reverb";
+        case 93:  return "Chorus";
+        case 95:  return "Phaser";
+        case 123: return "AllOff";
+        default:  return nullptr;
+    }
+}
+
+// Bottom-lane label. Short, because the button is 42 px wide: an abbreviation
+// for the controllers people know by one ("Mod", "Vol", "Pan", "Expr", "Sus"),
+// "CC n" for the rest. It always WRITES what it returns into `buf`, because the
+// button draws the buffer — the first cut returned the name without copying it
+// and the lane said "CC1" for the mod wheel (a screenshot found it; the test
+// now reads the caption back through LaneLabel()).
+const char* PianoRollView::LaneLabelFor(int cc, char* buf, size_t n) {
+    const char* label = "Vel";
+    if (cc >= 0) {
+        // On the button only the shortest names fit; the menu (CcItemLabel)
+        // spells out the rest ("CC64 Sus").
+        switch (cc) {
+            case 1:  label = "Mod";  break;
+            case 7:  label = "Vol";  break;
+            case 10: label = "Pan";  break;
+            case 11: label = "Expr"; break;
+            case 64: label = "Sus";  break;
+            default: label = nullptr; break;
+        }
+        if (label == nullptr) {
+            std::snprintf(buf, n, "CC%d", cc);
+            return buf;
+        }
+    }
+    std::snprintf(buf, n, "%s", label);
+    return buf;
+}
 
 PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
                              Frame clipStart, Frame clipLength,
@@ -92,7 +139,7 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
       fTrack(track), fClip(clip),
       fClipStart(clipStart), fClipLen(clipLength), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
-    SetViewColor(ColBackground());
+    ApplyTheme();
     fTempo.sampleRate = sampleRate;
     fSel.assign(fNotes.size(), 0);
 
@@ -109,6 +156,37 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
             if (fScrollFrame < 0) fScrollFrame = 0;
         }
     }
+}
+
+void PianoRollView::ApplyTheme() {
+    SetViewColor(ColBackground());
+}
+
+// The transport's playhead, pushed by the main window's pulse. M2.2: the roll
+// FOLLOWS it -- when it leaves the visible span the view scrolls so it stays on
+// screen (the same 10 % margin policy the timeline's chase uses), which is what
+// makes a docked or popped-out roll usable while the song plays.
+Frame PianoRollView::VisibleSpan() const {
+    const float w = Bounds().Width() - kKbdW;
+    if (w < 1.0f) return 0;
+    return (Frame)((double)w * fFramesPerPixel);
+}
+
+void PianoRollView::SetPlayhead(Frame absFrame) {
+    if (absFrame == fPlayhead) return;
+    const Frame rel = absFrame - fClipStart;
+    if (absFrame >= 0 && fFollow) {
+        const Frame visible = VisibleSpan();
+        if (visible > 0) {
+            const Frame right = fScrollFrame + visible;
+            if (rel < fScrollFrame || rel > right - visible / 10) {
+                fScrollFrame = rel - visible / 10;
+                if (fScrollFrame < 0) fScrollFrame = 0;
+            }
+        }
+    }
+    fPlayhead = absFrame;
+    Invalidate();
 }
 
 void PianoRollView::SelectOnly(int i) {
@@ -154,10 +232,22 @@ int PianoRollView::ToolAt(BPoint where) const {
     return -1;
 }
 void PianoRollView::ZoomBy(double factor) {
-    // Zoom about the view's left edge (keeps the left-visible frame anchored).
+    // The keys and the strip's buttons anchor on the roll's playhead when it is
+    // in view (so the bar being worked on stays put), else on the centre.
+    float x = (kKbdW + Bounds().right) * 0.5f;
+    const float px = FrameToX(fPlayhead - fClipStart);
+    if (fPlayhead >= 0 && px >= kKbdW && px <= Bounds().right) x = px;
+    ZoomAnchoredAt(factor, x);
+}
+
+// Zoom keeping the frame under `x` where it is (M2.2's pointer-anchored zoom).
+void PianoRollView::ZoomAnchoredAt(double factor, float x) {
+    const Frame anchor = XToFrame(x);
     fFramesPerPixel *= factor;
     if (fFramesPerPixel < 8)    fFramesPerPixel = 8;
     if (fFramesPerPixel > 8192) fFramesPerPixel = 8192;
+    fScrollFrame = anchor - (Frame)((double)(x - kKbdW) * fFramesPerPixel);
+    if (fScrollFrame < 0) fScrollFrame = 0;
     Invalidate();
 }
 Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
@@ -291,13 +381,13 @@ void PianoRollView::Draw(BRect) {
     FillRect(BRect(0, velTop, w, h));
     SetHighColor(ColGrid());
     StrokeLine(BPoint(0, velTop), BPoint(w, velTop));
-    if (fLane > 0) DrawCcLane(BRect(0, velTop, w, h));
-    // Lane selector (click to cycle Vel -> Vol -> Expr -> Pan).
-    DrawButton(this, LanePickRect(), kLanes[fLane].label, fLane > 0,
-               fLane > 0 ? Rgb(120, 200, 160) : ColAccent());
+    if (fLaneCc >= 0) DrawCcLane(BRect(0, velTop, w, h));
+    // Lane selector: names the lane it is showing, and opens the menu of them.
+    DrawButton(this, LanePickRect(), fLaneLabel, fLaneCc >= 0,
+               fLaneCc >= 0 ? Rgb(120, 200, 160) : ColAccent());
     const float base = h - 5.0f;
     const float span = kVelLaneH - 12.0f;
-    for (size_t i = 0; fLane == 0 && i < fNotes.size(); i++) {
+    for (size_t i = 0; fLaneCc < 0 && i < fNotes.size(); i++) {
         const MidiNote& n = fNotes[i];
         const float x0 = FrameToX(n.startFrame);
         const float x1 = FrameToX(n.startFrame + n.lengthFrames);
@@ -434,19 +524,19 @@ void PianoRollView::ApplyMidiOp(MidiOp op) {
 // the fast path for the one that gets used constantly.
 void PianoRollView::MidiMenu() {
     BPopUpMenu* m = new BPopUpMenu("midi", false, false);
-    m->AddItem(new BMenuItem("Quantize" B_UTF8_ELLIPSIS, NULL));
-    m->AddItem(new BMenuItem("Quantize (last settings)   q", NULL));
+    m->AddItem(new ThemedMenuItem("Quantize" B_UTF8_ELLIPSIS, NULL));
+    m->AddItem(new ThemedMenuItem("Quantize (last settings)   q", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Humanize", NULL));
-    m->AddItem(new BMenuItem("Legato", NULL));
+    m->AddItem(new ThemedMenuItem("Humanize", NULL));
+    m->AddItem(new ThemedMenuItem("Legato", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Transpose +1", NULL));
-    m->AddItem(new BMenuItem("Transpose -1", NULL));
-    m->AddItem(new BMenuItem("Transpose +12", NULL));
-    m->AddItem(new BMenuItem("Transpose -12", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose +1", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose -1", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose +12", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose -12", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Velocity +10", NULL));
-    m->AddItem(new BMenuItem("Velocity -10", NULL));
+    m->AddItem(new ThemedMenuItem("Velocity +10", NULL));
+    m->AddItem(new ThemedMenuItem("Velocity -10", NULL));
 
     const BRect r = MidiMenuRectR();
     BMenuItem* sel = m->Go(ConvertToScreen(BPoint(r.left, r.bottom)), false, true);
@@ -596,6 +686,69 @@ int PianoRollView::VelNoteAtX(float x) const {
 
 // --- bottom lane (velocity or one controller) ------------------------------
 
+// Pick the lane. Clamps instead of failing, and re-labels the button, so the
+// view always says which lane it is showing (UI_GUIDELINES §3).
+void PianoRollView::SetLaneCc(int cc) {
+    if (cc < -1 || cc > 127) return;
+    if (cc == fLaneCc) return;
+    fLaneCc = cc;
+    LaneLabelFor(cc, fLaneLabel, sizeof(fLaneLabel));
+    Invalidate();
+}
+
+// The lane menu's label for a controller: always the number (the message the
+// picker reads back), plus the common name where there is one.
+static BString CcItemLabel(int cc) {
+    BString label;
+    label << "CC" << cc;
+    if (const char* name = CcCommonName(cc)) label << " " << name;
+    return label;
+}
+
+// The lane button's menu. Lists velocity, then the controllers THIS region
+// already carries (so a recorded pedal or wheel lane is one click away), then
+// all 128 in four groups. The item's label carries the number ("CC64 Sus"), and
+// the pick below parses it — the same dispatch-by-label the MIDI menu uses.
+void PianoRollView::LaneMenu() {
+    BPopUpMenu* m = new BPopUpMenu("lane", false, false);
+    m->AddItem(new BMenuItem("Velocity", NULL));
+
+    // What is actually in the region, in controller order, deduplicated.
+    bool have[128] = {};
+    for (const MidiClipEvent& e : fEvents)
+        if (e.type == MidiClipEvent::CC && e.data >= 0 && e.data < 128)
+            have[e.data] = true;
+    bool any = false;
+    for (int cc = 0; cc < 128; cc++) {
+        if (!have[cc]) continue;
+        if (!any) { m->AddSeparatorItem(); any = true; }
+        m->AddItem(new BMenuItem(CcItemLabel(cc).String(), NULL));
+    }
+
+    m->AddSeparatorItem();
+    for (int group = 0; group < 4; group++) {
+        char gname[40];
+        std::snprintf(gname, sizeof(gname), "Controllers %d-%d",
+                      group * 32, group * 32 + 31);
+        BPopUpMenu* sub = new BPopUpMenu(gname);
+        for (int cc = group * 32; cc < group * 32 + 32; cc++)
+            sub->AddItem(new BMenuItem(CcItemLabel(cc).String(), NULL));
+        m->AddItem(new BMenuItem(sub));
+    }
+
+    const BRect r = LanePickRect();
+    BMenuItem* sel = m->Go(ConvertToScreen(BPoint(r.left, r.top)), false, true);
+    const std::string label = sel ? std::string(sel->Label()) : std::string();
+    delete m;
+    if (label.empty()) return;
+    if (label == "Velocity") { SetLaneCc(-1); return; }
+    // Only a "CC<n> ..." item names a lane: a submenu's parent item ("Controllers
+    // 0-31") can come back selected too, and must not be read as a controller.
+    int cc = -1;
+    if (label.rfind("CC", 0) == 0 && std::sscanf(label.c_str(), "CC%d", &cc) == 1)
+        SetLaneCc(cc);
+}
+
 BRect PianoRollView::LanePickRect() const {
     const float top = VelLaneTop();
     return BRect(4, top + 3, 46, top + 19);
@@ -618,8 +771,8 @@ int PianoRollView::CcYToValue(float y) const {
 
 // Nearest event of the active controller within a few pixels of x, else -1.
 int PianoRollView::CcEventAtX(float x) const {
-    if (fLane <= 0) return -1;
-    const int cc = kLanes[fLane].cc;
+    if (fLaneCc < 0) return -1;
+    const int cc = fLaneCc;
     int   best = -1;
     float bestD = 7.0f;   // grab radius in pixels
     for (size_t i = 0; i < fEvents.size(); i++) {
@@ -634,8 +787,8 @@ int PianoRollView::CcEventAtX(float x) const {
 // Add a controller point at the click, or move the one already at that frame.
 // Snapped in time so drawing a ramp lands on the grid like note entry does.
 void PianoRollView::SetCcAt(BPoint where) {
-    if (fLane <= 0) return;
-    const int cc = kLanes[fLane].cc;
+    if (fLaneCc < 0) return;
+    const int cc = fLaneCc;
     Frame f = Snapped(XToFrame(where.x));
     if (f < 0) f = 0;
     const int v = CcYToValue(where.y);
@@ -678,7 +831,7 @@ void PianoRollView::ApplyEvents() {
 // the frame), so draw it as a staircase rather than joining the dots — the shape
 // on screen is then exactly what the engine renders.
 void PianoRollView::DrawCcLane(BRect lane) {
-    const int cc = kLanes[fLane].cc;
+    const int cc = fLaneCc;
     const float w = lane.right;
 
     // Gather this controller's points in time order.
@@ -690,9 +843,10 @@ void PianoRollView::DrawCcLane(BRect lane) {
                   return a->startFrame < b->startFrame;
               });
 
-    // Value in force before the first point: what MidiControl falls back to when
-    // the controller is absent (unity for vol/expr, centre for pan).
-    const int def = (cc == 10) ? 64 : 127;
+    // Value in force before the first point: the same fallback the engine and
+    // Exporter use where they act on this controller (MidiControl.h), so the
+    // staircase drawn here is the level that sounds.
+    const int def = CcDefault(cc);
     SetHighColor(Rgb(120, 200, 160));
 
     // Walk left to right holding each value until the next point, then stepping
@@ -750,18 +904,18 @@ void PianoRollView::MouseDown(BPoint where) {
         return;
     }
 
-    // Bottom lane. The selector cycles which lane is shown; below that it is
-    // either the velocity lollipops or the active controller's envelope.
+    // Bottom lane. The selector names the lane it is showing and opens the menu
+    // of them; below that it is either the velocity lollipops or the active
+    // controller's envelope.
     if (where.y >= VelLaneTop()) {
         if (LanePickRect().Contains(where)) {
-            fLane = (fLane + 1) % (int)(sizeof(kLanes) / sizeof(kLanes[0]));
-            Invalidate();
+            LaneMenu();
             return;
         }
         int32 lb = 0;
         if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
             m->FindInt32("buttons", &lb);
-        if (fLane > 0) {           // CC lane: draw points, right-click deletes
+        if (fLaneCc >= 0) {        // CC lane: draw points, right-click deletes
             if (where.x < kKbdW) return;
             if (lb & B_SECONDARY_MOUSE_BUTTON) { EraseCcAt(where); return; }
             fDrag = Drag::Cc;
@@ -882,6 +1036,10 @@ void PianoRollView::MouseDown(BPoint where) {
 }
 
 void PianoRollView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
+    // The pointer's last position: the Ctrl+wheel zoom anchors on it (M2.2),
+    // and a wheel message carries no position of its own.
+    fHoverPos = where;
+    fHoverSeen = true;
     // The tool buttons carry no text since M1.6: hovering one names it. (The
     // view is custom-drawn, so the tooltip is driven here rather than by a
     // control per button.)
@@ -1006,11 +1164,16 @@ void PianoRollView::MessageReceived(BMessage* msg) {
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         float dy = 0.0f;
         if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
-            if (modifiers() & B_SHIFT_KEY) {          // Shift+wheel: scroll time
+            const uint32 mods = EventModifiers(msg);
+            if (mods & B_SHIFT_KEY) {                 // Shift+wheel: scroll time
                 fScrollFrame += (Frame)((double)dy * 8.0 * fFramesPerPixel);
                 if (fScrollFrame < 0) fScrollFrame = 0;
-            } else if (modifiers() & B_CONTROL_KEY) { // Ctrl+wheel: zoom time
-                ZoomBy(dy > 0 ? 1.2 : 1.0 / 1.2);
+            } else if (mods & B_CONTROL_KEY) {        // Ctrl+wheel: zoom time,
+                float x = fHoverPos.x;                // anchored on the pointer
+                if (x < kKbdW) x = kKbdW;
+                if (x > Bounds().right) x = Bounds().right;
+                if (!fHoverSeen) x = (kKbdW + Bounds().right) * 0.5f;
+                ZoomAnchoredAt(dy > 0 ? 1.2 : 1.0 / 1.2, x);
             } else {                                   // wheel: scroll pitch
                 fTopPitch -= (int)dy * 3;
                 if (fTopPitch > 127) fTopPitch = 127;
@@ -1081,6 +1244,7 @@ PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
 }
 
 void PianoRoll::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardUndoRedo(m, fMain)) return;           // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fMain)) return;
     BWindow::DispatchMessage(m, h);
 }

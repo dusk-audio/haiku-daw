@@ -51,7 +51,7 @@ inline void DrawKnob(BView* v, BRect r, float val, rgb_color accent,
 
     // Pointer (standard math angle; screen y is down, so subtract sin).
     const double ang = (90.0 - val * 140.0) * M_PI / 180.0;
-    v->SetHighColor(Rgb(235, 235, 240));
+    v->SetHighColor(ColText());
     v->SetPenSize(Themed(2.0f));
     v->StrokeLine(BPoint(cx, cy),
                   BPoint(cx + std::cos(ang) * rad * 0.78f,
@@ -76,12 +76,11 @@ inline void DrawButton(BView* v, BRect r, const char* label, bool active,
         v->SetHighColor(ColBtnBorder());
         v->StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
     }
-    rgb_color txt = ColBtnText();
-    if (active) {
-        const float lum = 0.299f * onColor.red + 0.587f * onColor.green
-                        + 0.114f * onColor.blue;
-        txt = lum > 140.0f ? Rgb(20, 20, 22) : Rgb(240, 240, 240);
-    }
+    // The label colour for a filled box is the theme's rule (whichever of
+    // black or white reads better on that fill), not an ad-hoc brightness
+    // threshold: the lamppost colours are the user's and the accent is a
+    // preference, so a fixed threshold gets it wrong for some of them.
+    rgb_color txt = active ? LabelOn(onColor) : ColBtnText();
     v->SetHighColor(txt);
     const float tw = v->StringWidth(label);
     v->DrawString(label, BPoint((r.left + r.right) * 0.5f - tw * 0.5f,
@@ -99,7 +98,7 @@ inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
     BRect trough(cx - Themed(2.0f), r.top, cx + Themed(2.0f), r.bottom);
     v->SetHighColor(ColGrid());
     v->FillRect(trough);
-    v->SetHighColor(Rgb(10, 10, 13));
+    v->SetHighColor(MixColor(ColKnobOutline(), Rgb(0, 0, 0), 0.6f));
     v->StrokeLine(BPoint(trough.left, r.top), BPoint(trough.left, r.bottom));
 
     // Unity (0 dB) tick.
@@ -113,13 +112,13 @@ inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
     BRect cap(cx - Themed(12.0f), cy - Themed(6.0f),
               cx + Themed(12.0f), cy + Themed(6.0f));
     BGradientLinear grad(BPoint(cap.left, cap.top), BPoint(cap.left, cap.bottom));
-    grad.AddColor(Rgb(96, 96, 106), 0);
-    grad.AddColor(Rgb(62, 62, 70), 128);
-    grad.AddColor(Rgb(44, 44, 52), 255);
+    grad.AddColor(TintColor(ColKnobOutline(), 1.25f), 0);
+    grad.AddColor(ColKnobOutline(), 128);
+    grad.AddColor(ColKnobBody(), 255);
     v->FillRoundRect(cap, Themed(2.0f), Themed(2.0f), grad);
     v->SetHighColor(ColKnobOutline());
     v->StrokeRoundRect(cap, Themed(2.0f), Themed(2.0f));
-    v->SetHighColor(Rgb(232, 232, 238));
+    v->SetHighColor(ColText());
     v->StrokeLine(BPoint(cap.left + Themed(3.0f), cy),
                   BPoint(cap.right - Themed(3.0f), cy));
 }
@@ -128,7 +127,7 @@ inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
 // yellow -> red gradient to `level` [0,1].
 inline void DrawVUMeter(BView* v, BRect r, float level) {
     if (level < 0) level = 0; if (level > 1) level = 1;
-    v->SetHighColor(Rgb(16, 16, 20));
+    v->SetHighColor(ColLcd());
     v->FillRect(r);
     if (level > 0.001f) {
         BRect fill = r;

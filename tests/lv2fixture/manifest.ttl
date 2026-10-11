@@ -1,4 +1,7 @@
 @prefix lv2:  <http://lv2plug.in/ns/lv2core#> .
+@prefix pset: <http://lv2plug.in/ns/ext/presets#> .
+@prefix state: <http://lv2plug.in/ns/ext/state#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 
@@ -68,3 +71,23 @@
     a lv2:Plugin ;
     lv2:binary <daw_test_plugins.so> ;
     rdfs:seeAlso <plugins.ttl> .
+
+# --- A bundled preset, so preset discovery has something to find ------------
+# A preset is a resource in the bundle, not a plugin: it appliesTo the plugin
+# and carries a label plus (here) both a port value and a state property.
+<urn:haiku-daw:test:stateful>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:preset:half>
+    a pset:Preset ;
+    lv2:appliesTo <urn:haiku-daw:test:stateful> ;
+    rdfs:label "Half Gain" ;
+    lv2:port [
+        lv2:symbol "gain" ;
+        pset:value 0.5
+    ] ;
+    state:state [
+        <urn:haiku-daw:test:state:mul> "4.0"^^xsd:float
+    ] .

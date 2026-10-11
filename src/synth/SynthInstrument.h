@@ -24,8 +24,9 @@ public:
 
     void Render(const std::vector<MidiNote>& notes,
                 float* out, size_t frames, Frame blockStart,
-                StereoGain from, StereoGain to) override {
-        fSynth.Render(notes, fInst, out, frames, blockStart, from, to);
+                StereoGain from, StereoGain to,
+                const VoiceExpression& expr = {}) override {
+        fSynth.Render(notes, fInst, out, frames, blockStart, from, to, expr);
     }
 
     using IInstrument::Render;   // keep the constant-gain convenience overloads
