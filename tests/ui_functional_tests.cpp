@@ -2889,12 +2889,11 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             BMessenger(child).SendMessage(&key);
             CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name != "Child Undo"; }));
         }
-        // Close the child again.
-        if (child) {
-            child->Lock();
-            child->Quit();
-            child->Unlock();
-        }
+        // Close the child again. Lock, Quit(), and NO Unlock: Quit tears the
+        // looper down, and touching it afterwards trips "looper must be locked
+        // before proceeding" — a crash dialog on the target, not a failed
+        // check (the pattern every other close in this file follows).
+        if (child && child->LockWithTimeout(2000000) == B_OK) child->Quit();
         CHECK(WaitFor([&] { return VisibleWindows() == before; }));
     }
 
