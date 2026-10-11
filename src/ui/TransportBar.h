@@ -20,6 +20,12 @@ public:
     void GetPreferredSize(float* width, float* height) override;
     BSize MinSize() override;
     BSize MaxSize() override;
+    // The bar's CONTENTS are pinned offsets the window places (see
+    // MainWindow::LayoutTransportBar). The bar's width can change without the
+    // WINDOW resizing -- a pane re-layout does it -- so the window has to hear
+    // about it, or everything pinned to the right edge (the master meter)
+    // stays where the last window resize put it.
+    void FrameResized(float width, float height) override;
 
     void SetPlaying(bool p)   { if (p != fPlaying)   { fPlaying = p;   Invalidate(); } }
     void SetRecording(bool r) { if (r != fRecording) { fRecording = r; Invalidate(); } }

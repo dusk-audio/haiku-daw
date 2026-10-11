@@ -65,6 +65,14 @@ public:
     void MouseUp(BPoint where) override;
     void KeyDown(const char* bytes, int32 numBytes) override;
     void AttachedToWindow() override;
+    // A plain BView's minimum size IS its current size, and this view is an
+    // item in the pane split: left unsaid, every time it grew the split's (and
+    // so the window layout's) minimum grew with it, until the transport bar
+    // was laid out wider than the window and the master meter -- pinned to the
+    // bar's right edge -- sat outside the visible window. M3.3 found it; these
+    // two say what the view actually needs (UI_GUIDELINES §4).
+    BSize MinSize() override { return BSize(Themed(200.0f), Themed(120.0f)); }
+    BSize MaxSize() override { return BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED); }
 
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);

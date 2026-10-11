@@ -1992,13 +1992,21 @@ static std::string WriteMeterWav(const char* path, double amp, double hz,
 }
 
 // One track playing one file through the engine, then the meter's readings.
+// `gain` is the track's fader (the engine's pan law costs 3 dB at centre, so a
+// +3.5 dB fader is what puts a full-scale source over 0 dBFS at the meter).
+//
+// The fixture track is SOLOED and every other track's solo/mute is cleared:
+// this is one project for the whole run and earlier tests leave clips on it,
+// so anything else still audible would land in the master meter's sum (the
+// first cut of this test read a peak that was partly someone else's audio).
 static bool PlayMeterFixture(MainWindow* win, Project& project,
-                             const std::string& wav, TrackId* outTrack) {
+                             const std::string& wav, float gain,
+                             TrackId* outTrack) {
     Track t;
     t.id = project.NextTrackId();
     t.type = TrackType::Audio;
     t.name = "meter-fix";
-    t.gain = 1.0f;
+    t.gain = gain;
     Clip c;
     c.id = project.NextClipId();
     c.startFrame = 0;
@@ -2008,6 +2016,12 @@ static bool PlayMeterFixture(MainWindow* win, Project& project,
     if (!LockedAddTrack(win, project, t)) return false;
     if (outTrack) *outTrack = t.id;
     if (win->LockWithTimeout(1000000) == B_OK) {
+        for (Track& other : project.Tracks()) {
+            if (other.id == t.id) continue;
+            other.soloed = false;
+            other.muted  = true;
+        }
+        if (Track* mine = project.FindTrack(t.id)) mine->soloed = true;
         project.transport.playhead = 0;
         win->Unlock();
     }
@@ -2029,35 +2043,94 @@ static void TestMetering(MainWindow* win, Project& project, CommandStack& stack)
     CHECK(meter != nullptr);
     if (!meter) return;
 
-    // A 0.5-amplitude sine on both channels: RMS ~0.354, correlation +1.
+    // The meter is on the transport bar, inside it, and inside the WINDOW.
+    // That last clause is the one that bit: a pane re-layout widens the bar
+    // (a plain BView's minimum is its current size), and everything pinned to
+    // the bar's right edge was then placed past the window's edge -- painted
+    // by nobody, over a background the server had already filled. A screenshot
+    // review of the first cut found it; this is the cheap check of the same
+    // thing, and the Pop out / dock toggle this test follows is what triggers
+    // it (TestDockedEditor runs just before).
+    {
+        bool onBar = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            BView* bar = win->FindView("transport");
+            const BRect onScreen = meter->ConvertToScreen(meter->Bounds());
+            // (win->Frame() is shadowed by MainWindow's Frame typedef.)
+            const BRect windowScreen = win->ConvertToScreen(win->Bounds());
+            onBar = bar != nullptr && meter->Parent() == bar
+                 && !meter->IsHidden()
+                 && meter->Frame().right <= bar->Bounds().right
+                 && meter->Frame().Width() > Themed(80.0f)
+                 && onScreen.left >= windowScreen.left
+                 && onScreen.right <= windowScreen.right;
+            // ... and the bar itself fits the window: the root cause of the
+            // whole thing is a pane whose minimum is its current size, which
+            // made the window's layout wider than the window after any pane
+            // re-layout (TimelineView says what it needs now).
+            CHECK(bar != nullptr
+                  && bar->Bounds().right <= win->Bounds().Width() + 1.0f);
+            if (!onBar) {
+                std::printf("  meter frame (%g,%g,%g,%g) bounds (%g,%g,%g,%g) "
+                            "hidden %d parent %p\n",
+                            meter->Frame().left, meter->Frame().top,
+                            meter->Frame().right, meter->Frame().bottom,
+                            meter->Bounds().left, meter->Bounds().top,
+                            meter->Bounds().right, meter->Bounds().bottom,
+                            (int)meter->IsHidden(), (void*)meter->Parent());
+                if (bar)
+                    std::printf("  bar bounds (%g,%g,%g,%g) scale %.2f\n",
+                                bar->Bounds().left, bar->Bounds().top,
+                                bar->Bounds().right, bar->Bounds().bottom,
+                                ThemeScale());
+            }
+            win->Unlock();
+        }
+        CHECK(onBar);
+    }
+
+    // A 0.5-amplitude sine on both channels. Through the engine that is
+    // 0.5 * 0.707 (the equal-power pan law's centre) = 0.354 peak, and a
+    // sine's RMS is 0.354/sqrt(2) = 0.25.
     const std::string sine = WriteMeterWav("/tmp/haiku_daw_ui_meter.wav", 0.5,
                                            440.0);
     CHECK(!sine.empty());
-    CHECK(PlayMeterFixture(win, project, sine, nullptr));
+    CHECK(PlayMeterFixture(win, project, sine, 1.0f, nullptr));
     CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
     CHECK(WaitFor([&] {
         return meter->Readings().rmsL > 0.2f;   // the window has fed it
     }, 8000000));
+    // The RMS window is 300 ms long, so a reading taken while it fills is a
+    // LOWER number: wait for it to settle before believing it.
+    CHECK(WaitFor([&] {
+        const float a = meter->Readings().rmsL;
+        snooze(60000);
+        const float b = meter->Readings().rmsL;
+        return std::fabs(a - b) < 0.005f;
+    }, 5000000));
     const MeterReadings r = meter->Readings();
     std::printf("  peak %.3f rms %.3f corr %+.2f\n", r.peakL, r.rmsL,
                 r.correlation);
-    CHECK(r.peakL > 0.4f && r.peakL < 0.6f);
-    CHECK(r.rmsL > 0.30f && r.rmsL < 0.41f);      // 0.5/sqrt(2) = 0.354
-    CHECK(r.rmsR > 0.30f && r.rmsR < 0.41f);
+    CHECK(r.peakL > 0.30f && r.peakL < 0.40f);
+    CHECK(r.rmsL > 0.22f && r.rmsL < 0.28f);      // 0.354/sqrt(2) = 0.25
+    CHECK(r.rmsR > 0.22f && r.rmsR < 0.28f);
     CHECK(r.correlation > 0.9f);                  // mono: in phase
-    CHECK(!meter->ClipLatched());                 // 0.5 is not a clip
+    CHECK(!meter->ClipLatched());                 // -3 dB is not a clip
     Shot("meter-playing");
     win->PostMessage(MSG_STOP);
     CHECK(WaitFor([&] { return !win->IsPlaying(); }));
 
-    // The peak hold remembers the peak the bars have already fallen from.
-    CHECK(meter->HoldFracL() > 0.7f);             // ~-6 dBFS, on a 66 dB scale
+    // The peak hold remembers the peak the bars have already fallen from
+    // (-9 dB, i.e. 0.77 of a 66 dB scale).
+    CHECK(meter->HoldFracL() > 0.7f);
 
     // Full scale: the clip lamp latches, and a click on the meter clears it.
+    // The fader is above unity so the mix really is over 0 dBFS (with the
+    // 3 dB-centre pan law, unity alone would sit at -3 dBFS).
     const std::string full = WriteMeterWav("/tmp/haiku_daw_ui_meter_full.wav",
                                            1.0, 0.0);
     CHECK(!full.empty());
-    CHECK(PlayMeterFixture(win, project, full, nullptr));
+    CHECK(PlayMeterFixture(win, project, full, 1.5f, nullptr));
     CHECK(WaitFor([&] { return meter->ClipLatched(); }, 8000000));
     Shot("meter-clipped");
     win->PostMessage(MSG_STOP);
@@ -2073,18 +2146,23 @@ static void TestMetering(MainWindow* win, Project& project, CommandStack& stack)
         BMessenger(meter).SendMessage(&click);
         CHECK(WaitFor([&] { return !meter->ClipLatched(); }));
     }
-    // ... and it stays cleared: the engine's own flag was cleared too (a clip
-    // that happened after the read is kept, one that happened before is not).
-    win->PostMessage(MSG_PLAY);
-    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
-    snooze(500000);
-    win->PostMessage(MSG_STOP);
-    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    // ... and it stays clear on its own: the click cleared the window's latch
+    // AND the engine's own flag bits, so the clip that already happened cannot
+    // re-light it on the next poll.
+    snooze(400000);
     CHECK(!meter->ClipLatched());
 
+    // A fresh clip lights it again -- the lamp is not simply dead.
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
+    CHECK(WaitFor([&] { return meter->ClipLatched(); }, 8000000));
     // The engine's readings are what the meter drew: the correlation strip
-    // shows the same number the view was handed.
+    // shows the same number the view was handed (read while it is still
+    // being fed -- stopping zeroes the bars, by design).
     CHECK(meter->Readings().correlation > 0.9f);
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    CHECK(meter->ClipLatched());   // the latch outlives the transport
 
     (void)stack;
 }

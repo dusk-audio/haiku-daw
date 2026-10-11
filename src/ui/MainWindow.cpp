@@ -713,6 +713,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
             break;
+        case kMsgTransportLayout:   // the bar's width changed (see TransportBar)
+            LayoutTransportBar();
+            break;
         case kMsgMeterClipReset:
             // The master meter was clicked. Clear the latched flags where they
             // live (the engine, or the recorder during a take); the fetch_and
@@ -1843,7 +1846,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
 // readout and the meter are never hidden.
 void MainWindow::LayoutTransportBar() {
     if (!fTransport) return;
-    const float W = fTransport->Bounds().right + 1.0f;
+    float W = fTransport->Bounds().right + 1.0f;
+    // The bar can be laid out wider than the window: the pane layout's own
+    // minimum is the sum of its children's current sizes (a plain BView
+    // reports exactly that), so fPaneSplit can demand more width than there is
+    // and the group hands it to every child. Everything this method pins to
+    // the bar's right edge would then sit outside the window -- the master
+    // meter was invisible for exactly that reason (M3.3). Clamp to the window.
+    if (W > Bounds().Width()) W = Bounds().Width();
 
     // Design offsets, from the original 1000-wide layout: meter 130 from the
     // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
@@ -1854,7 +1864,14 @@ void MainWindow::LayoutTransportBar() {
     const float kSliderR = Themed(588.0f);   // right edge of the master slider
     const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
 
-    if (fMeter) fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+    if (fMeter) {
+        // Placed AND sized: the meter is built before the theme scale is known
+        // on a HiDPI system (the tests override the scale after the window
+        // exists), so a pin that only moved it would leave it at its design
+        // size in a 150% bar.
+        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+        fMeter->ResizeTo(kMeterW, Themed(26.0f));
+    }
 
     const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
 

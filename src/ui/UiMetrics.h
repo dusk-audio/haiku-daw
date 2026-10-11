@@ -56,6 +56,9 @@ constexpr uint32 kMsgClickToggle     = 'xpcl';   // C (metronome)
 // MeterView -> MainWindow: the master meter was clicked, so the engine's (and
 // the recorder's) latched clip flags can go back to clear.
 constexpr uint32 kMsgMeterClipReset  = 'xpcr';
+// TransportBar -> MainWindow: the bar's width changed (a pane re-layout can do
+// that without the window resizing), so re-place its pinned children.
+constexpr uint32 kMsgTransportLayout = 'xtly';
 
 // Forward a spacebar key-down to the main window as a transport toggle, so any
 // child window (FX, Mixer, piano roll, ...) can start/stop playback. Call from a

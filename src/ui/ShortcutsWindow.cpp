@@ -3,6 +3,7 @@
 #include "../model/KeyMap.h"   // BuildShortcutsText: the one table
 #include "Theme.h"
 
+#include <LayoutBuilder.h>
 #include <Screen.h>
 #include <ScrollView.h>
 #include <String.h>
@@ -33,21 +34,12 @@ ShortcutsWindow::ShortcutsWindow()
     const BFont font = ThemeFont();
     const float tabW = Themed(96.0f);
 
-    font_height fi;
-    font.GetHeight(&fi);
-    const float lineH = fi.ascent + fi.descent + fi.leading;
-
+    // The widest tab-expanded line decides the width.
     float textW = Themed(240.0f);   // a floor, so a short text still reads
-    int lines = 0;
-    for (size_t i = 0; i <= text.size(); ) {
+    for (size_t i = 0; i < text.size(); ) {
         const size_t nl = text.find('\n', i);
-        const std::string line = text.substr(
-            i, nl == std::string::npos ? std::string::npos : nl - i);
-        if (!line.empty() || nl != std::string::npos) {
-            textW = std::max(textW, LineWidth(font, line, tabW));
-            if (!line.empty()) lines++;
-        }
         if (nl == std::string::npos) break;
+        textW = std::max(textW, LineWidth(font, text.substr(i, nl - i), tabW));
         i = nl + 1;
     }
 
@@ -56,15 +48,14 @@ ShortcutsWindow::ShortcutsWindow()
     BScreen screen;
     const BRect sf = screen.Frame();
     const float pad = Themed(8.0f);
+    const float insetX = Themed(6.0f), insetY = Themed(4.0f);
     const float sbW = B_V_SCROLL_BAR_WIDTH + 1.0f;
-    float w = std::min(textW + pad * 2.0f + sbW, sf.Width() - Themed(40.0f));
-    float h = std::min(lines * lineH + pad * 2.0f + Themed(24.0f),
-                       sf.Height() - Themed(60.0f));
+    float w = std::min(textW + insetX * 2.0f + pad * 2.0f + sbW,
+                       sf.Width() - Themed(40.0f));
     if (w < Themed(240.0f)) w = Themed(240.0f);
-    ResizeTo(w, h);
-    SetSizeLimits(Themed(200.0f), sf.Width(), Themed(120.0f), sf.Height());
 
-    const BRect inner(pad, pad, pad + textW, pad + lines * lineH);
+    const BRect inner(pad, pad, pad + w - sbW - pad * 2.0f,
+                      pad + Themed(100.0f));
     BTextView* tv = new BTextView(inner, kShortcutsTextView,
                                   inner.OffsetToCopy(0.0f, 0.0f), &font, nullptr,
                                   B_FOLLOW_ALL, B_WILL_DRAW);
@@ -72,14 +63,28 @@ ShortcutsWindow::ShortcutsWindow()
     tv->SetLowColor(ColLcd());
     tv->SetHighColor(ColText());
     tv->SetTabWidth(tabW);
-    tv->SetInsets(Themed(6.0f), Themed(4.0f), Themed(6.0f), Themed(4.0f));
+    tv->SetInsets(insetX, insetY, insetX, insetY);
     tv->MakeEditable(false);
     tv->MakeSelectable(true);
     tv->SetDoesUndo(false);
     tv->SetWordWrap(false);
     tv->SetText(text.c_str());
 
-    AddChild(new BScrollView("scroll", tv, B_FOLLOW_ALL, 0, false, true));
+    // The text view knows exactly how tall its text is at this width -- ask it
+    // rather than estimating: an estimate a font's leading off clips the last
+    // lines, which is the fault this replaced.
+    float needMin = 0.0f, needMax = 0.0f, needH = 0.0f;
+    tv->GetHeightForWidth(inner.Width(), &needMin, &needMax, &needH);
+    const float contentH = std::max(needH, inner.Height());
+
+    float h = std::min(contentH + pad * 2.0f + Themed(6.0f),
+                       sf.Height() - Themed(60.0f));
+    ResizeTo(w, h);
+    SetSizeLimits(Themed(200.0f), sf.Width(), Themed(120.0f), sf.Height());
+
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f)
+        .Add(new BScrollView("scroll", tv, B_FOLLOW_ALL, 0, false, true))
+        .End();
     CenterIn(sf);
 }
 

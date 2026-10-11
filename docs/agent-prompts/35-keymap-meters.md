@@ -172,14 +172,38 @@ Read first: `docs/HANDOFF.md`, `docs/UI_GUIDELINES.md` (this touches
      a full-scale take has set it; correlation/RMS read back from the view after
      playing an in-phase signal. `Shot()`s of the shortcuts window and of the
      running transport bar.
-8. **Verification** (all in the record, with counts): host build exit 0 →
+8. **The master meter's disappearing act (found by the screenshot pass).** The
+   first cut's shots showed the meter painting at startup and then, from the
+   dock's Pop out onward, never again: the area was a flat bar-coloured
+   rectangle. The cause is a two-hop layout bug, both hops fixed here because
+   the second one is what a meter needs to be correct:
+   - A plain `BView`'s *minimum* size is its *current* size (`BView::MinSize`
+     falls back to `GetPreferredSize`). `TimelineView` is an item in the pane
+     split, so every time it grew, the split's — and the window layout's —
+     minimum grew with it, until the transport bar was laid out ~1036 px wide
+     in an 840 px window.
+   - The bar's pinned children follow the bar, and the app_server implements
+     `B_FOLLOW_RIGHT` for a child whose parent was resized by the layout. So
+     the meter was moved to the *bar's* right edge — outside the window — while
+     the *client* still believed it was at the old position. Nothing painted it
+     (the server clipped it away), and a client-side `Invalidate` could not
+     bring it back: the two sides disagreed, and `MoveTo` early-returns while
+     the client's cached position is unchanged.
+   The fix: `TimelineView::MinSize()/MaxSize()` say what the view needs (the
+   layout can shrink again), `TransportBar::FrameResized` tells the window the
+   bar's width changed (its pinned children are re-placed — `kMsgTransportLayout`),
+   `LayoutTransportBar` clamps to the window and also *sizes* the meter so it
+   follows the theme scale, and the functional test asserts the meter is inside
+   the bar AND the bar inside the window. Verified by eye (the shot pass, which
+   is what found it) and by that check.
+9. **Verification** (all in the record, with counts): host build exit 0 →
    `ctest` green → ASan/UBSan green → `haiku_syntax_check.sh` 0 FAIL (with
    `-DDAW_HAVE_LV2=1`; master's script does not define it, so the LV2 branches
    of `src/ui/` and the tests compile out — say in the record which way it was
    run) → VM `build` and `build-off` ctest → `ui_functional_tests` on the VM →
    the `DAW_UI_SHOTS` pass with every shot of the changed windows opened, at
    150% too (the transport bar and the new window are both geometry), in every
-   theme mode this base has.
+   theme mode this base has (it is pre-T1: one theme — say so).
 
 ## Definition of done
 
