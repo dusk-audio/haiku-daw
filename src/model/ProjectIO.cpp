@@ -1,5 +1,7 @@
 #include "ProjectIO.h"
 
+#include "Base64.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -95,6 +97,35 @@ void ApplyFxInsert(std::vector<EffectDesc>& chain, int index, int bypassed,
     chain[(size_t)index].mix      = ClampFxMix(mix);
 }
 
+// Apply one parsed `fxstate` / `masterfxstate` record (a plugin's own state,
+// base64) to `chain`. Same malformed-input policy as ApplyFxInsert: an index
+// that addresses no slot is skipped, and so is a token that is not valid base64
+// — a plugin's blob is opaque to us, so a damaged one can only be dropped, and
+// dropping it leaves the insert at its factory defaults instead of failing a
+// whole project over one plugin's unreadable patch.
+void ApplyFxState(std::vector<EffectDesc>& chain, int index,
+                  const std::string& b64) {
+    if (index < 0 || index >= (int)chain.size())
+        return;
+    std::string decoded;
+    if (!Base64Decode(b64, &decoded) || decoded.empty())
+        return;
+    chain[(size_t)index].state = std::move(decoded);
+}
+
+// The base64 token that follows the index on a `fxstate` line, or "" when the
+// line has none. Taken as ONE whitespace-free token so nothing a plugin writes
+// (a quote, a brace, a newline) can shift the record.
+std::string StateToken(const std::string& line) {
+    std::istringstream iss(line);
+    std::string kw;
+    int index = -1;
+    iss >> kw >> index;
+    std::string b64;
+    iss >> b64;
+    return b64;
+}
+
 } // namespace
 
 bool ProjectIO::Save(const Project& p, const std::string& path) {
@@ -147,6 +178,13 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         f << "masterfxin " << i << " " << (e.bypassed ? 1 : 0) << " "
           << e.mix << "\n";
     }
+    // The master chain's plugin states, one optional line per insert that has
+    // one — the same append-only rule as `masterfxin` above, and written after
+    // it so the index already addresses a loaded slot.
+    for (size_t i = 0; i < p.masterFx.size(); i++)
+        if (!p.masterFx[i].state.empty())
+            f << "masterfxstate " << i << " "
+              << Base64Encode(p.masterFx[i].state) << "\n";
 
     // Tempo/meter map. Frame 0 is seeded from `tempo`/`timesig` above, so only
     // changes at frame > 0 are written.
@@ -212,6 +250,13 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "fxin " << i << " " << (e.bypassed ? 1 : 0) << " "
               << e.mix << "\n";
         }
+        // Plugin state (see the master chain above). One line per insert that
+        // has one; an insert without state writes nothing at all, so a project
+        // of built-ins stays byte-identical to a pre-state save.
+        for (size_t i = 0; i < t.fx.size(); i++)
+            if (!t.fx[i].state.empty())
+                f << "fxstate " << i << " " << Base64Encode(t.fx[i].state)
+                  << "\n";
 
         for (const Send& s : t.sends)
             f << "send " << s.dest << " " << s.level << " "
@@ -379,6 +424,14 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(p.masterFx, index, byp, mix);
+        }
+        else if (kw == "masterfxstate") {
+            // Optional; absent in files from before plugin state was saved, in
+            // which case the insert keeps an empty state and the plugin comes
+            // up on its own defaults — the pre-feature behaviour, no worse.
+            int index = -1;
+            iss >> index;
+            ApplyFxState(p.masterFx, index, StateToken(line));
         }
         else if (kw == "timesig") { iss >> p.timeSig.numerator >> p.timeSig.denominator; }
         else if (kw == "tempochange") {
@@ -550,6 +603,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(cur.fx, index, byp, mix);
+        }
+        else if (kw == "fxstate" && haveTrack) {
+            int index = -1;
+            iss >> index;
+            ApplyFxState(cur.fx, index, StateToken(line));
         }
         else if (kw == "fxauto" && haveTrack) {
             FxAutoLane fa;

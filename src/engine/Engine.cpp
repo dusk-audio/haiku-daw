@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <pmmintrin.h>   // DAZ (denormals-are-zero)
@@ -32,6 +33,25 @@ static inline void EnableDenormalFlush() {
 // disk thread stays ahead of the RT callback without hoarding memory.
 static constexpr size_t kRingFramesPerStream = 48000 * 2;   // frames
 static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
+
+// Cheap identities compared by SyncFx and CaptureFxStates (see
+// Bus::fxIdentity / Bus::fxStateHash). Zero for "no state" in the hash, which
+// is what every built-in and every stateless plugin has.
+static uint64_t FxStateHash(const std::string& state) {
+    return state.empty() ? 0u : (uint64_t)std::hash<std::string>{}(state);
+}
+
+// What an insert IS: its type plus the plugin it names. Two LV2 inserts at one
+// index share a type, so the type alone cannot tell a swapped-in plugin from
+// the one the chain was built from — for SyncFx that means pushing one plugin's
+// parameters into another, and for a state capture it means writing one
+// insert's patch onto another's descriptor.
+static uint64_t FxIdentity(const EffectDesc& d) {
+    const uint64_t h = (uint64_t)std::hash<std::string>{}(d.pluginName);
+    // FNV-style mixing: the two halves must not cancel for a swapped pair
+    // (type 3 + name X vs type 4 + name Y).
+    return ((uint64_t)(int)d.type * 1099511628211ull) ^ (h + 0x9e3779b97f4a7c15ull);
+}
 
 // Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each), +1 = hard
 // right. Folds the track gain into the returned per-channel gains.
@@ -383,6 +403,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
             if (fx) { fx->Prepare(fOutputRate); fx->SetTempo(project.tempoBPM); }
             b.fx.push_back(std::move(fx));
             b.fxTypes.push_back(d.type);
+            b.fxIdentity.push_back(FxIdentity(d));
+            b.fxStateHash.push_back(FxStateHash(d.state));
         }
         // Per-insert slot state, sized once the chain is built (arrays of
         // atomics, so they are allocated rather than grown). The dry-delay line
@@ -500,6 +522,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     // Master bus effect chain (applied to the summed output).
     fMasterFx.clear();
     fMasterFxTypes.clear();
+    fMasterFxIdentity.clear();
+    fMasterFxStateHash.clear();
     fMasterFxDelay.clear();
     // Insert state collected alongside, then moved into the atomic arrays once
     // the final chain length is known (this chain DROPS effects that fail to
@@ -518,6 +542,8 @@ status_t Engine::Load(const Project& project, Frame startFrame,
         masterMix.push_back(ClampFxMix(d.mix));
         fMasterFx.push_back(std::move(fx));
         fMasterFxTypes.push_back(d.type);
+        fMasterFxIdentity.push_back(FxIdentity(d));
+        fMasterFxStateHash.push_back(FxStateHash(d.state));
     }
     fMasterFxBypass.reset();
     fMasterFxMix.reset();
@@ -628,12 +654,29 @@ bool Engine::SyncFx(const Project& project) {
     bool allMatched = true;
     auto sync = [&](std::vector<std::unique_ptr<IEffect>>& fx,
                     const std::vector<EffectType>& types,
+                    const std::vector<uint64_t>& identity,
+                    const std::vector<uint64_t>& stateHash,
                     const std::vector<EffectDesc>& descs,
                     std::atomic<bool>* bypass, std::atomic<float>* mix) {
         if (fx.size() != descs.size()) { allMatched = false; return; }
         for (size_t i = 0; i < fx.size(); i++) {
-            if (i >= types.size() || types[i] != descs[i].type) {
+            // The insert's identity (type AND plugin), not the type alone: a
+            // different plugin of the same type at this index is a different
+            // effect, and pushing the new descriptor's params into the old
+            // instance would be a chain edit that silently did nothing.
+            if (i >= types.size() || types[i] != descs[i].type
+                || i >= identity.size()
+                || identity[i] != FxIdentity(descs[i])) {
                 allMatched = false;   // an effect was replaced at this slot
+                continue;
+            }
+            // A plugin's own state is applied at INSTANTIATION and nothing can
+            // push it into a running instance — so a changed state (a preset
+            // just loaded onto this insert, say) is structural, even though the
+            // type at the slot still matches, and the caller must rebuild.
+            if (i >= stateHash.size() ||
+                stateHash[i] != FxStateHash(descs[i].state)) {
+                allMatched = false;
                 continue;
             }
             // Insert bypass / wet-dry are PUSHABLE, like params: they change
@@ -653,11 +696,48 @@ bool Engine::SyncFx(const Project& project) {
     };
     for (Bus& b : fBuses) {
         const Track* t = project.FindTrack(b.id);
-        if (t) sync(b.fx, b.fxTypes, t->fx, b.fxBypass.get(), b.fxMix.get());
+        if (t) sync(b.fx, b.fxTypes, b.fxIdentity, b.fxStateHash, t->fx,
+                    b.fxBypass.get(), b.fxMix.get());
     }
-    sync(fMasterFx, fMasterFxTypes, project.masterFx,
-         fMasterFxBypass.get(), fMasterFxMix.get());
+    sync(fMasterFx, fMasterFxTypes, fMasterFxIdentity, fMasterFxStateHash,
+         project.masterFx, fMasterFxBypass.get(), fMasterFxMix.get());
     return allMatched;
+}
+
+void Engine::CaptureFxStates(Project& project) {
+    // One insert: ask the live instance for its own state and store it on the
+    // descriptor it came from. An insert the engine could not build (no
+    // nullptr check needed -- fx[i] is null for an unavailable plugin) and a
+    // plugin with no state to give both leave the stored state alone: writing
+    // an empty string here would erase a patch the project still holds.
+    auto capture = [](IEffect* fx, EffectDesc& d) {
+        if (!fx) return;
+        std::string state;
+        if (fx->SaveState(&state) && !state.empty()) d.state = std::move(state);
+    };
+    for (Bus& b : fBuses) {
+        Track* t = project.FindTrack(b.id);
+        if (!t) continue;
+        for (size_t i = 0; i < b.fx.size() && i < t->fx.size(); i++) {
+            // Only the descriptor this instance was BUILT from. The model can
+            // have been edited since Load (a chain replace that kept the chain's
+            // length does not rebuild the engine), and writing one plugin's
+            // patch onto whatever descriptor sits at the index now would be a
+            // wrong state saved to disk.
+            if (i < b.fxIdentity.size() &&
+                b.fxIdentity[i] == FxIdentity(t->fx[i]))
+                capture(b.fx[i].get(), t->fx[i]);
+        }
+    }
+    // The master chain DROPS inserts that fail to build, so fMasterFx is not
+    // index-aligned with project.masterFx; the type check is the same alignment
+    // rule SyncFx uses for it. An insert whose effect is missing is skipped —
+    // its stored state is what an uninstalled plugin has, not something to
+    // overwrite.
+    for (size_t i = 0; i < fMasterFx.size() && i < project.masterFx.size(); i++)
+        if (i < fMasterFxIdentity.size() &&
+            fMasterFxIdentity[i] == FxIdentity(project.masterFx[i]))
+            capture(fMasterFx[i].get(), project.masterFx[i]);
 }
 
 void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,

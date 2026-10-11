@@ -23,8 +23,12 @@ class RenameWindow : public BWindow {
 public:
     // `what` is the message posted on OK (default renames a track; pass
     // kMsgRenameMarker to rename a marker, with the frame in the "track" field).
+    // `aux` is echoed back as int64 "aux" for a caller that needs a second
+    // number in the answer (the insert index, for "Save Preset..."), and
+    // `title` overrides the window title for a non-rename use.
     RenameWindow(BRect frame, TrackId track, const char* current,
-                 BMessenger apply, uint32 what = kMsgRenameTrack);
+                 BMessenger apply, uint32 what = kMsgRenameTrack,
+                 int64 aux = 0, const char* title = nullptr);
 
     void MessageReceived(BMessage* msg) override;
 
@@ -32,6 +36,7 @@ private:
     TrackId       fTrack;
     BMessenger    fApply;
     uint32        fWhat;
+    int64         fAux;
     std::string   fOldName;   // the name before edit, echoed back as "oldname"
     BTextControl* fText;
 };

@@ -152,6 +152,18 @@ public:
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
     void SetFxTempo(double bpm);
 
+    // Pull every live insert's own state (IEffect::SaveState) into the matching
+    // descriptor of `project` — what a save, an export snapshot or an autosave
+    // calls first, so the file (and the render) holds the patch the engine is
+    // playing. The model's params describe the control ports and nothing else; a
+    // synth's patch exists only in the running instance until this runs.
+    //
+    // Off the RT thread (lilv allocates), and safe to call while the transport
+    // rolls: LV2's state save threading class is exactly "may run alongside
+    // Process". An insert the engine has no instance for keeps whatever state
+    // the project already stores.
+    void CaptureFxStates(Project& project);
+
     // Push a single effect parameter into the running graph live (for smooth
     // knob-drag response during playback, before the edit is committed). RT-safe
     // SetParam; `master` targets the master chain, else the track's node.
@@ -439,6 +451,18 @@ private:
         std::vector<MidiNote>                 liveNotes;
         std::vector<std::unique_ptr<IEffect>> fx;
         std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
+        // Parallel to fx, both hashes rather than the strings: they are
+        // compared on every SyncFx call, including during a knob drag.
+        //   fxIdentity — hash of (type, plugin id). Two LV2 inserts at one index
+        //     are the same EffectType, so the type alone cannot tell a replaced
+        //     plugin from the one the chain was built with; and CaptureFxStates
+        //     must not write one insert's patch into a descriptor that now holds
+        //     a different plugin.
+        //   fxStateHash — hash of the descriptor's stored state. A plugin's own
+        //     state is applied at INSTANTIATION and cannot be pushed, so a
+        //     changed state is structural (rebuild) even though the type matches.
+        std::vector<uint64_t>                 fxIdentity;
+        std::vector<uint64_t>                 fxStateHash;
         // Per-insert slot state, parallel to fx (see model/Effect.h). Atomic
         // because the UI thread pushes them through SyncFx while the RT callback
         // reads them per block — like the fader gains above: independent scalars
@@ -554,6 +578,8 @@ private:
     std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
     std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
     std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
+    std::vector<uint64_t>                     fMasterFxIdentity;   // parallel
+    std::vector<uint64_t>                     fMasterFxStateHash;  // parallel
     // Master-chain insert state, same shape and rules as Bus::fxBypass/fxMix/
     // fxDryDelay above. Note fMasterFx DROPS effects that fail to build, so
     // these are parallel to fMasterFx, not to project.masterFx.

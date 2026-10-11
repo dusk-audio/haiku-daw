@@ -491,6 +491,7 @@ Lv2UiWindow::Lv2UiWindow(BRect frame, const char* title)
 Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
                                const std::string& displayName,
                                const std::vector<float>& params,
+                               const std::string& state,
                                TrackId track, int fxIndex, BMessenger apply) {
     // One editor per INSERT, not per plugin. Two tracks -- or two slots -- can
     // hold the same plugin, and each now wants its own window: an editor is
@@ -615,6 +616,23 @@ Lv2UiWindow* Lv2UiWindow::Open(BRect frame, const std::string& pluginUri,
         lilv_node_free(nAudio); lilv_node_free(nControl);
         lilv_node_free(nInput); lilv_node_free(nAtom);
         lilv_instance_activate(d->dsp);
+
+        // The insert's stored plugin state, onto our own instance — the same
+        // document the engine restores at MakeEffect, and the same world and
+        // URID map, so the two instances of this plugin start from the same
+        // patch. Without it the editor opens on the plugin's factory default
+        // while the engine plays the project's patch, which is exactly the
+        // disagreement a "save preset" would then capture.
+        if (!state.empty()) {
+            LilvState* st = lilv_state_new_from_string(w, &d->map, state.c_str());
+            if (st) {
+                const LV2_Feature* restoreFeatures[] = { &d->fMap, &d->fUnmap,
+                                                         nullptr };
+                lilv_state_restore(st, d->dsp, nullptr, nullptr, 0,
+                                   restoreFeatures);
+                lilv_state_free(st);
+            }
+        }
 
         d->link->slotOfPort = Lv2UiSlotsForPorts(isCtrlIn);
         // Seed the insert's STORED values so the editor opens showing what the
@@ -956,6 +974,16 @@ void Lv2UiWindow::MessageReceived(BMessage* msg) {
             reply.AddInt32("slot", e.first);
             reply.AddFloat("val", e.second);
         }
+        // ...and the plugin's own state, from the instance this window holds.
+        // This is where a direct-access editor's patch edits live, and the
+        // engine's instance is a different object: without this the patch the
+        // user has been editing in here would be the one thing a save missed.
+        // Empty (no "state" field) for a plugin with no state, so the caller's
+        // existing stored state is left alone rather than cleared.
+        std::string state;
+        if (Lv2Host::Instance().SaveInstanceState(d->uri, d->dsp, &state) &&
+            !state.empty())
+            reply.AddString("state", state.c_str());
         msg->SendReply(&reply);
         return;
     }
