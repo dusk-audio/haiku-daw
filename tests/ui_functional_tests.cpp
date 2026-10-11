@@ -2452,9 +2452,7 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         // Snapped to the 1/16 grid (6000 frames at this tempo).
         CHECK(a == 60000);
         CHECK(b == 90000);
-        Shot("depth-range");
-        // ... and the ruler shows it too.
-        CHECK(WaitFor([&] { return true; }));
+        Shot("depth-range");   // the band over the lanes + the ruler marks
     }
 
     // --- 2. A bare click on empty content clears it again ------------------
@@ -2549,7 +2547,7 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         CHECK(WaitFor([&] { return clips(ta.id) == before; }));
     }
 
-    // --- 6. Range delete trims/splits what it covers, and undoes ----------
+    // --- 6. Range delete splits/trims what it covers, and undoes ----------
     std::printf("  depth: range delete\n");
     {
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -2557,16 +2555,29 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             win->Unlock();
         }
         win->PostMessage(MSG_EDIT_DELETE);
-        CHECK(WaitFor([&] {
-            const Clip c = clipOf(ta.id, ac.id);
-            return c.startFrame == 72000 && c.lengthFrames == 24000;
-        }));
-        CHECK(clipOf(ta.id, ac.id).sourceOffset == 24000);
+        // The clip covers the range: it becomes a left half that keeps its id
+        // and a fresh right half, and nothing sounds between them.
+        CHECK(WaitFor([&] { return clips(ta.id) == 2; }));
+        {
+            const Clip left = clipOf(ta.id, ac.id);
+            CHECK(left.startFrame == 48000 && left.lengthFrames == 12000);
+            bool rightOk = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(ta.id))
+                    for (const Clip& c : t->clips)
+                        if (c.id != ac.id)
+                            rightOk = (c.startFrame == 72000
+                                       && c.lengthFrames == 24000
+                                       && c.sourceOffset == 24000);
+                win->Unlock();
+            }
+            CHECK(rightOk);
+        }
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] {
             const Clip c = clipOf(ta.id, ac.id);
             return c.startFrame == 48000 && c.lengthFrames == 48000
-                && c.sourceOffset == 0;
+                && c.sourceOffset == 0 && clips(ta.id) == 1;
         }));
     }
 
@@ -2596,17 +2607,23 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             }
             CHECK(moved);
         }
-        // A MIDI region that starts after the point moves whole.
+        // The region straddles the point too: it splits the same way, and the
+        // right half lands one range length later.
         {
-            bool regionMoved = false;
+            bool regionOk = false;
+            int regions = 0;
             if (win->LockWithTimeout(1000000) == B_OK) {
-                if (const Track* t = project.FindTrack(tm.id))
+                if (const Track* t = project.FindTrack(tm.id)) {
+                    regions = (int)t->midiClips.size();
                     for (const MidiClip& c : t->midiClips)
-                        if (c.startFrame == 60000 && c.lengthFrames == 48000)
-                            regionMoved = true;
+                        if (c.id != mc.id && c.startFrame == 72000
+                            && c.lengthFrames == 36000)
+                            regionOk = true;
+                }
                 win->Unlock();
             }
-            CHECK(regionMoved);
+            CHECK(regions == 2);
+            CHECK(regionOk);
         }
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] { return clips(ta.id) == 1; }));
@@ -2625,7 +2642,22 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             }
             return ok;
         }));
-        CHECK(editMenuEnabled(6));   // Duplicate lights up with a selection
+        {
+            // Duplicate (by label: the separators shift the indices) lights up
+            // when there is something to duplicate.
+            bool dupOn = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (BMenu* m = editMenu())
+                    for (int32 i = 0; i < m->CountItems(); i++)
+                        if (BMenuItem* it = m->ItemAt(i)) {
+                            const char* l = it->Label();
+                            if (l && std::strcmp(l, "Duplicate") == 0)
+                                dupOn = it->IsEnabled();
+                        }
+                win->Unlock();
+            }
+            CHECK(dupOn);
+        }
         const std::size_t before = clips(ta.id);
         win->PostMessage(MSG_EDIT_DUPLICATE);
         CHECK(WaitFor([&] { return clips(ta.id) == before + 1; }));
@@ -2742,6 +2774,13 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeShape
                                    == FadeShape::SCurve; }));
+        // One more undo for the shape itself; the fade it belongs to is the
+        // step after that.
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] {
+            const Clip c = clipOf(ta.id, ac.id);
+            return c.fadeShape == FadeShape::Linear && c.fadeInFrames == 12000;
+        }));
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeInFrames == 0; }));
     }
@@ -2835,9 +2874,7 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         BWindow* child = nullptr;
         for (int32 i = 0; i < be_app->CountWindows(); i++) {
             BWindow* w = be_app->WindowAt(i);
-            if (w && !w->IsHidden() && w != win
-                && std::strcmp(WindowTitle(w), "Haiku DAW") != 0)
-                child = w;
+            if (w && !w->IsHidden() && w != win) child = w;
         }
         CHECK(child != nullptr);
         if (child) {
