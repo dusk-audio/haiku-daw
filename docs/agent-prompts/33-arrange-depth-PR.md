@@ -305,10 +305,15 @@ machine, not this branch's code.
 
 ## Screenshots
 
-The `DAW_UI_SHOTS` pass in **both** modes (`DAW_UI_THEME=light` and
-`DAW_UI_THEME=dark`; 47 shots each, `docs/agent-prompts/shots-33/<mode>/`).
-Shots I opened at full size (and zoomed on the clip strips and the range
-edges):
+The `DAW_UI_SHOTS` pass ran in **both** modes (`DAW_UI_THEME=light` and
+`DAW_UI_THEME=dark`; 47 shots each). They were taken from the revision before
+the P1 fix commit — whose diff is the per-pane refresh and the test's own
+polling check, neither of which touches what the timeline draws — and a
+re-shoot of the final revision was queued behind the shared VM lock, so the
+generated files are NOT committed here (an over-eager `rm` in my own cleanup
+removed the fetched set before they could be added; the re-shoot is the
+remedy, and its output goes to `/tmp/shots-33-fetch/<mode>/`). Shots I opened
+at full size (and zoomed on the clip strips and the range edges):
 
 - `22-depth-range` (both modes) — the range band over the lanes with its solid
   edges and the bar + edges on the ruler, drawn over the clips and under the
