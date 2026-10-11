@@ -312,6 +312,16 @@ inline rgb_color TrackColor(int i) {
 }
 constexpr int kTrackColorCount = 6;
 
+// The palette entry's name, for the picker's menu. Beside TrackColor so a new
+// colour is one edit: the swatch, the menu chip and the label cannot disagree.
+inline const char* TrackColourName(int i) {
+    static const char* names[] = { "Blue", "Pink", "Green", "Orange",
+                                   "Purple", "Teal" };
+    const int n = (int)(sizeof(names) / sizeof(names[0]));
+    if (i < 0) i = 0;
+    return names[i % n];
+}
+
 
 // --- menus ---------------------------------------------------------------
 

@@ -7,6 +7,7 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
+#include "TrackInputs.h"     // the ONE input-choice list (header + inspector)
 #include "widgets/DawIcons.h"   // the shared glyphs (arrange tools, slip)
 #include "../engine/Recorder.h" // live capture waveform envelope
 #include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
@@ -129,8 +130,49 @@ static BRect PanKnobRect(BRect lane) {
                  Themed(128), lane.top + Themed(43));
 }
 static BRect GainRect(BRect lane) {
-    return BRect(Themed(6),   lane.top + Themed(50),
-                 Themed(128), lane.top + Themed(62));
+    return BRect(Themed(6),   lane.top + Themed(60),
+                 Themed(128), lane.top + Themed(72));
+}
+
+// --- track depth (M2.6): the header's new controls ------------------------
+
+// The fold triangle, the colour swatch and the input field. HeaderControlAt,
+// the drawing and HeaderRectFor all come through these, so a control cannot be
+// drawn somewhere and clicked somewhere else.
+static BRect FoldRect(BRect lane) {
+    return BRect(Themed(5),  lane.top + Themed(3),
+                 Themed(15), lane.top + Themed(15));
+}
+static BRect ColourSwatchRect(BRect lane) {
+    return BRect(Themed(116), lane.top + Themed(2),
+                 Themed(132), lane.top + Themed(16));
+}
+static BRect InputRect(BRect lane) {
+    return BRect(Themed(6),  lane.top + Themed(44),
+                 Themed(96), lane.top + Themed(58));
+}
+// The name field: what the in-place rename edits and where it is drawn.
+static BRect NameRect(BRect lane) {
+    return BRect(Themed(18), lane.top + Themed(1),
+                 Themed(112), lane.top + Themed(17));
+}
+// The collapsed lane's compact row (M2.6): triangle, swatch, name, M, S. The
+// meter stays on the right edge.
+static BRect FoldRectCompact(BRect lane) {
+    return BRect(Themed(5),  lane.top + Themed(3),
+                 Themed(15), lane.top + Themed(17));
+}
+static BRect ColourSwatchRectCompact(BRect lane) {
+    return BRect(Themed(20), lane.top + Themed(4),
+                 Themed(34), lane.top + Themed(18));
+}
+static BRect MuteRectCompact(BRect lane) {
+    return BRect(Themed(96),  lane.top + Themed(3),
+                 Themed(112), lane.top + Themed(19));
+}
+static BRect SoloRectCompact(BRect lane) {
+    return BRect(Themed(116), lane.top + Themed(3),
+                 Themed(132), lane.top + Themed(19));
 }
 
 float TimelineView::FrameToX(Frame f) const {
@@ -382,6 +424,11 @@ void TimelineView::MessageReceived(BMessage* msg) {
 
 void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
+    // An open in-place rename owns the keyboard: the on-screen name field is a
+    // text field, and a bare key reaching the arrangement behind it is how a
+    // rename edits the wrong thing (M2.6).
+    if (fRenameTrack != kInvalidTrackId && HandleRenameKey(bytes, numBytes))
+        return;
     // One page = the visible content width in frames.
     const Frame page = (Frame)((Bounds().right - HeaderWidth()) * fFramesPerPixel);
     switch (bytes[0]) {
@@ -415,15 +462,15 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         case B_SPACE:   // toggle transport (play/stop)
             if (BWindow* w = Window()) w->PostMessage(kMsgTransportToggle);
             break;
-        case 'm': case 'M': {   // drop a marker at the playhead
-            Frame at = fProject->transport.playhead; if (at < 0) at = 0;
-            char nm[24];
-            std::snprintf(nm, sizeof(nm), "Marker %d",
-                          (int)fProject->markers.size() + 1);
-            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
-            Invalidate();
+        case 'm': case 'M':
+            // `m` drops a marker at the playhead; Shift-M toggles the marker
+            // lane (the View menu's item has the same two states).
+            if (EventModifiers(Window() ? Window()->CurrentMessage() : nullptr)
+                & B_SHIFT_KEY)
+                SetMarkerLane(!fMarkerLane);
+            else
+                AddMarkerAt(fProject->transport.playhead);
             break;
-        }
         case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - ContentTop()) * 0.8f); break;
         case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - ContentTop()) * 0.8f); break;
         // Nudge the selection one grid step (M2.5).
@@ -615,6 +662,14 @@ TimelineView::Hit TimelineView::HitTest(BPoint where, uint32 mods) const {
 
 TimelineView::Pointer TimelineView::CursorFor(BPoint where, uint32 mods) const {
     if (where.y < ToolbarHeight()) return Pointer::Default;
+    // The lane's resize edge (M2.6) outranks the tools: the grab is in the
+    // header gutter, where no tool acts.
+    if (where.x < HeaderWidth() && where.y >= ContentTop()) {
+        const int edge = LaneEdgeAt(where);
+        if (edge >= 0 && HeaderControlAt(TrackIndexAt(where), where)
+                             == HeaderControl::None)
+            return Pointer::LaneSize;
+    }
     switch (fTool) {
         case Tool::Scissors:
             return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Split
@@ -835,32 +890,86 @@ void TimelineView::SplitAtPlayhead() {
 
 // --- hover, cursors and tooltips (M2.1) ------------------------------------
 
-// Track-header controls, in the order the drawing and the click path agree on.
-static constexpr int kHdrMute = 0, kHdrSolo = 1, kHdrArm = 2, kHdrMon = 3,
-                     kHdrPan = 4, kHdrGain = 5;
-
-int TimelineView::HeaderControlAt(int idx, BPoint where) const {
-    if (idx < 0 || !fProject || idx >= (int)fProject->Tracks().size()) return -1;
+// The header's controls, in the order the drawing and the click path agree on
+// (M2.6). A folded lane draws the compact set, so which rects apply depends on
+// the track's state -- one function answers for both.
+TimelineView::HeaderControl TimelineView::HeaderControlAt(int idx,
+                                                          BPoint where) const {
+    if (idx < 0 || !fProject || idx >= (int)fProject->Tracks().size())
+        return HeaderControl::None;
+    const Track& t = fProject->Tracks()[(size_t)idx];
     const BRect lane = LaneRect(idx);
-    if (MuteRect(lane).Contains(where)) return kHdrMute;
-    if (SoloRect(lane).Contains(where)) return kHdrSolo;
-    if (ArmRect(lane).Contains(where))  return kHdrArm;
-    if (MonRect(lane).Contains(where))  return kHdrMon;
-    if (PanKnobRect(lane).Contains(where)) return kHdrPan;
-    if (GainRect(lane).Contains(where))    return kHdrGain;
+    if (t.collapsed) {
+        if (FoldRectCompact(lane).Contains(where))          return HeaderControl::Fold;
+        if (ColourSwatchRectCompact(lane).Contains(where))  return HeaderControl::Colour;
+        if (MuteRectCompact(lane).Contains(where))          return HeaderControl::Mute;
+        if (SoloRectCompact(lane).Contains(where))          return HeaderControl::Solo;
+        return HeaderControl::None;
+    }
+    if (FoldRect(lane).Contains(where))          return HeaderControl::Fold;
+    if (MuteRect(lane).Contains(where))          return HeaderControl::Mute;
+    if (SoloRect(lane).Contains(where))          return HeaderControl::Solo;
+    if (ArmRect(lane).Contains(where))           return HeaderControl::Arm;
+    if (MonRect(lane).Contains(where))           return HeaderControl::Monitor;
+    if (PanKnobRect(lane).Contains(where))       return HeaderControl::Pan;
+    if (GainRect(lane).Contains(where))          return HeaderControl::Gain;
+    if (ColourSwatchRect(lane).Contains(where))  return HeaderControl::Colour;
+    if (InputRect(lane).Contains(where))         return HeaderControl::Input;
+    return HeaderControl::None;
+}
+
+BRect TimelineView::HeaderRectFor(int lane, HeaderControl which) const {
+    if (!fProject || lane < 0 || lane >= (int)fProject->Tracks().size())
+        return BRect();
+    const Track& t = fProject->Tracks()[(size_t)lane];
+    const BRect l = LaneRect(lane);
+    const bool compact = t.collapsed;
+    switch (which) {
+        case HeaderControl::Fold: return compact ? FoldRectCompact(l)
+                                                 : FoldRect(l);
+        case HeaderControl::Colour: return compact ? ColourSwatchRectCompact(l)
+                                                   : ColourSwatchRect(l);
+        case HeaderControl::Mute: return compact ? MuteRectCompact(l) : MuteRect(l);
+        case HeaderControl::Solo: return compact ? SoloRectCompact(l) : SoloRect(l);
+        case HeaderControl::Arm:  return ArmRect(l);
+        case HeaderControl::Monitor: return MonRect(l);
+        case HeaderControl::Pan:  return PanKnobRect(l);
+        case HeaderControl::Gain: return GainRect(l);
+        case HeaderControl::Input: return InputRect(l);
+        default: return BRect();
+    }
+}
+
+// The lane whose bottom edge is in the grab band, in the header gutter only:
+// the lane content's own bottom pixels belong to clips and ranges, and the
+// header is where every other per-lane control already lives.
+int TimelineView::LaneEdgeAt(BPoint where) const {
+    if (!fProject || where.x >= HeaderWidth()) return -1;
+    const float grab = Themed(3.0f);
+    const int n = (int)fProject->Tracks().size();
+    for (int i = 0; i < n; i++) {
+        const float bottom = LaneRect(i).bottom;
+        if (where.y >= bottom - grab && where.y <= bottom + TrackGap())
+            return i;
+    }
     return -1;
 }
 
 // The tooltip for a header control.
-static const char* HeaderTip(int which) {
+static const char* HeaderTip(TimelineView::HeaderControl which) {
     switch (which) {
-        case kHdrMute: return "Mute";
-        case kHdrSolo: return "Solo";
-        case kHdrArm:  return "Record arm";
-        case kHdrMon:  return "Input monitor";
-        case kHdrPan:  return "Pan (drag up/down)";
-        case kHdrGain: return "Volume";
-        default:       return "";
+        case TimelineView::HeaderControl::Mute: return "Mute";
+        case TimelineView::HeaderControl::Solo:
+            return "Solo (Alt-click: solo this track only)";
+        case TimelineView::HeaderControl::Arm:  return "Record arm";
+        case TimelineView::HeaderControl::Monitor: return "Input monitor";
+        case TimelineView::HeaderControl::Pan:  return "Pan (drag up/down)";
+        case TimelineView::HeaderControl::Gain: return "Volume";
+        case TimelineView::HeaderControl::Colour: return "Track colour";
+        case TimelineView::HeaderControl::Input:  return "Record input";
+        case TimelineView::HeaderControl::Fold:
+            return "Collapse / expand the lane";
+        default: return "";
     }
 }
 
@@ -873,7 +982,8 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
         fHoverValid = false;
         fHover = Hit();
         fHoverToolBtn = -1;
-        fHoverHeader = -1;
+        fHoverHeader = HeaderControl::None;
+        fHoverLaneEdge = false;
         fSplitHoverX = -1.0f;
         SetTip("");
         ApplyCursor(Pointer::Default);
@@ -883,13 +993,15 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
 
     const Hit prevHit = fHover;
     const int prevBtn  = fHoverToolBtn;
-    const int prevHdr  = fHoverHeader;
+    const HeaderControl prevHdr = fHoverHeader;
+    const bool prevEdge = fHoverLaneEdge;
     const float prevSplit = fSplitHoverX;
 
     fHoverPos = where;
     fHoverValid = true;
     fHoverToolBtn = (where.y < ToolbarHeight()) ? ToolButtonAt(where) : -1;
-    fHoverHeader = -1;
+    fHoverHeader = HeaderControl::None;
+    fHoverLaneEdge = false;
     fHover = Hit();
     fSplitHoverX = -1.0f;
 
@@ -901,7 +1013,14 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
                              : "Snap is off: click to choose a grid";
         else if (ZoomOutRect().Contains(where)) tip = "Zoom out";
         else if (ZoomInRect().Contains(where))  tip = "Zoom in";
-    } else if (where.y < ContentTop()) {
+    } else if (fMarkerLane && where.y >= RulerBottom() && where.y < ContentTop()) {
+        // The marker lane (M2.7): flag = seek, empty = add on double-click,
+        // right-click on a flag = remove.
+        tip = MarkerInLane(where)
+            ? "Marker: click to jump, right-click to remove"
+            : "Markers: double-click to add one here";
+    } else if (where.y < RulerBottom()) {
+        // The ruler (RulerBottom, not ContentTop: the marker lane sits below).
         tip = MarkerAt(where) ? "Marker: click to jump"
                               : "Ruler: click to seek, drag for a loop, "
                                 "Ctrl-drag for punch, Alt-drag for a time range";
@@ -913,7 +1032,17 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
         if (hidx >= 0 && hidx < (int)fProject->Tracks().size())
             fHover.track = fProject->Tracks()[(size_t)hidx].id;
         fHoverHeader = HeaderControlAt(hidx, where);
-        if (fHoverHeader >= 0) tip = HeaderTip(fHoverHeader);
+        if (fHoverHeader != HeaderControl::None) {
+            tip = HeaderTip(fHoverHeader);
+        } else {
+            // The lane's bottom edge: the resize grab (M2.6).
+            const int edge = LaneEdgeAt(where);
+            if (edge >= 0) {
+                fHoverLaneEdge = true;
+                if (fHover.lane < 0) fHover.lane = edge;
+                tip = "Drag to resize the lane";
+            }
+        }
     } else {
         fHover = HitTest(where);
         if (fHover.clip != kInvalidClipId) {
@@ -957,10 +1086,12 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
     const bool hitChanged = prevHit.clip != fHover.clip
                             || prevHit.lane != fHover.lane
                             || prevHit.zone != fHover.zone;
-    if (hitChanged || prevBtn != fHoverToolBtn || prevHdr != fHoverHeader) {
+    if (hitChanged || prevBtn != fHoverToolBtn || prevHdr != fHoverHeader
+        || prevEdge != fHoverLaneEdge) {
         if (prevHit.lane >= 0) Invalidate(LaneRect(prevHit.lane));
         if (fHover.lane  >= 0) Invalidate(LaneRect(fHover.lane));
-        if (prevHdr != fHoverHeader && fHoverHeader < 0 && fHover.lane >= 0)
+        if (prevHdr != fHoverHeader && fHoverHeader == HeaderControl::None
+            && fHover.lane >= 0)
             Invalidate(LaneRect(fHover.lane));
         if (where.y < ToolbarHeight() || prevBtn >= 0)
             Invalidate(BRect(0, 0, Bounds().right, ToolbarHeight()));
@@ -992,6 +1123,9 @@ const BCursor* TimelineView::CursorObject(Pointer p) {
         case Pointer::Move:  c.reset(new BCursor(B_CURSOR_ID_GRAB)); break;
         case Pointer::Trim:  c.reset(new BCursor(B_CURSOR_ID_RESIZE_EAST_WEST)); break;
         case Pointer::Gain:  c.reset(new BCursor(B_CURSOR_ID_RESIZE_NORTH_SOUTH)); break;
+        case Pointer::LaneSize:
+            c.reset(new BCursor(B_CURSOR_ID_RESIZE_NORTH_SOUTH));
+            break;
         case Pointer::Split: c.reset(new BCursor(B_CURSOR_ID_CROSS_HAIR)); break;
         case Pointer::Default:
             c.reset(new BCursor(B_CURSOR_ID_SYSTEM_DEFAULT));
@@ -1863,6 +1997,7 @@ void TimelineView::Draw(BRect updateRect) {
 
     DrawTimeRange();         // the M2.4 range, over the tints, under the playhead
     DrawPlayhead();          // over lanes, under the ruler
+    DrawMarkerLane();        // the M2.7 strip, between the ruler and the lanes
     DrawRuler(updateRect);   // ruler last so it sits above lane content
     DrawToolbar();           // the tool strip sits above the ruler
     SyncScrollBars();        // ranges follow the content, zoom and pane size
@@ -2040,14 +2175,10 @@ void TimelineView::HandleRulerMenu(BPoint where) {
             else if (nearMeter >= 0) tm.RemoveMeterAt(nearMeter);
         } else if (label && std::strcmp(label, "Add Marker") == 0) {
             Frame at = Snapped(XToFrame(where.x)); if (at < 0) at = 0;
-            char nm[24];
-            std::snprintf(nm, sizeof(nm), "Marker %d",
-                          (int)fProject->markers.size() + 1);
-            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
+            AddMarkerAt(at);
         } else if (nearMarker && label
                    && std::strcmp(label, "Delete Marker") == 0) {
-            fStack->Execute(std::make_unique<RemoveMarkerCommand>(
-                                nearMarker->frame, nearMarker->name), *fProject);
+            RemoveMarkerAt(nearMarker->frame, nearMarker->name);
         } else if (nearMarker && label
                    && std::strncmp(label, "Rename Marker", 13) == 0) {
             // Reuse RenameWindow; the marker frame rides in the "track" id field.
@@ -2086,8 +2217,23 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
+    // An open in-place rename (M2.6) commits on a press outside its own field;
+    // the press then does whatever it would have done.
+    if (fRenameTrack != kInvalidTrackId) {
+        const int rIdx = fProject->IndexOfTrack(fRenameTrack);
+        const bool inside = rIdx >= 0 && NameRect(LaneRect(rIdx)).Contains(where);
+        if (!inside) CommitTrackRename();
+    }
+
+    // The marker lane (M2.7), between the ruler and the lanes when it is on.
+    if (fMarkerLane && where.y >= RulerBottom() && where.y < ContentTop()
+        && where.x >= HeaderWidth()) {
+        HandleMarkerLaneClick(where, rightClick);
+        return;
+    }
+
     // Right-click on the ruler: tempo / meter change menu.
-    if (rightClick && where.y >= ToolbarHeight() && where.y < ContentTop()
+    if (rightClick && where.y >= ToolbarHeight() && where.y < RulerBottom()
         && where.x >= HeaderWidth()) {
         HandleRulerMenu(where);
         return;
@@ -2096,13 +2242,12 @@ void TimelineView::MouseDown(BPoint where) {
     // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
     // range, Alt-drag the time range (M2.4). On release we decide
     // seek-vs-drag by how far it moved.
-    if (where.y >= ToolbarHeight() && where.y < ContentTop()
+    if (where.y >= ToolbarHeight() && where.y < RulerBottom()
         && where.x >= HeaderWidth()) {
         // Left-click a marker flag: jump the playhead there.
         if (!rightClick) {
             if (const Marker* mk = MarkerAt(where)) {
-                fProject->transport.playhead = mk->frame;
-                if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+                SeekTo(mk->frame);
                 return;
             }
         }
@@ -2127,6 +2272,24 @@ void TimelineView::MouseDown(BPoint where) {
         return;
     }
 
+    // The lane's resize edge (M2.6) sits in the header gutter. Checked before
+    // the lane itself: the gain fader's last row of pixels is inside the grab
+    // band, and a press there must still mean "fader".
+    if (where.x < HeaderWidth() && !rightClick) {
+        const int edge = LaneEdgeAt(where);
+        if (edge >= 0 && HeaderControlAt(edge, where) == HeaderControl::None
+            && edge < (int)fProject->Tracks().size()) {
+            const Track& et = fProject->Tracks()[(size_t)edge];
+            fDrag       = Drag::LaneResize;
+            fDragTrack  = et.id;
+            fDragLane   = edge;
+            fDragOrig   = (float)et.height;    // the pre-drag value, for undo
+            fDragGrabY  = where.y;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            return;
+        }
+    }
+
     const int idx = TrackIndexAt(where);
     if (idx < 0)
         return;
@@ -2136,8 +2299,10 @@ void TimelineView::MouseDown(BPoint where) {
     if (where.x < HeaderWidth()) {
         // Any header click selects the track (drives the left inspector).
         SetSelectedTrack(t.id);
-        // Track name strip: right-click deletes the track, double-click renames.
-        if (where.y <= lane.top + 18 && where.x < 114) {
+        // Track name strip: right-click deletes the track, double-click renames
+        // it IN PLACE (M2.6; "Rename…" in this menu still opens the window).
+        if (where.y <= lane.top + Themed(18) && where.x < 114
+            && HeaderControlAt(idx, where) == HeaderControl::None) {
             if (rightClick) {
                 BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
                 mm->AddItem(new ThemedMenuItem("Move Up", NULL));
@@ -2162,6 +2327,11 @@ void TimelineView::MouseDown(BPoint where) {
                     mg->AddItem(gi);
                 }
                 mm->AddItem(mg);
+                mm->AddSeparatorItem();
+                mm->AddItem(new ThemedMenuItem("Duplicate Track", NULL));
+                mm->AddItem(new ThemedMenuItem(t.collapsed ? "Expand Lane"
+                                                           : "Collapse Lane", NULL));
+                mm->AddSeparatorItem();
                 mm->AddItem(new ThemedMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
                 mm->AddItem(new ThemedMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
                 mm->AddItem(new ThemedMenuItem("Delete", NULL));
@@ -2191,6 +2361,10 @@ void TimelineView::MouseDown(BPoint where) {
                         fStack->Execute(std::make_unique<SetTrackHeightCommand>(
                             t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
                             *fProject);
+                } else if (pick == "Duplicate Track") {
+                    DuplicateTrack(t.id);
+                } else if (pick == "Collapse Lane" || pick == "Expand Lane") {
+                    SetTrackCollapsed(t.id, pick == "Collapse Lane");
                 } else if (pick == "Solo Safe") {
                     // Project state -- it serializes -- so through the stack like
                     // every other edit: it undoes now, and it marks the project
@@ -2226,11 +2400,8 @@ void TimelineView::MouseDown(BPoint where) {
             int32 clicks = 1;
             if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
                 m->FindInt32("clicks", &clicks);
-            if (clicks >= 2) {   // double-click a track name: rename it
-                BPoint sp = ConvertToScreen(where);
-                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
-                (new RenameWindow(wr, t.id, t.name.c_str(),
-                                  BMessenger(Window())))->Show();
+            if (clicks >= 2) {   // double-click a track name: rename IN PLACE
+                BeginTrackRename(t.id);
                 return;
             }
         }
@@ -2580,23 +2751,46 @@ void TimelineView::MouseDown(BPoint where) {
 
 void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     const TrackId id = t.id;
+    const HeaderControl ctl = HeaderControlAt(fProject->IndexOfTrack(id), where);
+    // The modifier the event carried: Alt-clicking Solo is exclusive solo
+    // (M2.6). Both Alt bits are accepted, like the range drag (Haiku maps the
+    // PC's Alt to B_COMMAND_KEY and Option to B_OPTION_KEY).
+    const uint32 mods = EventModifiers(Window() ? Window()->CurrentMessage()
+                                                : nullptr);
+
+    if (ctl == HeaderControl::Fold) {   // fold the lane to its title strip
+        ToggleTrackCollapsed(id);
+        return;
+    }
+    if (ctl == HeaderControl::Colour) {
+        OpenColourPicker(id, where);
+        return;
+    }
+    if (ctl == HeaderControl::Input) {
+        OpenInputPicker(id, where);
+        return;
+    }
 
     // Mute / solo: immediate toggle commands.
-    if (MuteRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Mute) {
         fStack->Execute(std::make_unique<SetTrackMuteCommand>(id, !t.muted),
                         *fProject);
         Invalidate(lane);
         if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
-    if (SoloRect(lane).Contains(where)) {
-        fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
-                        *fProject);
+    if (ctl == HeaderControl::Solo) {
+        if ((mods & (B_OPTION_KEY | B_COMMAND_KEY)) != 0) {
+            ExclusiveSolo(id);   // Alt-click: this track alone
+        } else {
+            fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
+                            *fProject);
+        }
         Invalidate(lane);
         if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
-    if (MonRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Monitor) {
         // Per-track input monitor: hear this track's input live without arming.
         if (Track* tr = fProject->FindTrack(id)) tr->inputMonitor = !tr->inputMonitor;
         Invalidate(lane);
@@ -2606,7 +2800,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         }
         return;
     }
-    if (ArmRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Arm) {
         // Arm is transient transport state, not an undoable document edit:
         // toggle it directly. Multiple tracks may be armed; recording writes
         // one take from the single input and drops it on every armed track.
@@ -2624,8 +2818,8 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     // Gain / pan: begin a drag. Grab the pointer so we keep getting move/up
     // events even if the cursor leaves the fader.
     Drag mode = Drag::None;
-    if (GainRect(lane).Contains(where))         mode = Drag::Gain;
-    else if (PanKnobRect(lane).Contains(where)) mode = Drag::Pan;
+    if (ctl == HeaderControl::Gain)     mode = Drag::Gain;
+    else if (ctl == HeaderControl::Pan) mode = Drag::Pan;
     if (mode == Drag::None)
         return;
 
@@ -2636,6 +2830,259 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     fDragGrabY = where.y;                       // pan knob drags vertically
     SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     PreviewDrag(where);
+}
+
+// --- track depth actions (M2.6) --------------------------------------------
+//
+// The header buttons, the context menu and the Track menu all run these, and
+// so does the functional test: a popup menu Go()s synchronously, so the suite
+// drives the method the menu entry calls (the pattern M2.3/M2.5 established)
+// and the drawn control is what the shots are for.
+
+void TimelineView::SetTrackColour(TrackId track, int colorIndex) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    if (colorIndex < 0) colorIndex = 0;
+    if (fStack->Execute(std::make_unique<SetTrackColorCommand>(track, colorIndex),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetTrackInput(TrackId track, InputSource input) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    if (fStack->Execute(std::make_unique<SetTrackInputCommand>(track,
+                                                              std::move(input)),
+                        *fProject)) {
+        Invalidate();
+        // A changed input re-evaluates idle monitoring (the same message the
+        // inspector's picker posts), and repaints the panes.
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgMonitorRefresh);
+            w->PostMessage(kMsgUiRefresh);
+        }
+    }
+}
+
+void TimelineView::SetTrackCollapsed(TrackId track, bool collapsed) {
+    if (!fProject || !fStack) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t || t->collapsed == collapsed) return;
+    if (fStack->Execute(std::make_unique<SetTrackCollapsedCommand>(track,
+                                                                  collapsed),
+                        *fProject)) {
+        SyncScrollBars();   // the content height changed
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::ToggleTrackCollapsed(TrackId track) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (t) SetTrackCollapsed(track, !t->collapsed);
+}
+
+// Alt-click on a Solo button: this track alone. One MacroCommand over the
+// tracks that actually change, so it is a single "Exclusive Solo" undo step;
+// Alt-clicking the track that is already the only soloed one clears it (the
+// same toggle every other solo button has).
+void TimelineView::ExclusiveSolo(TrackId track) {
+    if (!fProject || !fStack) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    bool onlyThis = t->soloed;
+    for (const Track& o : fProject->Tracks())
+        if (o.id != track && o.soloed) { onlyThis = false; break; }
+    const bool want = !onlyThis;
+
+    auto macro = std::make_unique<MacroCommand>("Exclusive Solo");
+    for (const Track& o : fProject->Tracks()) {
+        const bool target = (o.id == track) ? want : false;
+        if (o.soloed != target)
+            macro->Add(std::make_unique<SetTrackSoloCommand>(o.id, target));
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+// Duplicate a whole track. The copy is selected and scrolled into view: the
+// user asked for it, and a new lane somewhere below the fold would otherwise
+// look like nothing happened.
+void TimelineView::DuplicateTrack(TrackId track) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    auto cmd = std::make_unique<DuplicateTrackCommand>(track);
+    DuplicateTrackCommand* cp = cmd.get();
+    if (!fStack->Execute(std::move(cmd), *fProject)) return;
+
+    const TrackId newId = cp->CreatedId();
+    SetSelectedTrack(newId);          // posts kMsgTrackSelected (inspector)
+    const int idx = fProject->IndexOfTrack(newId);
+    if (idx >= 0) {
+        const BRect lane = LaneRect(idx);      // with the CURRENT scroll
+        const float limit = Bounds().bottom - fBarThickness;
+        if (lane.bottom > limit)
+            ScrollToY(fScrollY + (lane.bottom - limit));
+    }
+    Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+}
+
+void TimelineView::DuplicateSelectedTrack() {
+    if (fSelectedTrack != kInvalidTrackId) DuplicateTrack(fSelectedTrack);
+}
+
+// The colour picker: the palette is TrackColor (one definition), the labels
+// come from beside it, and the chip is drawn on the item itself.
+namespace {
+class ColourMenuItem : public ThemedMenuItem {
+public:
+    ColourMenuItem(int index, rgb_color chip)
+        : ThemedMenuItem(TrackColourName(index), nullptr), fChip(chip) {}
+    void DrawContent() override {
+        BMenu* m = Menu();
+        if (m == nullptr) return;
+        // ContentLocation() is where the stock item starts its label, and
+        // GetContentSize() its line height -- so the chip and the label land on
+        // the same line as every other menu entry without guessing.
+        const BPoint at = ContentLocation();
+        float w = 0.0f, h = 0.0f;
+        GetContentSize(&w, &h);
+        BFont font;
+        m->GetFont(&font);
+        font_height fh;
+        font.GetHeight(&fh);
+        const float side = std::min(h - Themed(2.0f), Themed(11.0f));
+        const float top = at.y + (h - side) * 0.5f;
+        BRect chip(at.x, top, at.x + side, top + side);
+        m->SetHighColor(fChip);
+        m->FillRoundRect(chip, Themed(2.0f), Themed(2.0f));
+        m->SetHighColor(ColBtnBorder());
+        m->StrokeRoundRect(chip, Themed(2.0f), Themed(2.0f));
+        m->SetHighColor(IsEnabled() ? ColText() : ColTextDim());
+        m->DrawString(Label(), BPoint(chip.right + Themed(6.0f),
+                                      at.y + fh.ascent));
+    }
+private:
+    rgb_color fChip;
+};
+} // namespace
+
+void TimelineView::OpenColourPicker(TrackId track, BPoint where) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    BPopUpMenu* menu = new BPopUpMenu("track colour", false, false);
+    for (int i = 0; i < kTrackColorCount; i++) {
+        BMenuItem* it = new ColourMenuItem(i, TrackColor(i));
+        if (i == t->colorIndex) it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    const int pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick >= 0) SetTrackColour(track, pick);
+}
+
+void TimelineView::OpenInputPicker(TrackId track, BPoint where) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    const std::vector<InputSource> choices = TrackInputChoices(*t);
+    BPopUpMenu* menu = new BPopUpMenu("record input", false, false);
+    for (size_t i = 0; i < choices.size(); i++) {
+        BMenuItem* it = new ThemedMenuItem(
+            InputChoiceLabel(choices[i]).c_str(), nullptr);
+        if (choices[i].kind == t->input.kind
+            && choices[i].name == t->input.name)
+            it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    const int pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick >= 0 && (size_t)pick < choices.size())
+        SetTrackInput(track, choices[(size_t)pick]);
+}
+
+// --- rename in place (M2.6) ------------------------------------------------
+
+void TimelineView::BeginTrackRename(TrackId track) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    fRenameTrack = track;
+    fRenameText  = t->name;
+    fRenameCaret = (int)fRenameText.size();
+    MakeFocus(true);              // the keys are this view's while it is open
+    Invalidate();
+}
+
+void TimelineView::CancelTrackRename() {
+    if (fRenameTrack == kInvalidTrackId && fRenameText.empty()) return;
+    fRenameTrack = kInvalidTrackId;
+    fRenameText.clear();
+    fRenameCaret = 0;
+    Invalidate();
+}
+
+void TimelineView::CommitTrackRename() {
+    const TrackId id = fRenameTrack;
+    const std::string text = fRenameText;
+    fRenameTrack = kInvalidTrackId;
+    fRenameText.clear();
+    fRenameCaret = 0;
+    Track* t = (fProject && id != kInvalidTrackId) ? fProject->FindTrack(id)
+                                                   : nullptr;
+    if (t && !text.empty() && text != t->name) {
+        if (fStack->Execute(std::make_unique<SetTrackNameCommand>(id, text),
+                            *fProject))
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+    Invalidate();
+}
+
+// The keys the open name field owns. While it is open EVERY key is consumed:
+// a bare `,` or `1` would otherwise nudge a clip or switch tools behind the
+// field, which is how a rename edits the wrong thing.
+bool TimelineView::HandleRenameKey(const char* bytes, int32 numBytes) {
+    if (fRenameTrack == kInvalidTrackId || numBytes < 1) return false;
+    const unsigned char c = (unsigned char)bytes[0];
+    switch (c) {
+        case B_RETURN:               // (== B_ENTER on this platform) commits
+            CommitTrackRename();
+            return true;
+        case B_ESCAPE:               CancelTrackRename();  return true;
+        case B_BACKSPACE:
+            if (fRenameCaret > 0) {
+                fRenameText.erase((size_t)fRenameCaret - 1, 1);
+                --fRenameCaret;
+            }
+            Invalidate();
+            return true;
+        case B_LEFT_ARROW:
+            if (fRenameCaret > 0) --fRenameCaret;
+            Invalidate();
+            return true;
+        case B_RIGHT_ARROW:
+            if (fRenameCaret < (int)fRenameText.size()) ++fRenameCaret;
+            Invalidate();
+            return true;
+        case B_DELETE:
+            if (fRenameCaret < (int)fRenameText.size())
+                fRenameText.erase((size_t)fRenameCaret, 1);
+            Invalidate();
+            return true;
+        default: break;
+    }
+    if (c >= 0x20 && c != 0x7f) {                 // a printable ASCII byte
+        fRenameText.insert((size_t)fRenameCaret, 1, (char)c);
+        ++fRenameCaret;
+        Invalidate();
+    }
+    return true;
 }
 
 // Compute the dragged value from the cursor x and write it straight into the
@@ -2654,6 +3101,21 @@ void TimelineView::PreviewDrag(BPoint where) {
         if (hi - lo <= minDrag) return;   // not a real drag yet
         fRangeDragged = true;
         SetTimeRange(lo, hi);
+        return;
+    }
+
+    // A lane-edge drag (M2.6): the pointer's distance from the grab point is
+    // the height delta, previewed straight into the model (one command on
+    // release, like every other drag here). The clamp matches the drag's own
+    // floor and SetTrackHeightCommand's ceiling.
+    if (fDrag == Drag::LaneResize) {
+        Track* t = fProject->FindTrack(fDragTrack);
+        if (!t) return;
+        float h = fDragOrig + (where.y - fDragGrabY);
+        if (h < Themed(72.0f))  h = Themed(72.0f);
+        if (h > Themed(300.0f)) h = Themed(300.0f);
+        t->height = (int)(h + 0.5f);
+        Invalidate();
         return;
     }
 
@@ -2940,6 +3402,23 @@ void TimelineView::MouseUp(BPoint where) {
         return;
     }
 
+    // A lane-edge drag (M2.6): restore the pre-drag height, then push ONE
+    // command carrying the dragged result.
+    if (fDrag == Drag::LaneResize) {
+        if (Track* t = fProject->FindTrack(fDragTrack)) {
+            const int v = t->height;
+            t->height = (int)(fDragOrig + 0.5f);
+            if (v != t->height)
+                fStack->Execute(std::make_unique<SetTrackHeightCommand>(
+                                    fDragTrack, v), *fProject);
+            SyncScrollBars();   // the content height changed
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+        }
+        fDrag = Drag::None;
+        Invalidate();
+        return;
+    }
+
     // Ruler: a real drag leaves a loop region; a bare click (no movement)
     // seeks and clears any loop — regardless of prior loop state.
     if (fDrag == Drag::RulerLoop) {
@@ -3209,7 +3688,7 @@ void TimelineView::DrawPlayhead() {
 void TimelineView::DrawRuler(BRect update) {
     BRect r = Bounds();
     r.top    = ToolbarHeight();
-    r.bottom = ContentTop();
+    r.bottom = RulerBottom();   // the marker lane (when on) is below this
 
     SetHighColor(ColRuler());
     FillRect(r);
@@ -3311,6 +3790,128 @@ void TimelineView::DrawRuler(BRect update) {
     }
 }
 
+// --- markers (M2.7) ---------------------------------------------------------
+
+// The one seek: the model's playhead, the DRAWN line (the ruler's flag click
+// used to move the model without moving the line, which left the screen
+// showing the old position while stopped), and the engine/intents a seek
+// posts.
+void TimelineView::SeekTo(Frame frame) {
+    if (!fProject) return;
+    if (frame < 0) frame = 0;
+    fProject->transport.playhead = frame;
+    SetPlayhead(frame);
+    if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+}
+
+void TimelineView::AddMarkerAt(Frame frame) {
+    if (!fProject || !fStack) return;
+    if (frame < 0) frame = 0;
+    char nm[32];
+    std::snprintf(nm, sizeof(nm), "Marker %d",
+                  (int)fProject->markers.size() + 1);
+    if (fStack->Execute(std::make_unique<AddMarkerCommand>(frame, nm), *fProject)) {
+        Invalidate();
+        // The markers window (and the other panes) follow through this one
+        // message -- an open list that does not show a new marker is stale
+        // content.
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::RemoveMarkerAt(Frame frame, const std::string& name) {
+    if (!fProject || !fStack) return;
+    if (fStack->Execute(std::make_unique<RemoveMarkerCommand>(frame, name),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetMarkerLane(bool on) {
+    if (fMarkerLane == on) return;
+    fMarkerLane = on;
+    // The lanes start lower now: the scroll ranges and the vertical clamp both
+    // read ContentTop(), so both have to be recomputed.
+    SyncScrollBars();
+    Invalidate();
+}
+
+// The marker whose flag or drawn name is under a point in the marker lane.
+const Marker* TimelineView::MarkerInLane(BPoint where) const {
+    if (!fProject) return nullptr;
+    if (where.y < RulerBottom() || where.y >= ContentTop()) return nullptr;
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        // The hit zone is the flag PLUS the name to its right, so clicking the
+        // label works too (the ruler's flag-only 9 px zone is part of why this
+        // lane exists). Names that overlap: the first (leftmost) wins, which is
+        // the one whose flag the pointer is nearest.
+        BString nm(mk.name.c_str());
+        const float w = std::min(StringWidth(nm), Themed(96.0f));
+        if (where.x >= x - Themed(4.0f) && where.x <= x + Themed(11.0f) + w)
+            return &mk;
+    }
+    return nullptr;
+}
+
+void TimelineView::HandleMarkerLaneClick(BPoint where, bool rightClick) {
+    int32 clicks = 1;
+    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+        m->FindInt32("clicks", &clicks);
+    const Marker* mk = MarkerInLane(where);
+    if (rightClick) {
+        // No popup here (the ruler already has the full menu): right-clicking
+        // a flag removes it, right-clicking empty lane adds one -- both one
+        // undoable step, and both drivable by a synthetic click.
+        if (mk) RemoveMarkerAt(mk->frame, mk->name);
+        else    AddMarkerAt(Snapped(XToFrame(where.x)));
+        return;
+    }
+    if (mk) {                 // click-to-seek
+        SeekTo(mk->frame);
+        return;
+    }
+    if (clicks >= 2) AddMarkerAt(Snapped(XToFrame(where.x)));
+}
+
+// The lane itself: a header-coloured strip with the flags and their names.
+void TimelineView::DrawMarkerLane() {
+    if (!fMarkerLane || !fProject) return;
+    const float top = RulerBottom();
+    const float bot = ContentTop() - 1.0f;
+    if (bot <= top) return;
+    SetHighColor(ColHeader());
+    FillRect(BRect(0, top, Bounds().right, bot));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(0, bot), BPoint(Bounds().right, bot));
+    // The gutter names the strip (an unlabelled band is an "unexplained
+    // empty band", which the guidelines call a bug).
+    SetHighColor(ColTextDim());
+    DrawString("Markers", BPoint(Themed(10.0f), top + Themed(14.0f)));
+
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        if (x < HeaderWidth() - Themed(4.0f) || x > Bounds().right) continue;
+        SetHighColor(ColMidiAccent());
+        BPoint flag[3] = { BPoint(x, top + Themed(3.0f)),
+                           BPoint(x + Themed(9.0f), top + Themed(7.0f)),
+                           BPoint(x, top + Themed(11.0f)) };
+        FillPolygon(flag, 3);
+        StrokeLine(BPoint(x, top + Themed(3.0f)), BPoint(x, bot - Themed(2.0f)));
+        BString name(mk.name.c_str());
+        TruncateString(&name, B_TRUNCATE_END, Themed(96.0f));
+        SetHighColor(ColText());
+        DrawString(name.String(), BPoint(x + Themed(12.0f), top + Themed(14.0f)));
+    }
+    // The playhead crosses the strip, so a marker jump is visible here too.
+    const float px = FrameToX(fPlayhead);
+    if (px >= HeaderWidth() && px <= Bounds().right) {
+        SetHighColor(ColPlayhead());
+        StrokeLine(BPoint(px, top), BPoint(px, bot));
+    }
+}
+
 void TimelineView::JumpToMarker(int dir) {
     const Frame ph = fProject->transport.playhead;
     Frame target = -1;
@@ -3321,10 +3922,7 @@ void TimelineView::JumpToMarker(int dir) {
         for (const Marker& m : fProject->markers)
             if (m.frame < ph) target = m.frame; else break;
     }
-    if (target >= 0) {
-        fProject->transport.playhead = target;
-        if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
-    }
+    if (target >= 0) SeekTo(target);
 }
 
 void TimelineView::LoopBetweenMarkers() {
@@ -3342,7 +3940,7 @@ void TimelineView::LoopBetweenMarkers() {
 
 // The marker whose flag is under `where` on the ruler, or nullptr.
 const Marker* TimelineView::MarkerAt(BPoint where) const {
-    if (!fProject || where.y < ToolbarHeight() || where.y >= ContentTop())
+    if (!fProject || where.y < ToolbarHeight() || where.y >= RulerBottom())
         return nullptr;
     const Marker* best = nullptr; float bestd = 9.0f;
     for (const Marker& mk : fProject->markers) {
@@ -3385,6 +3983,8 @@ void TimelineView::ForEachGridLine(
 
 // Lane height for a track (clamped), falling back to the default.
 static float LaneHeightOf(const Track& t) {
+    // A folded lane is the title strip, whatever its unfolded height is (M2.6).
+    if (t.collapsed) return CollapsedTrackHeight();
     // Floor at the default so the header controls always fit; taller lanes just
     // add waveform room.
     float h = (float)t.height;
@@ -3427,6 +4027,14 @@ void TimelineView::DrawLanes(BRect update) {
 
         SetHighColor((idx & 1) ? ColLaneAlt() : ColLane());
         FillRect(lane);
+
+        // A folded lane (M2.6) is its title strip: no grid, no clips, no
+        // waveform -- the lane says what it is and nothing else.
+        if (t.collapsed) {
+            DrawTrackHeaderCompact(t, lane);
+            idx++;
+            continue;
+        }
 
         // Bar/beat grid lines through the lane content area (bars brighter).
         // Lines outside the update rect are skipped: on a long project the
@@ -3527,8 +4135,45 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
         StrokeRect(BRect(Themed(1), lane.top + Themed(1), HeaderWidth() - Themed(2), lane.bottom - Themed(1)));
     }
 
-    SetHighColor(ColText());
-    DrawString(t.name.c_str(), BPoint(Themed(10), lane.top + Themed(14)));
+    // The fold triangle (M2.6): down = expanded, right = folded. Drawn before
+    // the name so the name field's own fill cannot bury it.
+    {
+        const BRect fr = FoldRect(lane);
+        SetHighColor(ColText());
+        const float m = Themed(3.0f);
+        if (t.collapsed) {
+            BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                            BPoint(fr.left + m + Themed(6.0f), (fr.top + fr.bottom) * 0.5f),
+                            BPoint(fr.left + m, fr.bottom - m) };
+            FillPolygon(p, 3);
+        } else {
+            BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                            BPoint(fr.right - m, fr.top + m),
+                            BPoint((fr.left + fr.right) * 0.5f, fr.top + m + Themed(6.0f)) };
+            FillPolygon(p, 3);
+        }
+    }
+
+    // Name (or the in-place rename field, M2.6), then the colour swatch.
+    if (t.id == fRenameTrack)
+        DrawNameField(t, lane);
+    else {
+        SetHighColor(ColText());
+        BString nm(t.name.c_str());
+        TruncateString(&nm, B_TRUNCATE_END,
+                       NameRect(lane).Width() - Themed(4.0f));
+        DrawString(nm.String(), BPoint(NameRect(lane).left + Themed(1.0f),
+                                       lane.top + Themed(14.0f)));
+    }
+    // The colour swatch: the track's palette colour, in the one place the
+    // picker opens from.
+    {
+        const BRect sw = ColourSwatchRect(lane);
+        SetHighColor(TrackColor(t.colorIndex));
+        FillRoundRect(sw, Themed(2.0f), Themed(2.0f));
+        SetHighColor(ColBtnBorder());
+        StrokeRoundRect(sw, Themed(2.0f), Themed(2.0f));
+    }
 
     // Mute / Solo / Record / Input-monitor: rounded state buttons.
     DrawButton(this, MuteRect(lane), "M", t.muted,        ColMute());
@@ -3544,6 +4189,26 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     // Pan knob (value ring in the track-type accent).
     DrawKnob(this, PanKnobRect(lane), t.pan,
              t.type == TrackType::Midi ? ColMidiAccent() : ColAudioAccent());
+
+    // The record-input selector (M2.6): a compact field showing the chosen
+    // source ("Default", an endpoint's tail, or an em dash for none), lit
+    // while a source is set. The full list is the popup -- one definition,
+    // shared with the inspector (TrackInputs.h).
+    {
+        const BRect ir = InputRect(lane);
+        SetHighColor(ColBtnOff());
+        FillRoundRect(ir, Themed(3.0f), Themed(3.0f));
+        SetHighColor(t.input.kind != InputSource::kNone ? ColMon()
+                                                        : ColBtnBorder());
+        StrokeRoundRect(ir, Themed(3.0f), Themed(3.0f));
+        BString lab("In: ");
+        lab << InputShortLabel(t.input).c_str();
+        TruncateString(&lab, B_TRUNCATE_END, ir.Width() - Themed(8.0f));
+        SetHighColor(t.input.kind != InputSource::kNone ? ColMon()
+                                                        : ColTextDim());
+        DrawString(lab.String(), BPoint(ir.left + Themed(4.0f),
+                                        ir.bottom - Themed(4.0f)));
+    }
 
     // Gain fader (horizontal): recessed trough + accent fill.
     BRect g = GainRect(lane);
@@ -3573,24 +4238,130 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     meterBar(meterBox.left + Themed(1), mPeakL);
     meterBar(meterBox.left + Themed(2) + bw, mPeakR);
 
-    // Hover highlight (M2.1): the header control the pointer is over. Drawn
-    // last so it is not buried under the control's own fill.
-    if (fHoverHeader >= 0 && fHoverValid && fHover.track == t.id) {
-        BRect r;
-        switch (fHoverHeader) {
-            case kHdrMute: r = MuteRect(lane); break;
-            case kHdrSolo: r = SoloRect(lane); break;
-            case kHdrArm:  r = ArmRect(lane);  break;
-            case kHdrMon:  r = MonRect(lane);  break;
-            case kHdrPan:  r = PanKnobRect(lane); break;
-            default:       r = GainRect(lane); break;
+    // Hover highlight (M2.1): the header control the pointer is over -- or the
+    // lane's resize edge (M2.6). Drawn last so it is not buried under the
+    // control's own fill.
+    if (fHoverValid && fHover.track == t.id) {
+        if (fHoverLaneEdge) {
+            SetHighColor(ColAccent());
+            FillRect(BRect(0, lane.bottom - Themed(2.0f), HeaderWidth() - 1,
+                           lane.bottom));
+        } else if (fHoverHeader != HeaderControl::None) {
+            const BRect r = HeaderRectFor(fProject->IndexOfTrack(t.id),
+                                          fHoverHeader);
+            SetHighColor(ColAccent());
+            SetPenSize(Themed(2.0f));
+            if (fHoverHeader == HeaderControl::Pan) StrokeEllipse(r);
+            else StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
+            SetPenSize(1.0f);
         }
+    }
+}
+
+// The compact row a folded lane shows (M2.6): fold triangle, colour swatch,
+// name, mute, solo -- and the meter, which stays on the right edge. No clips,
+// no pan/fader/input: a folded lane is a title strip.
+void TimelineView::DrawTrackHeaderCompact(const Track& t, BRect lane) {
+    BRect hdr(0, lane.top, HeaderWidth(), lane.bottom);
+    const bool selected = (t.id == fSelectedTrack);
+    SetHighColor(selected ? ColHeaderHi() : ColHeader());
+    FillRect(hdr);
+    SetHighColor(t.type == TrackType::Midi ? ColMidiAccent()
+               : t.type == TrackType::Bus  ? ColTextDim() : ColAudioAccent());
+    FillRect(BRect(0, lane.top, Themed(4), lane.bottom));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(HeaderWidth() - 1, lane.top),
+               BPoint(HeaderWidth() - 1, lane.bottom));
+    if (selected) {
+        SetHighColor(ColAccent());
+        StrokeRect(BRect(Themed(1), lane.top + Themed(1),
+                         HeaderWidth() - Themed(2), lane.bottom - Themed(1)));
+    }
+
+    {   // the fold triangle, pointing right when folded
+        const BRect fr = FoldRectCompact(lane);
+        SetHighColor(ColText());
+        const float m = Themed(3.0f);
+        BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                        BPoint(fr.left + m + Themed(6.0f),
+                               (fr.top + fr.bottom) * 0.5f),
+                        BPoint(fr.left + m, fr.bottom - m) };
+        FillPolygon(p, 3);
+    }
+    {   // the colour swatch stays: the colour is the track's identity
+        const BRect sw = ColourSwatchRectCompact(lane);
+        SetHighColor(TrackColor(t.colorIndex));
+        FillRoundRect(sw, Themed(2.0f), Themed(2.0f));
+        SetHighColor(ColBtnBorder());
+        StrokeRoundRect(sw, Themed(2.0f), Themed(2.0f));
+    }
+    if (t.id == fRenameTrack) {
+        DrawNameField(t, lane);
+    } else {
+        BString nm(t.name.c_str());
+        TruncateString(&nm, B_TRUNCATE_END, Themed(56.0f));
+        SetHighColor(ColText());
+        DrawString(nm.String(), BPoint(Themed(38.0f), lane.top + Themed(15.0f)));
+    }
+    DrawButton(this, MuteRectCompact(lane), "M", t.muted,  ColMute());
+    DrawButton(this, SoloRectCompact(lane), "S", t.soloed, ColSolo());
+
+    // The meter, exactly as the expanded header draws it.
+    const float mx0 = HeaderWidth() - HdrMeterW();
+    BRect meterBox(mx0, lane.top + Themed(2), HeaderWidth() - Themed(2),
+                   lane.bottom - Themed(2));
+    SetHighColor(ColLcd());
+    FillRect(meterBox);
+    float mPeakL = 0.0f, mPeakR = 0.0f;
+    if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
+        mPeakL = it->second.first; mPeakR = it->second.second;
+    }
+    const float bw = (meterBox.Width() - Themed(3)) * 0.5f;
+    auto meterBar = [&](float x0, float level) {
+        if (level < 0.0f) level = 0.0f; if (level > 1.0f) level = 1.0f;
+        const float h = meterBox.Height() * level;
+        SetHighColor(MeterColor(level));
+        FillRect(BRect(x0, meterBox.bottom - h, x0 + bw, meterBox.bottom));
+    };
+    meterBar(meterBox.left + Themed(1), mPeakL);
+    meterBar(meterBox.left + Themed(2) + bw, mPeakR);
+
+    if (fHoverValid && fHover.track == t.id
+        && fHoverHeader != HeaderControl::None) {
+        const BRect r = HeaderRectFor(fProject->IndexOfTrack(t.id),
+                                      fHoverHeader);
         SetHighColor(ColAccent());
         SetPenSize(Themed(2.0f));
-        if (fHoverHeader == kHdrPan) StrokeEllipse(r);
-        else                         StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
+        StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
         SetPenSize(1.0f);
     }
+}
+
+// The in-place rename's field: a sunken well over the name, with the edit
+// buffer and a caret. The caret scrolls the text so it stays visible in a
+// narrow field (a long name edited at the end must not draw the caret outside
+// the box).
+void TimelineView::DrawNameField(const Track& t, BRect lane) {
+    const BRect r = NameRect(lane);
+    SetHighColor(ColLcd());
+    FillRoundRect(r, Themed(2.0f), Themed(2.0f));
+    SetHighColor(ColAccent());
+    StrokeRoundRect(r, Themed(2.0f), Themed(2.0f));
+
+    const float pad = Themed(3.0f);
+    const char* full = fRenameText.c_str();
+    // The caret's pixel offset within the whole string, and the shift needed
+    // to keep it inside the field.
+    const float caretW = StringWidth(full, (int32)fRenameCaret);
+    float shift = 0.0f;
+    const float room = r.Width() - pad * 2.0f;
+    if (caretW > room) shift = caretW - room;
+
+    SetHighColor(ColText());
+    DrawString(full, BPoint(r.left + pad - shift, r.bottom - Themed(4.0f)));
+    const float cx = r.left + pad - shift + caretW;
+    SetHighColor(ColText());
+    StrokeLine(BPoint(cx, r.top + Themed(3.0f)), BPoint(cx, r.bottom - Themed(3.0f)));
 }
 
 // --- Automation editing --------------------------------------------------

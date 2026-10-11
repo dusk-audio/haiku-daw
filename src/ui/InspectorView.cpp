@@ -13,7 +13,7 @@
 #include "InstrumentWindow.h"
 #include "../model/Commands.h"
 #include "../plugin/PluginHost.h"   // "is this insert loadable?" for the badge
-#include "../midi/MidiPort.h"
+#include "TrackInputs.h"   // the shared input-choice list (header + inspector)
 
 #include <PopUpMenu.h>
 #include <MenuItem.h>
@@ -197,20 +197,17 @@ void InspectorView::Draw(BRect) {
     DrawButton(this, fMuteR, "Mute", t->muted,  ColMute());
     DrawButton(this, fSoloR, "Solo", t->soloed, ColSolo());
 
-    // Input source.
-    char ib[64];
+    // Input source. The label comes from TrackInputs.h, the same place the
+    // arrangement header's In field gets its own -- the two cannot drift.
+    std::string inLabel = "In: ";
     if (t->input.kind == InputSource::kMidi) {
-        std::string n = t->input.name;
-        const std::string pfx = "/dev/midi/";
-        if (n.compare(0, pfx.size(), pfx) == 0) n = n.substr(pfx.size());
-        std::snprintf(ib, sizeof(ib), "In: %s", n.empty() ? "set" : n.c_str());
-    } else if (t->input.kind == InputSource::kAudioDefault) {
-        std::snprintf(ib, sizeof(ib), "In: Default");
+        std::string n = InputShortLabel(t->input);
+        inLabel += n.empty() ? std::string("set") : n;
     } else {
-        std::snprintf(ib, sizeof(ib), "In: \xE2\x80\x94");
+        inLabel += InputShortLabel(t->input);
     }
-    DrawButton(this, fInputR, ib, t->input.kind != InputSource::kNone,
-               Rgb(52, 104, 74));
+    DrawButton(this, fInputR, inLabel.c_str(),
+               t->input.kind != InputSource::kNone, Rgb(52, 104, 74));
 
     // Sends, output routing, group.
     char sb[16];
@@ -355,35 +352,22 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fInputR.Contains(where)) {
+        // The choices, their labels and their order are TrackInputs.h's -- one
+        // definition, shared with the arrangement header's In field.
+        const std::vector<InputSource> choices = TrackInputChoices(*t);
         BPopUpMenu* menu = new BPopUpMenu("input", false, false);
-        BMenuItem* none = new ThemedMenuItem("None", NULL);
-        if (t->input.kind == InputSource::kNone) none->SetMarked(true);
-        menu->AddItem(none);
-        std::vector<InputSource> choices;
-        if (t->type == TrackType::Midi) {
-            for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
-                if (!e.isProducer || e.name.find("HaikuDAW") != std::string::npos)
-                    continue;
-                BMenuItem* it = new ThemedMenuItem(e.name.c_str(), NULL);
-                if (t->input.kind == InputSource::kMidi && t->input.name == e.name)
-                    it->SetMarked(true);
-                menu->AddItem(it);
-                choices.push_back(InputSource{ InputSource::kMidi, e.name, 0 });
-            }
-        } else if (t->type == TrackType::Audio) {
-            BMenuItem* def = new ThemedMenuItem("Default Input", NULL);
-            if (t->input.kind == InputSource::kAudioDefault) def->SetMarked(true);
-            menu->AddItem(def);
-            choices.push_back(InputSource{ InputSource::kAudioDefault, "", 0 });
+        for (const InputSource& c : choices) {
+            BMenuItem* it = new ThemedMenuItem(InputChoiceLabel(c).c_str(), NULL);
+            if (c.kind == t->input.kind && c.name == t->input.name)
+                it->SetMarked(true);
+            menu->AddItem(it);
         }
         BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
         const int32 pick = sel ? menu->IndexOf(sel) : -1;
         delete menu;
-        if (pick == 0)
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(id, InputSource{}), *fProject);
-        else if (pick > 0 && (size_t)(pick - 1) < choices.size())
+        if (pick >= 0 && (size_t)pick < choices.size())
             fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                id, choices[(size_t)(pick - 1)]), *fProject);
+                id, choices[(size_t)pick]), *fProject);
         Refresh();
         if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;

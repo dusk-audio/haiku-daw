@@ -15,6 +15,7 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
+#include "MarkersWindow.h"   // the markers/locations list (M2.7)
 #include "PluginBrowser.h"
 #include "ExportWindow.h"
 #include "ExportProgressWindow.h"
@@ -368,6 +369,13 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     trackMenu->AddItem(new ThemedMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
     trackMenu->AddItem(new ThemedMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
     trackMenu->AddItem(new ThemedMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
+    trackMenu->AddSeparatorItem();
+    // Duplicate Track (M2.6): the whole track, clips and all, right below the
+    // source. Disabled until a track is selected (UpdateEditMenu keeps it).
+    fDupTrackItem = new ThemedMenuItem("Duplicate Track",
+                                       new BMessage(MSG_DUPLICATE_TRACK));
+    fDupTrackItem->SetEnabled(false);
+    trackMenu->AddItem(fDupTrackItem);
     menuBar->AddItem(new ThemedMenuItem(trackMenu));
     BMenu* helpMenu = new BMenu("Help");
     helpMenu->AddItem(new ThemedMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
@@ -376,6 +384,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 
     BMenu* viewMenu = new BMenu("View");
     viewMenu->AddItem(new ThemedMenuItem("Mixer", new BMessage(MSG_MIXER)));
+    // The markers list (M2.7): a locations window of its own, single-instance
+    // like the mixer.
+    viewMenu->AddItem(new ThemedMenuItem("Markers", new BMessage(MSG_MARKERS),
+                                         'M'));
     fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
     viewMenu->AddItem(fMetItem);
     viewMenu->AddItem(new ThemedMenuItem("Master Effects" B_UTF8_ELLIPSIS,
@@ -404,6 +416,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fFollowItem = new ThemedMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
     fFollowItem->SetMarked(true);   // chase on by default
     viewMenu->AddItem(fFollowItem);
+    // The marker lane (M2.7): a flag strip between the ruler and the lanes.
+    fMarkerLaneItem = new ThemedMenuItem("Marker Lane",
+                                         new BMessage(MSG_MARKER_LANE));
+    viewMenu->AddItem(fMarkerLaneItem);
     viewMenu->AddItem(new ThemedMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SHORTCUTS)));
     viewMenu->AddItem(new ThemedMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
@@ -732,6 +748,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 m.AddFloat("mg", fProject->masterGain);
                 fMixerMsgr.SendMessage(&m);
             }
+            // ... and an open markers window, whose list is model data too. A
+            // marker edit posts this same message, so one funnel keeps the
+            // list honest (a list that misses an edit is stale content).
+            PushMarkers();
             break;
         }
         case kMsgCycleAuto:        // inspector Auto button -> cycle timeline mode
@@ -1022,6 +1042,35 @@ void MainWindow::MessageReceived(BMessage* msg) {
             mx->Show();
             break;
         }
+        case MSG_MARKERS:      // View > Markers (M2.7)
+            ShowMarkersWindow();
+            break;
+        case MSG_MARKER_LANE:  // View > Marker Lane: a view preference
+            fTimeline->SetMarkerLane(!fTimeline->MarkerLaneOn());
+            if (fMarkerLaneItem)
+                fMarkerLaneItem->SetMarked(fTimeline->MarkerLaneOn());
+            SaveSettings();    // it survives the quit, like the panes
+            break;
+        case MSG_DUPLICATE_TRACK:   // Track > Duplicate Track (M2.6)
+            fTimeline->DuplicateSelectedTrack();
+            break;
+        case kMsgMarkerJump: {      // the markers window: locate
+            int64 fr = 0;
+            msg->FindInt64("frame", &fr);
+            fTimeline->SeekTo((Frame)fr);
+            break;
+        }
+        case kMsgMarkerAdd:         // the markers window: add at the playhead
+            fTimeline->AddMarkerAt(fProject->transport.playhead);
+            break;
+        case kMsgMarkerDelete: {    // the markers window: remove one
+            int64 fr = 0;
+            const char* name = nullptr;
+            msg->FindInt64("frame", &fr);
+            if (msg->FindString("name", &name) == B_OK && name)
+                fTimeline->RemoveMarkerAt((Frame)fr, name);
+            break;
+        }
         case kMsgMixArm: {
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid)) t->armed = !t->armed;
@@ -1239,6 +1288,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fStack->Execute(std::make_unique<RenameMarkerCommand>(
                         (Frame)fr, name), *fProject);
                 fTimeline->Invalidate();
+                PostMessage(kMsgUiRefresh);   // an open markers window follows
             }
             break;
         }
@@ -2802,6 +2852,13 @@ void MainWindow::UpdateEditMenu() {
     fDupItem->SetEnabled(hasSel || hasRange);
     fPasteItem->SetEnabled(hasClipboard);
     fSilenceItem->SetEnabled(hasRange);
+    // Duplicate Track needs a selected track to duplicate (M2.6). The menu is
+    // refreshed on the 2 Hz title poll as well as after edits, so a selection
+    // made by clicking a lane in the timeline enables it.
+    if (fDupTrackItem != nullptr)
+        fDupTrackItem->SetEnabled(fTimeline != nullptr
+                                  && fTimeline->SelectedTrack()
+                                         != kInvalidTrackId);
 }
 
 void MainWindow::ReportError(const char* title, const std::string& detail) {
@@ -3285,6 +3342,9 @@ void MainWindow::LoadSettings() {
     if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
     if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
+    // The marker lane (M2.7): a view preference, restored with the panes.
+    if (fTimeline) fTimeline->SetMarkerLane(s.markerLaneVisible);
+    if (fMarkerLaneItem) fMarkerLaneItem->SetMarked(s.markerLaneVisible);
     // Restore the window frame: sane in both directions, and no larger than
     // the screen it is being restored on. A frame saved on a bigger display
     // (or by a test run) otherwise puts the window's own controls -- the dock's
@@ -3330,6 +3390,7 @@ void MainWindow::SaveSettings() {
         if (fDock->Bounds().Height() > 1.0f)
             s.bottomHeight = fDock->Bounds().Height();
     }
+    if (fTimeline != nullptr) s.markerLaneVisible = fTimeline->MarkerLaneOn();
 
     BPath p;
     if (!ProjectDocument::SettingsPath(p)) return;
@@ -3411,6 +3472,64 @@ void MainWindow::PushRollPlayhead(Frame ph) {
     BMessage m(kMsgRollPlayhead);
     m.AddInt64("ph", (int64)ph);
     fRollMsgr.SendMessage(&m);
+}
+
+// The markers window's list (M2.7): a pure snapshot -- frame, name and the
+// pre-formatted position (the transport's own bar:beat + min:sec readout), so
+// the window needs neither the model nor the tempo map.
+void MainWindow::PushMarkers() {
+    if (!fMarkersMsgr.IsValid() || !fProject) return;
+    BMessage m(kMsgMarkerList);
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    for (const Marker& mk : fProject->markers) {
+        const double sec  = fProject->sampleRate > 0
+                          ? (double)mk.frame / fProject->sampleRate : 0.0;
+        const int    mins = (int)(sec / 60.0);
+        const double rem  = sec - mins * 60.0;
+        int bar = 1, beat = 1;
+        fProject->tempoMap.BarBeat(mk.frame, &bar, &beat);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
+        m.AddInt64("frame", (int64)mk.frame);
+        m.AddString("name", mk.name.c_str());
+        m.AddString("time", buf);
+    }
+    m.AddInt64("playhead", (int64)fProject->transport.playhead);
+    fMarkersMsgr.SendMessage(&m);
+}
+
+// View > Markers: one window, like the mixer (M1.4's rule). Asking again
+// brings the open one forward with the current list.
+void MainWindow::ShowMarkersWindow() {
+    std::vector<MarkerInfo> list;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    for (const Marker& mk : fProject->markers) {
+        MarkerInfo info;
+        info.frame = mk.frame;
+        info.name  = mk.name;
+        const double sec  = fProject->sampleRate > 0
+                          ? (double)mk.frame / fProject->sampleRate : 0.0;
+        const int    mins = (int)(sec / 60.0);
+        const double rem  = sec - mins * 60.0;
+        int bar = 1, beat = 1;
+        fProject->tempoMap.BarBeat(mk.frame, &bar, &beat);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
+        info.time = buf;
+        list.push_back(std::move(info));
+    }
+    if (fMarkersMsgr.IsValid()) {
+        PushMarkers();
+        BMessage act(kMsgMarkerActivate);
+        fMarkersMsgr.SendMessage(&act);
+        return;
+    }
+    BRect wr(140, 120, 140 + 330, 120 + 320);
+    MarkersWindow* win = new MarkersWindow(wr, std::move(list),
+                                           fProject->transport.playhead,
+                                           BMessenger(this));
+    fMarkersMsgr = BMessenger(win);
+    win->Show();
 }
 
 void MainWindow::PushTrackPeaks() {

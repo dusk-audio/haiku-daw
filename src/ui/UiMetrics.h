@@ -31,6 +31,14 @@ constexpr float kDesignToolbarHeight = 28.0f;
 // The strip's own width: what the timeline must be able to show without
 // clipping a button (MainWindow's minimum for the pane).
 constexpr float kDesignArrToolStripW = 288.0f;
+// The marker lane (M2.7): a flag strip between the ruler and the lanes,
+// toggled from the View menu / Shift-M. Its height is part of ContentTop()
+// whenever it is on, so the lanes and the ruler move down with it (and the
+// ruler keeps its own band: TimelineContentTop() is still where the ruler
+// ends).
+constexpr float kDesignMarkerLaneH = 20.0f;
+// A collapsed lane (M2.6): the header folds to a title strip.
+constexpr float kDesignCollapsedH = 22.0f;
 
 inline float RulerHeight()    { return Themed(kDesignRulerHeight); }
 inline float ToolbarHeight()  { return Themed(kDesignToolbarHeight); }
@@ -45,6 +53,9 @@ inline float ArrToolStripWidth() { return Themed(kDesignArrToolStripW); }
 // timeline's own ContentTop() and every test that computes a lane's y use this
 // one, so a click target and the drawn lane cannot disagree.
 inline float TimelineContentTop() { return ToolbarHeight() + RulerHeight(); }
+
+inline float MarkerLaneHeight()      { return Themed(kDesignMarkerLaneH); }
+inline float CollapsedTrackHeight()  { return Themed(kDesignCollapsedH); }
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.
 constexpr double kDefaultFramesPerPixel = 512.0;
