@@ -46,8 +46,10 @@ constexpr uint32 kMsgFreezeTrack     = 'frtk';
 // reuse the sample browser's kMsgBrowserImport instead.
 constexpr uint32 kMsgDropMidi = 'dpmd';
 
-class TimelineView : public BView {
+class TimelineView : public BView, public ThemeAware {
 public:
+    void ApplyTheme() override;   // T1: the cached lane colour
+
     // BView already has a Frame() method; without this typedef every
     // unqualified `Frame` in this class would bind to BView::Frame() instead
     // of the model's frame type. A member typedef hides the inherited name.

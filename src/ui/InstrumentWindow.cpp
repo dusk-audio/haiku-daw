@@ -74,11 +74,10 @@ InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
     : BWindow(frame, "Instrument", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fDesc(std::move(inst)), fTrack(track), fApply(apply) {
-    BGroupView* root = new BGroupView(B_VERTICAL, Themed(6.0f));
+    BGroupView* root = new ThemedGroupView("root", B_VERTICAL, Themed(6.0f));
     root->GroupLayout()->SetInsets(Themed(8.0f), Themed(8.0f), Themed(8.0f),
                                    Themed(8.0f));
     fRoot = root;
-    root->SetViewColor(ColHeader());
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // Reopening the editor on a track that already has a soundfont should show
@@ -214,7 +213,7 @@ void InstrumentWindow::Build() {
         for (int i = 0; i < 3; i++) {
             BMessage* mm = new BMessage(MSG_MODE);
             mm->AddInt32("type", (int32)kinds[i]);
-            BMenuItem* it = new BMenuItem(TypeName(kinds[i]), mm);
+            BMenuItem* it = new ThemedMenuItem(TypeName(kinds[i]), mm);
             it->SetMarked(kinds[i] == fDesc.type);
             it->SetTarget(this);
             menu->AddItem(it);
@@ -229,7 +228,7 @@ void InstrumentWindow::Build() {
         for (int i = 0; i < 4; i++) {
             BMessage* mm = new BMessage(MSG_WAVE);
             mm->AddInt32("wave", i);
-            BMenuItem* it = new BMenuItem(names[i], mm);
+            BMenuItem* it = new ThemedMenuItem(names[i], mm);
             it->SetMarked(i == fDesc.synth.waveform);
             it->SetTarget(this);
             menu->AddItem(it);
@@ -269,7 +268,7 @@ void InstrumentWindow::Build() {
                 char label[96];
                 std::snprintf(label, sizeof label, "%03d:%03d  %s",
                               p.bank, p.program, p.name.c_str());
-                BMenuItem* it = new BMenuItem(label, mm);
+                BMenuItem* it = new ThemedMenuItem(label, mm);
                 it->SetMarked(p.index == fDesc.sf2Preset);
                 it->SetTarget(this);
                 menu->AddItem(it);

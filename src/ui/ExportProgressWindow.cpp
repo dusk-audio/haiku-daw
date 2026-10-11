@@ -16,8 +16,7 @@ ExportProgressWindow::ExportProgressWindow(BRect frame, BMessenger main,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_NOT_CLOSABLE
               | B_ASYNCHRONOUS_CONTROLS),
       fMain(main) {
-    BView* root = new BView("root", B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView("root", B_WILL_DRAW);
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     fBar = new BStatusBar("bar", label, nullptr);

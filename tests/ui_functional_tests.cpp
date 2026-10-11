@@ -1496,7 +1496,17 @@ static void TestWidgetKit(MainWindow* win) {
     root->AddChild(check);
     root->AddChild(slider);
     root->AddChild(knob);
+    // The probe window is a window like any other: what shows behind its root
+    // view is the window's own background — the system panel colour — so it
+    // gets the theme's, exactly as the app's windows do through ThemeAware.
+    // Without this a dark run has a light rim around a dark panel, which is
+    // the thing the pass is supposed to catch, not produce.
     probe->Show();
+    if (probe->Lock()) {
+        root->ResizeTo(probe->Bounds().Width(), probe->Bounds().Height());
+        probe->Unlock();
+    }
+    ThemeStockTopView(probe);
     snooze(250000);
     Shot("widget-kit");
 
@@ -1763,6 +1773,71 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return !playing(); }));
 }
 
+// --- the theme modes (T1) --------------------------------------------------
+
+// What the mode switch has to do that a unit test cannot see: leave the
+// system's own colours alone, install the mode's control look, and repaint the
+// windows that cached a colour.
+static void TestThemeMode(MainWindow* win) {
+    const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
+
+    // The user's own panel colour, before anything is switched. Haiku keeps it
+    // in the app_server and SAVES it, which is why the app may never write it.
+    const rgb_color systemPanel = ui_color(B_PANEL_BACKGROUND_COLOR);
+
+    // The mode reached the window's own background (its top view is what shows
+    // where no pane covers it).
+    win->Lock();
+    BLayout* layout = win->GetLayout();
+    BView* top = layout != nullptr ? layout->Owner() : nullptr;
+    // The timeline is a SIBLING of the menu bar and the transport strip, not
+    // their child: reading it is what catches a refresh that only walks the
+    // window's first child (which is exactly what shipped once -- every state
+    // check passed while the screen never changed).
+    BView* timeline = win->FindView("timeline");
+    const rgb_color before = top != nullptr ? top->ViewColor()
+                                            : B_TRANSPARENT_COLOR;
+    const rgb_color laneBefore = timeline != nullptr
+        ? timeline->ViewColor() : B_TRANSPARENT_COLOR;
+    win->Unlock();
+    CHECK(before == ColBackground());
+    CHECK(laneBefore == ColBackground());
+
+    win->PostMessage(MSG_THEME_MODE);   // View > Dark Mode
+    CHECK(WaitFor([&] { return ActiveThemeMode() != runMode; }));
+
+    win->Lock();
+    const rgb_color after = top != nullptr ? top->ViewColor()
+                                           : B_TRANSPARENT_COLOR;
+    const rgb_color laneAfter = timeline != nullptr
+        ? timeline->ViewColor() : B_TRANSPARENT_COLOR;
+    win->Unlock();
+    CHECK(after != before);            // the cached colour was re-taken
+    CHECK(after == ColBackground());   // ... to the other mode's
+    CHECK(laneAfter != laneBefore);    // and the panes were reached too
+    CHECK(laneAfter == ColBackground());
+
+    // The look followed the mode: the stock Haiku look in System mode,
+    // DawControlLook in Dark mode.
+    CHECK((dynamic_cast<DawControlLook*>(be_control_look) != nullptr)
+          == (ActiveThemeMode() == ThemeMode::Dark));
+
+    // And the operating system was left alone. This is the check that fails if
+    // anything ever calls set_ui_color again.
+    const rgb_color panelNow = ui_color(B_PANEL_BACKGROUND_COLOR);
+    CHECK(panelNow.red == systemPanel.red
+          && panelNow.green == systemPanel.green
+          && panelNow.blue == systemPanel.blue);
+
+    Shot(ActiveThemeMode() == ThemeMode::Dark ? "theme-dark" : "theme-system");
+
+    // Back to the run's mode, so the shots of everything after this are in the
+    // mode the pass was asked for.
+    win->PostMessage(MSG_THEME_MODE);
+    CHECK(WaitFor([&] { return ActiveThemeMode() == runMode; }));
+    Shot(runMode == ThemeMode::Dark ? "theme-dark-2" : "theme-system-2");
+}
+
 // --- driver ----------------------------------------------------------------
 
 static int32 TestThread(void*) {
@@ -1818,6 +1893,9 @@ static int32 TestThread(void*) {
     // exercises the save-panel branch.
     TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
+    // The theme switch flips the whole process and puts it back; last, so no
+    // other test's shots depend on the mode it leaves behind.
+    TestThemeMode(win);
 
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
@@ -1837,10 +1915,22 @@ int main() {
         std::printf("ui_functional_tests: no app_server - skipping\n");
         return 77;   // CTest SKIP_RETURN_CODE
     }
-    // The app's own look (main.cpp installs it the same way, before any
-    // window): without it the windows here are drawn partly by the stock look,
-    // and what the run shows is not what a user sees.
-    be_control_look = new DawControlLook();
+    // The theme (T1): the run's mode comes from DAW_UI_THEME, so the whole
+    // screenshot pass is run twice -- once per mode -- and what is reviewed is
+    // what a user in that mode sees. Exactly what DawApplication::ReadyToRun
+    // does: the user's colours in, the mode's look installed, no system
+    // colour written.
+    const char* themeEnv = std::getenv("DAW_UI_THEME");
+    SetActiveThemeMode(ThemeModeFromString(themeEnv));
+    ReadSystemBaseColors();
+    // A third value, for the screenshot pass only: System mode on a LIGHT
+    // Appearance (the colours Haiku ships with). The machine this runs on may
+    // have any Appearance at all -- this machine's own is a dark one -- and the
+    // light-panel case has to be reviewable without changing anyone's system
+    // settings, which is what T1 is about.
+    if (themeEnv != nullptr && std::strcmp(themeEnv, "light") == 0)
+        SetSystemBaseColors(ThemeBase::Defaults());
+    InstallControlLookForMode(ActiveThemeMode());
     // A window is the only honest proof that there is a display to drive.
     BWindow* probe = new BWindow(BRect(0, 0, 40, 40), "probe",
                                  B_NO_BORDER_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,

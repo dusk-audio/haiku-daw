@@ -92,7 +92,7 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
       fTrack(track), fClip(clip),
       fClipStart(clipStart), fClipLen(clipLength), fTempo(tempo),
       fSampleRate(sampleRate), fApply(apply) {
-    SetViewColor(ColBackground());
+    ApplyTheme();
     fTempo.sampleRate = sampleRate;
     fSel.assign(fNotes.size(), 0);
 
@@ -109,6 +109,10 @@ PianoRollView::PianoRollView(BRect frame, TrackId track, ClipId clip,
             if (fScrollFrame < 0) fScrollFrame = 0;
         }
     }
+}
+
+void PianoRollView::ApplyTheme() {
+    SetViewColor(ColBackground());
 }
 
 void PianoRollView::SelectOnly(int i) {
@@ -434,19 +438,19 @@ void PianoRollView::ApplyMidiOp(MidiOp op) {
 // the fast path for the one that gets used constantly.
 void PianoRollView::MidiMenu() {
     BPopUpMenu* m = new BPopUpMenu("midi", false, false);
-    m->AddItem(new BMenuItem("Quantize" B_UTF8_ELLIPSIS, NULL));
-    m->AddItem(new BMenuItem("Quantize (last settings)   q", NULL));
+    m->AddItem(new ThemedMenuItem("Quantize" B_UTF8_ELLIPSIS, NULL));
+    m->AddItem(new ThemedMenuItem("Quantize (last settings)   q", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Humanize", NULL));
-    m->AddItem(new BMenuItem("Legato", NULL));
+    m->AddItem(new ThemedMenuItem("Humanize", NULL));
+    m->AddItem(new ThemedMenuItem("Legato", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Transpose +1", NULL));
-    m->AddItem(new BMenuItem("Transpose -1", NULL));
-    m->AddItem(new BMenuItem("Transpose +12", NULL));
-    m->AddItem(new BMenuItem("Transpose -12", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose +1", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose -1", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose +12", NULL));
+    m->AddItem(new ThemedMenuItem("Transpose -12", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Velocity +10", NULL));
-    m->AddItem(new BMenuItem("Velocity -10", NULL));
+    m->AddItem(new ThemedMenuItem("Velocity +10", NULL));
+    m->AddItem(new ThemedMenuItem("Velocity -10", NULL));
 
     const BRect r = MidiMenuRectR();
     BMenuItem* sel = m->Go(ConvertToScreen(BPoint(r.left, r.bottom)), false, true);

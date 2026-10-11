@@ -32,6 +32,10 @@ InspectorView::InspectorView(BRect frame, Project* project, CommandStack* stack)
             // knob, not just the strip it exposes.
             B_WILL_DRAW | B_SUPPORTS_LAYOUT | B_FULL_UPDATE_ON_RESIZE),
       fProject(project), fStack(stack) {
+    ApplyTheme();
+}
+
+void InspectorView::ApplyTheme() {
     SetViewColor(ColHeader());
 }
 
@@ -351,7 +355,7 @@ void InspectorView::MouseDown(BPoint where) {
     }
     if (fInputR.Contains(where)) {
         BPopUpMenu* menu = new BPopUpMenu("input", false, false);
-        BMenuItem* none = new BMenuItem("None", NULL);
+        BMenuItem* none = new ThemedMenuItem("None", NULL);
         if (t->input.kind == InputSource::kNone) none->SetMarked(true);
         menu->AddItem(none);
         std::vector<InputSource> choices;
@@ -359,14 +363,14 @@ void InspectorView::MouseDown(BPoint where) {
             for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
                 if (!e.isProducer || e.name.find("HaikuDAW") != std::string::npos)
                     continue;
-                BMenuItem* it = new BMenuItem(e.name.c_str(), NULL);
+                BMenuItem* it = new ThemedMenuItem(e.name.c_str(), NULL);
                 if (t->input.kind == InputSource::kMidi && t->input.name == e.name)
                     it->SetMarked(true);
                 menu->AddItem(it);
                 choices.push_back(InputSource{ InputSource::kMidi, e.name, 0 });
             }
         } else if (t->type == TrackType::Audio) {
-            BMenuItem* def = new BMenuItem("Default Input", NULL);
+            BMenuItem* def = new ThemedMenuItem("Default Input", NULL);
             if (t->input.kind == InputSource::kAudioDefault) def->SetMarked(true);
             menu->AddItem(def);
             choices.push_back(InputSource{ InputSource::kAudioDefault, "", 0 });
@@ -385,11 +389,11 @@ void InspectorView::MouseDown(BPoint where) {
     }
     if (fOutR.Contains(where)) {
         BPopUpMenu* menu = new BPopUpMenu("out", false, false);
-        menu->AddItem(new BMenuItem("Master", NULL));
+        menu->AddItem(new ThemedMenuItem("Master", NULL));
         std::vector<TrackId> targets;
         for (const Track& bt : fProject->Tracks()) {
             if (bt.type != TrackType::Bus || bt.id == id) continue;
-            menu->AddItem(new BMenuItem(bt.name.c_str(), NULL));
+            menu->AddItem(new ThemedMenuItem(bt.name.c_str(), NULL));
             targets.push_back(bt.id);
         }
         BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
@@ -404,13 +408,13 @@ void InspectorView::MouseDown(BPoint where) {
     }
     if (fGroupR.Contains(where)) {
         BPopUpMenu* menu = new BPopUpMenu("group", false, false);
-        BMenuItem* none = new BMenuItem("None", NULL);
+        BMenuItem* none = new ThemedMenuItem("None", NULL);
         none->SetMarked(t->muteGroup == 0);
         menu->AddItem(none);
         for (int g = 1; g <= 4; g++) {       // same four the timeline offers
             char lb[16];
             std::snprintf(lb, sizeof(lb), "Group %d", g);
-            BMenuItem* gi = new BMenuItem(lb, NULL);
+            BMenuItem* gi = new ThemedMenuItem(lb, NULL);
             gi->SetMarked(t->muteGroup == g);
             menu->AddItem(gi);
         }

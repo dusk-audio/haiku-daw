@@ -8,6 +8,8 @@
 // posts kMsgUiRefresh so the timeline stays in sync. Haiku-only.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Project.h"
 #include "../model/Command.h"
 
@@ -15,8 +17,10 @@
 
 namespace daw {
 
-class InspectorView : public BView {
+class InspectorView : public BView, public ThemeAware {
 public:
+    void ApplyTheme() override;   // T1: the cached panel colour
+
     using Frame = daw::Frame;
 
     InspectorView(BRect frame, Project* project, CommandStack* stack);

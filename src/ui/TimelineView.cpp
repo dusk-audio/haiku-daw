@@ -36,6 +36,12 @@ TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
       fStack(stack),
       fFramesPerPixel(kDefaultFramesPerPixel),
       fScrollFrame(0) {
+    ApplyTheme();
+}
+
+// A mode switch: the lane colour is cached, everything else this view draws is
+// read from the tokens at draw time.
+void TimelineView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
@@ -317,12 +323,12 @@ Frame TimelineView::Snapped(Frame f) const {
 // A tiny Copy/Delete popup for a right-clicked clip or note.
 int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const {
     BPopUpMenu* m = new BPopUpMenu("ctx", false, false);
-    m->AddItem(new BMenuItem("Copy", NULL));      // 0
-    m->AddItem(new BMenuItem("Delete", NULL));    // 1
+    m->AddItem(new ThemedMenuItem("Copy", NULL));      // 0
+    m->AddItem(new ThemedMenuItem("Delete", NULL));    // 1
     if (withSplit)
-        m->AddItem(new BMenuItem("Split here", NULL));  // 2
+        m->AddItem(new ThemedMenuItem("Split here", NULL));  // 2
     if (withTake)
-        m->AddItem(new BMenuItem("Next Take", NULL));   // 3 (2 if no split)
+        m->AddItem(new ThemedMenuItem("Next Take", NULL));   // 3 (2 if no split)
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const int idx = sel ? m->IndexOf(sel) : -1;
@@ -332,16 +338,16 @@ int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const
 
 std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
     BPopUpMenu* m = new BPopUpMenu("clip", false, false);
-    m->AddItem(new BMenuItem("Copy", NULL));
-    m->AddItem(new BMenuItem("Delete", NULL));
-    m->AddItem(new BMenuItem("Split here", NULL));
+    m->AddItem(new ThemedMenuItem("Copy", NULL));
+    m->AddItem(new ThemedMenuItem("Delete", NULL));
+    m->AddItem(new ThemedMenuItem("Split here", NULL));
     if (withTake)
-        m->AddItem(new BMenuItem("Next Take", NULL));
+        m->AddItem(new ThemedMenuItem("Next Take", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Normalize", NULL));
-    m->AddItem(new BMenuItem("Reverse", NULL));
-    m->AddItem(new BMenuItem("Strip Silence", NULL));
-    m->AddItem(new BMenuItem("Clear Fades", NULL));
+    m->AddItem(new ThemedMenuItem("Normalize", NULL));
+    m->AddItem(new ThemedMenuItem("Reverse", NULL));
+    m->AddItem(new ThemedMenuItem("Strip Silence", NULL));
+    m->AddItem(new ThemedMenuItem("Clear Fades", NULL));
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     std::string label = sel ? std::string(sel->Label()) : std::string();
@@ -351,7 +357,7 @@ std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
 
 bool TimelineView::PastePopup(BPoint where) const {
     BPopUpMenu* m = new BPopUpMenu("paste", false, false);
-    m->AddItem(new BMenuItem("Paste here", NULL));
+    m->AddItem(new ThemedMenuItem("Paste here", NULL));
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const bool ok = (sel != NULL);
@@ -685,11 +691,11 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     BMenu* tsub = new BMenu("Tempo change");
     const int bpms[] = { 60, 80, 90, 100, 110, 120, 130, 140, 160, 180 };
     for (int b : bpms) { char s[8]; std::snprintf(s, 8, "%d", b);
-                         tsub->AddItem(new BMenuItem(s, NULL)); }
+                         tsub->AddItem(new ThemedMenuItem(s, NULL)); }
     menu->AddItem(tsub);
     BMenu* msub = new BMenu("Meter change");
     const char* mets[] = { "4/4", "3/4", "2/4", "6/8", "5/4", "7/8" };
-    for (const char* mm : mets) msub->AddItem(new BMenuItem(mm, NULL));
+    for (const char* mm : mets) msub->AddItem(new ThemedMenuItem(mm, NULL));
     menu->AddItem(msub);
 
     // Ramp toggle for the tempo change governing the click's segment (needs a
@@ -705,23 +711,23 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     const bool segHasNext = segFrame != tm.Tempos().back().frame;
     BMenuItem* rampItem = nullptr;
     if (segHasNext) {
-        rampItem = new BMenuItem("Ramp to next tempo", NULL);
+        rampItem = new ThemedMenuItem("Ramp to next tempo", NULL);
         rampItem->SetMarked(segRamp);
         menu->AddItem(rampItem);
     }
 
     if (nearTempo >= 0 || nearMeter >= 0) {
         menu->AddSeparatorItem();
-        menu->AddItem(new BMenuItem("Remove change here", NULL));
+        menu->AddItem(new ThemedMenuItem("Remove change here", NULL));
     }
 
     // Markers.
     const Marker* nearMarker = MarkerAt(where);
     menu->AddSeparatorItem();
-    menu->AddItem(new BMenuItem("Add Marker", NULL));
+    menu->AddItem(new ThemedMenuItem("Add Marker", NULL));
     if (nearMarker) {
-        menu->AddItem(new BMenuItem("Rename Marker" B_UTF8_ELLIPSIS, NULL));
-        menu->AddItem(new BMenuItem("Delete Marker", NULL));
+        menu->AddItem(new ThemedMenuItem("Rename Marker" B_UTF8_ELLIPSIS, NULL));
+        menu->AddItem(new ThemedMenuItem("Delete Marker", NULL));
     }
 
     BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
@@ -827,31 +833,31 @@ void TimelineView::MouseDown(BPoint where) {
         if (where.y <= lane.top + 18 && where.x < 114) {
             if (rightClick) {
                 BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
-                mm->AddItem(new BMenuItem("Move Up", NULL));
-                mm->AddItem(new BMenuItem("Move Down", NULL));
-                mm->AddItem(new BMenuItem("Next Color", NULL));
-                mm->AddItem(new BMenuItem("Taller", NULL));
-                mm->AddItem(new BMenuItem("Shorter", NULL));
+                mm->AddItem(new ThemedMenuItem("Move Up", NULL));
+                mm->AddItem(new ThemedMenuItem("Move Down", NULL));
+                mm->AddItem(new ThemedMenuItem("Next Color", NULL));
+                mm->AddItem(new ThemedMenuItem("Taller", NULL));
+                mm->AddItem(new ThemedMenuItem("Shorter", NULL));
                 mm->AddSeparatorItem();
-                BMenuItem* ssItem = new BMenuItem("Solo Safe", NULL);
+                BMenuItem* ssItem = new ThemedMenuItem("Solo Safe", NULL);
                 ssItem->SetMarked(t.soloSafe);
                 mm->AddItem(ssItem);
                 // Mute-group submenu: muting any member mutes the whole group.
                 BMenu* mg = new BMenu("Mute Group");
-                BMenuItem* mgNone = new BMenuItem("None", NULL);
+                BMenuItem* mgNone = new ThemedMenuItem("None", NULL);
                 mgNone->SetMarked(t.muteGroup == 0);
                 mg->AddItem(mgNone);
                 for (int g = 1; g <= 4; g++) {
                     char lb[16];
                     std::snprintf(lb, sizeof(lb), "Group %d", g);
-                    BMenuItem* gi = new BMenuItem(lb, NULL);
+                    BMenuItem* gi = new ThemedMenuItem(lb, NULL);
                     gi->SetMarked(t.muteGroup == g);
                     mg->AddItem(gi);
                 }
                 mm->AddItem(mg);
-                mm->AddItem(new BMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
-                mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
-                mm->AddItem(new BMenuItem("Delete", NULL));
+                mm->AddItem(new ThemedMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
+                mm->AddItem(new ThemedMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
+                mm->AddItem(new ThemedMenuItem("Delete", NULL));
                 BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
                 const std::string pick = sel ? std::string(sel->Label())
                                              : std::string();
@@ -1810,13 +1816,13 @@ void TimelineView::DrawRuler(BRect update) {
                 const float x0 = std::max(x, (float)HeaderWidth());
                 const float x1 = std::min(nx, r.right);
                 const bool  up = tempos[i + 1].bpm > t.bpm;
-                SetHighColor(Rgb(230, 170, 70));
+                SetHighColor(PanelAccent(Rgb(230, 170, 70)));
                 StrokeLine(BPoint(x0, up ? RulerHeight() - Themed(3) : Themed(3)),
                            BPoint(x1, up ? Themed(3) : RulerHeight() - Themed(3)));
             }
         }
         if (!onScreen) continue;
-        SetHighColor(Rgb(230, 170, 70));
+        SetHighColor(PanelAccent(Rgb(230, 170, 70)));
         StrokeLine(BPoint(x, 0), BPoint(x, RulerHeight()));
         char s[16];
         std::snprintf(s, sizeof(s), t.ramp ? "%.0f~" : "%.0f", t.bpm);
@@ -1825,7 +1831,7 @@ void TimelineView::DrawRuler(BRect update) {
     for (const MeterChange& m : tm.Meters()) {
         const float x = FrameToX(m.frame);
         if (x < HeaderWidth() || x > r.right) continue;
-        SetHighColor(Rgb(120, 190, 230));
+        SetHighColor(PanelAccent(Rgb(120, 190, 230)));
         char s[16]; std::snprintf(s, sizeof(s), "%d/%d", m.num, m.denom);
         DrawString(s, BPoint(x + Themed(2), Themed(19)));
     }
@@ -2083,7 +2089,7 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     // Per-track stereo meter at the header's right edge.
     const float mx0 = HeaderWidth() - HdrMeterW();
     BRect meterBox(mx0, lane.top + Themed(2), HeaderWidth() - Themed(2), lane.bottom - Themed(2));
-    SetHighColor(Rgb(16, 16, 20));
+    SetHighColor(ColLcd());
     FillRect(meterBox);
     float mPeakL = 0.0f, mPeakR = 0.0f;
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
@@ -2151,7 +2157,7 @@ void TimelineView::DrawAutomation(const Track& t, BRect lane, int mode) {
     const AutomationLane& al = *ref.lane;
     const float x0 = HeaderWidth(), x1 = lane.right;
 
-    SetHighColor(Rgb(230, 200, 90));
+    SetHighColor(PanelAccent(Rgb(230, 200, 90)));
     float px = x0, py = AutoValueToY(lane, ref.mn, ref.mx,
                                      al.ValueAt(XToFrame(x0), ref.def));
     for (float x = x0 + 2.0f; x <= x1; x += 2.0f) {

@@ -111,7 +111,7 @@ void RenderJobs::FinishExport() {
                      fExportPath.c_str());
         // Only a real failure is worth an alert: a cancel is the user's own
         // doing, and it already said so on stderr.
-        BAlert* a = new BAlert("Export", "The export failed. Nothing was "
+        BAlert* a = new ThemedAlertWindow("Export", "The export failed. Nothing was "
                                "written to that name.", "OK", nullptr, nullptr,
                                B_WIDTH_AS_USUAL, B_WARNING_ALERT);
         a->Go(nullptr);   // async, like the other warnings

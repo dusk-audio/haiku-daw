@@ -8,6 +8,10 @@ namespace daw {
 
 MeterView::MeterView(BRect frame)
     : BView(frame, "meter", B_FOLLOW_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW) {
+    ApplyTheme();
+}
+
+void MeterView::ApplyTheme() {
     SetViewColor(ColHeader());
 }
 

@@ -235,6 +235,10 @@ EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
     : BView(frame, "fx", B_FOLLOW_LEFT_RIGHT | B_FOLLOW_TOP, B_WILL_DRAW),
       fChain(std::move(chain)), fTrack(track), fApply(apply),
       fFocus(focusSlot >= 0 && focusSlot < (int)fChain.size() ? focusSlot : -1) {
+    ApplyTheme();
+}
+
+void EffectsView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
@@ -942,7 +946,7 @@ void EffectsView::MouseDown(BPoint where) {
             EffectDesc& d = fChain[h.effect];
             const int cur = (int)(d.p(2) + 0.5f);
             for (int a = 0; a < 4; a++) {
-                BMenuItem* it = new BMenuItem(names[a], nullptr);
+                BMenuItem* it = new ThemedMenuItem(names[a], nullptr);
                 if (a == cur) it->SetMarked(true);
                 menu->AddItem(it);
             }
@@ -964,11 +968,11 @@ void EffectsView::MouseDown(BPoint where) {
             const bool sync = d.p(3) >= 0.5f;
             const int  curDiv = (int)(d.p(4) + 0.5f);
             BPopUpMenu* menu = new BPopUpMenu("sync", false, false);
-            BMenuItem* free = new BMenuItem("Free", nullptr);
+            BMenuItem* free = new ThemedMenuItem("Free", nullptr);
             if (!sync) free->SetMarked(true);
             menu->AddItem(free);
             for (int a = 0; a < Delay::kDivisionCount; a++) {
-                BMenuItem* it = new BMenuItem(Delay::DivisionName(a), nullptr);
+                BMenuItem* it = new ThemedMenuItem(Delay::DivisionName(a), nullptr);
                 if (sync && a == curDiv) it->SetMarked(true);
                 menu->AddItem(it);
             }
