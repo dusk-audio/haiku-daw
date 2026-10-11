@@ -550,6 +550,12 @@ status_t Engine::Load(const Project& project, Frame startFrame,
     fLufsS.store(Loudness::kSilenceLufs);
     fTpDb.store(Loudness::kSilenceDb);
 
+    // The master meter's RMS/correlation window: allocated HERE (Load runs on
+    // the window thread), so the callback only does arithmetic.
+    fStereoMeter.Prepare(fOutputRate, 0.3f);
+    fRmsL.store(0.0f); fRmsR.store(0.0f); fCorr.store(0.0f);
+    fClipFlags.store(0, std::memory_order_relaxed);
+
     // Per-node mix buffers, sized to the output buffer (generous floor).
     size_t maxFrames = (size_t)(fPlayer->Format().buffer_size
                                 / (sizeof(float) * 2));
@@ -1147,6 +1153,19 @@ void Engine::FillBuffer(float* out, size_t frames) {
     }
     fPeakL.store(pl);
     fPeakR.store(pr);
+    // ... and the clip flags for the same block (M3.3): a clip the 60 Hz poll
+    // never sees because a later block overwrote the peak is still latched.
+    if (ReachesClipLevel(pl))
+        fClipFlags.fetch_or(kMeterClipL, std::memory_order_relaxed);
+    if (ReachesClipLevel(pr))
+        fClipFlags.fetch_or(kMeterClipR, std::memory_order_relaxed);
+
+    // Master RMS + stereo correlation over the meter's window, from the same
+    // block (M3.3). Preallocated in Load; arithmetic only.
+    fStereoMeter.Process(out, static_cast<int>(frames));
+    fRmsL.store(fStereoMeter.RmsL());
+    fRmsR.store(fStereoMeter.RmsR());
+    fCorr.store(fStereoMeter.Correlation());
 
     // Master loudness on the true mix (post master-gain + metronome, pre
     // monitor). RT-safe: integrated is disabled, so no allocation.

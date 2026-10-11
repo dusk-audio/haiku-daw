@@ -15,6 +15,7 @@
 #include "../model/Commands.h"
 #include "../model/Grid.h"
 #include "../model/Crossfade.h"   // ClipFades (the per-track fade cache)
+#include "../model/KeyMap.h"       // the one keyboard map (M3.2)
 #include "UiMetrics.h"             // HeaderWidth() (the peak invalidation)
 
 #include <View.h>
@@ -229,6 +230,11 @@ private:
     std::string AudioClipMenu(BPoint where, bool withTake) const;
     bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
+    // The keyboard map's actions this view runs itself (M3.2). The ones that
+    // change state the main window owns (record, click) are posted there.
+    void  ReturnToZero();              // Home / Enter
+    void  ToggleLoop();                // L
+    void  DropMarker();                // M
     bool     fHasClipClip = false;
     Clip     fClipClip;                // copied audio clip
     bool     fHasClipNote = false;

@@ -85,6 +85,13 @@ void Recorder::HandleBuffer(void* data, size_t size, const media_format& fmt) {
 
     fPeakL.store(pl, std::memory_order_relaxed);
     fPeakR.store(pr, std::memory_order_relaxed);
+    // Latched exactly when the block reached full scale: the flag only has to
+    // survive until the UI clears it, so testing the block peak is the same
+    // test as testing every sample.
+    if (ReachesClipLevel(pl))
+        fClipFlags.fetch_or(kMeterClipL, std::memory_order_relaxed);
+    if (ReachesClipLevel(pr))
+        fClipFlags.fetch_or(kMeterClipR, std::memory_order_relaxed);
 }
 
 // --- disk writer thread -----------------------------------------------
@@ -225,6 +232,7 @@ status_t Recorder::Start(const std::string& path) {
     fPath = path;
     fFormatReady.store(false);
     fXrun.store(false);
+    fClipFlags.store(0, std::memory_order_relaxed);   // a new take starts clean
     // Preallocate the waveform envelope to a fixed capacity so the disk thread
     // writes by index (never reallocates) while the UI reads published buckets.
     // ~13 min at 96 kHz / 256 frames-per-bucket.

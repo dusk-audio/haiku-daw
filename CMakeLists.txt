@@ -372,6 +372,18 @@ add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)
 add_test(NAME loudness_tests COMMAND loudness_tests)
 
+# The meter maths (M3.3): the dB scale, peak hold, the RMS/correlation window
+# and the clip latch — header-only and kit-free, so the UI and these tests read
+# the same code. And the one keyboard map (M3.2): its own consistency (nothing
+# bound twice, every row named) plus the text the help window shows.
+add_executable(meter_tests tests/meter_tests.cpp)
+target_link_libraries(meter_tests PRIVATE daw_model)
+add_test(NAME meter_tests COMMAND meter_tests)
+
+add_executable(keymap_tests tests/keymap_tests.cpp)
+target_link_libraries(keymap_tests PRIVATE daw_model)
+add_test(NAME keymap_tests COMMAND keymap_tests)
+
 add_executable(limiter_tests tests/limiter_tests.cpp)
 target_link_libraries(limiter_tests PRIVATE daw_model)
 add_test(NAME limiter_tests COMMAND limiter_tests)
@@ -502,6 +514,7 @@ if(HAIKU)
         src/ui/RenderJobs.cpp
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
+        src/ui/ShortcutsWindow.cpp   # the keyboard map, on screen (M3.2)
         src/ui/EffectsWindow.cpp
         src/ui/PluginBrowser.cpp
         src/ui/SendsWindow.cpp

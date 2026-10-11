@@ -247,52 +247,105 @@ void TimelineView::MessageReceived(BMessage* msg) {
     BView::MessageReceived(msg);
 }
 
+// The two ends of the one keyboard map (src/model/KeyMap.h): the codes in the
+// kit-free table must be the Interface Kit's, or a binding would sit on a key
+// nobody can press. These assert it at compile time.
+static_assert(kKeyHome == B_HOME,          "key table: Home");
+static_assert(kKeyEnd == B_END,            "key table: End (Ctrl-D's byte)");
+static_assert(kKeyBackspace == B_BACKSPACE,"key table: Backspace");
+static_assert(kKeyEnter == B_RETURN,       "key table: Return/Enter");
+static_assert(kKeyPageUp == B_PAGE_UP,     "key table: Page Up");
+static_assert(kKeyPageDown == B_PAGE_DOWN, "key table: Page Down");
+static_assert(kKeyEscape == B_ESCAPE,      "key table: Escape");
+static_assert(kKeyLeft == B_LEFT_ARROW,    "key table: Left arrow");
+static_assert(kKeyRight == B_RIGHT_ARROW,  "key table: Right arrow");
+static_assert(kKeySpace == B_SPACE,        "key table: Space");
+static_assert(kKeyDelete == B_DELETE,      "key table: Delete");
+static_assert(kModShift == B_SHIFT_KEY     && kModCommand == B_COMMAND_KEY
+           && kModControl == B_CONTROL_KEY && kModOption == B_OPTION_KEY,
+              "key table: modifier masks");
+
 void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
+    // ONE keyboard map (M3.2): the byte is resolved through the kit-free table
+    // that the Keyboard Shortcuts window is also generated from, and the switch
+    // is on the ACTION — no key literal is compared here any more, so the help
+    // and the behaviour cannot drift.
+    const KeyBinding* kb = FindKeyBinding(bytes[0], (uint32_t)modifiers());
+    if (kb == nullptr || kb->route != KeyRoute::Dispatch) {
+        BView::KeyDown(bytes, numBytes);
+        return;
+    }
     // One page = the visible content width in frames.
     const Frame page = (Frame)((Bounds().right - HeaderWidth()) * fFramesPerPixel);
-    switch (bytes[0]) {
-        case B_LEFT_ARROW:
-            if (modifiers() & B_COMMAND_KEY) JumpToMarker(-1);
-            else PanBy(-page / 4);
-            break;
-        case B_RIGHT_ARROW:
-            if (modifiers() & B_COMMAND_KEY) JumpToMarker(+1);
-            else PanBy(page / 4);
-            break;
-        case 'l': case 'L': LoopBetweenMarkers(); break;   // cycle marker-to-marker
-        case B_HOME:        fScrollFrame = 0; Invalidate(); break;
-        case '+': case '=': ZoomBy(0.5); break;   // zoom in
-        case '-': case '_': ZoomBy(2.0); break;   // zoom out
-        case 'f': case 'F': ZoomToFit(); break;   // fit project to view width
-        case B_SPACE:   // toggle transport (play/stop)
+    switch (kb->action) {
+        case KeyAction::PlayStop:
             if (BWindow* w = Window()) w->PostMessage(kMsgTransportToggle);
             break;
-        case 'm': case 'M': {   // drop a marker at the playhead
-            Frame at = fProject->transport.playhead; if (at < 0) at = 0;
-            char nm[24];
-            std::snprintf(nm, sizeof(nm), "Marker %d",
-                          (int)fProject->markers.size() + 1);
-            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
-            Invalidate();
+        case KeyAction::RecordToggle:
+            if (BWindow* w = Window()) w->PostMessage(kMsgTransportRecord);
             break;
-        }
-        case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - RulerHeight()) * 0.8f); break;
-        case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - RulerHeight()) * 0.8f); break;
-        case B_DELETE: case B_BACKSPACE:
+        case KeyAction::LoopToggle:          ToggleLoop(); break;
+        case KeyAction::LoopBetweenMarkers:  LoopBetweenMarkers(); break;
+        case KeyAction::ClickToggle:
+            if (BWindow* w = Window()) w->PostMessage(kMsgClickToggle);
+            break;
+        case KeyAction::ReturnToZero:        ReturnToZero(); break;
+        case KeyAction::PanLeft:             PanBy(-page / 4); break;
+        case KeyAction::PanRight:            PanBy( page / 4); break;
+        case KeyAction::MarkerPrev:          JumpToMarker(-1); break;
+        case KeyAction::MarkerNext:          JumpToMarker(+1); break;
+        case KeyAction::ZoomIn:              ZoomBy(0.5); break;
+        case KeyAction::ZoomOut:             ZoomBy(2.0); break;
+        case KeyAction::ZoomToFit:           ZoomToFit(); break;
+        case KeyAction::PageUp:
+            ScrollVerticalBy(-(Bounds().Height() - RulerHeight()) * 0.8f); break;
+        case KeyAction::PageDown:
+            ScrollVerticalBy( (Bounds().Height() - RulerHeight()) * 0.8f); break;
+        case KeyAction::DeleteSelection:
             if (!fSelClips.empty()) DeleteSelection();
             else BView::KeyDown(bytes, numBytes);
             break;
-        case 'd': case 'D':
-            if (modifiers() & B_CONTROL_KEY) DuplicateSelection();
-            else BView::KeyDown(bytes, numBytes);
-            break;
-        case B_ESCAPE:
+        case KeyAction::DuplicateSelection:  DuplicateSelection(); break;
+        case KeyAction::ClearSelection:
             if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(); }
             else BView::KeyDown(bytes, numBytes);
             break;
-        default: BView::KeyDown(bytes, numBytes);
+        case KeyAction::DropMarker:          DropMarker(); break;
+        case KeyAction::None:
+        default:
+            BView::KeyDown(bytes, numBytes);
+            break;
     }
+}
+
+// Home / Enter (M3.2): the playhead goes to the start and the view with it.
+// Home used to only scroll, which is what the plan called out.
+void TimelineView::ReturnToZero() {
+    fProject->transport.playhead = 0;
+    fScrollFrame = 0;
+    Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+}
+
+// L (M3.2): loop on/off. Turning it on with no range adopts the last one the
+// ruler set; with no range at all it takes the markers around the playhead
+// (the marker-to-marker loop, which keeps its own Shift-L binding).
+void TimelineView::ToggleLoop() {
+    Transport& tr = fProject->transport;
+    if (tr.loopEnabled) { tr.loopEnabled = false; Invalidate(); return; }
+    if (tr.loopEnd <= tr.loopStart) LoopBetweenMarkers();   // may set nothing
+    tr.loopEnabled = true;
+    Invalidate();
+}
+
+// M: a marker at the playhead, through the undo stack like every other edit.
+void TimelineView::DropMarker() {
+    Frame at = fProject->transport.playhead; if (at < 0) at = 0;
+    char nm[24];
+    std::snprintf(nm, sizeof(nm), "Marker %d", (int)fProject->markers.size() + 1);
+    fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
+    Invalidate();
 }
 
 Grid TimelineView::GridOf() const {
@@ -2089,13 +2142,13 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
         mPeakL = it->second.first; mPeakR = it->second.second;
     }
+    // dB-scaled, through the shared bar (M3.3): the same maths and the same
+    // one threshold set as the master meter, so a level means the same thing
+    // in both places.
     const float bw = (meterBox.Width() - Themed(3)) * 0.5f;
     auto meterBar = [&](float x0, float level) {
-        if (level < 0.0f) level = 0.0f; if (level > 1.0f) level = 1.0f;
-        const float h = meterBox.Height() * level;
-        BRect b(x0, meterBox.bottom - h, x0 + bw, meterBox.bottom);
-        SetHighColor(MeterColor(level));
-        FillRect(b);
+        DrawMeterBar(this, BRect(x0, meterBox.top, x0 + bw, meterBox.bottom),
+                     level, false);
     };
     meterBar(meterBox.left + Themed(1), mPeakL);
     meterBar(meterBox.left + Themed(2) + bw, mPeakR);

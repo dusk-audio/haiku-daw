@@ -46,6 +46,17 @@ constexpr uint32 kMsgMonitorRefresh = 'mon?';
 // TimelineView -> MainWindow: spacebar pressed; toggle play/stop.
 constexpr uint32 kMsgTransportToggle = 'xptg';
 
+// TimelineView -> MainWindow: the keyboard map's transport keys (M3.2). The
+// timeline owns the view-local keys; these three change state the window
+// holds (the record controller, the click's menu mark + engine, the meter's
+// clip flags), so they are posted, exactly as the transport bar's own
+// controls post the same actions.
+constexpr uint32 kMsgTransportRecord = 'xprc';   // R
+constexpr uint32 kMsgClickToggle     = 'xpcl';   // C (metronome)
+// MeterView -> MainWindow: the master meter was clicked, so the engine's (and
+// the recorder's) latched clip flags can go back to clear.
+constexpr uint32 kMsgMeterClipReset  = 'xpcr';
+
 // Forward a spacebar key-down to the main window as a transport toggle, so any
 // child window (FX, Mixer, piano roll, ...) can start/stop playback. Call from a
 // window's DispatchMessage; returns true if it consumed the event.

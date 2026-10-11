@@ -308,9 +308,11 @@ void InspectorView::Draw(BRect) {
                              fPanR.top - 7));
     DrawKnob(this, fPanR, t->pan, accent);
 
-    // Channel fader + VU meter (peak-fed) side by side.
+    // Channel fader + VU meter (peak-fed) side by side. The meter is the
+    // shared dB-scaled bar since M3.3 (same maths, same thresholds as the
+    // master meter).
     DrawFader(this, fFaderR, GainToFrac(t->gain), kUnityFrac);
-    DrawVUMeter(this, fMeterR, std::max(fPeakL, fPeakR));
+    DrawMeterBar(this, fMeterR, std::max(fPeakL, fPeakR), false);
 
     char db[16];
     const float d = GainToDb(t->gain);
