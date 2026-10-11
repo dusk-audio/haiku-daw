@@ -11,7 +11,7 @@
 //
 // The envelope is mono: each bucket summarises the average of the source's
 // stereo channels, which is what a single waveform lane shows. Amplitudes are
-// in [-1, 1] float, matching WavSource output.
+// in [-1, 1] float, matching IAudioSource output.
 #pragma once
 
 #include "types.h"
@@ -21,7 +21,7 @@
 
 namespace daw {
 
-class WavSource;
+class IAudioSource;
 
 // One bucket's vertical extent. An empty/never-written bucket reads back as
 // {0, 0} (a flat line), which is the correct thing to draw for silence.
@@ -38,7 +38,7 @@ public:
     // end of data, filling the envelope at the given bucket size. Returns
     // false if src is invalid or framesPerBucket < 1. Consumes the source's
     // forward read cursor, so build once, before streaming for playback.
-    bool Build(WavSource& src, int framesPerBucket = 256);
+    bool Build(IAudioSource& src, int framesPerBucket = 256);
 
     bool   IsValid() const { return fFramesPerBucket > 0; }
     int    FramesPerBucket() const { return fFramesPerBucket; }

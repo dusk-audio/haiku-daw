@@ -116,20 +116,11 @@ bool WavWriter::WriteFloat(const float* interleaved, size_t sampleCount,
         return false;
     }
 
-    // xorshift32 -> two uniform [0,1) -> triangular PDF dither in (-1,1) LSB.
-    auto tpdf = [&]() -> double {
-        auto next = [&]() {
-            fDitherState ^= fDitherState << 13;
-            fDitherState ^= fDitherState >> 17;
-            fDitherState ^= fDitherState << 5;
-            return fDitherState;
-        };
-        const double r1 = (next() >> 8) * (1.0 / 16777216.0);
-        const double r2 = (next() >> 8) * (1.0 / 16777216.0);
-        return r1 - r2;
-    };
+    // Two uniforms -> triangular PDF dither in (-1,1) LSB (Dither.h, shared
+    // with the FLAC writer so both depths of 16-bit output dither alike).
+    auto tpdf = [this]() -> double { return fDither.Next(); };
 
-    if (fFloat) {                                   // 32-bit IEEE float verbatim
+    if (fFloat) {                                 // 32-bit IEEE float verbatim
         fFile.write(reinterpret_cast<const char*>(interleaved),
                     sampleCount * sizeof(float));
         if (!fFile.good()) return false;
