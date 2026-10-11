@@ -50,7 +50,7 @@ constexpr uint32 kMsgPluginChosen = 'pbch';
 // dock's window) has nothing to do about either.
 constexpr uint32 kMsgBrowserDone = 'pbdn';
 
-class PluginBrowserView : public BGroupView, public ThemeAware {
+class PluginBrowserView : public ThemedGroupView {
 public:
     // `target` is where a choice is posted (the inspector, which turns it into
     // a SetFxCommand against "track"). `track` is the chain the choice applies
@@ -62,9 +62,15 @@ public:
     // different chain.
     void SetTrack(TrackId track) { fTrack = track; }
 
-    // The list is a stock BListView: it reads the system colour table unless
-    // the theme's document colour is put on it (T1).
+    // The panel colour of a themed group, plus the well colours: the list is a
+    // stock BListView, which keeps the system's list colour in Dark mode
+    // unless the theme's document colour is put on it (T1). Defined in the
+    // .cpp: the well views are incomplete types here.
     void ApplyTheme() override;
+
+    // The controls post to THIS view, not to whatever window hosts it (T2
+    // review) -- see the .cpp.
+    void AttachedToWindow() override;
 
     void MessageReceived(BMessage* msg) override;
 
@@ -96,13 +102,17 @@ private:
 // The standalone window: the content view, plus the spacebar passthrough (a
 // window that is not the main window has to forward Space to the transport
 // itself).
-class PluginBrowser : public BWindow {
+class PluginBrowser : public BWindow, public ThemeAware {
 public:
     // `main` is MainWindow, which is the only handler for the transport toggle.
     // It is a different window from `target`, so the spacebar passthrough cannot
     // reuse that one.
     PluginBrowser(BRect frame, TrackId track, BMessenger target,
                   BMessenger main);
+
+    // One of the app's own windows, not a stock one: ThemeStockWindow repaints
+    // the stock ones with stock colours, and the split lost this (T2 review).
+    void ApplyTheme() override;
 
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport

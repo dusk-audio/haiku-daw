@@ -67,6 +67,7 @@
 #include <String.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <TextView.h>   // a text field's inner view can hold the focus too
 
 #include <sys/stat.h>
 
@@ -629,12 +630,24 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         // common cases this covers: nothing focused yet (a fresh window), or
         // the timeline itself after a click on it.
         BView* focus = CurrentFocus();
-        const bool held = focus != nullptr && focus != fTimeline;
         int32 mods = 0;
         message->FindInt32("modifiers", &mods);
         const char* bytes = nullptr;
-        const bool isTab = message->FindString("bytes", &bytes) == B_OK
-                        && bytes && bytes[0] == B_TAB;
+        const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
+                            && bytes != nullptr;
+        const bool isTab = haveBytes && bytes[0] == B_TAB;
+        // Space is the transport's WHATEVER control holds the focus, except a
+        // text field being typed into (the same rule the aux windows apply to
+        // their own spacebar passthrough). A focused BControl eats Space in the
+        // kit's own KeyDown -- the dock's page switch re-sent its page on every
+        // press and the transport never started: click a page, press Space,
+        // nothing happens at all (found by this suite once the dock's pages
+        // were driven for real).
+        const bool isSpace = haveBytes && bytes[0] == B_SPACE;
+        const bool textFocus = dynamic_cast<BTextControl*>(focus) != nullptr
+                            || dynamic_cast<BTextView*>(focus) != nullptr;
+        const bool held = focus != nullptr && focus != fTimeline
+                       && !(isSpace && !textFocus);
         if (!(mods & B_COMMAND_KEY) && !held && !isTab) {
             // Hand it straight to the timeline: a BMessage carries no
             // retarget verb (Haiku's BMessage has no SetTarget), and this is
@@ -664,13 +677,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgTrackSelected: {  // point the inspector at the clicked track
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (fInspector) fInspector->SetTrack((TrackId)tid);
-            // ... and the plugin page, which adds to whichever chain the
-            // inspector is showing (T2).
-            fSelTrack = (TrackId)tid;
-            // Showing the plugins page re-points it (and re-names it) through
-            // the same code the page switch uses, so the two cannot disagree.
-            if (fDockPage == kDockPlugins) SetDockPage(kDockPlugins);
+            SelectTrack((TrackId)tid);
             break;
         }
         case kMsgUiRefresh: {      // a track edit: keep the panes + mixer consistent
@@ -779,8 +786,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
 
         case MSG_DOCK_PAGE: {
+            // The segmented control names the segment it selected as int32
+            // "index" (DawSegments::Invoke). A message without it -- anything
+            // that is not that control -- leaves the page alone rather than
+            // silently meaning Editor (T2 review).
             int32 index = 0;
-            msg->FindInt32("index", &index);
+            if (msg->FindInt32("index", &index) != B_OK) break;
             SetDockPage(index);
             break;
         }
@@ -1105,8 +1116,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgMixSelect: {
+            // A strip click in the mixer selects the track: the inspector AND
+            // the dock's plugin page follow it, through the same call the
+            // timeline's own selection uses (T2 review: the page stayed on the
+            // old track, so "add to <name>" and the inspector disagreed).
             int64 tid = 0; msg->FindInt64("track", &tid);
-            if (fInspector) fInspector->SetTrack((TrackId)tid);
+            SelectTrack((TrackId)tid);
             break;
         }
         case kMsgApplyMaster:
@@ -2031,9 +2046,30 @@ void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
                        trackName.c_str()))->Show();
 }
 
+// The inspector's track, and with it the chain the dock's plugin page adds to
+// (T2). Both follow the same selection through this one call: the two used to
+// be updated separately, so the mixer's strip click moved the inspector but
+// left the page on the old track, and a new project left it on a track id that
+// belonged to the old one (T2 review).
+void MainWindow::SelectTrack(TrackId tid) {
+    if (fInspector) fInspector->SetTrack(tid);
+    fSelTrack = tid;
+    // Re-point (and re-name) the plugin page through the same code the page
+    // switch uses, so the two cannot disagree. Deliberately not a SHOW: the
+    // page follows the selection even while the dock is hidden -- switching to
+    // the page would be re-opening a dock the user just closed (T2 review).
+    if (fDockPage == kDockPlugins && fDockPlugins != nullptr)
+        SetDockPage(kDockPlugins);
+}
+
 // Show one of the dock's pages (T2). The body holds exactly one view: leaving
 // the old one in place would keep its size (the same lesson as the split
 // items), and a page that is not showing must not be metering or querying.
+//
+// Only the BODY: the dock itself is not shown here. A page can be (re)pointed
+// while the dock is hidden, and a call that also showed the dock would reopen
+// one the user closed every time the track selection moved (T2 review). The
+// callers that mean "show me this page" say so themselves.
 void MainWindow::SetDockPage(int page) {
     if (page < kDockEditor || page > kDockPlugins) return;
     fDockPage = page;
@@ -2089,23 +2125,18 @@ void MainWindow::SetDockPage(int page) {
             break;
     }
     if (fDockSegments != nullptr) fDockSegments->SetSelected(page);
-    SetDockShown(true);
 }
 
 // A browser page, asked for by name (View > Sample Browser, the mixer strip's
 // Add Effect): show the dock on it, pointed at the chain the caller meant.
+// Which chain is the page's business: SetDockPage creates the plugin view with
+// fSelTrack and re-points one that exists, so naming it here as well would be
+// the same retarget twice -- three places setting the page and the track is
+// how they drift (T2 review).
 void MainWindow::ShowDockBrowser(int page, TrackId track) {
-    if (track != kInvalidTrackId && fDockPlugins != nullptr)
-        fDockPlugins->SetTrack(track);
-    if (page == kDockPlugins) {
-        fSelTrack = track != kInvalidTrackId ? track : fSelTrack;
-        if (fDockPlugins == nullptr)
-            fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
-        else
-            fDockPlugins->SetTrack(fSelTrack);
-    }
-    fDockPage = page;
+    if (page == kDockPlugins && track != kInvalidTrackId) fSelTrack = track;
     SetDockPage(page);
+    SetDockShown(true);
 }
 
 // Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
@@ -2117,7 +2148,7 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     const MidiClip* c = t->FindMidiClip(clip);
     if (c == nullptr) return;
 
-    ClearDockedEditor();
+    ClearDockedEditor();   // the previous roll goes
     // The roll fills the pane below the header row; the split gives it its
     // real size, so the frame here is only a hint.
     fDockRoll = new PianoRollView(BRect(0, 0, 600, Themed(200.0f)), track, clip,
@@ -2126,17 +2157,13 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
                                   fProject->sampleRate,
                                   fProject->transport.playhead,
                                   BMessenger(this));
-    fDockEmpty->RemoveSelf();
-    fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
     fDockTrack = track;
     fDockClip  = clip;
-    fDockPage  = kDockEditor;   // opening a region is asking for the editor page
-    if (fDockSegments != nullptr) fDockSegments->SetSelected(kDockEditor);
-    BString title("Piano Roll \xE2\x80\x94 ");   // em dash
-    title << t->name.c_str();
-    fDockTitle->SetText(title.String());
-    fDockPop->SetEnabled(true);
-
+    // Through the page switch, which takes the browsed page out of the body
+    // first: adding the roll here while Samples or Plugins was showing left
+    // TWO bodies (they split the pane) with the strip still naming the browser
+    // (T2 review).
+    SetDockPage(kDockEditor);
     SetDockShown(true);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
@@ -2598,7 +2625,10 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
 void MainWindow::ShowReplacedProject(Frame playhead) {
     fRecCtl.fRecTracks.clear();
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
-    if (fInspector) fInspector->SetTrack(kInvalidTrackId);
+    // The inspector AND the dock's plugin page (which adds to the track the
+    // inspector shows): a track id from the project that just went away means
+    // nothing here, and the new project may reuse it (T2 review).
+    SelectTrack(kInvalidTrackId);
     if (fDockRoll != nullptr) ClearDockedEditor();
     fTimeline->SetProject(fProject);   // same object, new content
     fTimeline->SetPlayhead(playhead);
@@ -3064,11 +3094,12 @@ void MainWindow::LoadSettings() {
         const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
         fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
         // The page first (it decides what the body holds), then whether the dock
-        // is showing at all.
-        if (s.dockPage >= kDockEditor && s.dockPage <= kDockPlugins) {
-            fDockPage = s.dockPage;
-            if (fDockSegments != nullptr) fDockSegments->SetSelected(fDockPage);
-        }
+        // is showing at all. Through SetDockPage, not by assigning fDockPage:
+        // the restore used to leave the body on the editor hint (and the
+        // highlighted segment inert, since a click on the current segment is a
+        // no-op) until the user switched pages twice (T2 review).
+        if (s.dockPage >= kDockEditor && s.dockPage <= kDockPlugins)
+            SetDockPage(s.dockPage);
         SetDockShown(s.bottomVisible);
     }
 
@@ -3136,7 +3167,7 @@ void MainWindow::SaveSettings() {
         s.inspectorWidth = fInspector->Bounds().Width();
     if (fRootSplit != nullptr && fDock != nullptr) {
         s.dockPage = fDockPage;
-    s.bottomVisible = fDock->Parent() != nullptr;
+        s.bottomVisible = fDock->Parent() != nullptr;
         if (fDock->Bounds().Height() > 1.0f)
             s.bottomHeight = fDock->Bounds().Height();
     }
@@ -3187,8 +3218,23 @@ void MainWindow::ApplyTheme() {
     if (fDock != nullptr)       fDock->SetViewColor(ColBackground());
     if (fEditorPane != nullptr) fEditorPane->SetViewColor(ColBackground());
     if (fDockEmpty != nullptr)  fDockEmpty->SetViewColor(ColBackground());
-    if (fDockTitle != nullptr)  fDockTitle->SetHighColor(ColText());
-    if (fDockHint != nullptr)   fDockHint->SetHighColor(ColTextDim());
+    // The dock's two BStringViews need their VIEW colour re-taken, not just
+    // their text colour: a BStringView copies its parent's view colour when it
+    // is attached (StringView.cpp), so a mode switch left the strip's title and
+    // the hint as boxes in the mode they were built in -- in the dark mode the
+    // title drew light text on its own light box, i.e. the page's name was
+    // unreadable. Colours match the parents set just above (the pane header and
+    // the empty-state group).
+    if (fDockTitle != nullptr) {
+        fDockTitle->SetViewColor(ColHeader());
+        fDockTitle->SetLowColor(ColHeader());
+        fDockTitle->SetHighColor(ColText());
+    }
+    if (fDockHint != nullptr) {
+        fDockHint->SetViewColor(ColBackground());
+        fDockHint->SetLowColor(ColBackground());
+        fDockHint->SetHighColor(ColTextDim());
+    }
 }
 
 void MainWindow::SetThemeMode(ThemeMode mode) {

@@ -32,6 +32,11 @@ public:
     void Draw(BRect updateRect) override;
     void MouseDown(BPoint where) override;
     void KeyDown(const char* bytes, int32 numBytes) override;
+    // BControl::Invoke() adds when/source/be:value but NOT the "index" this
+    // control's message is documented to carry (T2 review): every click and
+    // arrow key arrived as "page 0". The segment is known here, so that is
+    // where it is added.
+    status_t Invoke(BMessage* message = nullptr) override;
     // Only the preferred size: overriding MinSize/MaxSize here would SHADOW
     // the explicit sizes the caller sets, and an uncapped segmented control
     // stretches across the whole strip and pushes its other controls off the

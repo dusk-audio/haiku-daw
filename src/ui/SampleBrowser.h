@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+class BControl;
 class BListView;
 class BScrollView;
 class BTextControl;
@@ -36,14 +37,19 @@ constexpr uint32 kMsgBrowserImport = 'bimp';
 // drop. Field: string "path".
 constexpr uint32 kMsgSampleDrag = 'bsdg';
 
-class SampleBrowserView : public BGroupView, public ThemeAware {
+class SampleBrowserView : public ThemedGroupView {
 public:
     explicit SampleBrowserView(BMessenger target);
 
-    // The list is a stock BListView subclass: without this it keeps the
-    // system's list colour in Dark mode (T1).
+    // The panel colour AND the well colours: the view is a themed group (the
+    // mode's panel behind the controls, re-taken on a mode switch), and the
+    // list is a stock BListView, which keeps the system's list colour in Dark
+    // mode unless the theme's document colour is put on it (T1). Defined in
+    // the .cpp: the well views are incomplete types here.
     void ApplyTheme() override;
 
+    // The controls post to THIS view, not to whatever window hosts it (T2
+    // review), and the query runs once -- see the .cpp.
     void AttachedToWindow() override;
 
     void MessageReceived(BMessage* msg) override;
@@ -57,13 +63,20 @@ private:
     BScrollView*              fScroll = nullptr;
     BTextControl*             fFilter = nullptr;   // name filter
     BTextControl*             fBpm = nullptr;      // BPM to tag onto the selection
+    BControl*                 fSearch = nullptr;   // the two buttons, so their
+    BControl*                 fTag    = nullptr;   // messages can be re-targeted
     std::vector<std::string>  fPaths;       // parallel to list items
+    bool                      fQueried = false;   // the boot volume query has run
 };
 
 // The standalone window (File ▸ Sample Browser, View ▸ Sample Browser).
-class SampleBrowser : public BWindow {
+class SampleBrowser : public BWindow, public ThemeAware {
 public:
     SampleBrowser(BRect frame, BMessenger target);
+
+    // One of the app's own windows, not a stock one: ThemeStockWindow repaints
+    // the stock ones with stock colours, and the split lost this (T2 review).
+    void ApplyTheme() override;
 
 private:
     SampleBrowserView* fView = nullptr;

@@ -369,12 +369,17 @@ void EffectsView::Apply() {
 
 void EffectsView::Retarget(std::vector<EffectDesc> chain, TrackId track,
                            int focusSlot) {
-    // A deliberate retarget: whatever was in flight belongs to the chain that
-    // is leaving (a drag works from indices into ITS copy, and a pending wheel
-    // commit would Apply() it).
-    fDragEffect = -1;
-    fDragKind   = -1;
+    // A deliberate retarget: whatever was in flight belongs to the chain that is
+    // leaving -- but it is COMMITTED to that chain first, not dropped. The edit
+    // already reached the engine (kMsgFxLive during the drag, the wheel's live
+    // preview), so dropping the commit would leave the model, and the saved
+    // project, on the old value while the audio played the new one until the
+    // next rebuild reverted it -- the same reason QuitRequested flushes. Apply()
+    // still sees fTrack and fChain, so this lands on the chain being left.
+    const bool inFlight = fDragEffect >= 0 || fCommit != nullptr;
+    fDragEffect = fDragSlot = fDragKind = -1;
     DropPendingEdit();
+    if (inFlight) Apply();
     fChain = std::move(chain);
     fTrack = track;
     fFocus = (focusSlot >= 0 && focusSlot < (int)fChain.size()) ? focusSlot : -1;
@@ -1316,8 +1321,10 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
     }
     if (msg->what == kMsgFxRetarget) {
         // Single instance (T2): the window is pointed at another chain instead
-        // of a new one being opened. Retarget() drops anything in flight, so
-        // this is safe mid-drag as well -- the drag belonged to the old chain.
+        // of a new one being opened. Retarget() settles anything in flight onto
+        // the OLD chain before the swap, so this is safe mid-drag as well --
+        // the drag belonged to the chain that is leaving, and the value the user
+        // already heard goes to the model with it.
         int64 tid = 0; int32 focus = -1;
         const char* title = nullptr;
         msg->FindInt64("track", &tid);

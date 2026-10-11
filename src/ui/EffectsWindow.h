@@ -150,8 +150,10 @@ public:
     // would move under it, and its own mouse-up commit is the edit in progress.
     void SetChain(std::vector<EffectDesc> chain);
     // Point the view at another chain (T2, the single-instance window). Unlike
-    // SetChain this is a deliberate retarget, so an in-flight drag or a pending
-    // wheel commit is dropped: they belong to the chain that is going away.
+    // SetChain this is a deliberate retarget, so an in-flight drag and a pending
+    // wheel commit are SETTLED first: they belong to the chain that is going
+    // away, and the engine has already heard them (kMsgFxLive), so dropping
+    // them would leave the model -- and the file -- behind the audio.
     void Retarget(std::vector<EffectDesc> chain, TrackId track, int focusSlot);
 
     // Commit a wheel edit whose debounce timer has not fired yet. The window
