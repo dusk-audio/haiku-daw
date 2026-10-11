@@ -2945,14 +2945,18 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             const float beforeG = mixerGain();
             CHECK(beforeG >= 0.0f);
 
-            // Press on the header fader and move: mid-drag, the mixer must
-            // already have the new value.
+            // Press on the header fader and move. The button stays DOWN while
+            // the mixer is polled: the refresh has to reach it during the
+            // gesture, not on mouse-up (that is the whole point of the check,
+            // and polling with the button held is what makes it a real one).
             const float gy = laneTopA + Themed(56.0f);   // the gain fader row
             postMouse(B_MOUSE_DOWN, BPoint(Themed(26.0f), gy));
             postMouse(B_MOUSE_MOVED, BPoint(Themed(146.0f), gy));
-            const float midG = mixerGain();
-            std::printf("  header drag: mixer gain %.3f -> %.3f\n", beforeG, midG);
-            CHECK(midG > beforeG + 0.01f);     // mid-gesture, not mouse-up
+            const bool midLive = WaitFor(
+                [&] { return mixerGain() > beforeG + 0.01f; }, 5000000);
+            std::printf("  header drag: mixer gain %.3f -> %.3f (mid-drag: %s)\n",
+                        beforeG, mixerGain(), midLive ? "yes" : "no");
+            CHECK(midLive);                    // still mid-drag: the button is down
             postMouse(B_MOUSE_UP, BPoint(Themed(146.0f), gy));
             CHECK(WaitFor([&] { return mixerGain() > beforeG + 0.01f; }));
         }
