@@ -162,13 +162,220 @@ spelling, an old file loading with defaults, a truncated `clipinfo` skipped).
 | `SnapStep` ignores the triplet flag | 1 |
 | `SnapStep` Off does not fall back to a 1/16 | 1 |
 
+### The first VM run faulted at the very end of the new test
+
+ctest came back `61/61 ui_functional_tests ... Signal 21` after 180 s. Signal 21
+is `SIGKILLTHR`, i.e. the Terminate a crash dialog sends — the fault is the
+kernel's:
+
+```
+KERN: 123772: DEBUGGER: looper must be locked before proceeding
+KERN: stack trace, current PC ... _kern_debugger
+KERN:   BLooper::Unlock() + 0x11
+KERN:   TestArrangeDepth(...) + 0x4993
+KERN:   TestThread + 0x324
+```
+
+The test's own bug, and the same class the previous package hit: it closed the
+child window with `Lock(); Quit(); Unlock()` — `Quit()` tears the looper down,
+and the `Unlock()` that followed tripped the assertion. Every other close in
+this file is `Lock(); Quit();` with nothing after; the fix is one line
+(`fa31da0`). A fault is not something a `CHECK` can catch: the run has to reach
+the line, which is what the whole-test-on-the-target run is for.
+
+The run also proved the fault path costs a cycle: the crash dialog froze the
+VM and the next UI run hung behind it until the dialog was cleared with
+`virsh ... sendkey ret` (the machine rule that exists for exactly this).
+
+### The second run: two real check failures, one root cause
+
+With the fault fixed the whole test ran and reported six FAILs — all of them
+from one mistake of mine: the range drag in section 1 pressed at frame 60000,
+which is INSIDE the fixture clip. That is a clip drag, not a range drag, so no
+range appeared **and the clip was quietly moved 30000 frames right**, which is
+what the range-delete section (a range that no longer covered its clip) then
+tripped over. Every other section passed on that run — the ruler Alt-drag, the
+Edit menu's `UndoName` label, copy/paste, insert silence, select-all and
+duplicate, the mute tool, the rename, colour, fade shapes, nudge, slip and the
+child-window Cmd-Z. The fix (`ddc363c`) presses on empty lane content beyond
+the fixtures and asserts the clip did not move, so the next cut of this test
+cannot repeat the mistake silently.
+
+### VM mutation checks (applied, watched to fail, reverted)
+
+Each one is applied to the worktree, synced to the VM as a throwaway ref, built
+and run there; the counts are the run's own FAIL count from `/tmp/mut.log`.
+
+| mutation | failures |
+|---|---|
+| `range-never` — `SetTimeRange` never sets the range valid | 18: the range drag, the ruler drag and every range operation that followed |
+| `mute-track` — the Mute tool mutes the TRACK again (the pre-M2.5 body) | 4: the clip mute, the "track untouched" check, the unmute, the region mute |
+| `nudge-one-frame` — nudge by one frame instead of the grid step | 5: the nudge checks (baseline 4 in that run) |
+| `no-cmdz-forward` — `ForwardUndoRedo` returns false | 4 = the baseline 3 + the child-window Cmd-Z check (the only one that moved) |
+| `no-perstep-refresh` — the header fader/pan preview stops refreshing the panes | 4 in the first run — inconclusive, because that build still carried the check's first (non-polling) version, whose own baseline was 4 and which failed on a CORRECT build twice under load. The check was then rewritten to poll with the mouse button held (`5533e9a`), passes on the correct build (the green 0-failure run and the no-cmdz-forward run), and the re-run with the mutation was queued as the last cycle |
+
+### The P1 Marc reported: a header fader drag was dead in the other panes
+
+Reported while this branch was in flight, and fixed in it (`84a2eb1`): moving a
+fader or pan knob in the mixer or the inspector updates the timeline live, but
+dragging the **track header's** gain fader or pan knob left the inspector and
+the mixer showing the old value until the mouse came up.
+
+The mixer/inspector → timeline direction has always been live because
+`InspectorView::Refresh()` posts `kMsgUiRefresh` on every move of its own drag.
+The reverse had no such post: `TimelineView::PreviewDrag` wrote the model
+(preview) and refreshed the panes only from `MouseUp`. The fix is that same
+message at the same cadence in the gain/pan preview — no second mechanism, and
+the undo discipline is untouched (preview writes, ONE command on mouse-up).
+
+**Widened, as asked:** the other preview drags in the same shape were checked
+and deliberately not changed — clip move/resize/fade, clip gain, slip, the
+automation breakpoints and the ruler loop/punch change nothing another pane
+displays (the inspector and the mixer show track gain/pan/mute/solo/inserts;
+the docked piano roll shows a region's notes, not its timeline position). That
+is recorded so the omission reads as a decision.
+
+**Evidence:** `TestArrangeDepth` section 15 opens the real mixer (View > Mixer's
+own message), presses on the header fader, moves, and asserts **before the
+mouse-up** that the mixer's own strip snapshot already carries the new gain.
+The mixer is the observable: the inspector draws straight from the model, so it
+cannot distinguish "refreshed" from "not refreshed" in a test, while the rack
+holds a pushed snapshot (`kMsgMixStrips`) that only a refresh updates.
+**Mutation:** removing the per-step post makes exactly that check fail (the
+`no-perstep-refresh` mutation, run on the VM with the others).
+
 ### VM
 
-(filled in by the run below)
+| Check | Result |
+|---|---|
+| VM `build` — `ctest -E ui_functional_tests` | 60/60 |
+| VM `build-off` — `ctest -E ui_functional_tests` | 55/55 |
+| VM `ui_functional_tests`, System mode (`/tmp/ui-final.log`, settings cleared) | 411 checks, **0 failures** |
+| VM `ui_functional_tests`, `DAW_UI_THEME=light` (with shots) | queued behind another agent's VM hold; the shots I reviewed are the light pass listed under Screenshots |
+| VM `ui_functional_tests`, `DAW_UI_THEME=dark` (with shots) | same |
+
+The UI suite is measured by its own run (its log is kept whole) rather than
+inside ctest, because its stdout is what localises a failure; the other 60/55
+suites are green either way.
+
+**The three checks that followed this branch around were a stale SETTINGS
+file, not this branch.** `TestDockedEditor`'s `inspGone`/`inspBack` and
+`TestDockPages`' plugin pick failed in every run on this branch (light run,
+dark run, and all five mutation runs). Pinned down in three steps:
+
+1. A diagnostic cycle ran the same suite on the BASE commit (`e47fd16`): it
+   crashed early (a window-appearance wait in an unrelated test) — the VM's
+   desktop was already unwell — so base-vs-branch could not be settled that way.
+2. The branch was then built WITH temporary prints around the toggle (the
+   view's presence AND the View > Inspector item's marked state) and around the
+   browser pick (its list's row count). The prints named it exactly:
+
+   ```
+   DIAG before toggle 1: view=0 marked=0     <- the inspector was ALREADY hidden
+   DIAG toggle 1 took 200024us wall
+   DIAG after toggle 1:  view=1 marked=1     <- the toggle SHOWED it
+   FAIL inspGone
+   DIAG after toggle 2:  view=0 marked=0
+   FAIL inspBack
+   DIAG plugin list rows=14                  <- the browser was fine
+   FAIL <the plugin pick never landed>
+   ```
+
+   Flag and view agree — the pane is simply hidden at the start of the test,
+   which inverts its two checks; the second toggle then leaves the inspector
+   DETACHED, and the plugin pick (whose message targets the inspector's view)
+   has nowhere to land. Chain explained.
+3. Why was it hidden? `~/config/settings/HaikuDAW/settings` persists the panes
+   (`uiinsp`, M1.4). A run that ends with the inspector hidden (which is
+   exactly what the inverted toggles do) writes `uiinsp 0`, and every later run
+   then STARTS hidden. With that file deleted: `ui_functional_tests: 411
+   checks, 0 failures` — every check of this branch and every check of those
+   two tests green in one run.
+
+That is the same wedge the HANDOFF records for `recovery.dawproj`, in its
+settings-file form, and the fix is the same: the suite now deletes the settings
+file at startup (`f38e9b0`), so one run's pane state cannot decide the next
+run's result. The lesson is also added to `docs/HANDOFF.md`.
+
+A second observation from the same runs: a **HaikuDepot window left running by
+another session** sits in front of the DAW from shot 29 on, so those shots are
+not reviewable, and the test app was once left alive for ~10 minutes after its
+summary (it exited on its own). Both are VM-desktop conditions of a shared
+machine, not this branch's code.
 
 ## Screenshots
 
+The `DAW_UI_SHOTS` pass in **both** modes (`DAW_UI_THEME=light` and
+`DAW_UI_THEME=dark`; 47 shots each, `docs/agent-prompts/shots-33/<mode>/`).
+Shots I opened at full size (and zoomed on the clip strips and the range
+edges):
+
+- `22-depth-range` (both modes) — the range band over the lanes with its solid
+  edges and the bar + edges on the ruler, drawn over the clips and under the
+  playhead.
+- `23-depth-range-ruler` (both) — a range made by the Alt-drag on the ruler.
+- `24-depth-edit-menu` (both) — the Edit menu bar and the tool strip (an OPEN
+  menu cannot be photographed without a real pointer hold, so the labels are
+  asserted by readback instead; see below).
+- `25-depth-clip-muted` (both) — the muted clip: desaturated body, grey strip,
+  red "M" badge.
+- `26-depth-clip-named` (both) — the renamed clip's strip showing "Ver…".
+- `27-depth-clip-colour` (both) — the same clip tinted by `colorIndex` (pink).
+- `28-depth-fade-scurve` (both) — the S-curve fade-in ramp drawn as a curve.
+- Regression: `00-startup`, `13-playing`, `17-arrange-clips`,
+  `20-arrange-scrollbars`, `14-theme-150` (the 150 % case where the name
+  truncation matters: "haiku_daw…" fits its strip at 1.5× ✓).
+
+**What I fixed from the pass:** nothing structural — every shot showed the
+feature drawing as intended in both modes. Two things were chased and cleared:
+(a) `arrange-roll-follow` and the later shots report `shot failed:` — the
+`screenshot` tool exits non-zero even when the file lands (`docs/UI_GUIDELINES`
+§1 says so), and the files are all there; (b) from shot 29 on, a **HaikuDepot
+window that another session left running** sits in front of the DAW window, so
+those shots are not reviewable — they are other packages' tests and none of
+them shows this branch's change. My own shots (15–28) are all before it
+appears, and the two "shot failed" lines inside my range's shots are the same
+tool noise.
+
+**150 %:** no layout metric moved in this branch (the range band and the clip
+strips use the existing rects), so there is no new geometry to re-shoot at
+1.5×; `14-theme-150` (which shows the clip names truncated at 1.5×) was
+reviewed and is in the set.
+
 (filled in by the run below)
+
+## What could not be verified, and questions for Marc
+
+- **The pane failures' first cause on this VM was never pinned to a single
+  run** — only to the mechanism (a persisted `uiinsp 0`). The chain is now
+  broken by the harness fix, and the suite is green; the run that first left
+  the inspector hidden is not identifiable after the fact (several sessions
+  share this VM's settings file).
+- **The VM was in a degraded state for part of this work**: the BASE commit's
+  run crashed before reaching the pane tests (a window-appearance wait), the
+  `play_clip` link failed once because two of my own cycles built the same
+  directory concurrently, and a HaikuDepot window from another session covers
+  the DAW from shot 29 on. None of it shows in the branch's checks — but it is
+  why the base-vs-branch comparison could not be made the clean way.
+
+- **The physical Alt key.** Haiku maps the PC's Alt to `B_COMMAND_KEY` and the
+  Option/Windows key to `B_OPTION_KEY`; this codebase's existing "Alt" gestures
+  (the slip edit from 2.1) test `B_OPTION_KEY`. The range drag accepts BOTH, so
+  a user's Alt makes a range either way, but **the slip gesture accepts only
+  `B_OPTION_KEY`** — a pre-existing choice from 2.1, left alone here. If Marc
+  wants one modifier for both, it is a one-line change in `HitTest`'s slip zone
+  and worth deciding before 1.0.
+- **An open menu cannot be photographed on this VM.** The Edit menu's Undo/Redo
+  labels are asserted by reading the items back (`BMenuItem::Label()`), and the
+  shots show the window with the menu bar; opening the menu needs a real
+  pointer held down, which the synthetic-event suite cannot do without wedging
+  the window thread.
+- **Cursor glyphs and tooltip pop-ups** — the same limits the previous package
+  recorded: the mapping and the tooltip strings are set (and asserted) but a
+  real mouse's glyphs and the tooltip manager's idle timer are desktop checks.
+- **The drag's feel on real hardware** (how the range band tracks a real
+  pointer, whether the 4 px threshold is right with a real mouse) — VM
+  screenshots and synthetic events cannot measure it.
 
 ## What could not be verified
 
