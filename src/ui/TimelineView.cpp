@@ -10,6 +10,7 @@
 #include "widgets/DawIcons.h"   // the shared glyphs (arrange tools, slip)
 #include "../engine/Recorder.h" // live capture waveform envelope
 #include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
+#include "../model/RangeEdit.h" // ExtractRange (the M2.4 range operations)
 #include "Widgets.h"            // shared pan knob draw
 
 #include <Bitmap.h>
@@ -266,6 +267,22 @@ static bool DroppedExtIs(const char* path, const char* ext) {
 }
 
 void TimelineView::MessageReceived(BMessage* msg) {
+    // RenameWindow's answer for a clip (M2.5): the clip id rides in its
+    // echoed "aux" field, the track in "track".
+    if (msg->what == kMsgRenameClip) {
+        int64 tid = 0, cid = 0;
+        const char* name = nullptr;
+        msg->FindInt64("track", &tid);
+        msg->FindInt64("aux", &cid);
+        if (msg->FindString("name", &name) == B_OK && name) {
+            if (fStack->Execute(std::make_unique<SetClipNameCommand>(
+                                    (TrackId)tid, (ClipId)cid, name), *fProject)) {
+                Invalidate();
+                if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+            }
+        }
+        return;
+    }
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
         // Navigation (M2.2): Ctrl zooms anchored on the pointer, Shift (or a
         // horizontal wheel) scrolls sideways, a plain wheel scrolls the tracks.
@@ -409,8 +426,11 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
         }
         case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - ContentTop()) * 0.8f); break;
         case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - ContentTop()) * 0.8f); break;
+        // Nudge the selection one grid step (M2.5).
+        case ',': case '<': NudgeSelection(-1); break;
+        case '.': case '>': NudgeSelection(+1); break;
         case B_DELETE: case B_BACKSPACE:
-            if (!fSelClips.empty()) DeleteSelection();
+            if (HasTimeRange() || !fSelClips.empty()) RangeDelete();
             else BView::KeyDown(bytes, numBytes);
             break;
         case 'd': case 'D':
@@ -418,7 +438,10 @@ void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
             else BView::KeyDown(bytes, numBytes);
             break;
         case B_ESCAPE:
+            // Esc drops the clip selection first, then the range (two things
+            // can be selected; one press should not silently drop both).
             if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(); }
+            else if (HasTimeRange()) ClearTimeRange();
             else BView::KeyDown(bytes, numBytes);
             break;
         default: BView::KeyDown(bytes, numBytes);
@@ -684,15 +707,15 @@ void TimelineView::GlueAt(const Hit& hit) {
     }
 }
 
-// Mute: the track's mute, the only mute the model has until M2.5's Clip.muted.
+// Mute: the mute of the BLOCK the tool is pointed at (M2.5). Before clip
+// depth existed the only mute the model had was the track's, which made the
+// tool mean one thing over a block and another over the header; a clip and a
+// region both carry `muted` now, so the tool says what it does. Clicking the
+// empty lane still has no block to mute and does nothing.
 void TimelineView::MuteAt(const Hit& hit) {
-    if (hit.track == kInvalidTrackId) return;
-    const Track* t = fProject->FindTrack(hit.track);
-    if (!t) return;
-    fStack->Execute(std::make_unique<SetTrackMuteCommand>(hit.track, !t->muted),
-                    *fProject);
-    Invalidate();
-    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    if (hit.track == kInvalidTrackId || hit.clip == kInvalidClipId)
+        return;                               // nothing under the cursor
+    ToggleClipMute(hit.track, hit.clip, hit.midi);
 }
 
 // Pencil: draw a MIDI region by dragging, or one bar by clicking. Only a MIDI
@@ -881,7 +904,7 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
     } else if (where.y < ContentTop()) {
         tip = MarkerAt(where) ? "Marker: click to jump"
                               : "Ruler: click to seek, drag for a loop, "
-                                "Ctrl-drag for punch";
+                                "Ctrl-drag for punch, Alt-drag for a time range";
     } else if (where.x < HeaderWidth()) {
         // The header: a control highlight, and the track it belongs to (the
         // drawing compares ids).
@@ -898,7 +921,10 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
             switch (fTool) {
                 case Tool::Scissors: tip = "Split here"; break;
                 case Tool::Glue:     tip = "Glue with the next clip"; break;
-                case Tool::Mute:     tip = "Mute track"; break;
+                // The tool mutes the BLOCK under the pointer (M2.5's Clip.muted
+                // / MidiClip.muted) -- not the whole track, which is what the
+                // header's M button is for.
+                case Tool::Mute:     tip = "Mute this clip"; break;
                 case Tool::Pencil:   tip = "Drag to draw a region"; break;
                 case Tool::Fade:     tip = "Drag to set the fade"; break;
                 default:
@@ -919,6 +945,8 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
         } else if (fTool == Tool::Pencil) {
             const Track* t = fProject ? fProject->FindTrack(fHover.track) : nullptr;
             if (t && t->type == TrackType::Midi) tip = "Drag to draw a region";
+        } else if (fTool == Tool::Pointer) {
+            tip = "Drag to select a time range (Shift: band-select clips)";
         }
     }
     SetTip(tip);
@@ -1230,6 +1258,33 @@ std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
     if (withTake)
         m->AddItem(new ThemedMenuItem("Next Take", NULL));
     m->AddSeparatorItem();
+    // Clip depth (M2.5): the fields with no other gesture, plus the mute the
+    // Mute tool also toggles.
+    m->AddItem(new ThemedMenuItem("Rename Clip" B_UTF8_ELLIPSIS, NULL));
+    m->AddItem(new ThemedMenuItem("Next Colour", NULL));
+    // Find the clip under the cursor again for the state-dependent labels.
+    const Clip* cur = nullptr;
+    if (const int idx = TrackIndexAt(where);
+        idx >= 0 && idx < (int)fProject->Tracks().size()) {
+        const Track& t = fProject->Tracks()[(size_t)idx];
+        const Frame at = XToFrame(where.x);
+        for (const Clip& c : t.clips)
+            if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
+                cur = &c;
+                break;
+            }
+    }
+    m->AddItem(new ThemedMenuItem(cur && cur->muted ? "Unmute Clip" : "Mute Clip",
+                                  NULL));
+    BMenu* fs = new BMenu("Fade Shape");
+    const char* shapes[] = { "Fade Linear", "Fade Equal Power", "Fade S-Curve" };
+    for (int i = 0; i < 3; i++) {
+        BMenuItem* it = new ThemedMenuItem(shapes[i], NULL);
+        it->SetMarked(cur && (int)cur->fadeShape == i);
+        fs->AddItem(it);
+    }
+    m->AddItem(fs);
+    m->AddSeparatorItem();
     m->AddItem(new ThemedMenuItem("Normalize", NULL));
     m->AddItem(new ThemedMenuItem("Reverse", NULL));
     m->AddItem(new ThemedMenuItem("Strip Silence", NULL));
@@ -1251,19 +1306,137 @@ bool TimelineView::PastePopup(BPoint where) const {
     return ok;
 }
 
+// --- the clipboard (M2.4) --------------------------------------------------
+//
+// Many clips, since a range copy brings a whole slice of the arrangement with
+// it. The order the items were collected in is preserved and every start is
+// relative to the earliest item, so a paste keeps the range's internal spacing.
+
+void TimelineView::SetClipboardToClip(const Clip& c) {
+    fClipboard.clear();
+    ClipItem it;
+    it.midi = false;
+    it.audio = c;
+    it.audio.startFrame = 0;
+    fClipboard.push_back(it);
+}
+
+void TimelineView::SetClipboardToRegion(const MidiClip& c) {
+    fClipboard.clear();
+    ClipItem it;
+    it.midi = true;
+    it.region = c;
+    it.region.startFrame = 0;
+    fClipboard.push_back(it);
+}
+
+// The clip selection as clipboard items: starts relative to the selection's
+// earliest clip, so a multi-clip copy pastes as a group.
+void TimelineView::SetClipboardToSelection() {
+    Frame minStart = 0;
+    bool have = false;
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id)) {
+            if (Clip* c = t->FindClip(id)) {
+                if (!have || c->startFrame < minStart) minStart = c->startFrame;
+                have = true;
+            } else if (MidiClip* m = t->FindMidiClip(id)) {
+                if (!have || m->startFrame < minStart) minStart = m->startFrame;
+                have = true;
+            }
+        }
+    if (!have) return;
+    fClipboard.clear();
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id)) {
+            if (Clip* c = t->FindClip(id)) {
+                ClipItem it;
+                it.midi = false;
+                it.track = t->id;
+                it.audio = *c;
+                it.audio.startFrame = c->startFrame - minStart;
+                fClipboard.push_back(it);
+            } else if (MidiClip* m = t->FindMidiClip(id)) {
+                ClipItem it;
+                it.midi = true;
+                it.track = t->id;
+                it.region = *m;
+                it.region.startFrame = m->startFrame - minStart;
+                fClipboard.push_back(it);
+            }
+        }
+}
+
+// Where a paste lands on a track: the selected track when its kind matches,
+// else the first track that does (the rule PasteAtPlayhead always used, now
+// with "the selected track" first because the plan names it).
+TrackId TimelineView::PasteTargetFor(bool midi) const {
+    const TrackType want = midi ? TrackType::Midi : TrackType::Audio;
+    if (const Track* sel = fProject->FindTrack(fSelectedTrack))
+        if (sel->type == want) return sel->id;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == want) return t.id;
+    return kInvalidTrackId;
+}
+
+// Drop the clipboard's items on their tracks, `at` frames after the position
+// each was copied from. One MacroCommand: a paste is one undo step.
+void TimelineView::PasteItems(const std::vector<ClipItem>& items, Frame at,
+                              bool toSourceTracks) {
+    if (items.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Paste");
+    for (const ClipItem& it : items) {
+        const TrackId track = (toSourceTracks && it.track != kInvalidTrackId
+                               && fProject->FindTrack(it.track))
+                              ? it.track : PasteTargetFor(it.midi);
+        if (track == kInvalidTrackId) continue;
+        if (it.midi) {
+            MidiClip c = it.region;
+            c.id = kInvalidClipId;      // AddMidiClipCommand assigns a fresh id
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddMidiClipCommand>(track, c));
+        } else {
+            Clip c = it.audio;
+            c.id = kInvalidClipId;      // AddClipCommand assigns a fresh id
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddClipCommand>(track, c));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// Right-click "Paste here": the same items, from `at`, but forced onto the
+// track that was clicked (the user pointed at it).
 void TimelineView::PasteToTrack(TrackId track, Frame at, TrackType type) {
-    if (type == TrackType::Audio && fHasClipClip) {
-        Clip c = fClipClip;
-        c.id = kInvalidClipId;
-        c.startFrame = at;
-        fStack->Execute(std::make_unique<AddClipCommand>(track, c), *fProject);
+    if (track == kInvalidTrackId || fClipboard.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Paste");
+    for (const ClipItem& it : fClipboard) {
+        if (it.midi) {
+            if (type != TrackType::Midi) continue;
+            MidiClip c = it.region;
+            c.id = kInvalidClipId;
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddMidiClipCommand>(track, c));
+        } else {
+            if (type != TrackType::Audio) continue;
+            Clip c = it.audio;
+            c.id = kInvalidClipId;
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddClipCommand>(track, c));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
         Invalidate();
-    } else if (type == TrackType::Midi && fHasClipMidi) {
-        MidiClip c = fClipMidi;
-        c.id = kInvalidClipId;      // AddMidiClipCommand assigns a fresh id
-        c.startFrame = at;
-        fStack->Execute(std::make_unique<AddMidiClipCommand>(track, c), *fProject);
-        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
     }
 }
 
@@ -1286,30 +1459,82 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
 
 void TimelineView::PasteAtPlayhead() {
     const Frame at = fProject->transport.playhead;
-    if (fHasClipClip) {
-        // Prefer a track of the source type; fall back to the first such track.
-        TrackId target = kInvalidTrackId;
-        for (const Track& t : fProject->Tracks())
-            if (t.type == TrackType::Audio) { target = t.id; break; }
-        if (target != kInvalidTrackId) {
-            Clip c = fClipClip;
-            c.id = kInvalidClipId;      // AddClipCommand assigns a fresh id
-            c.startFrame = at;
-            fStack->Execute(std::make_unique<AddClipCommand>(target, c), *fProject);
-            Invalidate();
-        }
-    } else if (fHasClipMidi) {
-        TrackId target = kInvalidTrackId;
-        for (const Track& t : fProject->Tracks())
-            if (t.type == TrackType::Midi) { target = t.id; break; }
-        if (target != kInvalidTrackId) {
-            MidiClip c = fClipMidi;
-            c.id = kInvalidClipId;
-            c.startFrame = at;
-            fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
-            Invalidate();
-        }
+    PasteItems(fClipboard, at < 0 ? 0 : at);
+}
+
+// --- the time range (M2.4) -------------------------------------------------
+
+void TimelineView::SetTimeRange(Frame a, Frame b) {
+    if (a > b) std::swap(a, b);
+    if (a < 0) a = 0;
+    if (b < 0) b = 0;
+    if (fRangeValid && fRangeA == a && fRangeB == b) return;
+    ClearTimeRange();          // one invalidate, not two
+    if (b <= a) return;        // an empty span is no range at all
+    fRangeA = a;
+    fRangeB = b;
+    fRangeValid = true;
+    Invalidate();
+}
+
+void TimelineView::ClearTimeRange() {
+    if (!fRangeValid) return;
+    fRangeValid = false;
+    fRangeA = fRangeB = 0;
+    Invalidate();
+}
+
+// A press on empty lane content starts a range drag. Shift keeps the previous
+// rubber-band clip select (additive), which is where that gesture moved to
+// when this one took the plain drag.
+void TimelineView::BeginRangeDrag(BPoint where) {
+    fDrag = Drag::RangeSelect;
+    fRangeAnchor = Snapped(XToFrame(where.x));
+    if (fRangeAnchor < 0) fRangeAnchor = 0;
+    fRangeDragged = false;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+}
+
+// A click anywhere in a lane makes that track the selected one (the inspector's
+// target, and where a paste goes).
+void TimelineView::SetSelectedTrack(TrackId id) {
+    if (id == kInvalidTrackId || fSelectedTrack == id) return;
+    fSelectedTrack = id;
+    if (BWindow* w = Window()) {
+        BMessage sel(kMsgTrackSelected);
+        sel.AddInt64("track", (int64)id);
+        w->PostMessage(&sel);
     }
+    Invalidate();
+}
+
+// The name a clip shows: its own when it has one, else the source file's base
+// name. One definition, so the strip and any other reader cannot disagree.
+std::string TimelineView::ClipNameOf(const Clip& c) const {
+    if (!c.name.empty()) return c.name;
+    const std::string& p = c.sourcePath;
+    const size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? p : p.substr(slash + 1);
+}
+
+// The range over the lane area: a translucent blue band with solid edges, and
+// a matching bar on the ruler (drawn from DrawRuler). It is under the playhead
+// and over the loop/punch tints, so the one the user just dragged reads first.
+void TimelineView::DrawTimeRange() {
+    if (!fRangeValid || fRangeB <= fRangeA) return;
+    float x0 = FrameToX(fRangeA);
+    float x1 = FrameToX(fRangeB);
+    if (x1 < HeaderWidth() || x0 > Bounds().right) return;
+    if (x0 < HeaderWidth()) x0 = HeaderWidth();
+    const float botY = Bounds().bottom - fBarThickness;
+    SetDrawingMode(B_OP_ALPHA);
+    SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+    SetHighColor(90, 140, 230, 45);
+    FillRect(BRect(x0, ContentTop(), x1, botY));
+    SetDrawingMode(B_OP_COPY);
+    SetHighColor(PanelAccent(Rgb(120, 170, 255)));
+    StrokeLine(BPoint(x0, ContentTop()), BPoint(x0, botY));
+    StrokeLine(BPoint(x1, ContentTop()), BPoint(x1, botY));
 }
 
 Track* TimelineView::TrackOfClip(ClipId id) const {
@@ -1335,7 +1560,170 @@ void TimelineView::DeleteSelection() {
     Invalidate();
 }
 
+// --- range operations (M2.4) ----------------------------------------------
+//
+// Cut/Copy/Delete/Insert Silence act on the time range; Delete/Copy also fall
+// back to the clip selection when no range is set, so the Edit menu's items
+// mean something in both selection modes. The model work lives in
+// RangeEdit.h + the two range commands; this is the wiring.
+
+void TimelineView::RangeCopy() {
+    if (HasTimeRange()) {
+        std::vector<RangeItem> got = ExtractRange(*fProject, fRangeA, fRangeB);
+        fClipboard.clear();
+        for (RangeItem& it : got) {
+            ClipItem ci;
+            ci.midi = it.midi;
+            ci.track = it.track;
+            ci.audio = it.audio;
+            ci.region = it.region;
+            fClipboard.push_back(ci);
+        }
+        if (!fClipboard.empty())
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    } else if (!fSelClips.empty()) {
+        SetClipboardToSelection();
+    }
+    Invalidate();
+}
+
+void TimelineView::RangeDelete() {
+    if (HasTimeRange()) {
+        if (fStack->Execute(std::make_unique<RangeDeleteCommand>(fRangeA, fRangeB),
+                            *fProject))
+            if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+        Invalidate();
+        return;
+    }
+    DeleteSelection();
+}
+
+void TimelineView::RangeCut() {
+    if (HasTimeRange()) {
+        RangeCopy();
+        RangeDelete();
+        return;
+    }
+    if (fSelClips.empty()) return;
+    SetClipboardToSelection();
+    DeleteSelection();
+}
+
+void TimelineView::RangeInsertSilence() {
+    if (!HasTimeRange()) return;
+    if (fStack->Execute(
+            std::make_unique<RangeInsertSilenceCommand>(fRangeA, fRangeB), *fProject))
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    Invalidate();
+}
+
+void TimelineView::SelectAllClips() {
+    fSelClips.clear();
+    for (const Track& t : fProject->Tracks()) {
+        for (const Clip& c : t.clips)
+            if (!(c.takeGroup > 0 && !c.takeActive)) fSelClips.insert(c.id);
+        for (const MidiClip& c : t.midiClips)
+            if (!(c.takeGroup > 0 && !c.takeActive)) fSelClips.insert(c.id);
+    }
+    Invalidate();
+}
+
+// Nudge the selection one grid step (`,` left, `.` right) as one undo step.
+// The step is the snap grid's, at each clip's own position (a tempo change
+// moves it), and Off nudges by the historical 1/16 so a nudge always moves by
+// something the user can see.
+void TimelineView::NudgeSelection(int dir) {
+    if (dir == 0 || fSelClips.empty()) return;
+    auto macro = std::make_unique<MacroCommand>(dir < 0 ? "Nudge Left"
+                                                        : "Nudge Right");
+    for (ClipId id : fSelClips) {
+        Track* t = TrackOfClip(id);
+        if (!t) continue;
+        if (Clip* c = t->FindClip(id)) {
+            Frame ns = c->startFrame
+                     + dir * SnapStep(fProject->tempoMap, c->startFrame, fSnap);
+            if (ns < 0) ns = 0;
+            if (ns != c->startFrame)
+                macro->Add(std::make_unique<MoveClipCommand>(t->id, id, ns));
+        } else if (MidiClip* m = t->FindMidiClip(id)) {
+            Frame ns = m->startFrame
+                     + dir * SnapStep(fProject->tempoMap, m->startFrame, fSnap);
+            if (ns < 0) ns = 0;
+            if (ns != m->startFrame)
+                macro->Add(std::make_unique<MoveMidiClipCommand>(t->id, id, ns));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// --- clip depth actions (M2.5), shared by the context menu and the tests ----
+
+void TimelineView::ToggleClipMute(TrackId track, ClipId clip, bool midi) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    bool nowMuted = true;
+    if (midi) {
+        MidiClip* c = t->FindMidiClip(clip);
+        if (!c) return;
+        nowMuted = !c->muted;
+    } else {
+        Clip* c = t->FindClip(clip);
+        if (!c) return;
+        nowMuted = !c->muted;
+    }
+    if (fStack->Execute(std::make_unique<SetClipMuteCommand>(
+                            track, clip, midi, nowMuted), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgUiRefresh);
+            w->PostMessage(kMsgReloadEngine);   // the clip's stream is baked
+        }
+    }
+}
+
+void TimelineView::NextClipColour(TrackId track, ClipId clip) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    Clip* c = t->FindClip(clip);
+    if (!c) return;
+    if (fStack->Execute(std::make_unique<SetClipColorCommand>(
+                            track, clip, (c->colorIndex + 1) % kTrackColorCount),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetClipFadeShapeAt(TrackId track, ClipId clip, FadeShape shape) {
+    if (fStack->Execute(std::make_unique<SetClipFadeShapeCommand>(track, clip, shape),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
 void TimelineView::DuplicateSelection() {
+    // No clip selection but a range? Duplicate the range's content at its end,
+    // which is what the same command on a time selection means.
+    if (fSelClips.empty() && HasTimeRange()) {
+        std::vector<RangeItem> got = ExtractRange(*fProject, fRangeA, fRangeB);
+        if (got.empty()) return;
+        std::vector<ClipItem> items;
+        for (RangeItem& it : got) {
+            ClipItem ci;
+            ci.midi = it.midi;
+            ci.track = it.track;
+            ci.audio = it.audio;
+            ci.region = it.region;
+            items.push_back(ci);
+        }
+        PasteItems(items, fRangeB, /*toSourceTracks=*/true);
+        return;
+    }
     if (fSelClips.empty()) return;
     // Offset the copies by the selection's total span so they land just after.
     bool have = false; Frame minStart = 0, maxEnd = 0;
@@ -1473,6 +1861,7 @@ void TimelineView::Draw(BRect updateRect) {
     }
     SetDrawingMode(B_OP_COPY);
 
+    DrawTimeRange();         // the M2.4 range, over the tints, under the playhead
     DrawPlayhead();          // over lanes, under the ruler
     DrawRuler(updateRect);   // ruler last so it sits above lane content
     DrawToolbar();           // the tool strip sits above the ruler
@@ -1684,9 +2073,12 @@ void TimelineView::MouseDown(BPoint where) {
 
     // Secondary (right) button = delete the thing under the cursor.
     int32 buttons = 0;
-    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
-        m->FindInt32("buttons", &buttons);
+    BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr;
+    if (cur) cur->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
+    // The event's modifiers (not the live keyboard): a synthetic event from the
+    // functional test can set them, which is how the range drag is driven.
+    const uint32 mods = EventModifiers(cur);
 
     // The tool strip (M2.3): tool buttons, the snap field, the zoom pair.
     if (where.y < ToolbarHeight()) {
@@ -1702,7 +2094,8 @@ void TimelineView::MouseDown(BPoint where) {
     }
 
     // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
-    // range instead. On release we decide seek-vs-drag by how far it moved.
+    // range, Alt-drag the time range (M2.4). On release we decide
+    // seek-vs-drag by how far it moved.
     if (where.y >= ToolbarHeight() && where.y < ContentTop()
         && where.x >= HeaderWidth()) {
         // Left-click a marker flag: jump the playhead there.
@@ -1715,10 +2108,21 @@ void TimelineView::MouseDown(BPoint where) {
         }
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fDrag        = (modifiers() & B_CONTROL_KEY) ? Drag::RulerPunch
-                                                     : Drag::RulerLoop;
-        fLoopAnchor  = f;
-        fLoopDragged = false;
+        // The time range's modifier: Alt. Accepting BOTH modifier bits is
+        // deliberate — Haiku maps the PC's Alt key to B_COMMAND_KEY and the
+        // Option/Windows key to B_OPTION_KEY, and this codebase's existing
+        // "Alt-drag" (the slip gesture) tests for B_OPTION_KEY; a user's Alt
+        // must make a range either way.
+        if ((mods & (B_OPTION_KEY | B_COMMAND_KEY)) != 0) {
+            fDrag = Drag::RangeSelect;
+            fRangeAnchor = f;
+            fRangeDragged = false;
+        } else {
+            fDrag        = (mods & B_CONTROL_KEY) ? Drag::RulerPunch
+                                                  : Drag::RulerLoop;
+            fLoopAnchor  = f;
+            fLoopDragged = false;
+        }
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;
     }
@@ -1731,15 +2135,7 @@ void TimelineView::MouseDown(BPoint where) {
 
     if (where.x < HeaderWidth()) {
         // Any header click selects the track (drives the left inspector).
-        if (fSelectedTrack != t.id) {
-            fSelectedTrack = t.id;
-            if (BWindow* w = Window()) {
-                BMessage sel(kMsgTrackSelected);
-                sel.AddInt64("track", (int64)t.id);
-                w->PostMessage(&sel);
-            }
-            Invalidate();
-        }
+        SetSelectedTrack(t.id);
         // Track name strip: right-click deletes the track, double-click renames.
         if (where.y <= lane.top + 18 && where.x < 114) {
             if (rightClick) {
@@ -1895,9 +2291,7 @@ void TimelineView::MouseDown(BPoint where) {
                 const int pick = ContextMenu(where, /*withSplit=*/true,
                                              /*withTake=*/c.takeGroup > 0);
                 if (pick == 0) {          // Copy
-                    fClipMidi = c; fHasClipMidi = true;
-                    fHasClipClip = false; fHasClipNote = false;
-                    fClipType = TrackType::Midi;
+                    SetClipboardToRegion(c);
                 } else if (pick == 1) {   // Delete
                     fStack->Execute(std::make_unique<RemoveMidiClipCommand>(
                         t.id, c.id), *fProject);
@@ -1926,7 +2320,7 @@ void TimelineView::MouseDown(BPoint where) {
                         fStack->Execute(std::make_unique<SetActiveMidiTakeCommand>(
                             t.id, next), *fProject);
                 }
-            } else if (fHasClipMidi) {     // empty lane: offer paste
+            } else if (!fClipboard.empty()) {   // empty lane: offer paste
                 if (PastePopup(where))
                     PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Midi);
             }
@@ -1959,13 +2353,14 @@ void TimelineView::MouseDown(BPoint where) {
 
         if (hit >= 0) {   // select + begin move/resize
             const MidiClip& c = t.midiClips[(size_t)hit];
-            if (modifiers() & B_SHIFT_KEY) {
+            if (mods & B_SHIFT_KEY) {
                 if (ClipSelected(c.id)) fSelClips.erase(c.id);
                 else                    fSelClips.insert(c.id);
                 Invalidate(lane);
                 return;
             }
             if (!ClipSelected(c.id)) { fSelClips.clear(); fSelClips.insert(c.id); }
+            SetSelectedTrack(t.id);
             fDragTrack       = t.id;
             fDragLane        = idx;
             fDragClip        = c.id;
@@ -2002,8 +2397,19 @@ void TimelineView::MouseDown(BPoint where) {
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
-        // Empty single click: clear the selection.
-        if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(lane); }
+        // Empty lane: a plain click clears the selection (and a drag makes a
+        // time range, M2.4); Shift keeps the additive rubber-band select.
+        SetSelectedTrack(t.id);
+        if (!rightClick) {
+            if (mods & B_SHIFT_KEY) {
+                fBanding = true;
+                fBandA = fBandB = where;
+                Invalidate(lane);
+            } else {
+                if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(lane); }
+                BeginRangeDrag(where);
+            }
+        }
         return;
     }
 
@@ -2018,10 +2424,25 @@ void TimelineView::MouseDown(BPoint where) {
                 const std::string pick =
                     AudioClipMenu(where, /*withTake=*/c.takeGroup > 0);
                 if (pick == "Copy") {
-                    fClipClip = c;
-                    fHasClipClip = true; fHasClipNote = false;
-                    fHasClipMidi = false;   // audio copy invalidates MIDI clipboard
-                    fClipType = TrackType::Audio;
+                    SetClipboardToClip(c);
+                } else if (pick == "Rename Clip" B_UTF8_ELLIPSIS) {
+                    BPoint sp = ConvertToScreen(where);
+                    BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                    // The clip id rides in the aux field RenameWindow echoes
+                    // back (its "track" field is the TrackId it acts on).
+                    (new RenameWindow(wr, t.id, ClipNameOf(c).c_str(),
+                                      BMessenger(this), kMsgRenameClip,
+                                      (int64)c.id, "Rename Clip"))->Show();
+                } else if (pick == "Next Colour") {
+                    NextClipColour(t.id, c.id);
+                } else if (pick == "Mute Clip" || pick == "Unmute Clip") {
+                    ToggleClipMute(t.id, c.id, /*midi=*/false);
+                } else if (pick.rfind("Fade ", 0) == 0) {
+                    FadeShape shape = pick == "Fade Equal Power"
+                                          ? FadeShape::EqualPower
+                                      : pick == "Fade S-Curve" ? FadeShape::SCurve
+                                                               : FadeShape::Linear;
+                    SetClipFadeShapeAt(t.id, c.id, shape);
                 } else if (pick == "Delete") {
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
                                     *fProject);
@@ -2066,10 +2487,24 @@ void TimelineView::MouseDown(BPoint where) {
                 Invalidate(lane);
                 return;
             }
+            // Double-click an audio clip: rename it (M2.5). The MIDI path's
+            // double-click opens the piano roll instead — a region's content
+            // is what you edit there, a clip's name is what you edit here.
+            int32 clicks = 1;
+            if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+                m->FindInt32("clicks", &clicks);
+            if (clicks >= 2) {
+                BPoint sp = ConvertToScreen(where);
+                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                (new RenameWindow(wr, t.id, ClipNameOf(c).c_str(),
+                                  BMessenger(this), kMsgRenameClip,
+                                  (int64)c.id, "Rename Clip"))->Show();
+                return;
+            }
             // Selection: Shift-click toggles; a plain click on an unselected
             // clip selects only it (a click on an already-selected clip keeps
             // the whole selection so it can be dragged as a group).
-            if (modifiers() & B_SHIFT_KEY) {
+            if (mods & B_SHIFT_KEY) {
                 if (ClipSelected(c.id)) fSelClips.erase(c.id);
                 else                    fSelClips.insert(c.id);
                 Invalidate(lane);
@@ -2079,6 +2514,7 @@ void TimelineView::MouseDown(BPoint where) {
                 fSelClips.clear();
                 fSelClips.insert(c.id);
             }
+            SetSelectedTrack(t.id);
             fMultiMove       = false;
             fDragTrack       = t.id;
             fDragLane        = idx;
@@ -2119,19 +2555,25 @@ void TimelineView::MouseDown(BPoint where) {
     }
 
     // Right-click on an empty part of an audio lane: offer paste here.
-    if (fDrag == Drag::None && rightClick && fHasClipClip) {
+    if (fDrag == Drag::None && rightClick && !fClipboard.empty()) {
         if (PastePopup(where))
             PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Audio);
         return;
     }
 
-    // Left-click on empty audio content: clear selection (unless Shift) and
-    // begin a rubber-band box select.
+    // Left-click on empty audio content: the track becomes selected, and a
+    // drag makes a time range (M2.4). Shift keeps the additive rubber-band
+    // clip select -- the gesture the plain drag used to be.
     if (fDrag == Drag::None && !rightClick && where.x >= HeaderWidth()) {
-        if (!(modifiers() & B_SHIFT_KEY)) fSelClips.clear();
-        fBanding = true;
-        fBandA = fBandB = where;
-        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        SetSelectedTrack(t.id);
+        if (mods & B_SHIFT_KEY) {
+            fBanding = true;
+            fBandA = fBandB = where;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        } else {
+            if (!fSelClips.empty()) fSelClips.clear();
+            BeginRangeDrag(where);
+        }
         Invalidate();
     }
 }
@@ -2200,6 +2642,21 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
 // model for live feedback. This is a transient preview only; the undoable
 // command is pushed in MouseUp.
 void TimelineView::PreviewDrag(BPoint where) {
+    // A range drag (M2.4), from the ruler or from empty lane content. Same
+    // click-vs-drag threshold as the loop: a press that never moves is a
+    // click, and a click must not leave a sliver of a range behind.
+    if (fDrag == Drag::RangeSelect) {
+        Frame f = Snapped(XToFrame(where.x));
+        if (f < 0) f = 0;
+        const Frame lo = std::min(fRangeAnchor, f);
+        const Frame hi = std::max(fRangeAnchor, f);
+        const Frame minDrag = (Frame)(4.0 * fFramesPerPixel);   // ~4 px
+        if (hi - lo <= minDrag) return;   // not a real drag yet
+        fRangeDragged = true;
+        SetTimeRange(lo, hi);
+        return;
+    }
+
     // Ruler loop / punch drags aren't tied to a track. Ignore sub-threshold
     // jitter so a plain click (which may wobble a frame during button-down)
     // still seeks on release instead of creating a 1-frame loop region.
@@ -2459,6 +2916,16 @@ void TimelineView::MouseUp(BPoint where) {
         fDrag = Drag::None;
         fDragLane = -1;
         fHoverPos = where;
+        return;
+    }
+
+    // Range drag: a real drag left a range behind; a bare click (no movement)
+    // clears the range, the way clicking empty lane content always cleared the
+    // clip selection.
+    if (fDrag == Drag::RangeSelect) {
+        if (!fRangeDragged) ClearTimeRange();
+        fDrag = Drag::None;
+        Invalidate();
         return;
     }
 
@@ -2761,6 +3228,19 @@ void TimelineView::DrawRuler(BRect update) {
         }
     }
 
+    // The time range (M2.4): a band along the ruler's top and both edges, so
+    // the range reads even when every lane is scrolled out of the way.
+    if (fRangeValid && fRangeB > fRangeA) {
+        float x0 = FrameToX(fRangeA), x1 = FrameToX(fRangeB);
+        if (x0 < HeaderWidth()) x0 = HeaderWidth();
+        if (x1 > x0) {
+            SetHighColor(PanelAccent(Rgb(120, 170, 255)));
+            FillRect(BRect(x0, r.top, x1, r.top + Themed(3)));
+            StrokeLine(BPoint(x0, r.top), BPoint(x0, r.bottom));
+            StrokeLine(BPoint(x1, r.top), BPoint(x1, r.bottom));
+        }
+    }
+
     // Bar/beat ticks: bars full-height + numbered, beats short (when zoomed in).
     ForEachGridLine([&](float x, bool isBar, long bar) {
         SetHighColor(isBar ? ColText() : ColGrid());
@@ -2956,8 +3436,11 @@ void TimelineView::DrawLanes(BRect update) {
             const ClipFades& ef = fades[ci++];
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // only the active take of a group is drawn
-            DrawClip(c, lane, TrackColor(t.colorIndex), ef.fadeIn, ef.fadeOut,
-                     update);
+            // A clip's own colour when it has one (0 = the track's, the same
+            // rule MidiClip uses).
+            const rgb_color base = TrackColor(c.colorIndex ? c.colorIndex
+                                                           : t.colorIndex);
+            DrawClip(c, lane, base, ef, update);
             if (c.takeGroup > 0) {   // "T k/N" badge on the active take
                 int n = 0, k = 0;
                 for (const Clip& o : t.clips)
@@ -3261,7 +3744,7 @@ void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
-                            Frame fadeIn, Frame fadeOut, BRect update) {
+                            const ClipFades& ef, BRect update) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
     if (x1 < HeaderWidth() || x0 > lane.right)
@@ -3271,27 +3754,49 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         return;
     if (x0 < HeaderWidth()) x0 = HeaderWidth();
 
+    const Frame fadeIn  = ef.fadeIn;
+    const Frame fadeOut = ef.fadeOut;
+
+    // A muted clip is drawn desaturated so it reads as silent at a glance; the
+    // waveform still shows (you can still edit it), just dimmer.
+    const rgb_color fill = c.muted ? TintColor(base, 0.45f) : base;
+
     BRect block(x0, lane.top + Themed(3), x1, lane.bottom - Themed(3));
-    SetHighColor(base);
+    SetHighColor(fill);
     FillRoundRect(block, Themed(5), Themed(5));        // Logic-style rounded region
 
-    DrawClipWave(c, block, update);
+    DrawClipWave(c, block, update, ef);
 
-    // Fade ramps: a diagonal from the block corner up to where the fade ends.
-    // These are the effective fades, so an auto-crossfade with a neighbour draws
-    // here too rather than only being audible.
+    // Fade ramps: the actual CURVE (M2.5) from the block corner up to where the
+    // fade ends, sampled. These are the effective fades and their shapes, so an
+    // auto-crossfade's equal-power ramp draws here as the sound has it.
     SetHighColor(ColClipBorder());
+    // `fromSilence`: the ramp starts silent at xFrom (a fade-in) and reaches
+    // full at xTo; otherwise it starts full and reaches silence at xTo.
+    auto drawRamp = [&](float xFrom, float xTo, FadeShape shape, bool fromSilence) {
+        if (xTo <= xFrom) return;
+        const int steps = 12;
+        float px = xFrom;
+        float py = block.bottom - (fromSilence ? 0.0f : 1.0f) * block.Height();
+        for (int i = 1; i <= steps; i++) {
+            const float s = (float)i / (float)steps;   // along the ramp
+            const float t = fromSilence ? s : 1.0f - s;
+            const float g = FadeGainAt(shape, t);
+            const float x = xFrom + (xTo - xFrom) * s;
+            const float y = block.bottom - g * block.Height();
+            StrokeLine(BPoint(px, py), BPoint(x, y));
+            px = x; py = y;
+        }
+    };
     if (fadeIn > 0) {
-        float fx = FrameToX(c.startFrame + fadeIn);
-        if (fx > block.left)
-            StrokeLine(BPoint(block.left, block.bottom),
-                       BPoint(fx < block.right ? fx : block.right, block.top));
+        const float xEnd = FrameToX(c.startFrame + fadeIn);
+        if (xEnd > block.left)
+            drawRamp(block.left, std::min(xEnd, block.right), ef.inShape, true);
     }
     if (fadeOut > 0) {
-        float fx = FrameToX(c.startFrame + c.lengthFrames - fadeOut);
-        if (fx < block.right)
-            StrokeLine(BPoint(fx > block.left ? fx : block.left, block.top),
-                       BPoint(block.right, block.bottom));
+        const float xStart = FrameToX(c.startFrame + c.lengthFrames - fadeOut);
+        if (xStart < block.right)
+            drawRamp(std::max(xStart, block.left), block.right, ef.outShape, false);
     }
 
     // Per-clip gain: a horizontal line across the block at the gain level
@@ -3310,25 +3815,32 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         }
     }
 
-    // Name strip across the top (darker shade of the track color), like Logic.
+    // Name strip across the top (darker shade of the clip's colour), like
+    // Logic. The name is the clip's own (M2.5) or the file's base name, and a
+    // muted clip's strip goes grey so "muted" is readable from the strip alone.
     const float stripH = Themed(15.0f);
     if (block.Height() > stripH + Themed(2) && block.Width() > Themed(10)) {
         BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
                     block.top + stripH);
-        SetHighColor(Rgb((uint8)(base.red * 0.5f), (uint8)(base.green * 0.5f),
-                         (uint8)(base.blue * 0.5f)));
+        const float shade = c.muted ? 0.32f : 0.5f;
+        SetHighColor(Rgb((uint8)(base.red * shade), (uint8)(base.green * shade),
+                         (uint8)(base.blue * shade)));
         FillRect(strip);
-        const std::string& p = c.sourcePath;
-        size_t slash = p.find_last_of('/');
         // Truncated to the strip: a name runs into the next region otherwise.
-        BString name((slash == std::string::npos) ? p.c_str()
-                                                  : p.c_str() + slash + 1);
-        const float room = strip.Width() - Themed(14);
+        BString name(ClipNameOf(c).c_str());
+        const float room = strip.Width() - Themed(14)
+                         - (c.muted ? Themed(14) : 0.0f);
         if (room > Themed(8)) {
             TruncateString(&name, B_TRUNCATE_END, room);
-            SetHighColor(Rgb(245, 246, 248));
+            SetHighColor(c.muted ? Rgb(190, 194, 200) : Rgb(245, 246, 248));
             DrawString(name.String(), BPoint(strip.left + Themed(12),
                                              strip.top + Themed(11)));
+        }
+        // Muted badge on the strip's right corner.
+        if (c.muted && strip.Width() > Themed(30)) {
+            SetHighColor(Rgb(232, 120, 120));
+            DrawString("M", BPoint(strip.right - Themed(11),
+                                   strip.top + Themed(11)));
         }
     }
 
@@ -3382,23 +3894,34 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
                     std::min(x1, lane.right),         lane.bottom - Themed(3));
 
         rgb_color base = TrackColor(mc.colorIndex ? mc.colorIndex : t.colorIndex);
-        SetHighColor(Rgb((uint8)(base.red * 0.55f), (uint8)(base.green * 0.55f),
-                         (uint8)(base.blue * 0.55f)));
+        // A muted region (M2.5) draws desaturated, like a muted clip.
+        const float fillShade = mc.muted ? 0.30f : 0.55f;
+        SetHighColor(Rgb((uint8)(base.red * fillShade),
+                         (uint8)(base.green * fillShade),
+                         (uint8)(base.blue * fillShade)));
         FillRoundRect(block, Themed(5), Themed(5));
         // Name strip across the top.
         if (block.Height() > Themed(17) && block.Width() > Themed(10)) {
             BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
                         block.top + Themed(15));
-            SetHighColor(Rgb((uint8)(base.red * 0.32f), (uint8)(base.green * 0.32f),
-                             (uint8)(base.blue * 0.32f)));
+            const float stripShade = mc.muted ? 0.22f : 0.32f;
+            SetHighColor(Rgb((uint8)(base.red * stripShade),
+                             (uint8)(base.green * stripShade),
+                             (uint8)(base.blue * stripShade)));
             FillRect(strip);
             BString name(t.name.c_str());
-            const float room = strip.Width() - Themed(6);
+            const float room = strip.Width() - Themed(6)
+                             - (mc.muted ? Themed(14) : 0.0f);
             if (room > Themed(8)) {
                 TruncateString(&name, B_TRUNCATE_END, room);
-                SetHighColor(Rgb(240, 242, 245));
+                SetHighColor(mc.muted ? Rgb(186, 190, 196) : Rgb(240, 242, 245));
                 DrawString(name.String(), BPoint(strip.left + Themed(4),
                                                  strip.top + Themed(11)));
+            }
+            if (mc.muted && strip.Width() > Themed(30)) {   // mute badge
+                SetHighColor(Rgb(232, 120, 120));
+                DrawString("M", BPoint(strip.right - Themed(11),
+                                       strip.top + Themed(11)));
             }
         }
         // "T k/N" take badge on the active region of a loop-record group.
@@ -3484,7 +4007,8 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
 // column, from the column's min sample to its max. Reads a handful of peak
 // buckets per column (never scans the audio). No cache for this clip's source
 // -> just the flat filled block.
-void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
+void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update,
+                                const ClipFades& ef) {
     if (!fPeaks)
         return;
     auto it = fPeaks->find(c.sourcePath);
@@ -3528,8 +4052,16 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
             continue;
 
         Peak pk = pc.Range(s0 < 0 ? 0 : s0, s1);
-        const float yMax = mid - pk.max * half;   // max amplitude -> up
-        const float yMin = mid - pk.min * half;   // min amplitude -> down
+        // The envelope this column sounds at (M2.5): clip gain and the
+        // effective fades with their shapes — the SAME helper the engine and
+        // the exporter apply, so the drawn waveform is the level that plays
+        // rather than the raw source. A muted clip draws its envelope too
+        // (editing it is still possible), just in the muted wave colour.
+        const float env = c.gain * ClipFadeEnvelope(
+            tf0 - c.startFrame, c.lengthFrames, ef.fadeIn, ef.inShape,
+            ef.fadeOut, ef.outShape);
+        const float yMax = mid - pk.max * half * env;   // max amplitude -> up
+        const float yMin = mid - pk.min * half * env;   // min amplitude -> down
         pts[n++] = BPoint(x, yMin);
         pts[n++] = BPoint(x, yMax);
         if (n == kChunk * 2) {

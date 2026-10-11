@@ -18,6 +18,9 @@ namespace daw {
 
 constexpr uint32 kMsgRenameTrack  = 'rntk';   // int64 "track", string "name"
 constexpr uint32 kMsgRenameMarker = 'rnmk';   // int64 "track" = marker frame
+// Rename a clip (M2.5): int64 "track", int64 "aux" = the clip id, string
+// "name". Goes to the timeline, which owns the clip edits.
+constexpr uint32 kMsgRenameClip   = 'rncl';
 
 class RenameWindow : public BWindow {
 public:
