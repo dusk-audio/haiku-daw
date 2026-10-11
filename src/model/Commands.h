@@ -582,6 +582,79 @@ private:
     ClipId                fRightId = kInvalidClipId;
 };
 
+// Join the clicked clip with the NEXT clip on the same track when the two meet
+// -- adjacent or overlapping, the geometry SplitClipCommand leaves behind. The
+// left clip keeps its id, source and read offset and grows to cover the right
+// one's end; the interior fade-out is cleared (it was a seam, not a fade). This
+// is the Glue tool's whole behaviour.
+//
+// Do() refuses when there is no next clip, when the next one does not meet the
+// left one, when either belongs to a take group (comp takes are alternatives,
+// not halves) or when an inactive take is involved -- the user glued what they
+// can see.
+class JoinClipsCommand : public Command {
+public:
+    JoinClipsCommand(TrackId track, ClipId left)
+        : fTrack(track), fLeft(left) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Join Clips"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fLeft;
+    Frame   fOldLen       = 0;   // left clip's length before the join
+    Frame   fOldFadeOut   = 0;
+    Clip    fRight;              // the absorbed clip, saved for Undo()
+    bool    fHaveRight    = false;
+};
+
+// The MIDI-region twin of the above: the left region grows to the right one's
+// end and the right region's notes and events move into it, rebased by the
+// start delta (a note the right region held mid-way lands mid-way in the joined
+// one). Do() refuses on the same conditions.
+class JoinMidiClipsCommand : public Command {
+public:
+    JoinMidiClipsCommand(TrackId track, ClipId left)
+        : fTrack(track), fLeft(left) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Join MIDI Clips"; }
+
+private:
+    TrackId               fTrack;
+    ClipId                fLeft;
+    Frame                 fOldLen     = 0;
+    Frame                 fOldFadeOut = 0;
+    std::vector<MidiNote>      fOldNotes;   // left region's notes before the join
+    std::vector<MidiClipEvent> fOldEvents;
+    MidiClip              fRight;            // the absorbed region
+    bool                  fHaveRight  = false;
+};
+
+// Slip: move the audio inside a clip without moving the clip. The clip's
+// position, length and fades are untouched; `sourceOffset` moves by the delta,
+// so the material under the clip's window shifts. Clamped at 0 (there is no
+// audio before the file's start). Audio only -- a MIDI region has no source to
+// slip, its notes live in the region and are edited in the piano roll.
+class SlipClipCommand : public Command {
+public:
+    SlipClipCommand(TrackId track, ClipId clip, Frame newSourceOffset)
+        : fTrack(track), fClip(clip), fNewOffset(newSourceOffset) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Slip Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewOffset = 0;
+    Frame   fOldOffset = 0;
+};
+
 // Freeze or unfreeze a track. Freezing bakes the track's clips/notes through
 // its fader + effect chain into one rendered audio clip (supplied by the UI,
 // which does the offline render) and stashes the pre-freeze content on the

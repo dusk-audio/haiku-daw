@@ -65,7 +65,12 @@ public:
                   TempoMap tempo, double sampleRate, Frame playhead,
                   BMessenger apply);
 
-    void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
+    void SetPlayhead(Frame absFrame);   // M2.2: follows it into view
+    // Visible-span introspection for the functional tests, and the follow
+    // policy's own state (region-relative scroll in frames).
+    Frame  ScrollFrame() const { return fScrollFrame; }
+    Frame  VisibleSpan() const;   // frames the grid shows, right of the keyboard
+    double FramesPerPixel() const { return fFramesPerPixel; }
 
     // --- MIDI transforms ---------------------------------------------------
     // The transform runs here, on the snapshot, and the result is posted as one
@@ -158,10 +163,14 @@ private:
 
     double fFramesPerPixel = 128.0;
     Frame  fScrollFrame    = 0;
+    bool   fFollow         = true;  // M2.2: scroll to keep the playhead in view
     int    fTopPitch       = 96;   // highest pitch row at the top
     Frame  fPlayhead       = -1;   // absolute frames; <0 = hidden ("tapehead")
 
     void ZoomBy(double factor);    // horizontal zoom about the view
+    void ZoomAnchoredAt(double factor, float x);   // keeps x's frame in place
+    BPoint fHoverPos{ -1.0f, -1.0f };   // last pointer position (wheel anchor)
+    bool   fHoverSeen = false;
 
     enum class Drag { None, Move, Resize, Velocity, Marquee, Brush, Erase, Cc };
     Drag  fDrag = Drag::None;

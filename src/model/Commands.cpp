@@ -448,6 +448,129 @@ void SplitMidiClipCommand::Undo(Project& p) {
     }
 }
 
+// --- JoinClipsCommand / JoinMidiClipsCommand / SlipClipCommand ----------
+
+// The clip that follows `left` on the same track, when it MEETS it. Both clip
+// vectors are kept sorted by startFrame (Project::AddClip), so "the next one"
+// is the following element -- and a video-editor's glue means exactly that, not
+// "the next clip somewhere later on the track".
+namespace {
+// Shared preconditions for both joins. Returns the index of the left clip's
+// successor on success, -1 when the two do not meet (or must not be joined).
+template <typename Vec>
+int JoinableSuccessor(const Vec& v, ClipId left) {
+    if (v.size() < 2) return -1;
+    std::size_t i = 0;
+    for (; i < v.size(); i++)
+        if (v[i].id == left) break;
+    if (i + 1 >= v.size()) return -1;         // last clip: nothing to its right
+    const auto& a = v[i];
+    const auto& b = v[i + 1];
+    // Comp takes are alternatives, not halves; gluing one into another would
+    // leave a group member that is both. Refuse, as does an inactive take
+    // (the user acted on what is on screen, and that one is not).
+    if (a.takeGroup > 0 || b.takeGroup > 0) return -1;
+    if (!a.takeActive || !b.takeActive) return -1;
+    if (b.startFrame > a.startFrame + a.lengthFrames) return -1;   // a gap
+    return (int)i;
+}
+} // namespace
+
+bool JoinClipsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    const int i = JoinableSuccessor(t->clips, fLeft);
+    if (i < 0) return false;
+    Clip* c = &t->clips[(std::size_t)i];
+    const Clip right = t->clips[(std::size_t)i + 1];
+
+    fOldLen     = c->lengthFrames;
+    fOldFadeOut = c->fadeOutFrames;
+    fRight      = right;
+    fHaveRight  = true;
+    // The left clip already plays its source continuously, so growing it over
+    // the right one's span renders the two halves as the one clip they were
+    // before a split. The interior fade was a seam; drop it.
+    c->lengthFrames  = right.startFrame + right.lengthFrames - c->startFrame;
+    c->fadeOutFrames = 0;
+    return p.RemoveClip(fTrack, right.id);
+}
+
+void JoinClipsCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fLeft)) {
+        c->lengthFrames  = fOldLen;
+        c->fadeOutFrames = fOldFadeOut;
+    }
+    if (fHaveRight)
+        p.AddClip(fTrack, fRight);   // the id it had before, so references hold
+}
+
+bool JoinMidiClipsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    const int i = JoinableSuccessor(t->midiClips, fLeft);
+    if (i < 0) return false;
+    MidiClip* c = &t->midiClips[(std::size_t)i];
+    const MidiClip right = t->midiClips[(std::size_t)i + 1];
+
+    fOldLen     = c->lengthFrames;
+    fOldFadeOut = c->fadeOutFrames;
+    fOldNotes   = c->notes;
+    fOldEvents  = c->events;
+    fRight      = right;
+    fHaveRight  = true;
+
+    // The right region's content moves left by the start delta, so a note that
+    // sat 100 frames into it sits exactly the same distance after the joined
+    // region's start -- glue preserves what sounds, it does not move music.
+    const Frame delta = right.startFrame - c->startFrame;
+    for (const MidiNote& n : right.notes) {
+        MidiNote m = n;
+        m.startFrame += delta;
+        c->notes.push_back(m);
+    }
+    for (const MidiClipEvent& e : right.events) {
+        MidiClipEvent m = e;
+        m.startFrame += delta;
+        c->events.push_back(m);
+    }
+    c->lengthFrames  = right.startFrame + right.lengthFrames - c->startFrame;
+    c->fadeOutFrames = 0;
+    return p.RemoveMidiClip(fTrack, right.id);
+}
+
+void JoinMidiClipsCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (MidiClip* c = t->FindMidiClip(fLeft)) {
+        c->lengthFrames  = fOldLen;
+        c->fadeOutFrames = fOldFadeOut;
+        c->notes         = fOldNotes;
+        c->events        = fOldEvents;
+    }
+    if (fHaveRight)
+        p.AddMidiClip(fTrack, fRight);
+}
+
+bool SlipClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldOffset = c->sourceOffset;
+    c->sourceOffset = fNewOffset < 0 ? 0 : fNewOffset;
+    return true;
+}
+
+void SlipClipCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fClip))
+        c->sourceOffset = fOldOffset;
+}
+
 // --- MoveClipCommand --------------------------------------------------
 
 // Moving changes startFrame, which is the sort key. To preserve the

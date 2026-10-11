@@ -25,16 +25,40 @@ constexpr float kDesignHeaderWidth = 150.0f; // slim per-lane header
 constexpr float kDesignHdrMeterW   = 16.0f;  // per-track meter strip (right edge)
 constexpr float kDesignInspectorW  = 190.0f; // left inspector column
 constexpr float kDesignTransportH  = 36.0f;  // the transport strip
+// The arrange tool strip (M2.3), above the ruler: six tool buttons at the
+// piano roll's button pitch, then the snap field and the zoom pair.
+constexpr float kDesignToolbarHeight = 28.0f;
+// The strip's own width: what the timeline must be able to show without
+// clipping a button (MainWindow's minimum for the pane).
+constexpr float kDesignArrToolStripW = 288.0f;
 
 inline float RulerHeight()    { return Themed(kDesignRulerHeight); }
+inline float ToolbarHeight()  { return Themed(kDesignToolbarHeight); }
 inline float TrackHeight()    { return Themed(kDesignTrackHeight); }
 inline float TrackGap()       { return Themed(kDesignTrackGap); }
 inline float HeaderWidth()    { return Themed(kDesignHeaderWidth); }
 inline float HdrMeterW()      { return Themed(kDesignHdrMeterW); }
 inline float InspectorWidth() { return Themed(kDesignInspectorW); }
+inline float ArrToolStripWidth() { return Themed(kDesignArrToolStripW); }
+
+// Top of the arrange view's lane area: the tool strip, then the ruler. The
+// timeline's own ContentTop() and every test that computes a lane's y use this
+// one, so a click target and the drawn lane cannot disagree.
+inline float TimelineContentTop() { return ToolbarHeight() + RulerHeight(); }
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.
 constexpr double kDefaultFramesPerPixel = 512.0;
+
+// The modifier state for the event being handled. Mouse and key messages carry
+// "modifiers" (the input server adds it); a mouse WHEEL message does not, so the
+// live keyboard state is the fallback -- and a synthetic event from the
+// functional test can set the field to drive either path.
+inline uint32 EventModifiers(const BMessage* msg) {
+    int32 mods = 0;
+    if (msg && msg->FindInt32("modifiers", &mods) == B_OK)
+        return (uint32)mods;
+    return modifiers();
+}
 
 // TimelineView -> MainWindow: user clicked the ruler to move the playhead.
 constexpr uint32 kMsgSeek = 'seek';

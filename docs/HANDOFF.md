@@ -272,6 +272,33 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
   Recover? alert on the window thread and every locked check times out. Delete
   it before a run.
+- **A pipeline hides a failure: check the exit code yourself.** `sh scripts/vm.sh
+  build` and `test` used to end in `... | tail -3`, so a failed compile (or a
+  failing `ctest`) exited 0 and left the PREVIOUS binaries in place — a stale
+  binary run that looks green. The script now writes the build log, tails it and
+  `exit`s with the real status (fixed on `feature/arrange-feel`, 2026-10-10);
+  any other command you build from a pipeline in a script needs the same
+  treatment. `set -e` does not save you: the pipeline's status is its LAST
+  command's.
+- **A FAULTED run wedges the next one just as hard.** A thread that trips a
+  Haiku assertion (`debugger()`) raises the "has encountered an error" dialog,
+  and until it is answered every later run on that machine hangs — ctest
+  reports the run as `Signal 21`, which is `SIGKILLTHR`, i.e. the Terminate the
+  dialog sends, not the fault. Look at the screen
+  (`virsh -c qemu:///system screenshot haiku-beta6 /tmp/x.png`) and clear it
+  with `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp 'sendkey ret'`
+  (Terminate is the default button; `sendkey` is a keyboard event, not a
+  settings change — changing the debug server's settings is NOT allowed).
+  The fault itself is in the kernel's log: `sh scripts/vm.sh ssh 'grep -A 20
+  DEBUGGER /boot/system/var/log/syslog | tail -30'` prints the assertion and
+  the stack, which is far faster than bisecting.
+- **`debugger()` from the app means one of two shapes.** `BView`/`BLooper` call
+  `check_lock()`/`_CheckOwnerLockAndSwitchCurrent()` and assert when a view
+  method runs off the window lock ("Looper must be locked.") or on a view with
+  no owner ("View method requires owner and doesn't have one." — e.g. drawing
+  into a `BBitmap` built without `B_BITMAP_ACCEPTS_VIEWS`). Tests must hold the
+  window lock around every view call; a view that draws into a bitmap needs
+  `acceptsViews` and `Lock()` before `AddChild`.
 - **Green tests did not mean a working UI.** M1.3/M1.4 merged with the main
   window visibly broken and every check passing. `docs/UI_GUIDELINES.md` is
   the rule that came out of it.

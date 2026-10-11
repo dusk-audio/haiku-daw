@@ -334,6 +334,17 @@ add_executable(grid_tests tests/grid_tests.cpp)
 target_link_libraries(grid_tests PRIVATE daw_model)
 add_test(NAME grid_tests COMMAND grid_tests)
 
+# The arrange window's snap values (M2.3): the grid the menu offers, its labels
+# and the beat-space snap through the tempo map.
+add_executable(snapgrid_tests tests/snapgrid_tests.cpp)
+target_link_libraries(snapgrid_tests PRIVATE daw_model)
+add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
+
+# The arrange editing commands M2.1-2.3 add: Glue's two joins, the slip edit.
+add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
+target_link_libraries(arrange_cmd_tests PRIVATE daw_model)
+add_test(NAME arrange_cmd_tests COMMAND arrange_cmd_tests)
+
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
 add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)
