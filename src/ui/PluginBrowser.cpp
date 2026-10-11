@@ -11,10 +11,10 @@
 #include <ListView.h>
 #include <ScrollView.h>
 #include <StringItem.h>
+#include "widgets/DawStringItem.h"   // rows in the theme text colour
 #include "widgets/DawTextField.h"   // the kit (M1.3)
 
 #include <GroupLayout.h>
-#include <LayoutBuilder.h>
 
 #include <algorithm>
 #include <cctype>
@@ -54,18 +54,19 @@ const BuiltIn kBuiltIns[] = {
 } // namespace
 
 void PluginBrowserView::ApplyTheme() {
+    ThemedGroupView::ApplyTheme();   // the panel colour
     ApplyWellColors(fList);
     ApplyWellColors(fScroll);
 }
 
 PluginBrowserView::PluginBrowserView(TrackId track, BMessenger target)
-    : BGroupView("pluginbrowserview", B_VERTICAL, 0.0f), fTarget(target),
+    : ThemedGroupView("pluginbrowserview", B_VERTICAL, 0.0f), fTarget(target),
       fTrack(track) {
     // The field and the list, laid out the way the window used to place them:
     // inside a real window the group's own layout does the work, inside the
-    // dock the dock's. The window host hands this view the whole frame.
-    SetViewColor(ColHeader());
-    SetLowColor(ColHeader());
+    // dock the dock's. The window host hands this view the whole frame. The
+    // panel colour is the themed group's (taken at attach and on a mode
+    // switch); the ctor only builds.
     BGroupLayout* g = GroupLayout();
     g->SetInsets(8.0f, 8.0f, 8.0f, 8.0f);
     g->SetSpacing(6.0f);
@@ -106,6 +107,18 @@ PluginBrowserView::PluginBrowserView(TrackId track, BMessenger target)
     Rebuild();
 }
 
+void PluginBrowserView::AttachedToWindow() {
+    ThemedGroupView::AttachedToWindow();   // applies the theme (panel + wells)
+    // The filter and the list post to THIS view. Left alone they take the
+    // window as their target (BControl/BListView::AttachedToWindow set that),
+    // and neither the dock's MainWindow nor the PluginBrowser window handles
+    // 'pbfl'/'pbpk' -- typing and picking were dead in both (T2 review). Set
+    // after the base call: the base is what attaches the children, and the
+    // kit's own AttachedToWindow is what puts the window target there.
+    fFilter->SetTarget(this);
+    fList->SetTarget(this);
+}
+
 void PluginBrowserView::Rebuild() {
     fList->MakeEmpty();
     fShown.clear();
@@ -117,7 +130,7 @@ void PluginBrowserView::Rebuild() {
         if (!needle.empty() && e.search.find(needle) == std::string::npos)
             continue;
         fShown.push_back(e);
-        fList->AddItem(new BStringItem(e.label.c_str()));
+        fList->AddItem(new DawStringItem(e.label.c_str()));
     }
     if (!fShown.empty()) fList->Select(0);   // Enter works without a click
 }
@@ -171,6 +184,10 @@ PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
       fMain(main) {
     fView = new PluginBrowserView(track, target);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f).Add(fView).End();
+}
+
+void PluginBrowser::ApplyTheme() {
+    if (fView != nullptr) fView->ApplyTheme();   // the content is the window
 }
 
 void PluginBrowser::MessageReceived(BMessage* msg) {

@@ -75,6 +75,22 @@ void DawSegments::Draw(BRect) {
     }
 }
 
+// The page the control's own message promises: int32 "index", the segment that
+// is selected now. BControl::Invoke() would send the message as it was handed
+// in -- with "be:value" and nothing else -- so the window saw every click and
+// arrow key as "index 0" (default) and the page switch was unreachable by mouse
+// and keyboard alike (T2 review).
+status_t DawSegments::Invoke(BMessage* message) {
+    BMessage withIndex;
+    if (message == nullptr) message = Message();
+    if (message != nullptr) {
+        withIndex = *message;
+        withIndex.AddInt32("index", fSelected);
+        message = &withIndex;
+    }
+    return BControl::Invoke(message);
+}
+
 void DawSegments::MouseDown(BPoint where) {
     if (!IsEnabled()) return;
     const int hit = SegmentAt(where);
