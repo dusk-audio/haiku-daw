@@ -6,7 +6,11 @@
 // open window forward instead of stacking another (the mixer's pattern).
 #pragma once
 
+#include "Theme.h"   // ThemeAware (T1)
+
 #include <Window.h>
+
+class BTextView;
 
 #include <cstdint>
 
@@ -18,12 +22,19 @@ constexpr uint32 kMsgShortcutsActivate = 'ksac';
 // The view holding the text, by name, for the functional tests.
 constexpr const char* kShortcutsTextView = "shortcuts";
 
-class ShortcutsWindow : public BWindow {
+class ShortcutsWindow : public BWindow, public ThemeAware {
 public:
     // Sizes itself to the text (clamped to the screen) and shows.
     ShortcutsWindow();
 
     void MessageReceived(BMessage* msg) override;
+
+    // T1: the text view's colours are CACHED (a BTextView's runs carry their
+    // own colour), so a mode switch with the window open re-takes them here.
+    void ApplyTheme() override;
+
+private:
+    BTextView* fText = nullptr;
 };
 
 } // namespace daw
