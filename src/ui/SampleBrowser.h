@@ -4,17 +4,26 @@
 // shows each with its DAW:duration / DAW:bpm attributes, and double-click
 // imports the file into the timeline (posts kMsgBrowserImport to the main
 // window). A BPM field tags the selected file's DAW:bpm attribute so a library
-// can be built up. Haiku-only (Storage + Interface Kits).
+// can be built up.
+//
+// Two pieces since T2: `SampleBrowserView` is the content and `SampleBrowser`
+// is a window hosting it, so the dock can show the same view. The window used
+// absolute rectangles measured from its own bounds; the view is built with the
+// Layout Kit, which is what lets it live in a pane of any size.
+// Haiku-only (Storage + Interface Kits).
 #pragma once
 
 
 #include "Theme.h"   // ThemeAware + the well colours (T1)
+
+#include <GroupView.h>
 #include <Messenger.h>
 #include <Window.h>
 
 #include <string>
 #include <vector>
 
+class BControl;
 class BListView;
 class BScrollView;
 class BTextControl;
@@ -28,14 +37,20 @@ constexpr uint32 kMsgBrowserImport = 'bimp';
 // drop. Field: string "path".
 constexpr uint32 kMsgSampleDrag = 'bsdg';
 
-class SampleBrowser : public BWindow, public ThemeAware {
+class SampleBrowserView : public ThemedGroupView {
 public:
-    // The list is a stock BListView subclass: without this it keeps the
-    // system's list colour in Dark mode (T1).
+    explicit SampleBrowserView(BMessenger target);
+
+    // The panel colour AND the well colours: the view is a themed group (the
+    // mode's panel behind the controls, re-taken on a mode switch), and the
+    // list is a stock BListView, which keeps the system's list colour in Dark
+    // mode unless the theme's document colour is put on it (T1). Defined in
+    // the .cpp: the well views are incomplete types here.
     void ApplyTheme() override;
 
-public:
-    SampleBrowser(BRect frame, BMessenger target);
+    // The controls post to THIS view, not to whatever window hosts it (T2
+    // review), and the query runs once -- see the .cpp.
+    void AttachedToWindow() override;
 
     void MessageReceived(BMessage* msg) override;
 
@@ -44,11 +59,27 @@ private:
     std::string SelectedPath() const;
 
     BMessenger                fTarget;      // -> main window (import)
-    BListView*                fList;
+    BListView*                fList = nullptr;
     BScrollView*              fScroll = nullptr;
-    BTextControl*             fFilter;      // name filter
-    BTextControl*             fBpm;         // BPM to tag onto the selection
+    BTextControl*             fFilter = nullptr;   // name filter
+    BTextControl*             fBpm = nullptr;      // BPM to tag onto the selection
+    BControl*                 fSearch = nullptr;   // the two buttons, so their
+    BControl*                 fTag    = nullptr;   // messages can be re-targeted
     std::vector<std::string>  fPaths;       // parallel to list items
+    bool                      fQueried = false;   // the boot volume query has run
+};
+
+// The standalone window (File ▸ Sample Browser, View ▸ Sample Browser).
+class SampleBrowser : public BWindow, public ThemeAware {
+public:
+    SampleBrowser(BRect frame, BMessenger target);
+
+    // One of the app's own windows, not a stock one: ThemeStockWindow repaints
+    // the stock ones with stock colours, and the split lost this (T2 review).
+    void ApplyTheme() override;
+
+private:
+    SampleBrowserView* fView = nullptr;
 };
 
 } // namespace daw

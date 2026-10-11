@@ -53,6 +53,9 @@ namespace daw {
 
 class TimelineView;
 class InspectorView;
+class DawSegments;
+class SampleBrowserView;
+class PluginBrowserView;
 class PianoRollView;
 class MeterView;
 class DawButton;
@@ -79,6 +82,9 @@ constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
 // View > Dark Mode: flip the look between the user's own colours and the
 // DAW's dark palette (T1). Also what the functional test posts.
 constexpr uint32 MSG_THEME_MODE       = 'thmm';
+// The dock's segmented control -> the window (T2): int32 "index" is the page
+// to show (0 Editor, 1 Samples, 2 Plugins).
+constexpr uint32 MSG_DOCK_PAGE        = 'dkpg';
 // MainWindow -> itself, a moment after a file panel is shown: the panel builds
 // its views after Show() returns, so the themed colours go on a second time.
 constexpr uint32 MSG_THEME_STOCK      = 'thst';
@@ -121,6 +127,10 @@ public:
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
+    // For the functional tests: re-run the settings load, which a restart would
+    // do. The suite keeps ONE window for the whole run (closing it quits the
+    // app), so the restore path is otherwise unreachable from a test.
+    void ReloadSettings() { LoadSettings(); }
 
 private:
     // Feed one live event to every armed track whose route accepts it.
@@ -209,6 +219,29 @@ private:
     bool            fInspectorShown = true;
     void SetInspectorShown(bool shown);
     void SetDockShown(bool shown);
+    // The dock's pages (T2). The body holds ONE of them: the piano roll (or its
+    // hint), a sample browser, or the plugin browser. Switching shows the dock,
+    // so "add an effect" and "browse samples" land where the content is.
+    void SetDockPage(int page);
+    void PopOutDockPage();   // the showing page becomes its own window
+    // The effects window is single-instance (T2): this shows and activates the
+    // one that exists, retargeted at `track`/`focusSlot`, or creates it. Every
+    // "edit this chain" path goes through here so there is one window and one
+    // place that decides.
+    void ShowFxWindow(TrackId track, int focusSlot = -1);
+    enum { kDockEditor = 0, kDockSamples = 1, kDockPlugins = 2 };
+    // Show a browser page, pointed at `track` when it is a plugin browser (the
+    // chain a choice will be added to). kInvalidTrackId leaves it as it is.
+    void ShowDockBrowser(int page, TrackId track = kInvalidTrackId);
+    int              fDockPage     = kDockEditor;
+    DawSegments*     fDockSegments = nullptr;
+    SampleBrowserView* fDockSamples = nullptr;
+    PluginBrowserView* fDockPlugins = nullptr;
+    // The track the inspector is pointed at: the plugin page adds to it, so it
+    // follows the selection like the inspector does — through the same call,
+    // so the two cannot drift apart (T2 review).
+    TrackId          fSelTrack     = kInvalidTrackId;
+    void SelectTrack(TrackId tid);   // inspector + the plugin page follow
     void OpenDockedEditor(TrackId track, ClipId clip);
     void ClearDockedEditor();                // back to the empty hint
     void ShowReplacedProject(Frame playhead);   // after Open / New

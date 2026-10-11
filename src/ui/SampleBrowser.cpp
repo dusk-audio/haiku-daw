@@ -8,8 +8,11 @@
 #include <ListView.h>
 #include <Path.h>
 #include <Query.h>
+#include <GroupLayout.h>
+#include <LayoutBuilder.h>
 #include <ScrollView.h>
 #include <StringItem.h>
+#include "widgets/DawStringItem.h"   // rows in the theme's text colour
 #include "widgets/DawTextField.h"
 #include <Volume.h>
 #include <VolumeRoster.h>
@@ -30,8 +33,8 @@ enum {
 // to the browser's parallel path vector so the drag message holds the file path.
 class DragListView : public BListView {
 public:
-    DragListView(BRect f, const char* n, list_view_type t, uint32 mode)
-        : BListView(f, n, t, mode) {}
+    DragListView(const char* n, list_view_type t)
+        : BListView(n, t) {}
     const std::vector<std::string>* fPaths = nullptr;
     bool InitiateDrag(BPoint, int32 index, bool) override {
         if (!fPaths || index < 0 || index >= (int)fPaths->size()) return false;
@@ -50,57 +53,82 @@ static bool IsAudioPath(const char* p) {
         || strcasecmp(dot, ".aiff") == 0;
 }
 
-void SampleBrowser::ApplyTheme() {
+void SampleBrowserView::ApplyTheme() {
+    ThemedGroupView::ApplyTheme();   // the panel colour
     ApplyWellColors(fList);
     ApplyWellColors(fScroll);
 }
 
-SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
-    : BWindow(frame, "Sample Browser", B_TITLED_WINDOW,
-              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
-      fTarget(target) {
-    BView* root = new ThemedView(Bounds(), "root", B_FOLLOW_ALL_SIDES,
-                                 B_WILL_DRAW);
-    AddChild(root);
+SampleBrowserView::SampleBrowserView(BMessenger target)
+    : ThemedGroupView("samplebrowserview", B_VERTICAL, 0.0f), fTarget(target) {
+    // The panel colour is the themed group's (taken at attach and on a mode
+    // switch); the ctor only builds.
+    BGroupLayout* g = GroupLayout();
+    g->SetInsets(8.0f, 8.0f, 8.0f, 8.0f);
+    g->SetSpacing(6.0f);
 
-    const float w = Bounds().Width();
-    fFilter = new DawTextField(BRect(8, 8, w - 96, 30), "filter", "Find:",
-                               "", new BMessage(MSG_SEARCH));
+    fFilter = new DawTextField("filter", "Find:", "", new BMessage(MSG_SEARCH));
     fFilter->SetDivider(36.0f);
-    root->AddChild(fFilter);
-    DawButton* search = new DawButton(BRect(w - 88, 6, w - 8, 30), "search",
-                                  "Search", new BMessage(MSG_SEARCH));
-    root->AddChild(search);
+    fFilter->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, Themed(24.0f)));
+    fSearch = new DawButton("search", "Search", new BMessage(MSG_SEARCH));
+    fSearch->SetExplicitMaxSize(BSize(Themed(90.0f), Themed(24.0f)));
+    {
+        BGroupView* row = new BGroupView(B_HORIZONTAL, 6.0f);
+        row->GroupLayout()->AddView(fFilter, 1.0f);
+        row->GroupLayout()->AddView(fSearch, 0.0f);
+        g->AddView(row);
+    }
 
-    BRect lr(8, 38, w - 8 - B_V_SCROLL_BAR_WIDTH, Bounds().Height() - 40);
-    DragListView* dlv = new DragListView(lr, "list", B_SINGLE_SELECTION_LIST,
-                                         B_FOLLOW_ALL_SIDES);
-    dlv->fPaths = &fPaths;   // stable member; drag rows carry their path
-    fList = dlv;
+    DragListView* list = new DragListView("list", B_SINGLE_SELECTION_LIST);
+    list->fPaths = &fPaths;   // stable member; drag rows carry their path
+    fList = list;
     fList->SetInvocationMessage(new BMessage(MSG_PICK));
-    fScroll = new BScrollView("sv", fList, B_FOLLOW_ALL_SIDES, 0, false, true);
-    root->AddChild(fScroll);
-    ApplyTheme();   // the list is a well: the theme's colour, not the stock one
+    fScroll = new BScrollView("sv", fList, 0, false, true);
+    g->AddView(fScroll, 1.0f);
 
-    const float by = Bounds().Height() - 34;
-    fBpm = new DawTextField(BRect(8, by, 150, by + 22), "bpm", "BPM:", "",
-                            new BMessage(MSG_TAGBPM));
+    fBpm = new DawTextField("bpm", "BPM:", "", new BMessage(MSG_TAGBPM));
     fBpm->SetDivider(34.0f);
-    root->AddChild(fBpm);
-    DawButton* tag = new DawButton(BRect(158, by - 2, 260, by + 22), "tag",
-                               "Tag BPM", new BMessage(MSG_TAGBPM));
-    root->AddChild(tag);
-
-    RunQuery();
+    fBpm->SetExplicitMaxSize(BSize(Themed(150.0f), Themed(24.0f)));
+    fTag = new DawButton("tag", "Tag BPM", new BMessage(MSG_TAGBPM));
+    fTag->SetExplicitMaxSize(BSize(Themed(110.0f), Themed(24.0f)));
+    {
+        BGroupView* row = new BGroupView(B_HORIZONTAL, 6.0f);
+        row->GroupLayout()->AddView(fBpm, 0.0f);
+        row->GroupLayout()->AddView(fTag, 0.0f);
+        row->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
+        g->AddView(row);
+    }
 }
 
-std::string SampleBrowser::SelectedPath() const {
+void SampleBrowserView::AttachedToWindow() {
+    ThemedGroupView::AttachedToWindow();   // applies the theme (panel + wells)
+    // The field, the buttons and the list post to THIS view. Left alone they
+    // fall back to the window (BControl/BListView::AttachedToWindow set that
+    // target), and neither the dock's MainWindow nor the browser window
+    // handles 'srch'/'pick'/'tbpm': every one of them was dead (T2 review).
+    // Set after the base call: the base is what attaches the children, and the
+    // kit's own AttachedToWindow is what puts the window target there.
+    fFilter->SetTarget(this);
+    if (fSearch != nullptr) fSearch->SetTarget(this);
+    fList->SetTarget(this);
+    if (fBpm != nullptr) fBpm->SetTarget(this);
+    if (fTag != nullptr) fTag->SetTarget(this);
+    // The query runs ONCE, on the first showing -- not "while the list is
+    // empty", which is also the state a filter that matches nothing leaves
+    // behind: the page is re-attached on every page switch, so that test ran
+    // the whole boot-volume query again on MainWindow's looper each time (T2
+    // review).
+    if (!fQueried) RunQuery();
+}
+
+std::string SampleBrowserView::SelectedPath() const {
     const int32 sel = fList->CurrentSelection();
     if (sel < 0 || sel >= (int32)fPaths.size()) return std::string();
     return fPaths[(size_t)sel];
 }
 
-void SampleBrowser::RunQuery() {
+void SampleBrowserView::RunQuery() {
+    fQueried = true;   // even when it finds nothing: see AttachedToWindow
     fList->MakeEmpty();
     fPaths.clear();
 
@@ -135,13 +163,13 @@ void SampleBrowser::RunQuery() {
                           leaf, dur, bpm);
         else
             std::snprintf(line, sizeof(line), "%s   [%.1fs]", leaf, dur);
-        fList->AddItem(new BStringItem(line));
+        fList->AddItem(new DawStringItem(line));
         fPaths.push_back(p.Path());
         count++;
     }
 }
 
-void SampleBrowser::MessageReceived(BMessage* msg) {
+void SampleBrowserView::MessageReceived(BMessage* msg) {
     switch (msg->what) {
         case MSG_SEARCH:
             RunQuery();
@@ -168,8 +196,21 @@ void SampleBrowser::MessageReceived(BMessage* msg) {
             break;
         }
         default:
-            BWindow::MessageReceived(msg);
+            BGroupView::MessageReceived(msg);
     }
+}
+
+// --- the standalone window -------------------------------------------------
+
+SampleBrowser::SampleBrowser(BRect frame, BMessenger target)
+    : BWindow(frame, "Sample Browser", B_TITLED_WINDOW,
+              B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS) {
+    fView = new SampleBrowserView(target);
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f).Add(fView).End();
+}
+
+void SampleBrowser::ApplyTheme() {
+    if (fView != nullptr) fView->ApplyTheme();   // the content is the window
 }
 
 } // namespace daw

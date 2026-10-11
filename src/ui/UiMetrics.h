@@ -96,6 +96,13 @@ constexpr uint32 kMsgCycleAuto = 'caut';
 // int64 "track", int64 "clip".
 constexpr uint32 kMsgOpenEditor = 'oped';
 
+// Any view -> MainWindow: show the (single) effects window on a track's chain
+// (T2). Fields: int64 "track" (the master chain for the master sentinel),
+// int32 "focus" (insert index, or -1 for the whole chain). It lives here, with
+// the other cross-view messages, because the inspector and the channel strip
+// send it and neither includes MainWindow.h.
+constexpr uint32 kMsgShowFx = 'shfx';
+
 // TimelineView -> MainWindow: a clip/region edit (move/resize/fade/gain/split)
 // committed; rebuild the running engine at the playhead so it takes effect live
 // (clip fades, positions, etc. are otherwise only read at Load).

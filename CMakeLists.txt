@@ -521,6 +521,7 @@ if(HAIKU)
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp
+        src/ui/widgets/DawSegments.cpp
         src/storage/BfsAttr.cpp
         src/plugin/PluginHost.cpp
     )
