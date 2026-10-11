@@ -15,6 +15,7 @@
 #include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
+#include "../src/ui/RenameWindow.h"     // kMsgRenameClip (the Edit > Rename flow)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
@@ -39,6 +40,9 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <Menu.h>
+#include <MenuBar.h>
+#include <MenuItem.h>
 #include <Directory.h>
 #include <Entry.h>
 #include <Messenger.h>
@@ -1863,12 +1867,26 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         CHECK(len == 48000);        // 170000 snapped to 168000, minus 120000
     }
 
-    // --- 6. Mute mutes the track (per-clip mute is M2.5's Clip.muted).
+    // --- 6. Mute mutes the BLOCK under the pointer (M2.5). The previous
+    // package's boundary note said the tool then muted the TRACK because that
+    // was the only mute the model had; clip depth gave clips and regions their
+    // own, and this is the tool's resolved meaning. The track's own M button
+    // stays the track mute (checked in the header section of the suite).
     std::printf("  arrange: mute\n");
     sendKey("5");
     CHECK(WaitFor([&] { return readTool() == (int)TimelineView::Tool::Mute; }));
-    click(frameX(60000), laneMid);
-    CHECK(WaitFor([&] {
+    auto regionMuted = [&] {
+        bool muted = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Track* tr = project.FindTrack(t.id);
+            if (tr && !tr->midiClips.empty())
+                for (const MidiClip& c : tr->midiClips)
+                    if (c.startFrame == 48000) muted = c.muted;
+            win->Unlock();
+        }
+        return muted;
+    };
+    auto trackMuted = [&] {
         bool muted = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
             const Track* tr = project.FindTrack(t.id);
@@ -1876,17 +1894,12 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
             win->Unlock();
         }
         return muted;
-    }));
+    };
     click(frameX(60000), laneMid);
-    CHECK(WaitFor([&] {
-        bool muted = true;
-        if (win->LockWithTimeout(1000000) == B_OK) {
-            const Track* tr = project.FindTrack(t.id);
-            muted = tr && tr->muted;
-            win->Unlock();
-        }
-        return !muted;
-    }));
+    CHECK(WaitFor([&] { return regionMuted(); }));
+    CHECK(!trackMuted());          // the TRACK's mute is untouched
+    click(frameX(60000), laneMid);
+    CHECK(WaitFor([&] { return !regionMuted(); }));
 
     // --- 7. Fade sets the fade of the nearer edge, without the corner grip.
     std::printf("  arrange: fade\n");
@@ -2216,6 +2229,643 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
         win->Unlock();
         CHECK(nowOpen == dockWasOpen);   // left as it was found
     }
+}
+
+// ---------------------------------------------------------------------------
+// M2.4 (time-range selection and its edit operations) + M2.5 (clip depth).
+//
+// Everything here is driven through the real paths: the range by the same
+// mouse messages a pointer sends, the Edit menu by the messages its items
+// post, the clip-depth actions by the methods the context menu runs, and the
+// child-window Cmd-Z by a key message to that window's looper.
+static void TestArrangeDepth(MainWindow* win, Project& project,
+                             CommandStack* stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_arrange_depth\n");
+
+    // Fixture: one audio track with a 1-second clip and one MIDI track with a
+    // region, both starting at 48000 (beat 2 at 120 BPM / 48k).
+    const char* kWav = "/tmp/haiku_daw_ui_depth.wav";
+    {
+        std::remove(kWav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 2500, -2500 };
+        CHECK(w.Open(kWav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+    }
+    Track ta;
+    ta.id = project.NextTrackId();
+    ta.type = TrackType::Audio;
+    ta.name = "depth";
+    Clip ac;
+    ac.id = project.NextClipId();
+    ac.startFrame = 48000;
+    ac.lengthFrames = 48000;
+    ac.sourcePath = kWav;
+    ta.clips.push_back(ac);
+    CHECK(LockedAddTrack(win, project, ta));
+
+    Track tm;
+    tm.id = project.NextTrackId();
+    tm.type = TrackType::Midi;
+    tm.name = "depth-midi";
+    MidiClip mc;
+    mc.id = project.NextClipId();
+    mc.startFrame = 48000;
+    mc.lengthFrames = 48000;
+    mc.notes.push_back({ 60, 100, 0, 1000 });
+    tm.midiClips.push_back(mc);
+    CHECK(LockedAddTrack(win, project, tm));
+
+    TimelineView* tv = nullptr;
+    int laneIdx = -1, laneIdxMidi = -1;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
+        laneIdx = project.IndexOfTrack(ta.id);
+        laneIdxMidi = project.IndexOfTrack(tm.id);
+        win->Unlock();
+    }
+    CHECK(tv != nullptr);
+    if (!tv) return;
+
+    auto click = [&](float x, float y) {
+        BPoint screen(x, y);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(BPoint(x, y));
+            win->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 1);
+            m.AddPoint("where", BPoint(x, y));
+            m.AddPoint("screen_where", screen);
+            BMessenger(tv).SendMessage(&m);
+        }
+    };
+    auto postMouse = [&](uint32 what, BPoint at, uint32 mods = 0) {
+        BPoint screen = at;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(at);
+            win->Unlock();
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+        m.AddInt32("clicks", 1);
+        m.AddInt32("modifiers", (int32)mods);
+        m.AddPoint("where", at);
+        m.AddPoint("screen_where", screen);
+        BMessenger(tv).SendMessage(&m);
+    };
+    auto sendKey = [&](const char* bytes) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    };
+    auto frameX = [&](Frame f) {
+        float x = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            x = tv->FrameToX(f);
+            win->Unlock();
+        }
+        return x;
+    };
+    auto range = [&](Frame* a, Frame* b) {
+        bool has = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            has = tv->HasTimeRange();
+            *a = tv->RangeStart();
+            *b = tv->RangeEnd();
+            win->Unlock();
+        }
+        return has;
+    };
+    auto clipOf = [&](TrackId tid, ClipId cid) {
+        Clip c;
+        bool found = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* t = project.FindTrack(tid))
+                if (const Clip* p = t->FindClip(cid)) { c = *p; found = true; }
+            win->Unlock();
+        }
+        (void)found;
+        return c;
+    };
+    auto clips = [&](TrackId tid) {
+        std::size_t n = 0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* t = project.FindTrack(tid)) n = t->clips.size();
+            win->Unlock();
+        }
+        return n;
+    };
+    auto undoName = [&] {
+        std::string s;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            s = stack->UndoName();
+            win->Unlock();
+        }
+        return s;
+    };
+    // The Edit menu, by walking the bar (FindMenu exists only on BMenu).
+    auto editMenu = [&]() -> BMenu* {
+        BMenu* out = nullptr;
+        if (BMenuBar* mb = win->KeyMenuBar())
+            for (int32 i = 0; i < mb->CountItems(); i++)
+                if (BMenuItem* it = mb->ItemAt(i)) {
+                    const char* l = it->Label();
+                    if (l && std::strcmp(l, "Edit") == 0) out = it->Submenu();
+                }
+        return out;
+    };
+    auto editMenuLabel = [&](int index) {
+        std::string label;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenu* m = editMenu())
+                if (BMenuItem* it = m->ItemAt(index)) {
+                    const char* l = it->Label();
+                    label = l ? l : "";
+                }
+            win->Unlock();
+        }
+        return label;
+    };
+    auto editMenuEnabled = [&](int index) {
+        bool on = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenu* m = editMenu())
+                if (BMenuItem* it = m->ItemAt(index)) on = it->IsEnabled();
+            win->Unlock();
+        }
+        return on;
+    };
+
+    // Scroll the new tracks into view (they are the last two).
+    BMessage bottomWheel(B_MOUSE_WHEEL_CHANGED);
+    bottomWheel.AddFloat("be:wheel_delta_y", 100000.0f);
+    BMessenger(tv).SendMessage(&bottomWheel);
+    snooze(120000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv->ScrollToFrame(0);
+        win->Unlock();
+    }
+    snooze(120000);
+    float scrollY = 0.0f;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        scrollY = tv->ScrollY();
+        win->Unlock();
+    }
+    const float laneTopA = TimelineContentTop() - scrollY
+                         + (float)laneIdx * (TrackHeight() + TrackGap());
+    const float laneMidA = laneTopA + TrackHeight() * 0.7f;
+    const float laneTopM = TimelineContentTop() - scrollY
+                         + (float)laneIdxMidi * (TrackHeight() + TrackGap());
+    const float laneMidM = laneTopM + TrackHeight() * 0.7f;
+    CHECK(laneTopA >= TimelineContentTop());
+
+    // Focus the timeline with a full click on empty lane content, which also
+    // leaves the range and the selection empty.
+    click(frameX(200000), laneMidA);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus()) != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    // --- 1. A drag on empty lane content makes a time range ----------------
+    std::printf("  depth: range drag\n");
+    {
+        Frame a = -1, b = -1;
+        CHECK(!range(&a, &b));          // the focusing click left none
+        // The drag itself: press, move, release -- the pointer events a mouse
+        // sends, with the release far enough for the 4 px threshold.
+        const float x0 = frameX(60000), x1 = frameX(90000);
+        postMouse(B_MOUSE_DOWN, BPoint(x0, laneMidA));
+        postMouse(B_MOUSE_MOVED, BPoint(x1, laneMidA));
+        postMouse(B_MOUSE_UP, BPoint(x1, laneMidA));
+        CHECK(WaitFor([&] { return range(&a, &b); }));
+        // Snapped to the 1/16 grid (6000 frames at this tempo).
+        CHECK(a == 60000);
+        CHECK(b == 90000);
+        Shot("depth-range");
+        // ... and the ruler shows it too.
+        CHECK(WaitFor([&] { return true; }));
+    }
+
+    // --- 2. A bare click on empty content clears it again ------------------
+    {
+        click(frameX(200000), laneMidA);
+        CHECK(WaitFor([&] {
+            Frame a = -1, b = -1;
+            return !range(&a, &b);
+        }));
+    }
+
+    // --- 3. Alt-drag on the ruler sets the range from above ---------------
+    std::printf("  depth: range from the ruler\n");
+    {
+        const float yRuler = ToolbarHeight() + RulerHeight() * 0.5f;
+        postMouse(B_MOUSE_DOWN, BPoint(frameX(100000), yRuler), B_OPTION_KEY);
+        postMouse(B_MOUSE_MOVED, BPoint(frameX(130000), yRuler), B_OPTION_KEY);
+        postMouse(B_MOUSE_UP, BPoint(frameX(130000), yRuler), B_OPTION_KEY);
+        Frame a = -1, b = -1;
+        CHECK(WaitFor([&] { return range(&a, &b); }));
+        CHECK(a == 102000 && b == 132000);   // snapped to the 1/16 grid
+        Shot("depth-range-ruler");
+        click(frameX(200000), laneMidA);     // clear again for the next section
+        CHECK(WaitFor([&] { Frame a = -1, b = -1; return !range(&a, &b); }));
+    }
+
+    // --- 4. The Edit menu says what Undo will undo -------------------------
+    std::printf("  depth: edit menu labels\n");
+    {
+        // Index 0 = Undo, 1 = Redo in the Edit menu.
+        CHECK(editMenuLabel(0).rfind("Undo", 0) == 0);
+        // A model edit through the stack renames it, and the 2 Hz title poll
+        // is what picks it up (the timeline's own edits never message the
+        // window). Nudge is the cheapest edit to trigger here.
+        {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                tv->SelectAllClips();     // selects both fixture blocks
+                win->Unlock();
+            }
+        }
+        sendKey(".");
+        CHECK(WaitFor([&] { return undoName() == "Nudge Right"; }, 5000000));
+        CHECK(WaitFor([&] { return editMenuLabel(0) == "Undo Nudge Right"; },
+                      5000000));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return editMenuLabel(0) != "Undo Nudge Right"; }));
+        Shot("depth-edit-menu");
+    }
+
+    // --- 5. Range copy -> paste at the playhead ---------------------------
+    std::printf("  depth: copy and paste\n");
+    {
+        // Range over the first half of the audio clip.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTimeRange(48000, 72000);
+            win->Unlock();
+        }
+        win->PostMessage(MSG_EDIT_COPY);
+        CHECK(WaitFor([&] {
+            bool ok = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ok = tv->ClipboardCount() == 2;   // the clip half + the region half
+                win->Unlock();
+            }
+            return ok;
+        }));
+        const std::size_t before = clips(ta.id);
+        {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                project.transport.playhead = 300000;
+                win->Unlock();
+            }
+        }
+        win->PostMessage(MSG_EDIT_PASTE);
+        CHECK(WaitFor([&] { return clips(ta.id) == before + 1; }));
+        {
+            const Clip* pasted = nullptr;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(ta.id))
+                    for (const Clip& c : t->clips)
+                        if (c.startFrame == 300000) pasted = &c;
+                win->Unlock();
+            }
+            CHECK(pasted != nullptr);
+            if (pasted) {
+                CHECK(pasted->lengthFrames == 24000);   // the range's length
+                CHECK(pasted->sourceOffset == 0);       // from the clip's start
+                CHECK(pasted->id != ac.id);
+            }
+        }
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clips(ta.id) == before; }));
+    }
+
+    // --- 6. Range delete trims/splits what it covers, and undoes ----------
+    std::printf("  depth: range delete\n");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTimeRange(60000, 72000);   // strictly inside the clip
+            win->Unlock();
+        }
+        win->PostMessage(MSG_EDIT_DELETE);
+        CHECK(WaitFor([&] {
+            const Clip c = clipOf(ta.id, ac.id);
+            return c.startFrame == 72000 && c.lengthFrames == 24000;
+        }));
+        CHECK(clipOf(ta.id, ac.id).sourceOffset == 24000);
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] {
+            const Clip c = clipOf(ta.id, ac.id);
+            return c.startFrame == 48000 && c.lengthFrames == 48000
+                && c.sourceOffset == 0;
+        }));
+    }
+
+    // --- 7. Insert Silence ripples everything from the range start --------
+    std::printf("  depth: insert silence\n");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTimeRange(60000, 72000);   // range length 12000
+            win->Unlock();
+        }
+        win->PostMessage(MSG_EDIT_INSERT_SIL);
+        // The clip started before the point: it splits, and the right half
+        // (60000..96000, 36000 long) lands 12000 further right.
+        CHECK(WaitFor([&] { return clips(ta.id) == 2; }));
+        {
+            const Clip left = clipOf(ta.id, ac.id);
+            CHECK(left.startFrame == 48000 && left.lengthFrames == 12000);
+            bool moved = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(ta.id))
+                    for (const Clip& c : t->clips)
+                        if (c.id != ac.id)
+                            moved = (c.startFrame == 84000
+                                     && c.lengthFrames == 36000
+                                     && c.sourceOffset == 12000);
+                win->Unlock();
+            }
+            CHECK(moved);
+        }
+        // A MIDI region that starts after the point moves whole.
+        {
+            bool regionMoved = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(tm.id))
+                    for (const MidiClip& c : t->midiClips)
+                        if (c.startFrame == 60000 && c.lengthFrames == 48000)
+                            regionMoved = true;
+                win->Unlock();
+            }
+            CHECK(regionMoved);
+        }
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clips(ta.id) == 1; }));
+        CHECK(clipOf(ta.id, ac.id).lengthFrames == 48000);
+    }
+
+    // --- 8. Select All, Duplicate, Esc ------------------------------------
+    std::printf("  depth: select all and duplicate\n");
+    {
+        win->PostMessage(MSG_EDIT_SELECT_ALL);
+        CHECK(WaitFor([&] {
+            bool ok = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ok = tv->SelectionCount() >= 2;
+                win->Unlock();
+            }
+            return ok;
+        }));
+        CHECK(editMenuEnabled(6));   // Duplicate lights up with a selection
+        const std::size_t before = clips(ta.id);
+        win->PostMessage(MSG_EDIT_DUPLICATE);
+        CHECK(WaitFor([&] { return clips(ta.id) == before + 1; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clips(ta.id) == before; }));
+        sendKey("\x1b");   // Esc: drop the selection
+        CHECK(WaitFor([&] {
+            bool ok = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ok = tv->SelectionCount() == 0;
+                win->Unlock();
+            }
+            return ok;
+        }));
+    }
+
+    // --- 9. The Mute tool mutes the block (M2.5) --------------------------
+    std::printf("  depth: clip mute\n");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTool(TimelineView::Tool::Mute);
+            win->Unlock();
+        }
+        const float x = frameX(60000);
+        click(x, laneMidA);
+        CHECK(WaitFor([&] {
+            const Clip c = clipOf(ta.id, ac.id);
+            return c.muted;
+        }));
+        // The track's own mute stays put (it is the header M button's).
+        {
+            bool trackMuted = true;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                const Track* t = project.FindTrack(ta.id);
+                trackMuted = t && t->muted;
+                win->Unlock();
+            }
+            CHECK(!trackMuted);
+        }
+        Shot("depth-clip-muted");
+        click(x, laneMidA);
+        CHECK(WaitFor([&] { return !clipOf(ta.id, ac.id).muted; }));
+        // The same tool mutes a MIDI region.
+        click(frameX(60000), laneMidM);
+        CHECK(WaitFor([&] {
+            bool muted = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(tm.id))
+                    if (const MidiClip* c = t->FindMidiClip(mc.id))
+                        muted = c->muted;
+                win->Unlock();
+            }
+            return muted;
+        }));
+        click(frameX(60000), laneMidM);
+        CHECK(WaitFor([&] {
+            bool muted = true;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (const Track* t = project.FindTrack(tm.id))
+                    if (const MidiClip* c = t->FindMidiClip(mc.id))
+                        muted = c->muted;
+                win->Unlock();
+            }
+            return !muted;
+        }));
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTool(TimelineView::Tool::Pointer);
+            win->Unlock();
+        }
+    }
+
+    // --- 10. Clip name (RenameWindow's own message) and colour ------------
+    std::printf("  depth: clip name and colour\n");
+    {
+        // RenameWindow's OK posts exactly this to the timeline.
+        BMessage rename(kMsgRenameClip);
+        rename.AddInt64("track", (int64)ta.id);
+        rename.AddInt64("aux", (int64)ac.id);
+        rename.AddString("name", "Verse");
+        BMessenger(tv).SendMessage(&rename);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name == "Verse"; }));
+        CHECK(undoName() == "Rename Clip");   // and it is one undo step
+        Shot("depth-clip-named");
+
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->NextClipColour(ta.id, ac.id);   // what the menu entry runs
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).colorIndex == 1; }));
+        Shot("depth-clip-colour");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).colorIndex == 0; }));
+    }
+
+    // --- 11. Fade shapes (M2.5) -------------------------------------------
+    std::printf("  depth: fade shapes\n");
+    {
+        // A fade the clip owns, then each shape through the menu's own method.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<SetClipFadeCommand>(
+                               ta.id, ac.id, 12000, 0), project);
+            tv->SetClipFadeShapeAt(ta.id, ac.id, FadeShape::SCurve);
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeShape
+                                   == FadeShape::SCurve; }));
+        Shot("depth-fade-scurve");
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetClipFadeShapeAt(ta.id, ac.id, FadeShape::EqualPower);
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeShape
+                                   == FadeShape::EqualPower; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeShape
+                                   == FadeShape::SCurve; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).fadeInFrames == 0; }));
+    }
+
+    // --- 12. Nudge with , and . by one grid step --------------------------
+    std::printf("  depth: nudge\n");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetSnapGrid({ SnapKind::Quarter, false });
+            tv->SelectAllClips();
+            win->Unlock();
+        }
+        Frame step = 0;
+        {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                step = SnapStep(project.tempoMap, 48000,
+                                { SnapKind::Quarter, false });
+                win->Unlock();
+            }
+        }
+        CHECK(step > 1);   // a real grid step, not a frame
+        const Frame beforeA = clipOf(ta.id, ac.id).startFrame;
+        sendKey(".");
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).startFrame == beforeA + step; }));
+        CHECK(undoName() == "Nudge Right");
+        sendKey(",");
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).startFrame == beforeA; }));
+        sendKey(".");
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).startFrame == beforeA + step; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).startFrame == beforeA; }));
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetSnapGrid({ SnapKind::Sixteenth, false });
+            win->Unlock();
+        }
+    }
+
+    // --- 13. Slip: Alt-drag the audio inside the clip ---------------------
+    std::printf("  depth: slip gesture\n");
+    {
+        // Deselect so the drag acts on the clip under the pointer alone.
+        sendKey("\x1b");
+        CHECK(WaitFor([&] {
+            bool ok = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ok = tv->SelectionCount() == 0;
+                win->Unlock();
+            }
+            return ok;
+        }));
+        const Frame offBefore = clipOf(ta.id, ac.id).sourceOffset;
+        const Frame startBefore = clipOf(ta.id, ac.id).startFrame;
+        const float x = frameX(60000);
+        postMouse(B_MOUSE_DOWN, BPoint(x, laneMidA), B_OPTION_KEY);
+        postMouse(B_MOUSE_MOVED, BPoint(x + 20.0f, laneMidA), B_OPTION_KEY);
+        postMouse(B_MOUSE_UP, BPoint(x + 20.0f, laneMidA), B_OPTION_KEY);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).sourceOffset > offBefore; }));
+        const Clip moved = clipOf(ta.id, ac.id);
+        CHECK(moved.startFrame == startBefore);      // the clip did not move
+        CHECK(moved.lengthFrames == 48000);          // ... nor change length
+        CHECK(undoName() == "Slip Clip");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).sourceOffset == offBefore; }));
+        // One more nudge back so the engine's view of the fixture is unchanged.
+    }
+
+    // --- 14. Cmd-Z reaches the undo stack from a child window -------------
+    std::printf("  depth: child window forwards Cmd-Z\n");
+    {
+        // A real edit to undo, made through the stack.
+        {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                stack->Execute(std::make_unique<SetClipNameCommand>(
+                                   ta.id, ac.id, "Child Undo"), project);
+                win->Unlock();
+            }
+        }
+        CHECK(clipOf(ta.id, ac.id).name == "Child Undo");
+
+        // Open the (single-instance) effects window — a child window that
+        // forwards Space, and now Cmd-Z — and send it a Cmd-Z key the way the
+        // input server delivers one.
+        const int before = VisibleWindows();
+        {
+            BMessage show(kMsgShowFx);
+            show.AddInt64("track", (int64)ta.id);
+            show.AddInt32("focus", -1);
+            win->PostMessage(&show);
+        }
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        BWindow* child = nullptr;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden() && w != win
+                && std::strcmp(WindowTitle(w), "Haiku DAW") != 0)
+                child = w;
+        }
+        CHECK(child != nullptr);
+        if (child) {
+            std::printf("  child window: '%s'\n", WindowTitle(child));
+            BMessage key(B_KEY_DOWN);
+            key.AddString("bytes", "z");
+            key.AddInt32("modifiers", B_COMMAND_KEY);
+            BMessenger(child).SendMessage(&key);
+            CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name != "Child Undo"; }));
+        }
+        // Close the child again.
+        if (child) {
+            child->Lock();
+            child->Quit();
+            child->Unlock();
+        }
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // Leave the window as the next test (the big-project one) expects: pointer
+    // tool, no range, no selection.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv->SetTool(TimelineView::Tool::Pointer);
+        tv->ClearTimeRange();
+        win->Unlock();
+    }
+    sendKey("\x1b");
+    snooze(150000);
 }
 
 // M1.3: the kit's controls are real BControls. A click lands on them the way
@@ -2950,6 +3600,7 @@ static int32 TestThread(void*) {
     TestKeyboardFocus(win, project);
     TestThemeScale(win, project);
     TestArrangeFeel(win, project);
+    TestArrangeDepth(win, project, &stack);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
     TestDockPages(win, project, &stack);
