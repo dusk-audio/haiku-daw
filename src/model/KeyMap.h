@@ -22,7 +22,7 @@
 // What is deliberately NOT in this table: the piano roll's editor-local keys
 // (1-7 pick a tool, q quantizes, Cmd-A selects all). They belong to that
 // editor's own window, which shows its toolbar; the arrange window's map is
-// what this table is.
+// what this table is -- including the arrange tool palette's own 1-6 (M2.3).
 #pragma once
 
 #include <cstddef>
@@ -81,11 +81,23 @@ enum class KeyAction {
     ZoomToFit,
     PageUp,
     PageDown,
+    MarkerLaneToggle,
+    // Tools (the arrange palette, M2.3)
+    ToolPointer,
+    ToolPencil,
+    ToolScissors,
+    ToolGlue,
+    ToolMute,
+    ToolFade,
+    GridMenu,
     // Editing
     DeleteSelection,
     DuplicateSelection,
     ClearSelection,
     DropMarker,
+    SplitAtPlayhead,
+    NudgeLeft,
+    NudgeRight,
 };
 
 // Who runs the binding. `Menu` rows are accelerators a BMenuItem owns (the
@@ -142,10 +154,29 @@ inline constexpr KeyBinding kKeyBindings[] = {
       "Page Up", "Scroll up a page", "View" },
     { kKeyPageDown, 0, 0, KeyAction::PageDown, KeyRoute::Dispatch,
       "Page Down", "Scroll down a page", "View" },
+    { 'm', 0, kModShift, KeyAction::MarkerLaneToggle, KeyRoute::Dispatch,
+      "Shift-M", "Show / hide the marker lane", "View" },
+
+    // --- tools (the arrange palette) ---
+    { '1', 0, 0, KeyAction::ToolPointer, KeyRoute::Dispatch,
+      "1", "Pointer", "Tools" },
+    { '2', 0, 0, KeyAction::ToolPencil, KeyRoute::Dispatch,
+      "2", "Pencil", "Tools" },
+    { '3', 0, 0, KeyAction::ToolScissors, KeyRoute::Dispatch,
+      "3", "Scissors", "Tools" },
+    { '4', 0, 0, KeyAction::ToolGlue, KeyRoute::Dispatch,
+      "4", "Glue", "Tools" },
+    { '5', 0, 0, KeyAction::ToolMute, KeyRoute::Dispatch,
+      "5", "Mute", "Tools" },
+    { '6', 0, 0, KeyAction::ToolFade, KeyRoute::Dispatch,
+      "6", "Fade", "Tools" },
+    { 'g', 0, 0, KeyAction::GridMenu, KeyRoute::Dispatch,
+      "G", "The snap grid menu", "Tools" },
 
     // --- editing ---
     { kKeyDelete, kKeyBackspace, 0, KeyAction::DeleteSelection,
-      KeyRoute::Dispatch, "Del", "Delete the selection", "Editing" },
+      KeyRoute::Dispatch, "Del", "Delete the selection or the time range",
+      "Editing" },
     // Ctrl-D arrives as the control character 0x04 (the keyboard's control
     // map), not as 'd' with the Control flag -- the old `case 'd'` never
     // fired, so Duplicate had no working key.
@@ -155,6 +186,12 @@ inline constexpr KeyBinding kKeyBindings[] = {
       "Esc", "Clear the selection", "Editing" },
     { 'm', 0, 0, KeyAction::DropMarker, KeyRoute::Dispatch,
       "M", "Drop a marker at the playhead", "Editing" },
+    { 's', 0, 0, KeyAction::SplitAtPlayhead, KeyRoute::Dispatch,
+      "S", "Split at the playhead", "Editing" },
+    { ',', '<', 0, KeyAction::NudgeLeft, KeyRoute::Dispatch,
+      ",", "Nudge the selection one grid step left", "Editing" },
+    { '.', '>', 0, KeyAction::NudgeRight, KeyRoute::Dispatch,
+      ".", "Nudge the selection one grid step right", "Editing" },
 
     // --- the menu bar's accelerators (documented, dispatched by BMenuItem) ---
     { 'n', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
@@ -173,8 +210,20 @@ inline constexpr KeyBinding kKeyBindings[] = {
       "Cmd-Z", "Undo (Edit)", "Menus" },
     { 'z', 0, kModCommand | kModShift, KeyAction::None, KeyRoute::Menu,
       "Cmd-Shift-Z", "Redo (Edit)", "Menus" },
+    { 'x', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
+      "Cmd-X", "Cut (Edit)", "Menus" },
+    { 'c', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
+      "Cmd-C", "Copy (Edit)", "Menus" },
     { 'v', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
       "Cmd-V", "Paste (Edit)", "Menus" },
+    { 'a', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
+      "Cmd-A", "Select all (Edit)", "Menus" },
+    { 'd', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
+      "Cmd-D", "Duplicate (Edit)", "Menus" },
+    { 'i', 0, kModCommand | kModShift, KeyAction::None, KeyRoute::Menu,
+      "Cmd-Shift-I", "Insert silence (Edit)", "Menus" },
+    { 'm', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
+      "Cmd-M", "Markers window (View)", "Menus" },
     { 'i', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
       "Cmd-I", "Show / hide the inspector (View)", "Menus" },
     { 'j', 0, kModCommand, KeyAction::None, KeyRoute::Menu,
@@ -211,9 +260,10 @@ inline const KeyBinding* FindKeyBindingExact(char key, uint32_t mods) {
 inline const KeyBinding* FindKeyBinding(char key, uint32_t modifiers) {
     const uint32_t m = modifiers & kModMask;
     if (const KeyBinding* b = FindKeyBindingExact(key, m)) return b;
-    // A key with no Shift binding of its own keeps the unshifted one: Shift-M
-    // still drops a marker and Shift-Left still pans, while Shift-L finds its
-    // own row in the exact pass and never falls through to plain L.
+    // A key with no Shift binding of its own keeps the unshifted one: Shift-Left
+    // still pans and Shift-, (the '<' byte) still nudges, while Shift-L and
+    // Shift-M find their own rows in the exact pass and never fall through to
+    // plain L or M.
     if (m & kModShift)
         return FindKeyBindingExact(key, m & ~kModShift);
     return nullptr;

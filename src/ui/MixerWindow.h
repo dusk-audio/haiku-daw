@@ -7,6 +7,8 @@
 // The main window pushes live per-track peaks via kMsgMixPeaks.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include <Messenger.h>
 #include <View.h>
 #include <Window.h>
@@ -86,7 +88,9 @@ constexpr uint32 kMsgMixFxAdd    = 'mxfa';   // open the plugin browser for it
 // instead of opening a second rack (M1.4).
 constexpr uint32 kMsgMixerActivate = 'mxac';
 
-class MixerStripsView : public BView {
+class MixerStripsView : public BView, public ThemeAware {
+public:
+    void ApplyTheme() override;   // T1: the cached lane colour
 public:
     MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips,
                     float masterGain, BMessenger apply);
@@ -102,6 +106,12 @@ public:
     // Replace the strip state from a refresh (ignored mid-drag so it doesn't
     // disrupt a fader/pan gesture).
     void SetStrips(std::vector<MixerStripInfo> strips, float masterGain);
+
+    // The strip state this rack is showing. Read by the functional test to
+    // prove a drag elsewhere (the timeline's header fader) has ALREADY reached
+    // it mid-gesture -- the rack's snapshot is the observable the inspector,
+    // which draws straight from the model, cannot offer.
+    const std::vector<MixerStripInfo>& Strips() const { return fStrips; }
 
 private:
     float StripX(int i) const;       // left x of strip i (i == count -> master)

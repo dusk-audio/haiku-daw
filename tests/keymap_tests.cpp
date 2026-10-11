@@ -149,6 +149,28 @@ int main() {
     kb = FindKeyBinding(kKeyEnd, kModControl);
     CHECK(kb != nullptr && kb->action == KeyAction::DuplicateSelection);
 
+    // --- the arrange keys M2 added, now rows of the same table -------------
+    kb = FindKeyBinding('1', 0);
+    CHECK(kb != nullptr && kb->action == KeyAction::ToolPointer);
+    kb = FindKeyBinding('6', 0);
+    CHECK(kb != nullptr && kb->action == KeyAction::ToolFade);
+    kb = FindKeyBinding('g', 0);
+    CHECK(kb != nullptr && kb->action == KeyAction::GridMenu);
+    kb = FindKeyBinding('s', 0);
+    CHECK(kb != nullptr && kb->action == KeyAction::SplitAtPlayhead);
+    kb = FindKeyBinding('s', kModCommand);   // Save stays the menu's
+    CHECK(kb != nullptr && kb->route == KeyRoute::Menu);
+    kb = FindKeyBinding(',', 0);
+    CHECK(kb != nullptr && kb->action == KeyAction::NudgeLeft);
+    kb = FindKeyBinding('<', kModShift);     // Shift-, arrives as '<'
+    CHECK(kb != nullptr && kb->action == KeyAction::NudgeLeft);
+    kb = FindKeyBinding('>', kModShift);
+    CHECK(kb != nullptr && kb->action == KeyAction::NudgeRight);
+    // Shift-M has a row of its own (the marker lane), so it no longer falls
+    // through to plain M.
+    kb = FindKeyBinding('M', kModShift);
+    CHECK(kb != nullptr && kb->action == KeyAction::MarkerLaneToggle);
+
     // Lock keys are ignored, other modifiers are not.
     kb = FindKeyBinding('r', 0x08u /* B_CAPS_LOCK */ | 0x20u /* B_NUM_LOCK */);
     CHECK(kb != nullptr && kb->action == KeyAction::RecordToggle);

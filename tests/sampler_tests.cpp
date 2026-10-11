@@ -11,6 +11,7 @@
 #include "../src/synth/SfzParser.h"
 #include "../src/engine/WavWriter.h"
 #include "../src/model/Project.h"   // full MidiNote (Sampler.h only forward-declares it)
+#include "../src/model/MidiExpression.h"
 
 #include <algorithm>
 #include <cmath>
@@ -567,6 +568,62 @@ int main() {
         CHECK(inst != nullptr);
         const auto out = RenderBlocks(inst, { Note(36, 100, 0, 100) }, 80000, 512);
         CHECK(Peak(out, 48100, 52000) > 0.0f);
+    }
+
+    // ---- expression: bend slides the read position -----------------------
+    // The sampler must treat a bend the way the Synth treats its phase: the
+    // note reads FURTHER into the sample, it is not retuned (which would step
+    // the position at every block seam and skip a one-shot's transient).
+    {
+        auto inst = Build(
+            "<region> sample=ramp.wav key=36 loop_mode=one_shot\n");
+        CHECK(inst != nullptr);
+
+        std::vector<MidiClipEvent> ev(1);
+        ev[0].type = MidiClipEvent::PitchBend;
+        ev[0].startFrame = 0;
+        ev[0].value = 16383;                     // ~+2 semitones, the whole note
+        const std::vector<BendPoint> tl = BuildBendTimeline(ev);
+        std::vector<MidiNote> notes = { Note(36, 100, 0, 4800) };
+        AnnotateBendPhase(notes, tl);
+        const double ratio = (double)BendRatio(16383);
+
+        Sampler s(inst, SR);
+        const size_t total = 24000;
+        std::vector<float> bent(total * 2, 0.0f);
+        std::vector<float> plain(total * 2, 0.0f);
+        {
+            std::vector<MidiNote> flat = notes;
+            flat[0].bendPhaseFrames = 0.0;
+            for (Frame off = 0; off < (Frame)total; off += 512) {
+                const size_t n = std::min<size_t>(512, total - (size_t)off);
+                s.Render(notes, bent.data() + (size_t)off * 2, n, off,
+                         StereoGain{1, 1}, StereoGain{1, 1},
+                         ExpressionAt(tl, ev, off, off + (Frame)n));
+                s.Render(flat, plain.data() + (size_t)off * 2, n, off, 1.0f);
+            }
+        }
+        // The ramp's value is its read position over the sample's length, and
+        // both renders carry the same envelope and gain, so their ratio IS the
+        // bend's.
+        double sum = 0.0; int cnt = 0;
+        for (Frame g = 2000; g < 4000; g++) {
+            const float p = plain[(size_t)g * 2];
+            if (std::fabs(p) < 1e-3f) continue;      // the ramp starts at 0
+            sum += (double)bent[(size_t)g * 2] / (double)p;
+            cnt++;
+        }
+        CHECK(cnt > 1500);
+        const double measured = cnt ? sum / cnt : 0.0;
+        if (std::fabs(measured - ratio) > 0.01)
+            std::printf("  measured ratio %.4f, expected %.4f\n", measured, ratio);
+        CHECK(std::fabs(measured - ratio) < 0.01);
+
+        // And the one-shot runs out sooner: it played its 24000 frames 12%
+        // faster. (The range is right of the bent voice's end and left of the
+        // unbent one's.)
+        CHECK(Peak(bent,  21600, 23000) == 0.0f);
+        CHECK(Peak(plain, 21600, 23000) > 0.0f);
     }
 
     std::system(("rm -rf '" + g_dir + "'").c_str());

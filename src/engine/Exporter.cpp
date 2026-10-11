@@ -1,7 +1,7 @@
 #include "Exporter.h"
 
 #include "WavSource.h"
-#include "WavWriter.h"
+#include "IAudioSink.h"
 #include "Resampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
@@ -14,6 +14,7 @@
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
 #include "../model/MidiControl.h"
+#include "../model/MidiExpression.h"
 #include "../model/Crossfade.h"
 
 #include <algorithm>
@@ -89,11 +90,13 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
 }
 
 // Place a decoded clip into a track buffer at its timeline position, applying
-// linear fade-in/out (both measured in output frames) and per-channel gain.
+// the effective fade-in/out (both measured in output frames, with the shape
+// each renders with — M2.5) and per-channel gain.
 void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
                int64_t totalOut, const float* gainLR,
                std::vector<float>& trackBuf,
-               Frame effFadeIn, Frame effFadeOut) {
+               Frame effFadeIn, Frame effFadeOut,
+               FadeShape fadeInShape, FadeShape fadeOutShape) {
     // A clip that starts before the window lands at a negative offset: the loop
     // below skips those frames (they are outside the bounce), which is exactly
     // what a range export wants from a clip straddling the range start.
@@ -122,15 +125,10 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
         if (dst < 0) continue;
         if (dst >= totalOut) break;
 
-        float env = 1.0f;
-        if (fadeIn > 0 && i < fadeIn)
-            env *= static_cast<float>(i) / static_cast<float>(fadeIn);
-        if (fadeOut > 0 && i >= lengthOut - fadeOut) {
-            const int64_t rem = lengthOut - i;   // frames until clip end
-            float f = static_cast<float>(rem) / static_cast<float>(fadeOut);
-            if (f < 0.0f) f = 0.0f;
-            if (f < env)  env = f;   // combine as min so overlapping fades behave
-        }
+        // The same envelope the live engine applies (ClipFadeEnvelope), so a
+        // bounce and playback agree on the curve as well as the length.
+        float env = ClipFadeEnvelope(
+            i, lengthOut, fadeIn, fadeInShape, fadeOut, fadeOutShape);
         env *= c.gain;   // per-clip gain, after the [0,1] fade envelope
 
         trackBuf[dst * 2 + 0] += decoded[i * 2 + 0] * gainLR[0] * env;
@@ -198,7 +196,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
         for (const Clip& c : t.clips)
             if (c.startFrame + c.lengthFrames > projEnd)
                 projEnd = c.startFrame + c.lengthFrames;
-        for (const MidiNote& n : t.CollectNotes())   // absolute-timeline notes
+        // Playback notes, so the CC64 pedal's tail is inside the bounce: a
+        // pedal-extended note sounds past the key-up the raw note records, and
+        // computing the end from the raw list would cut exactly that tail off.
+        for (const MidiNote& n : t.CollectPlaybackNotes())   // absolute-timeline
             if (n.startFrame + n.lengthFrames > projEnd)
                 projEnd = n.startFrame + n.lengthFrames;
     }
@@ -469,22 +470,34 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
                 if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
+                if (c.muted) continue;                           // per-clip mute
                 PlaceClip(c, scale, winStart, outRate, totalOut, kUnity,
-                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
+                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut,
+                          fades[ci].inShape, fades[ci].outShape);
             }
         } else if (audible && t.type == TrackType::Midi) {
             // One voice per track, built at the OUTPUT rate. The sampler is
             // stateless like the synth, so a bounce reproduces live playback
             // block for block even though the block size differs.
             std::unique_ptr<IInstrument> inst = MakeInstrument(t.instrument, outRate);
-            std::vector<MidiNote> notes = t.CollectNotes();
+            // Playback notes: the CC64 pedal is applied per region (Sustain.h),
+            // exactly as the live engine does, so a bounce matches playback.
+            std::vector<MidiNote> notes = t.CollectPlaybackNotes();
+            const std::vector<MidiClipEvent> events = t.CollectEvents();
+            // Bend is integrated, not retuned per note: digest the track's bend
+            // events once, then stamp each note with the phase its start owes.
+            // The notes below move into output frames, so the phase is scaled
+            // with them (a second of bend is a second of phase either way).
+            const std::vector<BendPoint> bend = BuildBendTimeline(events);
             // Into window-relative output frames. A note that starts before the
             // window keeps its (negative) offset so its tail still sounds — the
             // instrument renders the part of it that falls inside the window,
             // exactly as a straddling clip does above.
             for (MidiNote& n : notes) {
+                const Frame projStart = n.startFrame;
                 n.startFrame   = ToOut(n.startFrame - winStart, scale);
                 n.lengthFrames = ToOut(n.lengthFrames, scale);
+                n.bendPhaseFrames = BendPhaseAt(bend, projStart) * scale;
             }
             // Render in blocks so the CC7 (volume) x CC11 (expression) channel
             // gain and the CC10 pan are re-evaluated as they step. Events stay in
@@ -492,7 +505,6 @@ bool ExportWav(const Project& project, const std::string& outPath,
             // the block start (output frames) maps back via 1/scale. A small
             // block (~10 ms) keeps CC resolution close to the live engine's
             // per-buffer granularity, so a bounce steps like playback.
-            const std::vector<MidiClipEvent> events = t.CollectEvents();
             const int64_t kBlk = 512;
             // Previous block's end gains: each block ramps from them to its own
             // target so a stepped controller glides, matching the live engine.
@@ -508,7 +520,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (lastL < 0.0f) ? to
                                                        : StereoGain{lastL, lastR};
-                inst->Render(notes, nb + off * 2, (size_t)nn, off, from, to);
+                inst->Render(notes, nb + off * 2, (size_t)nn, off, from, to,
+                             ExpressionAt(bend, events, pf,
+                                          winStart + (Frame)((off + nn) / scale),
+                                          scale));
                 lastL = cgl; lastR = cgr;
             }
         }   // Bus: nb already holds the summed upstream (dry).
@@ -637,15 +652,34 @@ bool ExportWav(const Project& project, const std::string& outPath,
     run.Report(0.84f);
 
     // Write to a temporary and rename on success. A cancelled or failed export
-    // must not leave a partial WAV where a finished one is expected, and an
+    // must not leave a partial file where a finished one is expected, and an
     // existing file at `outPath` keeps its old contents until the new one is
     // complete (the writer used to truncate it at open).
+    //
+    // One sink per container, one code path for all of them: the WAV sink wraps
+    // WavWriter body for body, so existing bounces stay byte-identical.
     const std::string tmpPath = outPath + ".part";
-    WavWriter writer;
-    const bool floatOut = (bitDepth == 32);
-    if (!writer.OpenFormat(tmpPath, static_cast<int>(outRate + 0.5), 2,
-                           bitDepth, floatOut))
+    std::unique_ptr<IAudioSink> writer = MakeAudioSink(opts.format.container);
+    if (!writer) {
+        std::fprintf(stderr, "Exporter: this build cannot write %s\n",
+                     AudioFileFormatName(opts.format.container));
         return false;
+    }
+    SinkFormat sinkFmt;
+    sinkFmt.sampleRate = static_cast<int>(outRate + 0.5);
+    sinkFmt.channels   = 2;
+    sinkFmt.bitDepth   = bitDepth;
+    sinkFmt.floatFmt   = (bitDepth == 32);
+    sinkFmt.dither     = dither;   // already 16-bit only (see above)
+    sinkFmt.quality    = opts.format.vorbisQuality;
+    if (!writer->Open(tmpPath, sinkFmt)) {
+        // A codec that fails part-way through its own header write can still
+        // have created the temp. Nothing may be left behind -- the same rule
+        // the cancel and write-failure paths below follow.
+        writer->Close();
+        std::remove(tmpPath.c_str());
+        return false;
+    }
     // Chunked so progress is real progress and a cancel lands within a chunk.
     // The write is byte-identical to one big call: the dither PRNG lives in the
     // writer and continues across calls.
@@ -653,14 +687,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
     const int64_t framesTotal  = static_cast<int64_t>(nfloats / 2);
     for (int64_t f = 0; f < framesTotal; f += kChunkFrames) {
         if (run.Cancelled()) {
-            writer.Close();
+            writer->Close();
             std::remove(tmpPath.c_str());
             return false;
         }
         const int64_t cnt = std::min(kChunkFrames, framesTotal - f);
-        if (!writer.WriteFloat(outp + f * 2, static_cast<size_t>(cnt) * 2,
-                               dither)) {
-            writer.Close();
+        if (!writer->WriteFloat(outp + f * 2, static_cast<size_t>(cnt) * 2)) {
+            writer->Close();
             std::remove(tmpPath.c_str());
             return false;
         }
@@ -669,10 +702,11 @@ bool ExportWav(const Project& project, const std::string& outPath,
         run.Report(0.84f + 0.15f * (float)((double)(f + cnt)
             / (double)std::max<int64_t>(1, framesTotal)));
     }
-    if (!writer.Close()) {
+    if (!writer->Close()) {
         std::remove(tmpPath.c_str());
         return false;
     }
+    writer.reset();
     if (std::rename(tmpPath.c_str(), outPath.c_str()) != 0) {
         std::remove(tmpPath.c_str());
         return false;
@@ -724,7 +758,10 @@ int ExportStems(const Project& project, const std::string& dir, double outRate,
         if (Track* ct = copy.FindTrack(t.id)) ct->muted = false;
         char pre[8];
         std::snprintf(pre, sizeof(pre), "%02d_", idx);
-        const std::string path = dir + "/" + pre + SanitizeName(t.name) + ".wav";
+        // The container decides the extension, so a FLAC stems run does not
+        // leave files named ".wav" that no reader will touch.
+        const std::string path = dir + "/" + pre + SanitizeName(t.name) + "."
+            + AudioFileFormatExtension(opts.format.container);
 
         // Each stem reports 0..1 of itself; rescale that into this stem's band
         // of the whole job, and pass the cancel flag straight through.

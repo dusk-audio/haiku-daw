@@ -12,6 +12,8 @@
 
 #include "../dsp/MeterMath.h"
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include <View.h>
 
 namespace daw {
@@ -27,8 +29,10 @@ struct MeterReadings {
     bool  clipL = false, clipR = false;  // the engine saw a clip since the reset
 };
 
-class MeterView : public BView {
+class MeterView : public BView, public ThemeAware {
 public:
+    void ApplyTheme() override;   // T1: the cached panel colour
+
     explicit MeterView(BRect frame);
 
     void Draw(BRect updateRect) override;
