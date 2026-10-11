@@ -92,6 +92,25 @@ int main() {
     CHECK(FadeShapeFromInt(99) == FadeShape::Linear);
     CHECK(FadeShapeFromInt(FadeShapeToInt(FadeShape::SCurve)) == FadeShape::SCurve);
 
+    // ClipFadeEnvelope is the ONE envelope the engine, the exporter and the
+    // drawn waveform apply: outside the fades it is 1, inside a ramp it is the
+    // shape's gain at that position, and two overlapping ramps combine as the
+    // MIN (the engine's long-standing rule, which the exporter now shares).
+    {
+        const Frame len = 1000;
+        CHECK(ClipFadeEnvelope(500, len, 0, FadeShape::Linear,
+                               0, FadeShape::Linear) == 1.0f);
+        CHECK(ClipFadeEnvelope(250, len, 500, FadeShape::Linear,
+                               0, FadeShape::Linear) == 0.5f);
+        CHECK(ClipFadeEnvelope(750, len, 0, FadeShape::Linear,
+                               500, FadeShape::Linear) == 0.5f);
+        // Fade-in 800 and fade-out 800 overlap between 200 and 800: at 500 the
+        // ramps are 0.625 (in) and 0.625 (out) -> the min, not their product.
+        const float v = ClipFadeEnvelope(500, len, 800, FadeShape::Linear,
+                                         800, FadeShape::Linear);
+        CHECK(std::fabs(v - 0.625f) < 1e-5f);
+    }
+
     // --- SliceClipToRange: both edges, offset, fades -----------------------
     {
         Clip c;
