@@ -56,9 +56,14 @@ ShortcutsWindow::ShortcutsWindow()
 
     const BRect inner(pad, pad, pad + w - sbW - pad * 2.0f,
                       pad + Themed(100.0f));
+    // The runs' colour is the theme's text colour: a BTextView draws its text
+    // in the colour of its runs, not its high colour, and with none given it
+    // takes the system's document colour -- dark text on the Dark well.
+    const rgb_color textCol = ColText();
     BTextView* tv = new BTextView(inner, kShortcutsTextView,
-                                  inner.OffsetToCopy(0.0f, 0.0f), &font, nullptr,
+                                  inner.OffsetToCopy(0.0f, 0.0f), &font, &textCol,
                                   B_FOLLOW_ALL, B_WILL_DRAW);
+    fText = tv;
     tv->SetViewColor(ColLcd());
     tv->SetLowColor(ColLcd());
     tv->SetHighColor(ColText());
@@ -86,6 +91,17 @@ ShortcutsWindow::ShortcutsWindow()
         .Add(new BScrollView("scroll", tv, B_FOLLOW_ALL, 0, false, true))
         .End();
     CenterIn(sf);
+}
+
+void ShortcutsWindow::ApplyTheme() {
+    if (fText == nullptr) return;
+    const BFont font = ThemeFont();
+    const rgb_color textCol = ColText();
+    fText->SetViewColor(ColLcd());
+    fText->SetLowColor(ColLcd());
+    fText->SetHighColor(textCol);
+    fText->SetFontAndColor(0, fText->TextLength(), &font, B_FONT_ALL, &textCol);
+    fText->Invalidate();
 }
 
 void ShortcutsWindow::MessageReceived(BMessage* msg) {
