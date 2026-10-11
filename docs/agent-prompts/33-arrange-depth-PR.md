@@ -212,7 +212,7 @@ and run there; the counts are the run's own FAIL count from `/tmp/mut.log`.
 | `mute-track` — the Mute tool mutes the TRACK again (the pre-M2.5 body) | 4: the clip mute, the "track untouched" check, the unmute, the region mute |
 | `nudge-one-frame` — nudge by one frame instead of the grid step | 5: the nudge checks (baseline 4 in that run) |
 | `no-cmdz-forward` — `ForwardUndoRedo` returns false | 4 = the baseline 3 + the child-window Cmd-Z check (the only one that moved) |
-| `no-perstep-refresh` — the header fader/pan preview stops refreshing the panes | 4 in the first run — inconclusive, because that build still carried the check's first (non-polling) version, whose own baseline was 4 and which failed on a CORRECT build twice under load. The check was then rewritten to poll with the mouse button held (`5533e9a`), passes on the correct build (the green 0-failure run and the no-cmdz-forward run), and the re-run with the mutation was queued as the last cycle |
+| `no-perstep-refresh` — the header fader/pan preview stops refreshing the panes | **1 — exactly `midLive`, the mid-drag check, on a 411-check run with everything else green** (the first attempt was inconclusive: that build still carried the check's first, non-polling version, whose own baseline was 4 and which failed twice on CORRECT builds under load; rewritten to poll with the mouse button held in `5533e9a`) |
 
 ### The P1 Marc reported: a header fader drag was dead in the other panes
 
@@ -251,8 +251,12 @@ holds a pushed snapshot (`kMsgMixStrips`) that only a refresh updates.
 | VM `build` — `ctest -E ui_functional_tests` | 60/60 |
 | VM `build-off` — `ctest -E ui_functional_tests` | 55/55 |
 | VM `ui_functional_tests`, System mode (`/tmp/ui-final.log`, settings cleared) | 411 checks, **0 failures** |
-| VM `ui_functional_tests`, `DAW_UI_THEME=light` (with shots) | queued behind another agent's VM hold; the shots I reviewed are the light pass listed under Screenshots |
-| VM `ui_functional_tests`, `DAW_UI_THEME=dark` (with shots) | same |
+| VM `ui_functional_tests`, `DAW_UI_THEME=light` (with shots) | **411 checks, 0 failures** |
+| VM `ui_functional_tests`, `DAW_UI_THEME=dark` (with shots) | **411 checks, 0 failures** |
+
+All three UI runs (System, light, dark) are 411/0 on the final revision; the
+`build`/`build-off` ctest numbers above were re-run on the same revision
+(`/tmp/ui-light.log`, `/tmp/ui-dark.log`, `/tmp/ui-final.log` on the VM).
 
 The UI suite is measured by its own run (its log is kept whole) rather than
 inside ctest, because its stdout is what localises a failure; the other 60/55
@@ -305,15 +309,12 @@ machine, not this branch's code.
 
 ## Screenshots
 
-The `DAW_UI_SHOTS` pass ran in **both** modes (`DAW_UI_THEME=light` and
-`DAW_UI_THEME=dark`; 47 shots each). They were taken from the revision before
-the P1 fix commit — whose diff is the per-pane refresh and the test's own
-polling check, neither of which touches what the timeline draws — and a
-re-shoot of the final revision was queued behind the shared VM lock, so the
-generated files are NOT committed here (an over-eager `rm` in my own cleanup
-removed the fetched set before they could be added; the re-shoot is the
-remedy, and its output goes to `/tmp/shots-33-fetch/<mode>/`). Shots I opened
-at full size (and zoomed on the clip strips and the range edges):
+The `DAW_UI_SHOTS` pass ran in **both** modes on the FINAL revision
+(`DAW_UI_THEME=light` and `DAW_UI_THEME=dark`; 47 shots each, both runs
+411/0). The shots of this package's change are committed in
+`docs/agent-prompts/shots-33/<mode>/` (7 per mode); the rest of each pass is
+the other packages' coverage and is not committed. Shots I opened at full
+size (and zoomed on the clip strips and the range edges):
 
 - `22-depth-range` (both modes) — the range band over the lanes with its solid
   edges and the bar + edges on the ruler, drawn over the clips and under the
