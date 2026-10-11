@@ -144,6 +144,10 @@ public:
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
+    // For the functional tests: re-run the settings load, which a restart would
+    // do. The suite keeps ONE window for the whole run (closing it quits the
+    // app), so the restore path is otherwise unreachable from a test.
+    void ReloadSettings() { LoadSettings(); }
 
 private:
     // Feed one live event to every armed track whose route accepts it.
@@ -264,8 +268,10 @@ private:
     SampleBrowserView* fDockSamples = nullptr;
     PluginBrowserView* fDockPlugins = nullptr;
     // The track the inspector is pointed at: the plugin page adds to it, so it
-    // follows the selection like the inspector does.
+    // follows the selection like the inspector does — through the same call,
+    // so the two cannot drift apart (T2 review).
     TrackId          fSelTrack     = kInvalidTrackId;
+    void SelectTrack(TrackId tid);   // inspector + the plugin page follow
     void OpenDockedEditor(TrackId track, ClipId clip);
     void ClearDockedEditor();                // back to the empty hint
     void ShowReplacedProject(Frame playhead);   // after Open / New

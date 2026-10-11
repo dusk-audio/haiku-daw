@@ -100,3 +100,234 @@ Mutation checks (each broken on purpose, seen to fail, restored):
   for T1 or be retargeted after it merges — say which you want.
 - Still a click list: the dock's pages with a real project, Pop out from each
   page, and a plugin with an internal state opened, retargeted and closed.
+
+---
+
+# T2 review follow-up (2026-10-10)
+
+A code review of this commit arrived with ten findings, explicitly unverified.
+All ten are real; each was checked against the code (Haiku's own kit sources are
+on the review machine, `/home/marc/haiku-cross/haiku/src/kits/`) and now has a
+functional check that fails without its fix. Three more defects fell out of
+driving the dock's controls for real and of looking at the dark-pass
+screenshots (the Space bar, the strip's title, the browsers' rows). Nothing was
+refuted — the notes below say how each one was confirmed, because "confirmed"
+has to mean something specific here.
+
+**Branches stacked on this one:** `feature/lv2-state` and `feature/arrange-feel`
+are based on this branch's older tip (`56dba14`). These review commits sit on
+top, so those two will need a rebase when this merges — left to Marc, and
+nothing here was rebased or force-pushed.
+
+## The ten, and what was wrong
+
+1. **The browser views' controls and lists posted to their WINDOW.** Confirmed
+   in the kit's source: `BControl::AttachedToWindow` and
+   `BListView::AttachedToWindow` both do `SetTarget(Window())` when no target is
+   set, and neither MainWindow nor the browser windows handle
+   `'srch'`/`'pick'`/`'tbpm'`/`'pbfl'`/`'pbpk'`. The old test posted `'pbpk'`
+   straight to the view, which proves nothing about the target — that is how a
+   browser whose filter, Search, Tag BPM and both picks were dead passed. Each
+   view now `SetTarget(this)` on its controls after the base
+   `AttachedToWindow` (the base is what attaches the children; the kit's own
+   attach is what had put the window target there).
+
+2. **`MSG_DOCK_PAGE` read an `"index"` nothing ever sent.** `BControl::Invoke`
+   adds `when`/`source`/`be:value`/`be:sender` and nothing else (Control.cpp),
+   so every click and arrow key reached the window as index 0 and
+   `SetDockPage(0)` showed the editor page: the page switch was unreachable by
+   mouse and keyboard alike. `DawSegments::Invoke` now adds the segment it
+   selected (the contract its own header documents), and the window *ignores* a
+   `MSG_DOCK_PAGE` without an `"index"` instead of guessing Editor.
+
+3. **`OpenDockedEditor` added the roll without removing the browser page.**
+   Confirmed by reading: `ClearDockedEditor` only takes the browser views out
+   when the page is already Editor, so with Samples showing the roll became a
+   second child of the body (they split the pane) while the strip still named
+   the browser. It goes through `SetDockPage(kDockEditor)` now.
+
+4. **`LoadSettings` restored the page number and the segment highlight but never
+   materialised the page.** Confirmed by reading; the state was reachable only
+   across a restart, which is why no test had it. The restore now goes through
+   `SetDockPage`, and `MainWindow::ReloadSettings()` (a test hook beside
+   `IsPlaying()`) lets the suite drive the restore with the dock hidden, the
+   page saved as Plugins.
+
+5. **`SetDockPage` ended with `SetDockShown(true)`**, so the track selection —
+   which re-points the plugin page — re-opened a dock the user had closed, every
+   time a track was clicked, and right after a restart with the page restored
+   while the dock was down. Showing is the callers' business now
+   (`ShowDockBrowser`, `OpenDockedEditor`); the check is "a closed dock stays
+   closed while the mixer selects a track, and the strip re-titles itself".
+
+6. **`EffectsView::Retarget` dropped a pending wheel commit and an in-flight
+   drag.** Confirmed: the engine had already heard those values
+   (`kMsgFxLive` on every drag move and wheel notch), so the model — and the
+   saved project — stayed on the old value while the audio played the new one
+   until the next rebuild reverted it, exactly what `QuitRequested` flushes
+   against. `Retarget` now settles them onto the chain it is leaving before the
+   swap. (The spec of this package said "drag state and any pending debounced
+   commit are dropped"; the spec was wrong, and this is the note that says so.)
+
+7. **The theming regressed in the split.** Confirmed: `PluginBrowserView` lost
+   its attach-time theme entirely (a page created in Dark mode kept the system's
+   list colour until something else happened to walk the tree), both views
+   cached the constructor's panel colour and never re-took it on a mode switch,
+   and the two browser windows stopped being `ThemeAware`, so the walker treated
+   them as stock windows. The views derive from `ThemedGroupView` and re-take
+   the well colours in `ApplyTheme`; the windows are `ThemeAware` again.
+
+8. **`fSelTrack` did not follow the selection everywhere.** Confirmed: a mixer
+   strip click moved the inspector but not the page (so "add to X" and the
+   inspector disagreed), and File ▸ New/Open left the page on a track id from
+   the project that went away — which the new project may reuse. Both paths go
+   through the same `SelectTrack()` the timeline's own selection uses.
+
+9. **The boot-volume query ran on every re-attach whose list was empty.**
+   Confirmed by reading `AttachedToWindow`: the dock's page is re-attached on
+   every page switch, and a filter that matches nothing (or a volume with no
+   tagged samples) leaves the list empty, so the whole query re-ran on
+   MainWindow's looper each time. A "queried once" flag, set even when the
+   result is empty.
+
+10. **`ShowDockBrowser` did `SetDockPage`'s work twice** (two `SetTrack` calls,
+    view creation, `fDockPage`), leaving three places that set the page and the
+    track to drift apart. It is now: `fSelTrack` if this is the plugin page and
+    a track was named, then `SetDockPage`. Plus the duplicate
+    `<LayoutBuilder.h>` include and the mis-indented `s.bottomVisible` line —
+    both confirmed by reading.
+
+## Found while fixing: the page switch ate the Space bar
+
+Driving the segmented control for real exposed it: `DawSegments` is
+`B_NAVIGABLE` and takes the focus on a click, and a focused `BControl` eats
+Space in the kit's own `KeyDown` (`B_SPACE` toggles its value and invokes). So
+after clicking a page, Space re-sent the *same* page and the transport never
+started, however many times it was pressed. It showed up as the run's
+`big project playback` check failing at its 5 s wait — the transport simply
+never started, not a slow start (the baseline on the T2 tip is 3.5 s; with a
+focused page switch the transport never played at all).
+
+`MainWindow::DispatchMessage` now routes Space to the transport whatever control
+holds the focus, except a text field being typed into (the rule the aux windows
+already apply to their own spacebar passthrough). Arrows still belong to the
+focused control. The check: after a page click, Space plays and stops the
+transport.
+
+## Tests
+
+`TestDockPages` is rewritten to drive the REAL widgets instead of the ids they
+would post: a synthetic mouse-down on the segmented control (its own
+`SegmentRect` geometry, computed in the test), the sample browser's field
+`Invoke` (what Enter does) and its list `Invoke` (what a double-click does,
+after selecting the row the way the click before it would), the plugin page's
+filter and list the same way, a region opened over a browser page, a settings
+reload with the dock hidden and the page saved as Plugins, a theme flip with a
+page detached and the well colours asserted in both modes, **Pop out** from the
+samples page (the browser WINDOW — the split's other theming victim — gets a
+shot and is closed again), a closed dock staying closed while the mixer selects
+a track, and Space after a page click.
+
+`TestFxRetargetFlush` (new) opens the real effects window on an existing track
+with one Limiter, drags the first knob (a synthetic mouse-down and move; the
+panel's hit regions exist once it has drawn), retargets the window to another
+track mid-drag, and asserts the MODEL of the chain it left holds what the engine
+had already played, and that the one window's title now names the new track.
+
+The colour checks go through `CheckViewColor`, which prints both colours when
+they differ — a bare `==` in a `CHECK` says nothing about which side was wrong.
+
+## Verification
+
+| Check | Result |
+|---|---|
+| Host build (exit 0) + `ctest --test-dir build-host` | 53/53 |
+| ASan+UBSan `b-asan` | 53/53 |
+| `scripts/haiku_syntax_check.sh` | 0 FAIL (67 files) |
+| VM `build` ctest | 55/55 |
+| VM `build-off` ctest | 51/51 |
+| `ui_functional_tests`, System mode | **305 checks, 0 failures** (was 236) |
+| `ui_functional_tests`, light | **305 checks, 0 failures** |
+| `ui_functional_tests`, dark | **305 checks, 0 failures** |
+| Screenshot passes | 36 shots each, both modes, reviewed |
+
+Mutation checks (each broken on purpose in its own commit, built on the VM,
+seen to fail, restored — nothing is on the branch). Each run's checkout was
+verified before the run was accepted, because a sibling agent builds in the
+same checkout: two cycles that had been replaced by another tree's binary
+(a 411-check run that passed) were discarded and re-run.
+
+1. `DawSegments::Invoke` back to `BControl::Invoke` (no `"index"`): the page
+   switch never happens — `onPage(1)`, the samples/plugins content and the
+   panel-colour checks fail (14+ failures).
+2. The browsers' `SetTarget(this)` removed: 285 checks, **6 failures** — the
+   search never emptying the list, the search not finding the fixture, the pick
+   not importing, the plugin filter not narrowing, the plugin pick not reaching
+   the inspector.
+3. `OpenDockedEditor` adding the roll without the page switch: 285 checks,
+   **1 failure** — "the roll took the body" (`samplebrowserview == nullptr`).
+4. `SetDockShown(true)` back in `SetDockPage`: 285 checks, **1 failure** — 
+   `hidden` ("a closed dock stays closed"). (This mutation also left the dock
+   hidden when the test clicked a page next, and a click on a *detached*
+   `DawSegments` traps in `BView::ConvertToScreen` — the kit kills the team and
+   leaves a modal dialog that blocks the VM for later runs. The click now checks
+   that the control has a window and fails its check instead; that guard is the
+   `test(ui): a page click on a hidden dock fails instead of crashing` commit.)
+5. `Retarget` dropping the in-flight edit: 285 checks, **1 failure** —
+   `modelled == heard` (`TestFxRetargetFlush`).
+6. The browser views' attach-time `ApplyTheme` removed: 285 checks,
+   **4 failures** — the samples and plugins panel colours (216,216,216 where
+   the theme's colour was expected) and the re-attached samples panel and well
+   (un-themed white where the dark well was expected).
+7. The query flag back to "while the list is empty": **the first cut of this
+   check did NOT catch it.** The page was switched back with a filter that could
+   not match anything, so a re-query produced the same empty list and the run
+   passed (285 checks, 0 failures). The check was tightened — the filter now
+   *would* match the fixture written while the page was away, so a re-query
+   fills the list and the "still empty" check fails — and the mutation was re-run
+   against the fixed test: 293 checks, **2 failures** — `sampleRows() == 0`
+   (the no-re-query check) and the pick/import that follows it (the list state
+   the re-query left behind).
+8. The strip title's and hint's view colours not re-taken in `ApplyTheme`:
+   292 checks, **3 failures** — `edtitle is 222,222,222, expected 38,38,44` (the
+   light box in the dark mode) twice, and `dockhint is 216,216,216, expected
+   30,30,36` for the empty-state hint.
+9. The browsers' rows back to plain `BStringItem`: 293 checks, **1 failure** —
+   `themedRows` (the row is not drawn in the theme's text colour).
+
+## What looking at the shots found
+
+Both passes (`DAW_UI_THEME=light` and `dark`), every shot that shows the dock,
+its pages or an effects window opened and checked against §3 — in the light
+pass `19`–`28` (`dock-samples`, `dock-plugins`, `dock-editor-page`,
+`dock-plugin-chosen`, `browser-window-popped`, `fx-window-track`,
+`fx-window-retargeted`, `dock-editor-over-browser`, `dock-restored-page`,
+`dock-theme-other`) plus `13-theme-150` (the 150% layout, in case the strip
+moved) and `00-startup`; the same numbers in the dark pass.
+
+- The strip's title in the dark mode was a **light box with light text**: the
+  page's name was unreadable. A `BStringView` copies its parent's view colour
+  when it is *attached* (`StringView.cpp`), so the title (and the empty-state
+  hint) stayed in the mode they were built in. Fixed in `MainWindow::ApplyTheme`
+  — the same treatment the transport bar's labels already got — and checked in
+  both modes.
+- The browsers' **list rows were black on the near-black well** in the dark
+  mode: `BListView::DrawItem` stamps the pen from
+  `ui_color(B_LIST_ITEM_TEXT_COLOR)`, the system colour table the app may not
+  rewrite (T1). `DawStringItem` (new, `src/ui/widgets/`) draws an unselected row
+  in the theme's text colour. Also present in T2's own dark shots.
+- The 150% shot: the strip's controls are all inside the window and the hint is
+  centred — nothing to fix.
+- Looked at and left alone: a *selected* list row draws the system's selection
+  background (a light row in the dark panel). That is the user's own selection
+  colour on a themed well, it is legible, and pseudo-theming it would mean the
+  app picking a colour the user did not.
+
+One environment note for whoever runs this next: **a blanked VM screen draws
+nothing.** The first dark pass produced 23 all-black shots and one failing check
+(`TestFxRetargetFlush`'s drag, whose hit regions only exist after the panel has
+been drawn) because the screen had blanked partway through; a modifier `sendkey`
+wakes the blanker, and the pass was re-run with the screen awake — 36 real shots
+and 305/305. The blanker does not count the suite's own synthetic input as
+activity, so wake the screen before each GUI step, not once per session.
+
