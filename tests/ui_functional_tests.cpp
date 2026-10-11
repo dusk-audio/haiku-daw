@@ -41,6 +41,7 @@
 #include <Alert.h>
 #include <Application.h>
 #include <Button.h>
+#include <ListView.h>
 #include <Menu.h>
 #include <MenuBar.h>
 #include <MenuItem.h>
@@ -3188,8 +3189,44 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     // Pop out: the dock empties and a window of its own appears (and is closed
     // again, because closing the main window is what quits the app).
     // The inspector toggles the same way (View > Inspector, key I).
-    win->PostMessage(MSG_TOGGLE_INSPECTOR);
-    snooze(200000);
+    // DIAGNOSTIC: the view's presence and the View > Inspector item's marked
+    // state must agree before and after every toggle; the elapsed time says
+    // whether the window thread was blocked instead.
+    auto diagPanes = [&](const char* when) {
+        bool view = false, marked = false;
+        bigtime_t lockedUs = -1;
+        const bigtime_t t0 = system_time();
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            lockedUs = system_time() - t0;
+            view = win->FindView("inspector") != nullptr;
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "View") == 0 && it->Submenu()) {
+                            BMenu* vm2 = it->Submenu();
+                            for (int32 j = 0; j < vm2->CountItems(); j++)
+                                if (BMenuItem* vi = vm2->ItemAt(j)) {
+                                    const char* vl = vi->Label();
+                                    if (vl && std::strcmp(vl, "Inspector") == 0)
+                                        marked = vi->IsMarked();
+                                }
+                        }
+                    }
+            win->Unlock();
+        }
+        std::printf("  DIAG %s: view=%d marked=%d lock=%lldus\n", when, (int)view,
+                    (int)marked, (long long)lockedUs);
+    };
+    diagPanes("before toggle 1");
+    {
+        const bigtime_t t0 = system_time();
+        win->PostMessage(MSG_TOGGLE_INSPECTOR);
+        snooze(200000);
+        std::printf("  DIAG toggle 1 took %lldus wall\n",
+                    (long long)(system_time() - t0));
+    }
+    diagPanes("after toggle 1");
     {
         bool inspGone = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -3201,6 +3238,7 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     }
     win->PostMessage(MSG_TOGGLE_INSPECTOR);
     snooze(200000);
+    diagPanes("after toggle 2");
     {
         bool inspBack = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -3459,6 +3497,13 @@ static void TestDockPages(MainWindow* win, Project& project, CommandStack* stack
         BView* browser = nullptr;
         win->Lock();
         browser = win->FindView("pluginbrowserview");
+        // DIAGNOSTIC: how many rows the browser's list actually holds.
+        if (browser != nullptr) {
+            if (BListView* lv = dynamic_cast<BListView*>(browser->FindView("list")))
+                std::printf("  DIAG plugin list rows=%d\n", (int)lv->CountItems());
+            else
+                std::printf("  DIAG no list view in the browser\n");
+        }
         win->Unlock();
         CHECK(browser != nullptr);
         if (browser != nullptr) {
@@ -3672,6 +3717,18 @@ static int32 TestThread(void*) {
             BPath recovery(settings);
             if (recovery.Append("recovery.dawproj") == B_OK)
                 BEntry(recovery.Path()).Remove();
+            // ... and the SETTINGS file itself. It persists the panes (M1.4:
+            // `uiinsp`, `uidockpage`), so a run that ended with the inspector
+            // hidden makes every LATER run start with it hidden -- and
+            // TestDockedEditor's two checks assume it starts visible, so the
+            // toggle sequence comes out inverted and the run that follows
+            // leaves it detached (which then breaks TestDockPages' plugin
+            // pick, whose message targets the inspector). One run's pane state
+            // must not decide the next run's result: same rule as the recovery
+            // file above, and the same wedge the HANDOFF records.
+            BPath cfg(settings);
+            if (cfg.Append("settings") == B_OK)
+                BEntry(cfg.Path()).Remove();
         }
     }
 
