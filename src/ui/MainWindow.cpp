@@ -8,6 +8,7 @@
 #include "InspectorView.h"
 #include "TransportBar.h"
 #include "MeterView.h"
+#include "ShortcutsWindow.h"   // View > Keyboard Shortcuts (M3.2)
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
@@ -718,6 +719,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fRecCtl.StopRecording();
             break;
         case MSG_REC:
+        case kMsgTransportRecord:   // the R key (M3.2), same as the Rec button
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
             if (fRecCtl.fRecMode) fRecCtl.StopRecording();
             else          fRecCtl.StartRecording();
@@ -810,9 +812,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
             break;
         case MSG_METRONOME:
+        case kMsgClickToggle:   // the C key (M3.2), same as the menu item
             fTransportCtl.fMetronome = !fTransportCtl.fMetronome;
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
+            break;
+        case kMsgTransportLayout:   // the bar's width changed (see TransportBar)
+            LayoutTransportBar();
+            break;
+        case kMsgMeterClipReset:
+            // The master meter was clicked. Clear the latched flags where they
+            // live (the engine, or the recorder during a take); the fetch_and
+            // keeps a clip that happened since the last poll.
+            if (fTransportCtl.fEngine)
+                fTransportCtl.fEngine->ClearClipFlags(kMeterClipBoth);
+            if (fRecCtl.fRecorder)
+                fRecCtl.fRecorder->ClearClipFlags(kMeterClipBoth);
             break;
         case MSG_TOGGLE_INSPECTOR:
             SetInspectorShown(!fInspectorShown);
@@ -1723,22 +1738,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_SHORTCUTS: {
-            BAlert* a = new ThemedAlertWindow("Keyboard Shortcuts",
-                "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
-                "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-X/C/V cut/copy/paste\n"
-                "       Cmd-A select all   Cmd-D duplicate   Cmd-Shift-I insert silence\n"
-                "       Del delete range/selection   Esc clear\n"
-                "View:  + / - zoom   F fit   arrows pan   wheel / PgUp-PgDn scroll   Home start\n"
-                "Clips: drag move   right edge resize   top corners fade\n"
-                "       Ctrl-drag gain   Alt-drag slip   Shift free-snap   right-click menu\n"
-                "       , / . nudge one grid step   double-click renames a clip\n"
-                "Range: drag empty lane content (Shift-drag band-selects clips)\n"
-                "       Alt-drag the ruler   then Edit > Cut/Copy/Paste/Delete/Silence\n"
-                "Ruler: click seek   drag loop   Ctrl-drag punch   right-click tempo/meter\n"
-                "Track header: M mute  S solo  R arm  route/FX/sends/auto/inst boxes",
-                "OK");
-            a->SetShortcut(0, B_ESCAPE);
-            a->Go(NULL);   // async; non-blocking
+            // One window, and it shows what the one key table says (M3.2): the
+            // hand-written list that used to live here is gone, so the help
+            // cannot describe a binding the behaviour does not have.
+            if (fKeysMsgr.IsValid()) {
+                fKeysMsgr.SendMessage(kMsgShortcutsActivate);
+                break;
+            }
+            ShortcutsWindow* w = new ShortcutsWindow();
+            fKeysMsgr = BMessenger(w);
+            w->Show();
             break;
         }
         case MSG_MASTER:
@@ -1952,7 +1961,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
                 fTransportCtl.fEngine->UpdateMix(*fProject);
-                fMeter->SetLevels(fTransportCtl.fEngine->PeakL(), fTransportCtl.fEngine->PeakR());
+                PushMeter(false);
                 PushTrackPeaks();
                 break;
             }
@@ -2024,8 +2033,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                             fTimeline->SetLiveMidiNotes(std::move(live));
                         }
                     }
-                    fMeter->SetLevels(capturing ? fRecCtl.fRecorder->PeakL() : fTransportCtl.fEngine->PeakL(),
-                                      capturing ? fRecCtl.fRecorder->PeakR() : fTransportCtl.fEngine->PeakR());
+                    PushMeter(capturing);
                     PushTrackPeaks();
                     PushFxMeters();
                     break;
@@ -2041,7 +2049,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTimeline->SetPlayhead(ph);
                 PushRollPlayhead(ph);
                 UpdateTimeReadout(ph);
-                fMeter->SetLevels(fTransportCtl.fEngine->PeakL(), fTransportCtl.fEngine->PeakR());
+                PushMeter(false);
                 UpdateLoudnessReadout(fTransportCtl.fEngine->LufsMomentary(),
                                       fTransportCtl.fEngine->LufsShort(),
                                       fTransportCtl.fEngine->TruePeakDb());
@@ -2075,7 +2083,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
 // readout and the meter are never hidden.
 void MainWindow::LayoutTransportBar() {
     if (!fTransport) return;
-    const float W = fTransport->Bounds().right + 1.0f;
+    float W = fTransport->Bounds().right + 1.0f;
+    // The bar can be laid out wider than the window: the pane layout's own
+    // minimum is the sum of its children's current sizes (a plain BView
+    // reports exactly that), so fPaneSplit can demand more width than there is
+    // and the group hands it to every child. Everything this method pins to
+    // the bar's right edge would then sit outside the window -- the master
+    // meter was invisible for exactly that reason (M3.3). Clamp to the window.
+    if (W > Bounds().Width()) W = Bounds().Width();
 
     // Design offsets, from the original 1000-wide layout: meter 130 from the
     // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
@@ -2086,7 +2101,14 @@ void MainWindow::LayoutTransportBar() {
     const float kSliderR = Themed(588.0f);   // right edge of the master slider
     const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
 
-    if (fMeter) fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+    if (fMeter) {
+        // Placed AND sized: the meter is built before the theme scale is known
+        // on a HiDPI system (the tests override the scale after the window
+        // exists), so a pin that only moved it would leave it at its design
+        // size in a 150% bar.
+        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+        fMeter->ResizeTo(kMeterW, Themed(26.0f));
+    }
 
     const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
 
@@ -3549,6 +3571,35 @@ void MainWindow::PushRollPlayhead(Frame ph) {
     BMessage m(kMsgRollPlayhead);
     m.AddInt64("ph", (int64)ph);
     fRollMsgr.SendMessage(&m);
+}
+
+// The master meter's readings for one poll (M3.3).
+//
+// Peaks, RMS and correlation all come from the engine's per-block meter —
+// except during a take, when the meter must show the INPUT: then the peaks are
+// the recorder's and there is no RMS/correlation for that signal (the engine
+// is mixing the project, not the input), so those read 0 and the RMS line and
+// correlation indicator stay at rest.
+void MainWindow::PushMeter(bool fromRecorder) {
+    if (fMeter == nullptr) return;
+    MeterReadings r;
+    if (fromRecorder && fRecCtl.fRecorder) {
+        r.peakL = fRecCtl.fRecorder->PeakL();
+        r.peakR = fRecCtl.fRecorder->PeakR();
+        const uint32_t bits = fRecCtl.fRecorder->ClipFlags();
+        r.clipL = (bits & kMeterClipL) != 0;
+        r.clipR = (bits & kMeterClipR) != 0;
+    } else if (fTransportCtl.fEngine) {
+        r.peakL = fTransportCtl.fEngine->PeakL();
+        r.peakR = fTransportCtl.fEngine->PeakR();
+        r.rmsL  = fTransportCtl.fEngine->RmsL();
+        r.rmsR  = fTransportCtl.fEngine->RmsR();
+        r.correlation = fTransportCtl.fEngine->Correlation();
+        const uint32_t bits = fTransportCtl.fEngine->ClipFlags();
+        r.clipL = (bits & kMeterClipL) != 0;
+        r.clipR = (bits & kMeterClipR) != 0;
+    }
+    fMeter->SetReadings(r);
 }
 
 // The markers window's list (M2.7): a pure snapshot -- frame, name and the

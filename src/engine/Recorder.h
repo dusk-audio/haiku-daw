@@ -18,6 +18,7 @@
 #include "RingBuffer.h"
 #include "WavWriter.h"
 #include "IMonitorSource.h"
+#include "../dsp/MeterMath.h"   // kMeterFullScale + the clip flag bits (M3.3)
 
 #include <MediaDefs.h>
 #include <MediaRecorder.h>
@@ -62,6 +63,15 @@ public:
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
 
+    // Clip flags, one bit per channel (kMeterClipL/R in dsp/MeterMath.h): the
+    // capture hook latches a bit at digital full scale — two compares on the
+    // block peak it already computes, no extra pass over the samples — and the
+    // UI reads the word and clears it (a clip between the two is not lost).
+    uint32_t ClipFlags() const { return fClipFlags.load(std::memory_order_relaxed); }
+    void ClearClipFlags(uint32_t mask) {
+        fClipFlags.fetch_and(~mask, std::memory_order_relaxed);
+    }
+
     // Live capture waveform envelope: one min/max pair per kEnvBucketFrames
     // source frames, appended by the disk thread (single producer) as it writes
     // and read by the UI (single consumer) to draw the take as it grows.
@@ -94,6 +104,7 @@ private:
     std::atomic<int>   fFormat{0};   // media_raw_audio_format::format tag
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
+    std::atomic<uint32_t> fClipFlags{0};  // latched input clips (M3.3)
     std::atomic<bool>  fXrun{false}; // ring overflowed (disk not keeping up)
     std::atomic<int>   fError{0};    // 0 none, 1 open, 2 write (see ErrorCode)
     std::atomic<int64_t> fDroppedFloats{0}; // xrun-dropped samples to pad w/ silence

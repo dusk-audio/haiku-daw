@@ -27,6 +27,7 @@
 #include "../model/Sustain.h"         // SustainLatch (CC64, live form)
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
+#include "../dsp/MeterMath.h"   // StereoMeter + the clip flag bits (M3.3)
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
 #include "../midi/IMidiInput.h"
@@ -308,6 +309,24 @@ public:
     // [0, 1+]. Written by the RT callback, read by the UI meter poll.
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
+
+    // Master meter readings for the M3.3 meter, from the same post-master-gain
+    // block the peaks come from: the stereo RMS over a sliding window, and the
+    // correlation coefficient between the channels (-1..+1, 0 with no signal).
+    // The window lives in a StereoMeter the callback was given in Load, so
+    // this costs arithmetic only — no allocation, locks or I/O on the RT side.
+    float RmsL() const { return fRmsL.load(); }
+    float RmsR() const { return fRmsR.load(); }
+    float Correlation() const { return fCorr.load(); }
+
+    // Clip flags, one bit per channel (kMeterClipL/R in dsp/MeterMath.h): the
+    // RT callback latches a bit at digital full scale, the UI reads the word
+    // and clears it here. Reading and clearing are separate so a clip between
+    // the two is not lost (ClearClipFlags is a fetch_and).
+    uint32_t ClipFlags() const { return fClipFlags.load(std::memory_order_relaxed); }
+    void ClearClipFlags(uint32_t mask) {
+        fClipFlags.fetch_and(~mask, std::memory_order_relaxed);
+    }
 
     // Per-track output peak (post-FX node level) for track meters. 0 if the
     // track isn't a live node or nothing is playing.
@@ -660,6 +679,7 @@ private:
     TempoMap                                  fTempoMap;  // for tempo-synced fx
     double                                     fLastFxBpm = 0.0;  // last pushed bpm
     Loudness                                  fLoudness;  // master BS.1770 meter
+    StereoMeter                               fStereoMeter;  // RMS + correlation
     std::atomic<bool>                         fMetronomeOn{false};
     std::atomic<bool>                         fMonitorDim{false};
     std::atomic<bool>                         fMonitorMono{false};
@@ -689,6 +709,12 @@ private:
     std::atomic<bool>  fFinished{false};
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
+    // The M3.3 master meter: RMS per channel, the stereo correlation, and the
+    // latched clip bits (RT writes, UI reads/clears).
+    std::atomic<float>    fRmsL{0.0f};
+    std::atomic<float>    fRmsR{0.0f};
+    std::atomic<float>    fCorr{0.0f};
+    std::atomic<uint32_t> fClipFlags{0};
     std::atomic<float> fMasterGain{1.0f};
 
     // Effect meter focus + flat storage (RT writes, UI reads).

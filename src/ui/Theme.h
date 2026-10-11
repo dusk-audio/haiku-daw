@@ -13,6 +13,8 @@
 // and what ApplyThemeToAllWindows() walks the window tree to deliver.
 #pragma once
 
+#include "../dsp/MeterMath.h"   // kMeterFullScale (the clip level below)
+
 #include "../app/ThemePalette.h"   // the derivation (kit-free, host-tested)
 
 #include <Alert.h>
@@ -221,8 +223,10 @@ inline void ApplyThemeToAllWindows() {
 // --- meter thresholds (ONE set: MeterView and MeterColor disagreed) ------
 
 // -3 dBFS-ish and 0: where a meter turns yellow, and where it turns red.
+// The clip level IS digital full scale (dsp/MeterMath.h): the RT side latches
+// its clip flag at the same number, so the lamp and the red zone agree.
 constexpr float kMeterWarn = 0.70f;
-constexpr float kMeterClip = 1.00f;
+constexpr float kMeterClip = daw::kMeterFullScale;
 
 // A level -> meter color (green below the warn threshold, yellow, red at
 // clip). The one place a meter's colours come from. The same in both modes:

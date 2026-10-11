@@ -85,7 +85,10 @@ void TransportController::StopPlayback(bool resumeMonitor) {
     if (fWin->fTransport) fWin->fTransport->SetPlaying(false);
     fWin->UpdatePulse();
     fWin->PushRollPlayhead(-1);   // hide the roll playhead when stopped
-    fWin->fMeter->SetLevels(0.0f, 0.0f);
+    // Bars to zero. The clip latch and the peak hold are the VIEW's state and
+    // are deliberately kept: a lamp that cleared itself when the transport
+    // stopped would hide the clip that just happened.
+    fWin->fMeter->SetReadings(MeterReadings{});
     fWin->fTimeline->ClearTrackPeaks();
     fWin->UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
                           Loudness::kSilenceDb);

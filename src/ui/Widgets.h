@@ -123,23 +123,86 @@ inline void DrawFader(BView* v, BRect r, float frac, float unityFrac) {
                   BPoint(cap.right - Themed(3.0f), cy));
 }
 
-// A vertical VU meter in `r`: recessed well filled bottom-up with a green ->
-// yellow -> red gradient to `level` [0,1].
-inline void DrawVUMeter(BView* v, BRect r, float level) {
-    if (level < 0) level = 0; if (level > 1) level = 1;
-    v->SetHighColor(ColLcd());
+// The one meter bar (M3.3): a recessed well, a fill mapped through the dB
+// scale of dsp/MeterMath.h and coloured in three bands by the theme's ONE
+// threshold set (MeterColor: green to kMeterWarn, yellow to kMeterClip, red
+// above) -- so every meter in the app reads the same level the same way. The
+// old green->yellow->red gradient had its own stops at 0.6/0.8 of the height,
+// which is exactly the second threshold set M1.2 removed.
+//
+// `level` is a linear amplitude (may exceed 1.0: the red band is the headroom
+// above 0 dBFS). `rms` / `holdFrac` are optional overlays: a thin line at the
+// RMS level and the peak-hold tick; pass < 0 for none. `horizontal` draws the
+// bar growing to the right instead of upwards.
+inline void DrawMeterBar(BView* v, BRect r, float level, bool horizontal,
+                         float rms = -1.0f, float holdFrac = -1.0f) {
+    v->SetHighColor(ColLcd());   // recessed well
     v->FillRect(r);
-    if (level > 0.001f) {
-        BRect fill = r;
-        fill.top = r.bottom - r.Height() * level;
-        BGradientLinear grad(BPoint(r.left, r.bottom), BPoint(r.left, r.top));
-        grad.AddColor(Rgb(52, 199, 89), 0);      // green bottom
-        grad.AddColor(Rgb(52, 199, 89), 150);
-        grad.AddColor(Rgb(255, 204, 0), 205);    // yellow ~-6 dB
-        grad.AddColor(Rgb(255, 59, 48), 255);    // red at top
-        v->FillRect(fill, grad);
+
+    const float frac = LinToFrac(level);
+    const float warnFrac = LinToFrac(kMeterWarn);
+    const float clipFrac = LinToFrac(kMeterClip);
+    // Band boundaries as meter fractions, in the theme's colours.
+    struct Band { float to; rgb_color col; };
+    const Band bands[3] = {
+        { warnFrac, MeterColor(0.0f) },
+        { clipFrac, MeterColor(kMeterWarn) },
+        { 1.0f,     MeterColor(kMeterClip) },
+    };
+    float from = 0.0f;
+    for (const Band& b : bands) {
+        const float to = frac < b.to ? frac : b.to;
+        if (to > from) {
+            BRect fill = r;
+            if (horizontal) { fill.left  = r.left  + r.Width()  * from;
+                              fill.right = r.left  + r.Width()  * to; }
+            else            { fill.bottom = r.bottom - r.Height() * from;
+                              fill.top    = r.bottom - r.Height() * to; }
+            v->SetHighColor(b.col);
+            v->FillRect(fill);
+        }
+        if (frac <= b.to) break;
+        from = b.to;
     }
+
+    if (rms >= 0.0f) {   // RMS line: a dark rule inside the fill, the way a
+        const float f = LinToFrac(rms);   // peak/RMS bar reads at any level
+        if (f > 0.0f) {
+            v->SetHighColor(ColBackground());
+            if (horizontal) {
+                const float x = r.left + r.Width() * f;
+                v->StrokeLine(BPoint(x, r.top + 1), BPoint(x, r.bottom - 1));
+            } else {
+                const float y = r.bottom - r.Height() * f;
+                v->StrokeLine(BPoint(r.left + 1, y), BPoint(r.right - 1, y));
+            }
+        }
+    }
+    if (holdFrac > 0.0f) {   // peak-hold tick: white and thicker, so it reads
+        const float f = holdFrac > 1.0f ? 1.0f : holdFrac;   // on every band
+        v->SetHighColor(ColText());
+        v->SetPenSize(2.0f);
+        if (horizontal) {
+            const float x = r.left + r.Width() * f;
+            v->StrokeLine(BPoint(x, r.top + 1), BPoint(x, r.bottom - 1));
+        } else {
+            const float y = r.bottom - r.Height() * f;
+            v->StrokeLine(BPoint(r.left + 1, y), BPoint(r.right - 1, y));
+        }
+        v->SetPenSize(1.0f);
+    }
+
     v->SetHighColor(ColGrid());
+    v->StrokeRect(r);
+}
+
+// The clip lamp: a small square that lights in the clip colour while the meter
+// is latched, with a dim outline otherwise (so the user can see where to click
+// to reset it).
+inline void DrawClipLamp(BView* v, BRect r, bool clipped) {
+    v->SetHighColor(clipped ? MeterColor(kMeterClip) : ColBtnOff());
+    v->FillRect(r);
+    v->SetHighColor(ColBtnBorder());
     v->StrokeRect(r);
 }
 

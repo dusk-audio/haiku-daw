@@ -148,8 +148,11 @@ public:
     // shortcuts keep flowing to the menus.
     void DispatchMessage(BMessage* message, BHandler* handler) override;
     bool QuitRequested() override;   // quit the app when the window closes
-    // For the functional tests: whether the transport is rolling.
+    // For the functional tests: whether the transport is rolling, and the two
+    // transport states the keyboard map toggles (M3.2).
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
+    bool IsRecording() const { return fRecCtl.fRecMode; }
+    bool MetronomeOn() const { return fTransportCtl.fMetronome; }
     // For the functional tests: re-run the settings load, which a restart would
     // do. The suite keeps ONE window for the whole run (closing it quits the
     // app), so the restore path is otherwise unreachable from a test.
@@ -162,6 +165,8 @@ private:
     void UpdatePulse();              // run the poll iff playing or recording
     void UpdateTimeReadout(Frame playhead);
     void UpdateLoudnessReadout(float momLufs, float shortLufs, float truePeakDb);
+    // Engine (or recorder) meter readings -> the master meter (M3.3).
+    void PushMeter(bool fromRecorder);
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
@@ -320,6 +325,7 @@ private:
     // stream, exactly as before.
     // Endpoint id + channel each MIDI track listens to, resolved from the
     // track's endpoint NAME when the input is opened (see ResolveMidiRoutes).
+    BMessenger                fKeysMsgr;    // the open Keyboard Shortcuts window
     BMessageRunner*           fPulse = nullptr;  // 60 Hz UI poll
     BMessageRunner*           fAutosave = nullptr;  // periodic crash-recovery save
     // The dirty marker has to follow edits made anywhere (the timeline and the

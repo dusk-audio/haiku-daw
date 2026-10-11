@@ -11,6 +11,9 @@
 // model is read under a window's lock, the way any other looper-external reader
 // has to.
 #include "../src/ui/MainWindow.h"
+#include "../src/ui/MeterView.h"      // the master meter (M3.3)
+#include "../src/ui/ShortcutsWindow.h" // kShortcutsTextView + kMsgShortcutsActivate
+#include "../src/model/KeyMap.h"      // the one keyboard map (M3.2)
 #include "../src/ui/ProjectDocument.h"   // SettingsPath (the recovery file)
 #include "../src/ui/TimelineView.h"   // the focus check casts CurrentFocus()
 #include "../src/ui/PianoRoll.h"
@@ -46,6 +49,7 @@
 
 #include <Alert.h>
 #include <Application.h>
+#include <TextView.h>   // the shortcuts window's text, read back
 #include <Button.h>
 #include <MenuField.h>   // the export dialog's Format / Vorbis quality menus
 #include <ListView.h>
@@ -90,6 +94,13 @@ using namespace daw;
 #ifndef MSG_TOGGLE_INSPECTOR
 #define MSG_TOGGLE_INSPECTOR 'tins'
 #endif
+#ifndef MSG_SHORTCUTS
+#define MSG_SHORTCUTS 'keys'
+#endif
+// The transport ids, for a test that needs the transport without the focus
+// rules the key path has (TestKeyMap drives the keys themselves).
+#define MSG_PLAY 'play'
+#define MSG_STOP 'stop'
 #ifndef MSG_TOGGLE_DOCK
 #define MSG_TOGGLE_DOCK 'tdck'
 #endif
@@ -4378,6 +4389,399 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return !playing(); }));
 }
 
+// --- M3.2: one keyboard map, one help window -------------------------------
+
+// The shortcuts window is opened by its menu item and shows the text the ONE
+// key table generates -- read back out of the real BTextView, so a window that
+// shipped a stale hand-written list would fail here. Asking twice must bring
+// the open window forward instead of stacking a second one.
+static void TestShortcutsWindow(MainWindow* win) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("keyboard shortcuts window ...\n");
+
+    auto findKeys = [&]() -> BWindow* {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Keyboard Shortcuts") == 0)
+                return w;
+        }
+        return nullptr;
+    };
+    auto countKeys = [&] {
+        int n = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Keyboard Shortcuts") == 0)
+                n++;
+        }
+        return n;
+    };
+
+    // What the menu item posts (the id is file-local to MainWindow.cpp).
+    win->PostMessage(MSG_SHORTCUTS);
+    CHECK(WaitFor([&] { return findKeys() != nullptr; }));
+    Shot("shortcuts");
+
+    // The text out of the real view, against the same table the behaviour
+    // resolves keys through.
+    std::string shown;
+    {
+        BWindow* keys = findKeys();
+        BTextView* tv = nullptr;
+        if (keys && keys->LockWithTimeout(1000000) == B_OK) {
+            tv = dynamic_cast<BTextView*>(keys->FindView(kShortcutsTextView));
+            if (tv) shown = tv->Text();
+            keys->Unlock();
+        }
+        CHECK(tv != nullptr);
+    }
+    const std::string expected = BuildShortcutsText();
+    CHECK(!shown.empty());
+    CHECK(shown == expected);
+    for (std::size_t i = 0; i < kKeyBindingCount; i++) {
+        CHECK(shown.find(kKeyBindings[i].keyName) != std::string::npos);
+        CHECK(shown.find(kKeyBindings[i].help) != std::string::npos);
+    }
+    // ... and the plan's five keys are actually in it.
+    CHECK(shown.find("Home") != std::string::npos);
+    CHECK(shown.find("Record") != std::string::npos);
+    CHECK(shown.find("Loop on / off") != std::string::npos);
+    CHECK(shown.find("Click (metronome) on / off") != std::string::npos);
+    CHECK(shown.find("Enter") != std::string::npos);
+
+    // One window: asking again activates it instead of stacking another.
+    win->PostMessage(MSG_SHORTCUTS);
+    snooze(400000);
+    CHECK(countKeys() == 1);
+
+    HideOtherWindows(win);   // the window is ours; put it away like its close box
+    CHECK(WaitQuiet());
+}
+
+// The map's transport and navigation keys, driven as real key events: the
+// window's own dump of a B_KEY_DOWN is what a keyboard sends.
+static void TestKeyMap(MainWindow* win, Project& project, CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("keyboard map ...\n");
+
+    auto sendKey = [&](const char* bytes, uint32 mods = 0) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", (int32)mods);
+        win->PostMessage(&key);
+    };
+    auto loopOn = [&] {
+        bool on = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            on = project.transport.loopEnabled;
+            win->Unlock();
+        }
+        return on;
+    };
+    auto playhead = [&] {
+        daw::Frame ph = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            ph = project.transport.playhead;
+            win->Unlock();
+        }
+        return ph;
+    };
+    auto setPlayhead = [&](daw::Frame f) {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            project.transport.playhead = f;
+            win->Unlock();
+        }
+    };
+
+    // A focused text field keeps its own keys (the DispatchMessage rule): the
+    // tempo field must not toggle the loop.
+    BView* tempo = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tempo = win->FindView("tempo");
+        if (tempo) tempo->MakeFocus(true);
+        win->Unlock();
+    }
+    const bool loopBefore = loopOn();
+    sendKey("l");
+    snooze(300000);
+    CHECK(loopOn() == loopBefore);
+
+    // ... and the timeline takes them back on a click.
+    BView* timeline = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        timeline = win->FindView("timeline");
+        win->Unlock();
+    }
+    CHECK(timeline != nullptr);
+    BMessage down(B_MOUSE_DOWN);
+    down.AddInt32("buttons", 1);
+    down.AddPoint("where", BPoint(220, 14));   // the ruler
+    if (timeline) BMessenger(timeline).SendMessage(&down);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = dynamic_cast<TimelineView*>(win->CurrentFocus()) != nullptr;
+        win->Unlock();
+        return ok;
+    }));
+
+    // L: loop on, then off. (It needs no loop range: the marker-span rule may
+    // set one, and the flag is what the key owns.)
+    sendKey("l");
+    CHECK(WaitFor([&] { return loopOn() != loopBefore; }));
+    sendKey("l");
+    CHECK(WaitFor([&] { return loopOn() == loopBefore; }));
+
+    // C: the click. The window's own state is the observable.
+    const bool clickBefore = win->MetronomeOn();
+    sendKey("c");
+    CHECK(WaitFor([&] { return win->MetronomeOn() != clickBefore; }));
+    sendKey("c");
+    CHECK(WaitFor([&] { return win->MetronomeOn() == clickBefore; }));
+
+    // Home and Enter: return to zero from wherever the playhead was.
+    setPlayhead(96000);
+    sendKey("\x01");   // B_HOME
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+    setPlayhead(48000);
+    sendKey("\x0a");   // B_RETURN / B_ENTER
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // R: record, on an armed MIDI track (a MIDI-only take opens no input
+    // device and writes no file, so this needs nothing but the transport).
+    {
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Midi;
+        t.name = "keymap-rec";
+        t.armed = true;
+        t.input.kind = InputSource::kMidi;   // no audio device involved
+        CHECK(LockedAddTrack(win, project, t));
+    }
+    CHECK(!win->IsRecording());
+    sendKey("r");
+    CHECK(WaitFor([&] { return win->IsRecording(); }, 10000000));
+    sendKey("r");
+    CHECK(WaitFor([&] { return !win->IsRecording(); }, 10000000));
+
+    // An unbound key is still the view's (BView::KeyDown), not an action:
+    // 'z' toggles nothing.
+    const bool clickNow = win->MetronomeOn();
+    sendKey("z");
+    snooze(200000);
+    CHECK(win->MetronomeOn() == clickNow);
+
+    // And the map is what the help shows: the table built the window's text.
+    CHECK(std::strcmp(FindKeyBinding('l', 0)->keyName, "L") == 0);
+    (void)stack;
+}
+
+// --- M3.3: the master meter ------------------------------------------------
+
+// A WAV of `seconds` whose two channels carry the same signal. `amp` is the
+// sample amplitude in [0, 1]; `hz` 0 writes a square that reaches full scale
+// (the clip fixture).
+static std::string WriteMeterWav(const char* path, double amp, double hz,
+                                 double seconds = 1.0) {
+    std::remove(path);
+    const int frames = (int)(48000 * seconds);
+    std::vector<int16_t> pcm((size_t)frames * 2);
+    for (int i = 0; i < frames; i++) {
+        double s;
+        if (hz > 0.0)
+            s = amp * std::sin(2.0 * M_PI * hz * i / 48000.0);
+        else
+            s = amp * ((i / 240) % 2 ? 1.0 : -1.0);   // 100 Hz square
+        const int16_t v = (int16_t)std::lround(s * 32767.0);
+        pcm[(size_t)i * 2 + 0] = v;
+        pcm[(size_t)i * 2 + 1] = v;
+    }
+    WavWriter w;
+    if (!w.Open(path, 48000, 2)) return std::string();
+    if (!w.WriteInt16(pcm.data(), pcm.size())) return std::string();
+    if (!w.Close()) return std::string();
+    return path;
+}
+
+// One track playing one file through the engine, then the meter's readings.
+// `gain` is the track's fader (the engine's pan law costs 3 dB at centre, so a
+// +3.5 dB fader is what puts a full-scale source over 0 dBFS at the meter).
+//
+// The fixture track is SOLOED and every other track's solo/mute is cleared:
+// this is one project for the whole run and earlier tests leave clips on it,
+// so anything else still audible would land in the master meter's sum (the
+// first cut of this test read a peak that was partly someone else's audio).
+static bool PlayMeterFixture(MainWindow* win, Project& project,
+                             const std::string& wav, float gain,
+                             TrackId* outTrack) {
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "meter-fix";
+    t.gain = gain;
+    Clip c;
+    c.id = project.NextClipId();
+    c.startFrame = 0;
+    c.lengthFrames = 48000;
+    c.sourcePath = wav;
+    t.clips.push_back(c);
+    if (!LockedAddTrack(win, project, t)) return false;
+    if (outTrack) *outTrack = t.id;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        for (Track& other : project.Tracks()) {
+            if (other.id == t.id) continue;
+            other.soloed = false;
+            other.muted  = true;
+        }
+        if (Track* mine = project.FindTrack(t.id)) mine->soloed = true;
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+    win->PostMessage(MSG_PLAY);
+    return true;
+}
+
+static void TestMetering(MainWindow* win, Project& project, CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("master meter ...\n");
+
+    // The view under test: the real one in the transport bar.
+    MeterView* meter = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        meter = dynamic_cast<MeterView*>(win->FindView("meter"));
+        win->Unlock();
+    }
+    CHECK(meter != nullptr);
+    if (!meter) return;
+
+    // The meter is on the transport bar, inside it, and inside the WINDOW.
+    // That last clause is the one that bit: a pane re-layout widens the bar
+    // (a plain BView's minimum is its current size), and everything pinned to
+    // the bar's right edge was then placed past the window's edge -- painted
+    // by nobody, over a background the server had already filled. A screenshot
+    // review of the first cut found it; this is the cheap check of the same
+    // thing, and the Pop out / dock toggle this test follows is what triggers
+    // it (TestDockedEditor runs just before).
+    {
+        bool onBar = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            BView* bar = win->FindView("transport");
+            const BRect onScreen = meter->ConvertToScreen(meter->Bounds());
+            // (win->Frame() is shadowed by MainWindow's Frame typedef.)
+            const BRect windowScreen = win->ConvertToScreen(win->Bounds());
+            onBar = bar != nullptr && meter->Parent() == bar
+                 && !meter->IsHidden()
+                 && meter->Frame().right <= bar->Bounds().right
+                 && meter->Frame().Width() > Themed(80.0f)
+                 && onScreen.left >= windowScreen.left
+                 && onScreen.right <= windowScreen.right;
+            // ... and the bar itself fits the window: the root cause of the
+            // whole thing is a pane whose minimum is its current size, which
+            // made the window's layout wider than the window after any pane
+            // re-layout (TimelineView says what it needs now).
+            CHECK(bar != nullptr
+                  && bar->Bounds().right <= win->Bounds().Width() + 1.0f);
+            if (!onBar) {
+                std::printf("  meter frame (%g,%g,%g,%g) bounds (%g,%g,%g,%g) "
+                            "hidden %d parent %p\n",
+                            meter->Frame().left, meter->Frame().top,
+                            meter->Frame().right, meter->Frame().bottom,
+                            meter->Bounds().left, meter->Bounds().top,
+                            meter->Bounds().right, meter->Bounds().bottom,
+                            (int)meter->IsHidden(), (void*)meter->Parent());
+                if (bar)
+                    std::printf("  bar bounds (%g,%g,%g,%g) scale %.2f\n",
+                                bar->Bounds().left, bar->Bounds().top,
+                                bar->Bounds().right, bar->Bounds().bottom,
+                                ThemeScale());
+            }
+            win->Unlock();
+        }
+        CHECK(onBar);
+    }
+
+    // A 0.5-amplitude sine on both channels. Through the engine that is
+    // 0.5 * 0.707 (the equal-power pan law's centre) = 0.354 peak, and a
+    // sine's RMS is 0.354/sqrt(2) = 0.25.
+    const std::string sine = WriteMeterWav("/tmp/haiku_daw_ui_meter.wav", 0.5,
+                                           440.0);
+    CHECK(!sine.empty());
+    CHECK(PlayMeterFixture(win, project, sine, 1.0f, nullptr));
+    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
+    CHECK(WaitFor([&] {
+        return meter->Readings().rmsL > 0.2f;   // the window has fed it
+    }, 8000000));
+    // The RMS window is 300 ms long, so a reading taken while it fills is a
+    // LOWER number: wait for it to settle before believing it.
+    CHECK(WaitFor([&] {
+        const float a = meter->Readings().rmsL;
+        snooze(60000);
+        const float b = meter->Readings().rmsL;
+        return std::fabs(a - b) < 0.005f;
+    }, 5000000));
+    const MeterReadings r = meter->Readings();
+    std::printf("  peak %.3f rms %.3f corr %+.2f\n", r.peakL, r.rmsL,
+                r.correlation);
+    CHECK(r.peakL > 0.30f && r.peakL < 0.40f);
+    CHECK(r.rmsL > 0.22f && r.rmsL < 0.28f);      // 0.354/sqrt(2) = 0.25
+    CHECK(r.rmsR > 0.22f && r.rmsR < 0.28f);
+    CHECK(r.correlation > 0.9f);                  // mono: in phase
+    CHECK(!meter->ClipLatched());                 // -3 dB is not a clip
+    Shot("meter-playing");
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+
+    // The peak hold remembers the peak the bars have already fallen from
+    // (-9 dB, i.e. 0.77 of a 66 dB scale).
+    CHECK(meter->HoldFracL() > 0.7f);
+
+    // Full scale: the clip lamp latches, and a click on the meter clears it.
+    // The fader is above unity so the mix really is over 0 dBFS (with the
+    // 3 dB-centre pan law, unity alone would sit at -3 dBFS).
+    const std::string full = WriteMeterWav("/tmp/haiku_daw_ui_meter_full.wav",
+                                           1.0, 0.0);
+    CHECK(!full.empty());
+    CHECK(PlayMeterFixture(win, project, full, 1.5f, nullptr));
+    CHECK(WaitFor([&] { return meter->ClipLatched(); }, 8000000));
+    Shot("meter-clipped");
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    CHECK(meter->ClipLatched());      // stopping does not clear the lamp
+
+    // The click: a real B_MOUSE_DOWN, posted to the view the way the app_server
+    // delivers one ("be:view_where" is what BView::MessageReceived reads).
+    {
+        BMessage click(B_MOUSE_DOWN);
+        click.AddInt32("buttons", 1);
+        click.AddPoint("be:view_where", BPoint(6, 6));
+        BMessenger(meter).SendMessage(&click);
+        CHECK(WaitFor([&] { return !meter->ClipLatched(); }));
+    }
+    // ... and it stays clear on its own: the click cleared the window's latch
+    // AND the engine's own flag bits, so the clip that already happened cannot
+    // re-light it on the next poll.
+    snooze(400000);
+    CHECK(!meter->ClipLatched());
+
+    // A fresh clip lights it again -- the lamp is not simply dead.
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
+    CHECK(WaitFor([&] { return meter->ClipLatched(); }, 8000000));
+    // The engine's readings are what the meter drew: the correlation strip
+    // shows the same number the view was handed (read while it is still
+    // being fed -- stopping zeroes the bars, by design).
+    CHECK(meter->Readings().correlation > 0.9f);
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    CHECK(meter->ClipLatched());   // the latch outlives the transport
+
+    (void)stack;
+}
+
 // --- the dock's pages (T2) -------------------------------------------------
 
 // Where segment `index` of the strip's segmented control sits, in the
@@ -5440,6 +5844,9 @@ static int32 TestThread(void*) {
     TestArrangeTracks(win, project, &stack);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
+    TestShortcutsWindow(win);
+    TestKeyMap(win, project, stack);
+    TestMetering(win, project, stack);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
     TestBigProjectPlayback(win, project);
