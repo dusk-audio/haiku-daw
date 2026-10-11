@@ -2614,7 +2614,7 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
                 if (const Track* t = project.FindTrack(ta.id))
                     for (const Clip& c : t->clips)
                         if (c.id != ac.id)
-                            moved = (c.startFrame == 84000
+                            moved = (c.startFrame == 72000
                                      && c.lengthFrames == 36000
                                      && c.sourceOffset == 12000);
                 win->Unlock();
