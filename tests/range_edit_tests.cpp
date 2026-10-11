@@ -389,10 +389,14 @@ int main() {
         CHECK(stack.Execute(std::make_unique<SetClipMuteCommand>(tm.id, 2, true, true),
                             p));
         CHECK(p.FindTrack(tm.id)->midiClips[0].muted);
-        // ... and a muted region contributes no notes to the render.
+        // ... and a muted region contributes no notes to the render -- in the
+        // PLAYBACK form too, which is what the engine and the Exporter play
+        // (it lost the mute when M7.3's sustain pass met M2.5's mute).
         CHECK(p.FindTrack(tm.id)->CollectNotes().empty());
+        CHECK(p.FindTrack(tm.id)->CollectPlaybackNotes().empty());
         CHECK(stack.Undo(p));
         CHECK(p.FindTrack(tm.id)->CollectNotes().size() == 1);
+        CHECK(p.FindTrack(tm.id)->CollectPlaybackNotes().size() == 1);
 
         CHECK(stack.Execute(std::make_unique<SetClipFadeShapeCommand>(
                                 ta.id, 1, FadeShape::SCurve), p));

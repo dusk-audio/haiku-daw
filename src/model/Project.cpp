@@ -17,6 +17,8 @@ std::vector<MidiNote> Track::CollectPlaybackNotes() const {
     for (const MidiClip& c : midiClips) {
         if (c.takeGroup > 0 && !c.takeActive)
             continue;   // inactive loop-record take: silent
+        if (c.muted)
+            continue;   // per-region mute (M2.5): nothing from it sounds
         std::vector<MidiNote> region = FlattenMidiClip(c);
         ApplySustain(region, c.events, c.lengthFrames);
         for (MidiNote n : region) {
