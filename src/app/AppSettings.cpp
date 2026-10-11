@@ -23,6 +23,7 @@ std::string AppSettings::Serialize() const {
       << "uiinsp " << (inspectorVisible ? 1 : 0) << " " << inspectorWidth << "\n"
       << "uibottom " << (bottomVisible ? 1 : 0) << " " << bottomHeight << "\n"
       << "uidockpage " << dockPage << "\n"
+      << "uimarklane " << (markerLaneVisible ? 1 : 0) << "\n"
       << "expbits "   << exportBitDepth << "\n"
       << "expdither " << (exportDither ? 1 : 0) << "\n"
       << "exprate "   << exportSampleRate << "\n"
@@ -75,6 +76,7 @@ bool AppSettings::Deserialize(const std::string& text) {
             if (ls >> v >> h) { bottomVisible = (v != 0); bottomHeight = h; }
         }
         else if (kw == "uidockpage") { int v; if (ls >> v) dockPage = v; }
+        else if (kw == "uimarklane") { int v; if (ls >> v) markerLaneVisible = (v != 0); }
         else if (kw == "expbits")   { int v; if (ls >> v) exportBitDepth = v; }
         else if (kw == "expdither") { int v; if (ls >> v) exportDither = (v != 0); }
         else if (kw == "exprate")   { int v; if (ls >> v) exportSampleRate = v; }

@@ -164,6 +164,26 @@ int main() {
         CHECK(r4.recentProjects.size() == AppSettings::kMaxRecent);
     }
 
+    // --- the marker lane (M2.6) ------------------------------------------
+    {
+        // Off by default, round-trips, and a settings file from before the
+        // preference keeps the default.
+        AppSettings m;
+        CHECK(m.markerLaneVisible == false);
+        m.markerLaneVisible = true;
+        AppSettings m2;
+        CHECK(m2.Deserialize(m.Serialize()));
+        CHECK(m2.markerLaneVisible == true);
+
+        AppSettings m3;
+        CHECK(m3.Deserialize("buffer 256\nuimarklane 1\n"));
+        CHECK(m3.markerLaneVisible == true);
+
+        AppSettings m4;
+        CHECK(m4.Deserialize("buffer 256\n"));   // older file: no line
+        CHECK(m4.markerLaneVisible == false);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

@@ -984,6 +984,48 @@ private:
     std::vector<MidiClipEvent> fNew, fOld;
 };
 
+// Fold a track's lane to a title strip (M2.6). A persisted track property
+// (`trackfold`), so it is an ordinary undoable edit; stores the old flag.
+class SetTrackCollapsedCommand : public Command {
+public:
+    SetTrackCollapsedCommand(TrackId track, bool collapsed)
+        : fTrack(track), fNew(collapsed) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override {
+        return fNew ? "Collapse Track" : "Expand Track";
+    }
+private:
+    TrackId fTrack; bool fNew; bool fOld = false;
+};
+
+// Duplicate a track: a copy of EVERYTHING it carries (name + " copy", gain,
+// pan, mute/solo/arm flags, colour, height, fold, fx, sends, automation,
+// instrument, input, routing, and the freeze stash), placed directly after the
+// source, with FRESH clip/region ids (ids are project-unique; a copy sharing
+// them would make every id-addressed edit hit two clips). The created id is
+// allocated once in Do() and reused on redo, the AddTrackCommand pattern.
+class DuplicateTrackCommand : public Command {
+public:
+    explicit DuplicateTrackCommand(TrackId track) : fTrack(track) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Duplicate Track"; }
+
+    TrackId CreatedId() const { return fCreatedId; }
+    int     NewIndex()  const { return fIndex; }   // where the copy landed
+    // Give every clip/region in `t` a fresh id (the freeze stash's too). Static
+    // so the id allocation is one definition; callable only with the project.
+    static void FreshenClipIds(Project& p, Track& t);
+
+private:
+    TrackId fTrack;
+    TrackId fCreatedId = kInvalidTrackId;
+    int     fIndex = -1;      // index the copy was inserted at (for undo)
+    Track   fCopy;            // built once in Do(), reused on redo (stable ids)
+    bool    fBuilt = false;
+};
+
 // Set a track's color index / lane height (view props; discrete, undoable).
 class SetTrackColorCommand : public Command {
 public:

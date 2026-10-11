@@ -308,6 +308,21 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
 - **Green tests did not mean a working UI.** M1.3/M1.4 merged with the main
   window visibly broken and every check passing. `docs/UI_GUIDELINES.md` is
   the rule that came out of it.
+- **A synthetic click at a hard-coded offset can land on a control that opens a
+  synchronous popup** — and `BPopUpMenu::Go` does NOT return until a choice is
+  made, so the window thread blocks and every later check that wants the window
+  lock times out (it reads as 8 unrelated failures and a wedged run). The
+  arrange-depth package's mid-drag check pressed the header fader at
+  `laneTop + Themed(56)`; the arrange-tracks package moved the fader and left
+  an input picker on that pixel. Tests must ask the view for a control's own
+  rect (`HeaderRectFor`, `HeaderControlAt`) instead of computing one.
+- **Two agents share this VM, and so do its scratch paths.** `refs/heads/_vmwt`
+  (the HANDOFF's own throwaway-ref recipe), `~/haiku-daw`, its `build/` dir and
+  `/tmp/ui.log` are common state: a sync left in an earlier `flock` hold is
+  overwritten by the sibling's next sync, and a run that does not rebuild in
+  the SAME hold executes the sibling's binary (two runs reported 329 checks and
+  "0 failures" for a tree this package never built). Sync, build, run and copy
+  the log to a private name INSIDE ONE hold, and use a per-agent ref name.
 
 ## Commit rules
 

@@ -32,6 +32,9 @@ struct AppSettings {
     float bottomHeight     = 260.0f;
     // Which dock page was showing (T2): 0 Editor, 1 Samples, 2 Plugins.
     int   dockPage         = 0;
+    // Whether the arrangement shows the marker lane (M2.6): a view
+    // preference like the panes above, not project data.
+    bool  markerLaneVisible = false;
 
     // How the app looks: the user's own colours and the stock Haiku look
     // (System), or the DAW's dark palette in the DAW's windows only (Dark).

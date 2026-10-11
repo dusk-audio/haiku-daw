@@ -554,6 +554,104 @@ int main() {
         std::remove(path);
     }
 
+    // Track depth (M2.6): a folded lane round-trips on its own optional line,
+    // an old file loads expanded, and a project that folds nothing writes the
+    // legacy track bytes exactly.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Fold"), a);
+        TrackId t = a.Tracks().front().id;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Open"), a);
+        s.Execute(std::make_unique<SetTrackCollapsedCommand>(t, true), a);
+
+        const char* path = "trackfold_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+        CHECK(b.Tracks().size() == 2);
+        CHECK(b.Tracks()[0].collapsed == true);
+        CHECK(b.Tracks()[1].collapsed == false);
+        std::remove(path);
+
+        // The save side: the folded track writes the line, the other does not,
+        // and the track line itself is untouched.
+        CHECK(ProjectIO::Save(a, path));
+        {
+            std::ifstream in(path);
+            std::string line, foldLine, firstTrack;
+            int folds = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("trackfold ", 0) == 0) { folds++; foldLine = line; }
+                else if (line.rfind("track ", 0) == 0 && firstTrack.empty())
+                    firstTrack = line;
+            }
+            CHECK(folds == 1);
+            CHECK(foldLine == "trackfold 1 1");
+            // The track line itself is unchanged: the fold is a separate line,
+            // never a new tail field.
+            CHECK(firstTrack.rfind("track 1 audio ", 0) == 0);
+            CHECK(firstTrack.find("\"Fold\" 0 72 0 0 0") != std::string::npos);
+        }
+        std::remove(path);
+    }
+
+    // Compat: a file from before the fold existed loads with every lane
+    // expanded, and an unknown/truncated trackfold is skipped rather than
+    // guessing.
+    {
+        const char* path = "legacyfold_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Old\" 0 72 0 0 0\n"
+                << "track 2 midi 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+                << "trackfold 2\n"       // truncated: skipped
+                << "trackfold 9 1\n"     // unknown track id: no effect
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 2);
+        if (p.Tracks().size() == 2) {
+            CHECK(p.Tracks()[0].collapsed == false);
+            CHECK(p.Tracks()[1].collapsed == false);
+        }
+        std::remove(path);
+    }
+
+    // Fold lines are addressed BY ID and applied after the whole file: one
+    // written after a later track still folds the track it names, and one
+    // written before its own record is not lost either.
+    {
+        const char* path = "foldorder_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "trackfold 2 1\n"     // for a track not read yet
+                << "track 1 audio 1 0 0 0 0 \"One\" 0 72 0 0 0\n"
+                << "track 2 audio 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+                << "trackfold 1 1\n"     // for a track already committed
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 2);
+        if (p.Tracks().size() == 2) {
+            CHECK(p.Tracks()[0].collapsed == true);
+            CHECK(p.Tracks()[1].collapsed == true);
+        }
+        std::remove(path);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

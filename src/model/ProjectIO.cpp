@@ -211,6 +211,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
           << t.colorIndex << " " << t.height << " "
           << (t.soloSafe ? 1 : 0) << " " << t.muteGroup << " "
           << (t.inputMonitor ? 1 : 0) << "\n";
+        // Track depth (M2.6): a folded lane. Its OWN optional line, like every
+        // other post-M2.5 field -- the track line's tail is positional, so a
+        // newer build appending there would still be read by an older one only
+        // by luck. A project that folds nothing writes the legacy bytes.
+        if (t.collapsed)
+            f << "trackfold " << t.id << " 1\n";
 
         for (const Clip& c : t.clips) {
             f << "clip " << c.id << " "
@@ -389,6 +395,8 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     std::vector<TempoChange> tempoChanges;
     std::vector<MeterChange> meterChanges;
     bool tempo0Ramp = false;   // ramp flag for the frame-0 tempo
+    // Track folds, applied once every track exists (see the `trackfold` case).
+    std::vector<std::pair<TrackId, bool>> folded;
 
     auto commit = [&]() {
         if (!haveTrack) return;
@@ -511,6 +519,17 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             }
             if (cur.id > maxTrack) maxTrack = cur.id;
             haveTrack = true;
+        }
+        else if (kw == "trackfold") {
+            // Track depth (M2.6): the lane is folded. Optional -- absent in
+            // every older file, where the track keeps the expanded default --
+            // and addressed BY ID and applied after the whole file is read, so
+            // the position of the line relative to its track record cannot
+            // decide whether it survives (the writer puts it right after the
+            // track; a hand-edit or a merge need not).
+            long long id = -1; int fold = 0;
+            if (!(iss >> id >> fold)) continue;
+            folded.emplace_back((TrackId)id, fold != 0);
         }
         else if (kw == "clip" && haveTrack) {
             Clip c;
@@ -741,6 +760,9 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     for (Track& t : p.Tracks())
         for (MidiClip& mc : t.midiClips)
             if (mc.id == kInvalidClipId) mc.id = p.NextClipId();
+    // Track folds, now that every track record has been committed.
+    for (const auto& f : folded)
+        if (Track* t = p.FindTrack(f.first)) t->collapsed = f.second;
 
     out = std::move(p);   // clean parse -> commit; live session was untouched
     return true;

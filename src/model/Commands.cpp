@@ -1478,6 +1478,51 @@ void SetTrackHeightCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->height = fOld;
 }
 
+// --- SetTrackCollapsed / DuplicateTrack (M2.6) ------------------------
+
+bool SetTrackCollapsedCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->collapsed;
+    t->collapsed = fNew;
+    return true;
+}
+void SetTrackCollapsedCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->collapsed = fOld;
+}
+
+// Every clip and region gets a fresh id, including the ones stashed by Freeze
+// (they become live clips again on Unfreeze, so they must be unique too).
+void DuplicateTrackCommand::FreshenClipIds(Project& p, Track& t) {
+    for (Clip& c : t.clips)         c.id = p.NextClipId();
+    for (MidiClip& c : t.midiClips) c.id = p.NextClipId();
+    for (Clip& c : t.freezeClips)   c.id = p.NextClipId();
+    for (MidiClip& c : t.freezeMidi) c.id = p.NextClipId();
+}
+
+bool DuplicateTrackCommand::Do(Project& p) {
+    const Track* src = p.FindTrack(fTrack);
+    if (!src) return false;
+    if (!fBuilt) {
+        // Built ONCE and reused on redo: the clip ids are allocated here, and a
+        // redo that re-allocated them would leave every id-addressed selection
+        // and clipboard item pointing at nothing.
+        fBuilt = true;
+        fCreatedId = p.NextTrackId();
+        fCopy = *src;
+        fCopy.id   = fCreatedId;
+        fCopy.name = src->name + " copy";
+        FreshenClipIds(p, fCopy);
+    }
+    const int at = p.IndexOfTrack(fTrack);
+    if (at < 0) return false;
+    fIndex = at + 1;                        // directly after the source
+    return p.InsertTrack((size_t)fIndex, fCopy);
+}
+void DuplicateTrackCommand::Undo(Project& p) {
+    p.RemoveTrack(fCreatedId);
+}
+
 bool FreezeTrackCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;

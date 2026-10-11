@@ -94,6 +94,12 @@ constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
 // View > Dark Mode: flip the look between the user's own colours and the
 // DAW's dark palette (T1). Also what the functional test posts.
 constexpr uint32 MSG_THEME_MODE       = 'thmm';
+// View > Markers (M2.7): the markers/locations list window, single-instance.
+constexpr uint32 MSG_MARKERS          = 'mkrs';
+// View > Marker Lane: the flag strip between the ruler and the lanes.
+constexpr uint32 MSG_MARKER_LANE      = 'mkln';
+// Track > Duplicate Track (the whole track, with fresh clip ids).
+constexpr uint32 MSG_DUPLICATE_TRACK  = 'dptr';
 // The dock's segmented control -> the window (T2): int32 "index" is the page
 // to show (0 Editor, 1 Samples, 2 Plugins).
 constexpr uint32 MSG_DOCK_PAGE        = 'dkpg';
@@ -233,6 +239,8 @@ private:
     BMenuItem*      fDupItem       = nullptr;
     BMenuItem*      fSilenceItem   = nullptr;   // Edit > Insert Silence (range)
     BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
+    BMenuItem*      fMarkerLaneItem = nullptr;  // View > Marker Lane (M2.7)
+    BMenuItem*      fDupTrackItem  = nullptr;   // Track > Duplicate Track (M2.6)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
     BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
     BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
@@ -254,6 +262,12 @@ private:
     // so "add an effect" and "browse samples" land where the content is.
     void SetDockPage(int page);
     void PopOutDockPage();   // the showing page becomes its own window
+    // The markers window (M2.7): show and activate the one that exists, or
+    // make it — and push it the current list. Every marker edit goes through
+    // PushMarkers (the kMsgUiRefresh handler calls it), so the window is never
+    // stale.
+    void ShowMarkersWindow();
+    void PushMarkers();
     // The effects window is single-instance (T2): this shows and activates the
     // one that exists, retargeted at `track`/`focusSlot`, or creates it. Every
     // "edit this chain" path goes through here so there is one window and one
@@ -314,6 +328,7 @@ private:
     // slow runner. UpdateTitle() is also called directly on save/load/undo.
     BMessageRunner*           fTitlePoll = nullptr; // 2 Hz dirty-marker poll
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
+    BMessenger                fMarkersMsgr;  // open markers window (the list push)
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)

@@ -114,7 +114,7 @@ public:
     // The cursor this pointer state wants. `mods` is passed rather than read so
     // a test can ask for the Alt/Ctrl variants without a keyboard.
     enum class Pointer { Default, Move, Trim, Gain, Slip, Split, Fade, Pencil,
-                         Glue, Mute };
+                         Glue, Mute, LaneSize };
     Pointer CursorFor(BPoint where, uint32 mods) const;
     Pointer ShownCursor() const { return fCursor; }
 
@@ -167,6 +167,58 @@ public:
 
     int   ClipboardCount() const { return (int)fClipboard.size(); }  // tests
 
+    // --- track depth (M2.6) ------------------------------------------------
+    //
+    // The header's controls, named once. The drawing, the click path, the
+    // hover, the cursor and the functional test all read HeaderControlAt, so
+    // a control cannot be drawn somewhere and clicked somewhere else.
+    enum class HeaderControl { None, Mute, Solo, Arm, Monitor, Pan, Gain,
+                               Colour, Input, Fold };
+    HeaderControl HeaderControlAt(int lane, BPoint where) const;
+    // Its rect, for the pickers' anchors and for a test that has to press ON a
+    // control without opening the (synchronous) popup it owns.
+    BRect HeaderRectFor(int lane, HeaderControl which) const;
+    // A lane's rectangle (the geometry the lane-edge grab measures against).
+    BRect LaneFrame(int index) const { return LaneRect(index); }
+    // The lane whose BOTTOM edge is under `where` in the header gutter (the
+    // resize grab), or -1. Public: the cursor, the hover and the test all use
+    // the same answer.
+    int   LaneEdgeAt(BPoint where) const;
+
+    // The track-depth actions, shared by the header, the menus and the tests
+    // (a popup menu cannot be driven by the suite -- the established pattern).
+    void  SetTrackColour(TrackId track, int colorIndex);
+    void  SetTrackInput(TrackId track, InputSource input);
+    void  SetTrackCollapsed(TrackId track, bool collapsed);
+    void  ToggleTrackCollapsed(TrackId track);
+    void  ExclusiveSolo(TrackId track);      // Alt-click on the header's S
+    void  DuplicateTrack(TrackId track);     // the copy is selected + shown
+    void  DuplicateSelectedTrack();          // the Track menu's entry
+
+    // In-place rename (M2.6). The name field in the header becomes a text
+    // field; Enter commits ONE SetTrackNameCommand, Esc cancels, a press
+    // outside commits first. Public so the test can read the edit state.
+    bool        RenamingInPlace() const { return fRenameTrack != kInvalidTrackId; }
+    TrackId     RenamingTrack()   const { return fRenameTrack; }
+    const char* RenameBuffer()    const { return fRenameText.c_str(); }
+    void        BeginTrackRename(TrackId track);
+
+    // --- markers (M2.7) -----------------------------------------------------
+    //
+    // The marker lane: a flag strip between the ruler and the lanes, toggled
+    // from the View menu (MSG_MARKER_LANE) and Shift-M. Its height is part of
+    // ContentTop() while it is on.
+    void SetMarkerLane(bool on);
+    bool MarkerLaneOn() const { return fMarkerLane; }
+
+    // The marker actions, one definition each: the `m` key, the ruler's
+    // context menu, the marker lane and the markers window all come through
+    // here, and every one of them posts kMsgUiRefresh so an open markers
+    // window is never stale.
+    void AddMarkerAt(Frame frame);                          // "Marker N"
+    void RemoveMarkerAt(Frame frame, const std::string& name);
+    void SeekTo(Frame frame);        // move the playhead AND the drawn line
+
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);
     // Zoom about the frame under `x`, so the point under the pointer stays put.
@@ -181,8 +233,14 @@ public:
     float FrameToX(Frame f) const;
     Frame XToFrame(float x) const;
 
-    // Top of the lane area: the tool strip, then the ruler.
-    float ContentTop() const { return TimelineContentTop(); }
+    // Top of the lane area: the tool strip, then the ruler, then the marker
+    // lane when it is on.
+    float ContentTop() const {
+        return RulerBottom() + (fMarkerLane ? MarkerLaneHeight() : 0.0f);
+    }
+    // Where the ruler ends: the marker lane (when shown) sits between this and
+    // ContentTop(), so the ruler's own hit tests must use THIS, not ContentTop.
+    float RulerBottom() const { return TimelineContentTop(); }
     // Where the project's content ends (last clip/region, playhead, loop,
     // punch, markers): the horizontal scroll may go this far, so the whole
     // arrangement can be scrolled past the left edge.
@@ -213,6 +271,9 @@ public:
         fSelClips.clear();
         fRangeValid = false;
         fRangeA = fRangeB = 0;
+        // An in-place rename addresses a track by id in the project that made
+        // it; a new project's ids mean something else (stale content is a bug).
+        CancelTrackRename();
         Invalidate();
     }
 
@@ -224,6 +285,9 @@ public:
     // Move the playhead. Invalidates only the old + new columns, so the 60 Hz
     // poll doesn't repaint the whole view each tick.
     void SetPlayhead(Frame f);
+    // The DRAWN playhead (what the line is at), not the model's -- the two can
+    // differ if a seek forgets to move the line, which is what this exposes.
+    Frame Playhead() const { return fPlayhead; }
     void SetFollow(bool on) { fFollow = on; }   // chase the playhead in view
     void SetMonitorInput(bool on) { fMonitorInput = on; Invalidate(); }  // lane "I" lamp
     void CycleAuto(TrackId id);                 // inspector Auto button
@@ -272,6 +336,8 @@ private:
     // Iterate visible bar/beat gridlines: fn(x, isBar, barNumber).
     void ForEachGridLine(const std::function<void(float, bool, long)>& fn) const;
     void DrawTrackHeader(const Track& t, BRect lane);
+    void DrawTrackHeaderCompact(const Track& t, BRect lane);  // collapsed lane
+    void DrawNameField(const Track& t, BRect lane);   // the in-place rename box
     void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
     void DrawLiveAudio(BRect region);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
@@ -294,6 +360,25 @@ private:
     void  OpenGridMenu();               // the snap popup
     void  DrawToolButton(int i);        // button + glyph + hover
 
+    // --- the header's pickers (M2.6) ---------------------------------------
+    void  OpenColourPicker(TrackId track, BPoint where);
+    void  OpenInputPicker(TrackId track, BPoint where);
+    // In-place rename internals: the key handler is the field's own, and only
+    // the commit and the cancel end the edit.
+    bool  HandleRenameKey(const char* bytes, int32 numBytes);
+    void  CommitTrackRename();
+    void  CancelTrackRename();
+    TrackId     fRenameTrack = kInvalidTrackId;
+    std::string fRenameText;
+    int         fRenameCaret = 0;       // byte offset into fRenameText
+
+    // --- the marker lane (M2.7) --------------------------------------------
+    void   DrawMarkerLane();
+    void   HandleMarkerLaneClick(BPoint where, bool rightClick);
+    // The marker whose flag or name is under a point on the marker lane.
+    const Marker* MarkerInLane(BPoint where) const;
+    bool   fMarkerLane = false;
+
     // --- the tools' gestures ----------------------------------------------
     void ScissorsAt(const Hit& hit, BPoint where);
     void GlueAt(const Hit& hit);
@@ -310,14 +395,14 @@ private:
     // path uses, and only a CHANGE repaints (a pointer move over a big project
     // must not repaint the world).
     void UpdateHover(BPoint where, uint32 mods, uint32 transit);
-    int  HeaderControlAt(int idx, BPoint where) const;   // -1 = none
     void ApplyCursor(Pointer p);
     void SetTip(const char* text);      // tooltip, only when it changes
     Hit     fHover;                     // what is under the cursor
     BPoint  fHoverPos{ -1.0f, -1.0f };
     bool    fHoverValid  = false;
     int     fHoverToolBtn = -1;         // palette button under the cursor
-    int     fHoverHeader  = -1;         // track-header control under the cursor
+    HeaderControl fHoverHeader = HeaderControl::None;   // header control under it
+    bool    fHoverLaneEdge = false;     // the lane resize edge is under it
     float   fSplitHoverX  = -1.0f;      // scissors' future cut line
     std::string fTip;
     Pointer fCursor = Pointer::Default;
@@ -374,7 +459,7 @@ private:
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
-                      RulerPunch, Pencil, Slip, RangeSelect };
+                      RulerPunch, Pencil, Slip, RangeSelect, LaneResize };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;

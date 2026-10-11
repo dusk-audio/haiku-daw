@@ -352,6 +352,12 @@ add_executable(range_edit_tests tests/range_edit_tests.cpp)
 target_link_libraries(range_edit_tests PRIVATE daw_model)
 add_test(NAME range_edit_tests COMMAND range_edit_tests)
 
+# The M2.6 model work: duplicating a whole track (fresh clip ids) and folding
+# a lane.
+add_executable(track_depth_tests tests/track_depth_tests.cpp)
+target_link_libraries(track_depth_tests PRIVATE daw_model)
+add_test(NAME track_depth_tests COMMAND track_depth_tests)
+
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
 add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)
@@ -559,6 +565,7 @@ if(HAIKU)
         src/ui/ExportProgressWindow.cpp
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
+        src/ui/MarkersWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp

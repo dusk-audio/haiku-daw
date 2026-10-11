@@ -17,6 +17,7 @@
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/ui/RenameWindow.h"     // kMsgRenameClip (the Edit > Rename flow)
 #include "../src/ui/MixerWindow.h"      // MixerStripsView::Strips (the mid-drag check)
+#include "../src/ui/MarkersWindow.h"    // MarkersView::Markers (the M2.7 list)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
@@ -2994,7 +2995,17 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             // the mixer is polled: the refresh has to reach it during the
             // gesture, not on mouse-up (that is the whole point of the check,
             // and polling with the button held is what makes it a real one).
-            const float gy = laneTopA + Themed(56.0f);   // the gain fader row
+            // The row comes from the view's own geometry: a hard-coded offset
+            // silently pressed the WRONG control when M2.6 moved the fader --
+            // and the control under it (the input picker) opens a synchronous
+            // popup, which wedged the whole run.
+            BRect gainR;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                gainR = tv->HeaderRectFor(laneIdx, TimelineView::HeaderControl::Gain);
+                win->Unlock();
+            }
+            const float gy = (gainR.top + gainR.bottom) * 0.5f;
+            CHECK(gainR.Height() > 1.0f);
             postMouse(B_MOUSE_DOWN, BPoint(Themed(26.0f), gy));
             postMouse(B_MOUSE_MOVED, BPoint(Themed(146.0f), gy));
             const bool midLive = WaitFor(
@@ -3015,6 +3026,566 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         tv->SetTool(TimelineView::Tool::Pointer);
         tv->ClearTimeRange();
         win->Unlock();
+    }
+    sendKey("\x1b");
+    snooze(150000);
+}
+
+// --- M2.6/M2.7: track depth and markers -------------------------------------
+//
+// Every check here drives the REAL widget: a synthetic mouse on the view, the
+// keystrokes the window routes to it, and the message the real menu item
+// posts. The one thing that cannot be driven is a popup menu (its Go() is
+// synchronous and would wedge the window thread), so the pickers' CHOICES run
+// through the method the menu item calls -- and what the popup looks like is
+// what the shots are for. A `HeaderControlAt` assertion on the control's own
+// rect proves the press would have landed there.
+static void TestArrangeTracks(MainWindow* win, Project& project,
+                              CommandStack* stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_arrange_tracks\n");
+
+    // Fixture: two audio tracks (each with one clip) at the end of the list.
+    const char* kWav = "/tmp/haiku_daw_ui_tracks.wav";
+    {
+        std::remove(kWav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 2500, -2500 };
+        CHECK(w.Open(kWav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+    }
+    // What the project looked like before this test (section 10 puts it back).
+    std::vector<Marker> markersWere;
+    Frame playheadWas = 0;
+    size_t tracksWere = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        markersWere = project.markers;
+        playheadWas = project.transport.playhead;
+        tracksWere  = project.Tracks().size();
+        win->Unlock();
+    }
+    auto makeTrack = [&](const char* name, Frame start) {
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = name;
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = start;
+        c.lengthFrames = 24000;
+        c.sourcePath = kWav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+        return t;
+    };
+    const Track ta = makeTrack("td-a", 0);
+    const Track tb = makeTrack("td-b", 0);
+    const ClipId clipB = tb.clips[0].id;
+
+    TimelineView* tv = nullptr;
+    int idxA = -1, idxB = -1;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
+        idxA = project.IndexOfTrack(ta.id);
+        idxB = project.IndexOfTrack(tb.id);
+        win->Unlock();
+    }
+    CHECK(tv != nullptr);
+    if (!tv) return;
+
+    auto lock = [&](const std::function<void()>& fn) {
+        if (win->LockWithTimeout(1000000) == B_OK) { fn(); win->Unlock(); }
+    };
+    // Post a mouse event to any view with a point in ITS OWN coordinates: the
+    // view's window is locked for the conversion (the app server delivers the
+    // press as ConvertFromScreen(screen_where), so the pair has to agree), and
+    // the view's window -- not the main window -- is the one locked, so this
+    // works for a button in the markers window too.
+    auto postMouseTo = [&](BView* view, uint32 what, BPoint at, uint32 mods,
+                           int32 buttons, int32 clicks) {
+        BPoint screen = at;
+        if (BWindow* vw = view->Window()) {
+            if (vw->LockWithTimeout(1000000) == B_OK) {
+                screen = view->ConvertToScreen(at);
+                vw->Unlock();
+            }
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", buttons);
+        m.AddInt32("clicks", clicks);
+        m.AddInt32("modifiers", (int32)mods);
+        m.AddPoint("where", at);
+        m.AddPoint("screen_where", screen);
+        BMessenger(view).SendMessage(&m);
+    };
+    auto trackCount = [&] {
+        size_t n = 0;
+        lock([&] { n = project.Tracks().size(); });
+        return n;
+    };
+    auto markerCount = [&] {
+        size_t n = 0;
+        lock([&] { n = project.markers.size(); });
+        return n;
+    };
+    auto press = [&](BPoint at, uint32 mods = 0, int32 buttons = 1,
+                     int32 clicks = 1) {
+        postMouseTo(tv, B_MOUSE_DOWN, at, mods, buttons, clicks);
+        postMouseTo(tv, B_MOUSE_UP, at, mods, 0, clicks);
+    };
+    auto sendKey = [&](const char* bytes, uint32 mods = 0) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", (int32)mods);
+        win->PostMessage(&key);
+    };
+    auto trackName = [&](TrackId id) {
+        std::string s;
+        lock([&] {
+            if (const Track* t = project.FindTrack(id)) s = t->name;
+        });
+        return s;
+    };
+    auto trackOf = [&](TrackId id) {
+        Track t;
+        lock([&] {
+            if (const Track* p = project.FindTrack(id)) t = *p;
+        });
+        return t;
+    };
+    auto undoName = [&] {
+        std::string s;
+        lock([&] { s = stack->UndoName(); });
+        return s;
+    };
+    auto laneAt = [&](int idx) {
+        BRect r;
+        lock([&] { r = tv->LaneFrame(idx); });
+        return r;
+    };
+    auto controlCentre = [&](int idx, TimelineView::HeaderControl which) {
+        BRect r;
+        lock([&] { r = tv->HeaderRectFor(idx, which); });
+        return BPoint((r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f);
+    };
+
+    // Bring the two new lanes into view (they are the last ones).
+    {
+        BMessage bottomWheel(B_MOUSE_WHEEL_CHANGED);
+        bottomWheel.AddFloat("be:wheel_delta_y", 100000.0f);
+        BMessenger(tv).SendMessage(&bottomWheel);
+        snooze(120000);
+        lock([&] { tv->ScrollToFrame(0); });
+        snooze(120000);
+    }
+    const BRect laneA = laneAt(idxA);
+    const BRect laneB = laneAt(idxB);
+    CHECK(laneA.top >= TimelineContentTop());
+    CHECK(laneB.top > laneA.top);
+
+    // --- 1. Rename a track in place (M2.6) --------------------------------
+    std::printf("  tracks: rename in place\n");
+    {
+        const BPoint nameAt(Themed(40.0f), laneA.top + Themed(8.0f));
+        press(nameAt, 0, 1, 2);            // double-click the name
+        CHECK(WaitFor([&] {
+            bool on = false;
+            lock([&] { on = tv->RenamingInPlace() && tv->RenamingTrack() == ta.id; });
+            return on;
+        }));
+        // The field owns the keys: four backspaces clear "td-a", then a name.
+        for (int i = 0; i < 4; i++) sendKey("\x08");
+        sendKey("L"); sendKey("e"); sendKey("a"); sendKey("d");
+        snooze(250000);
+        Shot("tracks-rename-field");       // the open field, caret and all
+        sendKey("\n");                     // Enter commits
+        CHECK(WaitFor([&] { return trackName(ta.id) == "Lead"; }));
+        CHECK(undoName() == "Rename Track");
+        CHECK(WaitFor([&] {
+            bool done = false;
+            lock([&] { done = !tv->RenamingInPlace(); });
+            return done;
+        }));
+        Shot("tracks-rename");             // the open field went away with Enter
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return trackName(ta.id) == "td-a"; }));
+
+        // Esc leaves the name as it was.
+        press(nameAt, 0, 1, 2);
+        CHECK(WaitFor([&] {
+            bool on = false;
+            lock([&] { on = tv->RenamingInPlace(); });
+            return on;
+        }));
+        sendKey("X");
+        sendKey("\x1b");                   // Esc cancels
+        CHECK(WaitFor([&] {
+            bool done = false;
+            lock([&] { done = !tv->RenamingInPlace(); });
+            return done;
+        }));
+        CHECK(trackName(ta.id) == "td-a");
+    }
+
+    // --- 2. Drag the lane edge to resize it (M2.6) ------------------------
+    std::printf("  tracks: lane-edge resize\n");
+    {
+        const float edgeY = laneAt(idxB).bottom;
+        const BPoint grab(Themed(40.0f), edgeY - Themed(1.0f));
+        // The widget's own hit test names this lane's edge...
+        int edgeIdx = -1;
+        lock([&] { edgeIdx = tv->LaneEdgeAt(grab); });
+        CHECK(edgeIdx == idxB);
+        const int before = trackOf(tb.id).height;
+        postMouseTo(tv, B_MOUSE_DOWN, grab, 0, 1, 1);
+        postMouseTo(tv, B_MOUSE_MOVED,
+                    BPoint(Themed(40.0f), edgeY + Themed(30.0f)), 0, 1, 1);
+        postMouseTo(tv, B_MOUSE_UP,
+                    BPoint(Themed(40.0f), edgeY + Themed(30.0f)), 0, 0, 1);
+        CHECK(WaitFor([&] { return trackOf(tb.id).height > before + 20; }));
+        CHECK(undoName() == "Set Track Height");
+        Shot("tracks-lane-height");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return trackOf(tb.id).height == before; }));
+    }
+
+    // --- 3. The colour swatch draws and its picker's action works (M2.6) ---
+    std::printf("  tracks: colour swatch\n");
+    {
+        const BPoint sw = controlCentre(idxB, TimelineView::HeaderControl::Colour);
+        TimelineView::HeaderControl hit = TimelineView::HeaderControl::None;
+        lock([&] { hit = tv->HeaderControlAt(idxB, sw); });
+        CHECK(hit == TimelineView::HeaderControl::Colour);   // the real geometry
+        lock([&] { tv->SetTrackColour(tb.id, 3); });         // the menu's own call
+        CHECK(WaitFor([&] { return trackOf(tb.id).colorIndex == 3; }));
+        CHECK(undoName() == "Set Track Color");
+        Shot("tracks-colour");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return trackOf(tb.id).colorIndex == 0; }));
+    }
+
+    // --- 4. The header's input selector (M2.6) -----------------------------
+    std::printf("  tracks: input selector\n");
+    {
+        const BPoint in = controlCentre(idxB, TimelineView::HeaderControl::Input);
+        TimelineView::HeaderControl hit = TimelineView::HeaderControl::None;
+        lock([&] { hit = tv->HeaderControlAt(idxB, in); });
+        CHECK(hit == TimelineView::HeaderControl::Input);
+        // The action the popup entry runs (a MIDI track would offer endpoints;
+        // an audio track offers the system default -- TrackInputs.h).
+        lock([&] { tv->SetTrackInput(tb.id, InputSource{ InputSource::kAudioDefault, "", 0 }); });
+        CHECK(WaitFor([&] {
+            return trackOf(tb.id).input.kind == InputSource::kAudioDefault;
+        }));
+        CHECK(undoName() == "Set Track Input");
+        Shot("tracks-input");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] {
+            return trackOf(tb.id).input.kind == InputSource::kNone;
+        }));
+    }
+
+    // --- 5. Fold the lane (M2.6) -------------------------------------------
+    std::printf("  tracks: collapse\n");
+    {
+        const BPoint fold = controlCentre(idxB, TimelineView::HeaderControl::Fold);
+        TimelineView::HeaderControl hit = TimelineView::HeaderControl::None;
+        lock([&] { hit = tv->HeaderControlAt(idxB, fold); });
+        CHECK(hit == TimelineView::HeaderControl::Fold);
+        press(fold);                       // a real click on the triangle
+        CHECK(WaitFor([&] { return trackOf(tb.id).collapsed; }));
+        CHECK(undoName() == "Collapse Track");
+        // The lane really folded: its drawn height is the title strip.
+        const BRect folded = laneAt(idxB);
+        CHECK(folded.Height() < TrackHeight());
+        CHECK(folded.Height() > 4.0f);
+        Shot("tracks-collapsed");
+        // Re-ask the widget where the triangle is: collapsing the last lane
+        // shrinks the content, the vertical scrollbar clamps (scroll-past-the-
+        // end stays impossible), and every lane shifts down with it. A stale
+        // point would press whatever moved under it.
+        press(controlCentre(idxB, TimelineView::HeaderControl::Fold));
+        CHECK(WaitFor([&] { return !trackOf(tb.id).collapsed; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return trackOf(tb.id).collapsed; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return !trackOf(tb.id).collapsed; }));
+    }
+
+    // --- 6. Alt-click solos one track exclusively (M2.6) -------------------
+    std::printf("  tracks: exclusive solo\n");
+    {
+        const BPoint soloA = controlCentre(idxA, TimelineView::HeaderControl::Solo);
+        const BPoint soloB = controlCentre(idxB, TimelineView::HeaderControl::Solo);
+        press(soloA);                      // A solos normally first
+        CHECK(WaitFor([&] { return trackOf(ta.id).soloed; }));
+        press(soloB, B_OPTION_KEY);        // Alt-click B: B alone
+        CHECK(WaitFor([&] { return trackOf(tb.id).soloed; }));
+        CHECK(!trackOf(ta.id).soloed);
+        CHECK(undoName() == "Exclusive Solo");
+        Shot("tracks-exclusive-solo");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return !trackOf(tb.id).soloed && trackOf(ta.id).soloed; }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return !trackOf(ta.id).soloed; }));
+    }
+
+    // --- 7. Duplicate Track, from the Track menu's own message (M2.6) ------
+    std::printf("  tracks: duplicate\n");
+    {
+        // Select B by clicking its header, so the menu item acts on it.
+        press(BPoint(Themed(60.0f), laneAt(idxB).top + Themed(8.0f)));
+        CHECK(WaitFor([&] {
+            bool sel = false;
+            lock([&] { sel = tv->SelectedTrack() == tb.id; });
+            return sel;
+        }));
+        const size_t before = trackCount();
+        win->PostMessage(MSG_DUPLICATE_TRACK);     // the Track menu's message
+        CHECK(WaitFor([&] { return trackCount() == before + 1; }));
+        CHECK(undoName() == "Duplicate Track");
+        TrackId copyId = kInvalidTrackId;
+        lock([&] {
+            const int at = project.IndexOfTrack(tb.id);
+            if (at >= 0 && at + 1 < (int)project.Tracks().size())
+                copyId = project.Tracks()[(size_t)(at + 1)].id;
+        });
+        CHECK(copyId != kInvalidTrackId);
+        const Track copy = trackOf(copyId);
+        CHECK(copy.name == "td-b copy");
+        CHECK(copy.clips.size() == 1);
+        if (!copy.clips.empty()) {
+            CHECK(copy.clips[0].id != clipB);      // fresh ids
+            CHECK(copy.clips[0].sourcePath == kWav);
+        }
+        CHECK(WaitFor([&] {
+            bool sel = false;
+            lock([&] { sel = tv->SelectedTrack() == copyId; });
+            return sel;
+        }));
+        Shot("tracks-duplicated");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return trackCount() == before; }));
+    }
+
+    // --- 8. The marker lane (M2.7) -----------------------------------------
+    std::printf("  markers: lane\n");
+    {
+        const size_t markersBefore = markerCount();
+        win->PostMessage(MSG_MARKER_LANE);      // View > Marker Lane's message
+        CHECK(WaitFor([&] {
+            bool on = false;
+            lock([&] { on = tv->MarkerLaneOn(); });
+            return on;
+        }));
+        // The lane sits between the ruler and the lanes.
+        float laneTop = 0.0f, rulerBottom = 0.0f;
+        lock([&] { laneTop = tv->ContentTop(); rulerBottom = tv->RulerBottom(); });
+        CHECK(laneTop > rulerBottom);
+        const float yMarker = (laneTop + rulerBottom) * 0.5f;
+
+        // Double-click empty marker-lane space: a marker appears there. The x
+        // comes from the view's own frame mapping, under its lock.
+        float xAt = 0.0f;
+        lock([&] { xAt = tv->FrameToX(120000); });
+        postMouseTo(tv, B_MOUSE_DOWN, BPoint(xAt, yMarker), 0, 1, 2);
+        postMouseTo(tv, B_MOUSE_UP,   BPoint(xAt, yMarker), 0, 0, 2);
+        CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+        Frame mkFrame = -1;
+        lock([&] {
+            if (!project.markers.empty()) mkFrame = project.markers.back().frame;
+        });
+        CHECK(mkFrame == 120000);         // the 1/16 grid at 120 BPM/48k
+        Shot("markers-lane");
+
+        // A click on the flag seeks -- and moves the DRAWN line, not just the
+        // model (the ruler's flag click used to leave the line behind).
+        lock([&] { project.transport.playhead = 0; tv->SetPlayhead(0); });
+        press(BPoint(xAt, yMarker));
+        CHECK(WaitFor([&] {
+            Frame ph = -1, drawn = -1;
+            lock([&] { ph = project.transport.playhead; drawn = tv->Playhead(); });
+            return ph == mkFrame && drawn == mkFrame;
+        }));
+
+        // Right-clicking the flag removes it -- one undoable step.
+        postMouseTo(tv, B_MOUSE_DOWN, BPoint(xAt, yMarker), 0, 2, 1);
+        postMouseTo(tv, B_MOUSE_UP,   BPoint(xAt, yMarker), 0, 0, 1);
+        CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
+        CHECK(undoName() == "Remove Marker");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+
+        // ...and the playhead-seek from a marker is what the markers window
+        // uses too (checked in section 9).
+        win->PostMessage(MSG_EDIT_UNDO);   // drop the marker again
+        CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
+
+        // Add two markers for the window's list, then leave the lane OFF so
+        // the later tests see the geometry they expect.
+        {
+            lock([&] { project.transport.playhead = 24000; });
+            lock([&] { tv->AddMarkerAt(24000); });
+            lock([&] { tv->AddMarkerAt(72000); });
+        }
+        CHECK(WaitFor([&] { return markerCount() == markersBefore + 2; }));
+        win->PostMessage(MSG_MARKER_LANE);
+        CHECK(WaitFor([&] {
+            bool off = false;
+            lock([&] { off = !tv->MarkerLaneOn(); });
+            return off;
+        }));
+    }
+
+    // --- 9. The markers window (M2.7) --------------------------------------
+    std::printf("  markers: the list window\n");
+    {
+        const int before = VisibleWindows();
+        win->PostMessage(MSG_MARKERS);        // View > Markers' own message
+        BWindow* mw = nullptr;
+        CHECK(WaitFor([&] {
+            for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                BWindow* w = be_app->WindowAt(i);
+                if (w && !w->IsHidden() && w != win
+                    && std::strcmp(WindowTitle(w), "Markers") == 0) mw = w;
+            }
+            return mw != nullptr && VisibleWindows() == before + 1;
+        }));
+        CHECK(mw != nullptr);
+        if (mw) {
+            MarkersView* mv = nullptr;
+            if (mw->LockWithTimeout(1000000) == B_OK) {
+                mv = dynamic_cast<MarkersView*>(mw->FindView("markers"));
+                mw->Unlock();
+            }
+            CHECK(mv != nullptr);
+            // The list is the pushed snapshot, not model access.
+            CHECK(WaitFor([&] {
+                size_t n = 0;
+                if (mw->LockWithTimeout(1000000) == B_OK) {
+                    n = mv ? mv->Markers().size() : 0;
+                    mw->Unlock();
+                }
+                return n == markerCount();
+            }));
+            // The list is kept CURRENT, not merely handed over at creation: a
+            // marker added in the arranger while the window is open has to
+            // appear here (that is the push, and without this check the
+            // constructor's snapshot alone satisfies the size comparison).
+            const size_t beforeAdd = markerCount();
+            lock([&] { tv->AddMarkerAt(48000); });
+            CHECK(WaitFor([&] { return markerCount() == beforeAdd + 1; }));
+            CHECK(WaitFor([&] {
+                size_t n = 0;
+                if (mw->LockWithTimeout(1000000) == B_OK) {
+                    n = mv ? mv->Markers().size() : 0;
+                    mw->Unlock();
+                }
+                return n == beforeAdd + 1;
+            }));
+            snooze(200000);
+            Shot("markers-window");
+
+            // The real "Add at Playhead" button, clicked the way the server
+            // delivers a click.
+            if (mv) {
+                BView* add = nullptr;
+                BView* del = nullptr;
+                if (mw->LockWithTimeout(1000000) == B_OK) {
+                    add = mw->FindView("mk-add");
+                    del = mw->FindView("mk-delete");
+                    mw->Unlock();
+                }
+                CHECK(add != nullptr && del != nullptr);
+                const size_t n0 = markerCount();
+                if (add) {
+                    // The button in ITS OWN coordinates, like TestWidgetKit.
+                    BPoint at;
+                    if (mw->LockWithTimeout(1000000) == B_OK) {
+                        at = BPoint(add->Bounds().Width() * 0.5f,
+                                    add->Bounds().Height() * 0.5f);
+                        mw->Unlock();
+                    }
+                    postMouseTo(add, B_MOUSE_DOWN, at, 0, 1, 1);
+                    postMouseTo(add, B_MOUSE_UP,   at, 0, 0, 1);
+                    CHECK(WaitFor([&] { return markerCount() == n0 + 1; }));
+                }
+                // Clicking a row locates to that marker.
+                Frame rowFrame = -1;
+                if (mw->LockWithTimeout(1000000) == B_OK) {
+                    if (mv && !mv->Markers().empty())
+                        rowFrame = mv->Markers()[1].frame;
+                    mw->Unlock();
+                }
+                CHECK(rowFrame >= 0);
+                if (rowFrame >= 0) {
+                    lock([&] { project.transport.playhead = 0; tv->SetPlayhead(0); });
+                    postMouseTo(mv, B_MOUSE_DOWN,
+                                BPoint(Themed(40.0f), Themed(16.0f)
+                                       + Themed(2.0f) + Themed(22.0f) * 1.5f),
+                                0, 1, 1);
+                    postMouseTo(mv, B_MOUSE_UP,
+                                BPoint(Themed(40.0f), Themed(16.0f)
+                                       + Themed(2.0f) + Themed(22.0f) * 1.5f),
+                                0, 0, 1);
+                    CHECK(WaitFor([&] {
+                        Frame ph = -1;
+                        lock([&] { ph = project.transport.playhead; });
+                        return ph == rowFrame;
+                    }));
+                }
+                // ...and Delete removes the selected row.
+                const size_t n1 = markerCount();
+                if (del) {
+                    BPoint at;
+                    if (mw->LockWithTimeout(1000000) == B_OK) {
+                        at = BPoint(del->Bounds().Width() * 0.5f,
+                                    del->Bounds().Height() * 0.5f);
+                        mw->Unlock();
+                    }
+                    postMouseTo(del, B_MOUSE_DOWN, at, 0, 1, 1);
+                    postMouseTo(del, B_MOUSE_UP,   at, 0, 0, 1);
+                    CHECK(WaitFor([&] { return markerCount() == n1 - 1; }));
+                }
+                Shot("markers-window-after");
+            }
+
+            // One instance: asking again brings the same window forward.
+            win->PostMessage(MSG_MARKERS);
+            snooze(300000);
+            int titled = 0;
+            for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                BWindow* w = be_app->WindowAt(i);
+                if (w && !w->IsHidden()
+                    && std::strcmp(WindowTitle(w), "Markers") == 0) titled++;
+            }
+            CHECK(titled == 1);
+            // Close it the way every other child window is closed here.
+            if (mw->LockWithTimeout(2000000) == B_OK) mw->Quit();
+            CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+        }
+    }
+
+    // --- 10. Leave the project as it was found ----------------------------
+    // The next test measures play start on the accumulated project against a
+    // 5 s bound that is already marginal (the real budget is M4.1's), so this
+    // package's fixtures must not stay behind and quietly tip it over. The two
+    // fixture tracks go back through the stack and the marker list goes back
+    // to exactly what it was (this is cleanup, not a behaviour under test).
+    {
+        lock([&] {
+            stack->Execute(std::make_unique<RemoveTrackCommand>(ta.id), project);
+            stack->Execute(std::make_unique<RemoveTrackCommand>(tb.id), project);
+            project.markers = markersWere;
+            project.transport.playhead = playheadWas;
+            tv->SetTool(TimelineView::Tool::Pointer);
+            tv->ClearTimeRange();
+        });
+        win->PostMessage(kMsgUiRefresh);
+        CHECK(trackCount() == tracksWere);
+        CHECK(markerCount() == markersWere.size());
     }
     sendKey("\x1b");
     snooze(150000);
@@ -4451,6 +5022,7 @@ static int32 TestThread(void*) {
     TestThemeScale(win, project);
     TestArrangeFeel(win, project);
     TestArrangeDepth(win, project, &stack);
+    TestArrangeTracks(win, project, &stack);
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
     TestDockPages(win, project, &stack);
