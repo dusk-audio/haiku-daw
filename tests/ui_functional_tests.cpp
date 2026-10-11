@@ -4433,7 +4433,23 @@ static void TestShortcutsWindow(MainWindow* win) {
         BTextView* tv = nullptr;
         if (keys && keys->LockWithTimeout(1000000) == B_OK) {
             tv = dynamic_cast<BTextView*>(keys->FindView(kShortcutsTextView));
-            if (tv) shown = tv->Text();
+            if (tv) {
+                shown = tv->Text();
+                // The text is drawn in the THEME's text colour on its well
+                // colour. A BTextView's runs carry their own colour (not the
+                // view's high colour), and the system default was dark-on-dark
+                // in Dark mode: the window opened unreadable.
+                BFont runFont;
+                rgb_color runCol = {};
+                tv->GetFontAndColor(0, &runFont, &runCol);
+                const rgb_color want = ColText();
+                CHECK(runCol.red == want.red && runCol.green == want.green
+                      && runCol.blue == want.blue);
+                const rgb_color well = ColLcd();
+                const rgb_color bg = tv->ViewColor();
+                CHECK(bg.red == well.red && bg.green == well.green
+                      && bg.blue == well.blue);
+            }
             keys->Unlock();
         }
         CHECK(tv != nullptr);
