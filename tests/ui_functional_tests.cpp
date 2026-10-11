@@ -1927,10 +1927,20 @@ static void TestDockPages(MainWindow* win, Project& project, CommandStack* stack
 
     auto clickPage = [&](int index) {
         BPoint at, screen;
+        bool shown = false;
         win->Lock();
-        at = SegmentClickPoint(segments, index);
-        screen = segments->ConvertToScreen(at);
+        // A detached view has no owner to convert coordinates with -- and one
+        // is detached exactly when the dock is hidden. Say so and fail, rather
+        // than let the kit trap in ConvertToScreen (which takes the whole test
+        // process, and the VM, down with it).
+        shown = segments->Window() != nullptr;
+        if (shown) {
+            at = SegmentClickPoint(segments, index);
+            screen = segments->ConvertToScreen(at);
+        }
         win->Unlock();
+        CHECK(shown);   // the dock must be showing for a click to land
+        if (!shown) return;
         const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
         for (uint32 what : whats) {
             BMessage m(what);
