@@ -107,6 +107,12 @@ public:
     // disrupt a fader/pan gesture).
     void SetStrips(std::vector<MixerStripInfo> strips, float masterGain);
 
+    // The strip state this rack is showing. Read by the functional test to
+    // prove a drag elsewhere (the timeline's header fader) has ALREADY reached
+    // it mid-gesture -- the rack's snapshot is the observable the inspector,
+    // which draws straight from the model, cannot offer.
+    const std::vector<MixerStripInfo>& Strips() const { return fStrips; }
+
 private:
     float StripX(int i) const;       // left x of strip i (i == count -> master)
     void  DrawStrip(int i, const MixerStripInfo* info, float gain,

@@ -16,6 +16,7 @@
 #include "../src/ui/PianoRoll.h"
 #include "../src/ui/QuantizeWindow.h"   // kMsgRollQuantize (the roll's settings)
 #include "../src/ui/RenameWindow.h"     // kMsgRenameClip (the Edit > Rename flow)
+#include "../src/ui/MixerWindow.h"      // MixerStripsView::Strips (the mid-drag check)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
@@ -84,6 +85,9 @@ using namespace daw;
 #endif
 #ifndef MSG_UNDO_TEST
 #define MSG_UNDO_TEST 'undo'  // Edit > Undo (MainWindow's MSG_UNDO)
+#endif
+#ifndef MSG_MIXER_TEST
+#define MSG_MIXER_TEST 'mixr'   // View > Mixer (MainWindow's MSG_MIXER)
 #endif
 
 static const char* kExportName = "haiku_daw_ui_export.wav";
@@ -2901,6 +2905,59 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         // check (the pattern every other close in this file follows).
         if (child && child->LockWithTimeout(2000000) == B_OK) child->Quit();
         CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // --- 15. A header fader/pan drag is live in the OTHER panes too ---------
+    // The mixer/inspector -> timeline direction has always been live; the
+    // reverse was not: the header drag previewed into the model and refreshed
+    // the panes only on mouse-up, so the inspector and the mixer showed the old
+    // value until the gesture ended. This asserts the value MID-DRAG, before
+    // the mouse-up, on the mixer's own snapshot of the strip (the observable
+    // the inspector, which draws straight from the model, cannot offer).
+    std::printf("  depth: header drag refreshes the panes mid-gesture\n");
+    {
+        win->PostMessage(MSG_MIXER_TEST);
+        MixerStripsView* strips = nullptr;
+        BWindow* mixer = nullptr;
+        CHECK(WaitFor([&] {
+            for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                BWindow* w = be_app->WindowAt(i);
+                if (!w || w->IsHidden() || w == win) continue;
+                if (w->LockWithTimeout(500000) != B_OK) continue;
+                BView* v = w->FindView("strips");
+                if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+                w->Unlock();
+                if (strips) return true;
+            }
+            return false;
+        }));
+        CHECK(strips != nullptr);
+        if (strips) {
+            auto mixerGain = [&] {
+                float g = -1.0f;
+                if (mixer->LockWithTimeout(1000000) == B_OK) {
+                    for (const MixerStripInfo& st : strips->Strips())
+                        if (st.trackId == ta.id) g = st.gain;
+                    mixer->Unlock();
+                }
+                return g;
+            };
+            const float beforeG = mixerGain();
+            CHECK(beforeG >= 0.0f);
+
+            // Press on the header fader and move: mid-drag, the mixer must
+            // already have the new value.
+            const float gy = laneTopA + Themed(56.0f);   // the gain fader row
+            postMouse(B_MOUSE_DOWN, BPoint(Themed(26.0f), gy));
+            postMouse(B_MOUSE_MOVED, BPoint(Themed(146.0f), gy));
+            const float midG = mixerGain();
+            std::printf("  header drag: mixer gain %.3f -> %.3f\n", beforeG, midG);
+            CHECK(midG > beforeG + 0.01f);     // mid-gesture, not mouse-up
+            postMouse(B_MOUSE_UP, BPoint(Themed(146.0f), gy));
+            CHECK(WaitFor([&] { return mixerGain() > beforeG + 0.01f; }));
+        }
+        if (mixer && mixer->LockWithTimeout(2000000) == B_OK) mixer->Quit();
+        CHECK(WaitFor([&] { return VisibleWindows() == 1; }));
     }
 
     // Leave the window as the next test (the big-project one) expects: pointer

@@ -2682,16 +2682,27 @@ void TimelineView::PreviewDrag(BPoint where) {
     if (!t) return;
     BRect lane = LaneRect(fDragLane);
 
-    if (fDrag == Drag::Gain) {
-        BRect g = GainRect(lane);
-        float v = (where.x - g.left) / g.Width() * kMaxGain;
-        if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
-        t->gain = v;
-    } else if (fDrag == Drag::Pan) {
-        // Pan knob: vertical drag (up = right), relative to the grab point.
-        float v = fDragOrig + (fDragGrabY - where.y) / 100.0f;
-        if (v < -1) v = -1; if (v > 1) v = 1;
-        t->pan = v;
+    if (fDrag == Drag::Gain || fDrag == Drag::Pan) {
+        // The header fader and pan knob are the ONE preview whose value other
+        // panes also show: the inspector draws it and the mixer holds a
+        // snapshot of it, so each step has to reach them or they sit on the
+        // old value until the mouse comes up (the mixer/inspector -> timeline
+        // direction has always been live: InspectorView::Refresh() posts this
+        // same message on every move). Same message, same cadence, no second
+        // mechanism -- the undo discipline is untouched (still preview writes,
+        // one command on mouse-up).
+        if (fDrag == Drag::Gain) {
+            BRect g = GainRect(lane);
+            float v = (where.x - g.left) / g.Width() * kMaxGain;
+            if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
+            t->gain = v;
+        } else {
+            // Pan knob: vertical drag (up = right), relative to the grab point.
+            float v = fDragOrig + (fDragGrabY - where.y) / 100.0f;
+            if (v < -1) v = -1; if (v > 1) v = 1;
+            t->pan = v;
+        }
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
     } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
         // MIDI region move: preview live (same track), commit on drop. When
         // multiple are selected, shift them all by the grabbed clip's delta
