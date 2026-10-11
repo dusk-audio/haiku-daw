@@ -5,6 +5,8 @@
 
 #include "Command.h"
 
+#include <algorithm>
+
 namespace daw {
 
 // Add a new track. Allocates a fresh id via Project::NextTrackId in Do()
@@ -582,6 +584,79 @@ private:
     ClipId                fRightId = kInvalidClipId;
 };
 
+// Join the clicked clip with the NEXT clip on the same track when the two meet
+// -- adjacent or overlapping, the geometry SplitClipCommand leaves behind. The
+// left clip keeps its id, source and read offset and grows to cover the right
+// one's end; the interior fade-out is cleared (it was a seam, not a fade). This
+// is the Glue tool's whole behaviour.
+//
+// Do() refuses when there is no next clip, when the next one does not meet the
+// left one, when either belongs to a take group (comp takes are alternatives,
+// not halves) or when an inactive take is involved -- the user glued what they
+// can see.
+class JoinClipsCommand : public Command {
+public:
+    JoinClipsCommand(TrackId track, ClipId left)
+        : fTrack(track), fLeft(left) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Join Clips"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fLeft;
+    Frame   fOldLen       = 0;   // left clip's length before the join
+    Frame   fOldFadeOut   = 0;
+    Clip    fRight;              // the absorbed clip, saved for Undo()
+    bool    fHaveRight    = false;
+};
+
+// The MIDI-region twin of the above: the left region grows to the right one's
+// end and the right region's notes and events move into it, rebased by the
+// start delta (a note the right region held mid-way lands mid-way in the joined
+// one). Do() refuses on the same conditions.
+class JoinMidiClipsCommand : public Command {
+public:
+    JoinMidiClipsCommand(TrackId track, ClipId left)
+        : fTrack(track), fLeft(left) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Join MIDI Clips"; }
+
+private:
+    TrackId               fTrack;
+    ClipId                fLeft;
+    Frame                 fOldLen     = 0;
+    Frame                 fOldFadeOut = 0;
+    std::vector<MidiNote>      fOldNotes;   // left region's notes before the join
+    std::vector<MidiClipEvent> fOldEvents;
+    MidiClip              fRight;            // the absorbed region
+    bool                  fHaveRight  = false;
+};
+
+// Slip: move the audio inside a clip without moving the clip. The clip's
+// position, length and fades are untouched; `sourceOffset` moves by the delta,
+// so the material under the clip's window shifts. Clamped at 0 (there is no
+// audio before the file's start). Audio only -- a MIDI region has no source to
+// slip, its notes live in the region and are edited in the piano roll.
+class SlipClipCommand : public Command {
+public:
+    SlipClipCommand(TrackId track, ClipId clip, Frame newSourceOffset)
+        : fTrack(track), fClip(clip), fNewOffset(newSourceOffset) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Slip Clip"; }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewOffset = 0;
+    Frame   fOldOffset = 0;
+};
+
 // Freeze or unfreeze a track. Freezing bakes the track's clips/notes through
 // its fader + effect chain into one rendered audio clip (supplied by the UI,
 // which does the offline render) and stashes the pre-freeze content on the
@@ -909,6 +984,48 @@ private:
     std::vector<MidiClipEvent> fNew, fOld;
 };
 
+// Fold a track's lane to a title strip (M2.6). A persisted track property
+// (`trackfold`), so it is an ordinary undoable edit; stores the old flag.
+class SetTrackCollapsedCommand : public Command {
+public:
+    SetTrackCollapsedCommand(TrackId track, bool collapsed)
+        : fTrack(track), fNew(collapsed) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override {
+        return fNew ? "Collapse Track" : "Expand Track";
+    }
+private:
+    TrackId fTrack; bool fNew; bool fOld = false;
+};
+
+// Duplicate a track: a copy of EVERYTHING it carries (name + " copy", gain,
+// pan, mute/solo/arm flags, colour, height, fold, fx, sends, automation,
+// instrument, input, routing, and the freeze stash), placed directly after the
+// source, with FRESH clip/region ids (ids are project-unique; a copy sharing
+// them would make every id-addressed edit hit two clips). The created id is
+// allocated once in Do() and reused on redo, the AddTrackCommand pattern.
+class DuplicateTrackCommand : public Command {
+public:
+    explicit DuplicateTrackCommand(TrackId track) : fTrack(track) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Duplicate Track"; }
+
+    TrackId CreatedId() const { return fCreatedId; }
+    int     NewIndex()  const { return fIndex; }   // where the copy landed
+    // Give every clip/region in `t` a fresh id (the freeze stash's too). Static
+    // so the id allocation is one definition; callable only with the project.
+    static void FreshenClipIds(Project& p, Track& t);
+
+private:
+    TrackId fTrack;
+    TrackId fCreatedId = kInvalidTrackId;
+    int     fIndex = -1;      // index the copy was inserted at (for undo)
+    Track   fCopy;            // built once in Do(), reused on redo (stable ids)
+    bool    fBuilt = false;
+};
+
 // Set a track's color index / lane height (view props; discrete, undoable).
 class SetTrackColorCommand : public Command {
 public:
@@ -969,6 +1086,123 @@ private:
     TrackId        fTrack;
     int            fIdx;
     AutomationLane fNew, fOld;
+};
+
+// --- clip depth (M2.5) --------------------------------------------------
+
+// Rename an audio clip (its display name; "" = the source file's base name).
+class SetClipNameCommand : public Command {
+public:
+    SetClipNameCommand(TrackId track, ClipId clip, std::string name)
+        : fTrack(track), fClip(clip), fNew(std::move(name)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Rename Clip"; }
+private:
+    TrackId     fTrack;
+    ClipId      fClip;
+    std::string fNew, fOld;
+};
+
+// Set a clip's colour index (0 = inherit the track's, like a MIDI region's).
+class SetClipColorCommand : public Command {
+public:
+    SetClipColorCommand(TrackId track, ClipId clip, int colorIndex)
+        : fTrack(track), fClip(clip), fNew(colorIndex) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Clip Color"; }
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    int     fNew = 0;
+    int     fOld = 0;
+};
+
+// Mute one clip or MIDI region (`midi` selects which list) — the Mute tool's
+// per-clip meaning, and what the engine/exporter/CollectNotes honour.
+class SetClipMuteCommand : public Command {
+public:
+    SetClipMuteCommand(TrackId track, ClipId clip, bool midi, bool muted)
+        : fTrack(track), fClip(clip), fMidi(midi), fNew(muted) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return fNew ? "Mute Clip" : "Unmute Clip"; }
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    bool    fMidi;
+    bool    fNew;
+    bool    fOld = false;
+};
+
+// Set the shape an audio clip's OWN fades render with (an auto-crossfade's
+// contribution renders equal-power regardless — see model/Crossfade.h).
+class SetClipFadeShapeCommand : public Command {
+public:
+    SetClipFadeShapeCommand(TrackId track, ClipId clip, FadeShape shape)
+        : fTrack(track), fClip(clip), fNew(shape) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Fade Shape"; }
+private:
+    TrackId   fTrack;
+    ClipId    fClip;
+    FadeShape fNew = FadeShape::Linear;
+    FadeShape fOld = FadeShape::Linear;
+};
+
+// --- time-range edits (M2.4) --------------------------------------------
+//
+// Both range commands address EVERY track (the range is project-wide; no
+// per-track selection exists until M2.6) and every clip, hidden loop-record
+// takes included — a range edit that skipped a take would desync the group the
+// next time the user cycles takes. They snapshot the affected tracks' clip
+// lists and restore them verbatim, which is exact for edits that can split
+// clips, allocate ids and trim fades.
+
+// Clear the content of [a,b): clips wholly inside are removed, straddling ones
+// are trimmed or split so nothing sounds inside the range and everything
+// outside it is untouched. Do() fails (nothing is pushed) when no clip
+// intersects the range.
+class RangeDeleteCommand : public Command {
+public:
+    RangeDeleteCommand(Frame a, Frame b)
+        : fA(std::min(a, b)), fB(std::max(a, b)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Delete Range"; }
+
+private:
+    Frame fA = 0, fB = 0;
+    struct Saved {
+        TrackId               track = kInvalidTrackId;
+        std::vector<Clip>     clips;
+        std::vector<MidiClip> midi;
+    };
+    std::vector<Saved> fSaved;
+};
+
+// Insert (b-a) frames of silence at `a`: everything that starts at or after
+// `a` moves right by that much, and a clip straddling `a` is split there so its
+// right half moves with the rest. The ripple is over clips only — the playhead,
+// the loop and the markers stay put (markers are M2.7's to move).
+class RangeInsertSilenceCommand : public Command {
+public:
+    RangeInsertSilenceCommand(Frame a, Frame b)
+        : fA(std::min(a, b)), fB(std::max(a, b)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Insert Silence"; }
+
+private:
+    Frame fA = 0, fB = 0;
+    struct Saved {
+        TrackId               track = kInvalidTrackId;
+        std::vector<Clip>     clips;
+        std::vector<MidiClip> midi;
+    };
+    std::vector<Saved> fSaved;
 };
 
 // Group several commands into one undoable step (multi-select edits: delete /

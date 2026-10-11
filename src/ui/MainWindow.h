@@ -19,6 +19,7 @@
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
+#include "Theme.h"                    // ThemeAware + the tokens (T1)
 #include "RecordController.h"         // the record state + the recorder
 #include "RenderJobs.h"              // export/freeze/region rendering
 #include "TransportController.h"      // the engine + transport state
@@ -52,6 +53,9 @@ namespace daw {
 
 class TimelineView;
 class InspectorView;
+class DawSegments;
+class SampleBrowserView;
+class PluginBrowserView;
 class PianoRollView;
 class MeterView;
 class DawButton;
@@ -71,13 +75,48 @@ constexpr uint32 MSG_SAVE_AS          = 'svas';   // File > Save As (always a pa
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
 constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
 constexpr uint32 MSG_RELINK_REF       = 'rlkr';   // from the Locate… walk's panel
+// The full Edit menu (M2.4). The timeline owns the range and the clipboard, so
+// the window routes these to it. Public ids: the functional tests post exactly
+// what the menu posts.
+constexpr uint32 MSG_EDIT_UNDO        = 'undo';
+constexpr uint32 MSG_EDIT_REDO        = 'redo';
+constexpr uint32 MSG_EDIT_CUT         = 'ecut';
+constexpr uint32 MSG_EDIT_COPY        = 'ecpy';
+constexpr uint32 MSG_EDIT_PASTE       = 'epst';
+constexpr uint32 MSG_EDIT_DELETE      = 'edel';
+constexpr uint32 MSG_EDIT_SELECT_ALL  = 'esel';
+constexpr uint32 MSG_EDIT_DUPLICATE   = 'edup';
+constexpr uint32 MSG_EDIT_INSERT_SIL  = 'eins';
 constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';
 constexpr uint32 MSG_EXPORT_STEMS_REF = 'stmr';
+// View > Dark Mode: flip the look between the user's own colours and the
+// DAW's dark palette (T1). Also what the functional test posts.
+constexpr uint32 MSG_THEME_MODE       = 'thmm';
+// View > Markers (M2.7): the markers/locations list window, single-instance.
+constexpr uint32 MSG_MARKERS          = 'mkrs';
+// View > Marker Lane: the flag strip between the ruler and the lanes.
+constexpr uint32 MSG_MARKER_LANE      = 'mkln';
+// Track > Duplicate Track (the whole track, with fresh clip ids).
+constexpr uint32 MSG_DUPLICATE_TRACK  = 'dptr';
+// The dock's segmented control -> the window (T2): int32 "index" is the page
+// to show (0 Editor, 1 Samples, 2 Plugins).
+constexpr uint32 MSG_DOCK_PAGE        = 'dkpg';
+// MainWindow -> itself, a moment after a file panel is shown: the panel builds
+// its views after Show() returns, so the themed colours go on a second time.
+constexpr uint32 MSG_THEME_STOCK      = 'thst';
 
-class MainWindow : public BWindow {
+class MainWindow : public BWindow, public ThemeAware {
 public:
+    // A mode switch re-takes every colour this window cached (the window's own
+    // background and the transport bar's readouts); the walker invalidates the
+    // rest, which draw from the tokens (T1).
+    void ApplyTheme() override;
+    // Switch the whole process — tokens, control look and every open window —
+    // and remember it. The View menu and the functional test both land here.
+    void SetThemeMode(ThemeMode mode);
+
     // The transport's method moves (M1.1) live in TransportController; it
     // reaches the widgets and the model through the window it is given.
     friend class TransportController;
@@ -97,6 +136,11 @@ public:
     ~MainWindow() override;
 
     void MessageReceived(BMessage* msg) override;
+    // The Edit menu's Undo/Redo labels come from the stack (M2.4):
+    // "Undo Move Clip" / "Redo Split at Playhead". Called after every undoable
+    // path the window itself runs and from the 2 Hz title poll, which covers
+    // the edits the timeline makes without a message to the window.
+    void UpdateEditMenu();
     // Keys belong to the focused view -- except that the timeline only takes
     // focus on a click, so after anyone touched a text field the transport
     // keys (Space, arrows, Home) went nowhere. Route a key with no command
@@ -106,6 +150,10 @@ public:
     bool QuitRequested() override;   // quit the app when the window closes
     // For the functional tests: whether the transport is rolling.
     bool IsPlaying() const { return fTransportCtl.fPlaying; }
+    // For the functional tests: re-run the settings load, which a restart would
+    // do. The suite keeps ONE window for the whole run (closing it quits the
+    // app), so the restore path is otherwise unreachable from a test.
+    void ReloadSettings() { LoadSettings(); }
 
 private:
     // Feed one live event to every armed track whose route accepts it.
@@ -123,6 +171,10 @@ private:
     void ValidateFxWatch();          // keep a live editor pointed at ITS insert
     void CloseFxEditors();           // project is going away: close them all
     void FlushFxEditors();           // before a save: commit what they wrote
+    // Save the insert's current patch as a named preset (the panel's
+    // "Save Preset..."). Captures the state the way a save does, then writes a
+    // preset file; `fx` is an index into the track's (or master's) chain.
+    void SaveFxPreset(TrackId tid, int fx, const char* name);
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path, bool asRecovery = false);
     // File > New: ask, then a fresh empty project at the session's rate.
@@ -177,6 +229,18 @@ private:
     // The window's panes (M1.4): the inspector/timeline split, and the docked
     // bottom pane (the editor and the browsers) under it. Both are BSplitViews,
     // so the user resizes them and the sizes persist in AppSettings.
+    BMenuItem*      fUndoItem      = nullptr;   // Edit > Undo  (its label from
+    BMenuItem*      fRedoItem      = nullptr;   // ... UndoName/RedoName, M2.4)
+    BMenuItem*      fCopyItem      = nullptr;   // Edit > Copy (nothing to copy)
+    BMenuItem*      fCutItem       = nullptr;
+    BMenuItem*      fDeleteItem    = nullptr;
+    BMenuItem*      fPasteItem     = nullptr;
+    BMenuItem*      fSelectAllItem = nullptr;
+    BMenuItem*      fDupItem       = nullptr;
+    BMenuItem*      fSilenceItem   = nullptr;   // Edit > Insert Silence (range)
+    BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
+    BMenuItem*      fMarkerLaneItem = nullptr;  // View > Marker Lane (M2.7)
+    BMenuItem*      fDupTrackItem  = nullptr;   // Track > Duplicate Track (M2.6)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
     BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
     BSplitView*     fPaneSplit = nullptr;   // inspector | timeline
@@ -185,6 +249,7 @@ private:
     BGroupView*     fEditorPane = nullptr;   // the dock's body: roll or hint
     BStringView*    fDockTitle  = nullptr;   // what the dock is showing
     BView*          fDockEmpty  = nullptr;   // the hint while nothing is open
+    BStringView*    fDockHint   = nullptr;   // its text (re-coloured on a mode switch)
     DawButton*      fDockPop    = nullptr;   // Pop out (only with a region)
     PianoRollView*  fDockRoll   = nullptr;   // the docked MIDI editor, or null
     TrackId         fDockTrack  = kInvalidTrackId;
@@ -192,6 +257,35 @@ private:
     bool            fInspectorShown = true;
     void SetInspectorShown(bool shown);
     void SetDockShown(bool shown);
+    // The dock's pages (T2). The body holds ONE of them: the piano roll (or its
+    // hint), a sample browser, or the plugin browser. Switching shows the dock,
+    // so "add an effect" and "browse samples" land where the content is.
+    void SetDockPage(int page);
+    void PopOutDockPage();   // the showing page becomes its own window
+    // The markers window (M2.7): show and activate the one that exists, or
+    // make it — and push it the current list. Every marker edit goes through
+    // PushMarkers (the kMsgUiRefresh handler calls it), so the window is never
+    // stale.
+    void ShowMarkersWindow();
+    void PushMarkers();
+    // The effects window is single-instance (T2): this shows and activates the
+    // one that exists, retargeted at `track`/`focusSlot`, or creates it. Every
+    // "edit this chain" path goes through here so there is one window and one
+    // place that decides.
+    void ShowFxWindow(TrackId track, int focusSlot = -1);
+    enum { kDockEditor = 0, kDockSamples = 1, kDockPlugins = 2 };
+    // Show a browser page, pointed at `track` when it is a plugin browser (the
+    // chain a choice will be added to). kInvalidTrackId leaves it as it is.
+    void ShowDockBrowser(int page, TrackId track = kInvalidTrackId);
+    int              fDockPage     = kDockEditor;
+    DawSegments*     fDockSegments = nullptr;
+    SampleBrowserView* fDockSamples = nullptr;
+    PluginBrowserView* fDockPlugins = nullptr;
+    // The track the inspector is pointed at: the plugin page adds to it, so it
+    // follows the selection like the inspector does — through the same call,
+    // so the two cannot drift apart (T2 review).
+    TrackId          fSelTrack     = kInvalidTrackId;
+    void SelectTrack(TrackId tid);   // inspector + the plugin page follow
     void OpenDockedEditor(TrackId track, ClipId clip);
     void ClearDockedEditor();                // back to the empty hint
     void ShowReplacedProject(Frame playhead);   // after Open / New
@@ -234,6 +328,7 @@ private:
     // slow runner. UpdateTitle() is also called directly on save/load/undo.
     BMessageRunner*           fTitlePoll = nullptr; // 2 Hz dirty-marker poll
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
+    BMessenger                fMarkersMsgr;  // open markers window (the list push)
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)

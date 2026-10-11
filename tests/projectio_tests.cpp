@@ -495,6 +495,237 @@ int main() {
         }
     }
 
+    // Clip depth (M2.5): name / colour / mute / fade shape round-trip, on both
+    // an audio clip and a MIDI region (the mute line is shared).
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "C"), a);
+        TrackId t = a.Tracks().front().id;
+        Clip c; c.startFrame = 0; c.lengthFrames = 100;
+        c.sourcePath = "x.wav";
+        c.name = "Verse \"one\"";   // spaces + a quote: the quoted token must hold
+        c.colorIndex = 4;
+        c.muted = true;
+        c.fadeShape = FadeShape::SCurve;
+        s.Execute(std::make_unique<AddClipCommand>(t, c), a);
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "M"), a);
+        TrackId tm = a.Tracks().back().id;
+        MidiClip mc; mc.startFrame = 0; mc.lengthFrames = 100;
+        mc.muted = true;
+        s.Execute(std::make_unique<AddMidiClipCommand>(tm, mc), a);
+
+        const char* path = "clipdepth_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+
+        const Clip& bc = b.Tracks()[0].clips[0];
+        CHECK(bc.name == "Verse \"one\"");
+        CHECK(bc.colorIndex == 4);
+        CHECK(bc.muted == true);
+        CHECK(bc.fadeShape == FadeShape::SCurve);
+        CHECK(b.Tracks()[1].midiClips[0].muted == true);
+
+        // Compat, direction 1: the CLIP LINE itself is byte-identical to the
+        // previous format — every new field rides on its own line, so a reader
+        // that does not know them still parses gain/takeGroup/takeActive from
+        // the tail exactly as it did.
+        {
+            std::ifstream in(path);
+            std::string line, clipLine, midiLine;
+            int infoLines = 0, muteLines = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("clipinfo ", 0) == 0) infoLines++;
+                if (line.rfind("clipmute ", 0) == 0) muteLines++;
+                if (line.rfind("clip ", 0) == 0) clipLine = line;
+                if (line.rfind("midiclip ", 0) == 0) midiLine = line;
+            }
+            CHECK(infoLines == 1);
+            CHECK(muteLines == 2);   // the audio clip and the MIDI region
+            CHECK(clipLine == "clip 1 0 100 0 0 0 \"x.wav\" 1 0 1");
+            CHECK(midiLine == "midiclip 2 0 100 0 0 0 0 1");
+        }
+        std::remove(path);
+    }
+
+    // Compat, direction 2: an old file (no clipinfo/clipmute at all) loads with
+    // the documented defaults, and a project that never touches the new fields
+    // writes NO new lines — its clip line is the legacy spelling, unchanged.
+    {
+        const char* path = "legacyclip_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Old\" 0 72 0 0 0\n"
+                << "clip 1 0 4800 0 0 0 \"old.wav\" 0.5 0 1\n"
+                << "midiclip 2 0 4800 0 0 0 0 1\n"
+                << "note 60 100 0 480\n"
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 1);
+        const Clip& c = p.Tracks()[0].clips[0];
+        CHECK(std::abs(c.gain - 0.5f) < 1e-4f);   // the old tail still parses
+        CHECK(c.name.empty());
+        CHECK(c.colorIndex == 0);
+        CHECK(c.muted == false);
+        CHECK(c.fadeShape == FadeShape::Linear);
+        CHECK(!p.Tracks()[0].midiClips.empty());
+        CHECK(p.Tracks()[0].midiClips[0].muted == false);
+        std::remove(path);
+
+        // The save side of the same rule.
+        Project q;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Q"), q);
+        Clip c2; c2.startFrame = 0; c2.lengthFrames = 4800;
+        c2.sourcePath = "old.wav"; c2.gain = 0.5f;
+        c2.takeGroup = 2;
+        s.Execute(std::make_unique<AddClipCommand>(q.Tracks().front().id, c2), q);
+        CHECK(ProjectIO::Save(q, path));
+        {
+            std::ifstream in(path);
+            std::string line, clipLine;
+            int newLines = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("clipinfo ", 0) == 0
+                    || line.rfind("clipmute ", 0) == 0) newLines++;
+                if (line.rfind("clip ", 0) == 0) clipLine = line;
+            }
+            CHECK(newLines == 0);
+            CHECK(clipLine == "clip 1 0 4800 0 0 0 \"old.wav\" 0.5 2 1");
+        }
+        std::remove(path);
+    }
+
+    // A truncated clipinfo line is skipped, not half-applied: the clip keeps
+    // what its own line said.
+    {
+        const char* path = "truncinfo_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"T\" 0 72 0 0 0\n"
+                << "clip 1 0 100 0 0 0 \"a.wav\" 1 0 1\n"
+                << "clipinfo 1 3\n"                  // missing shape + name
+                << "clipmute 1\n"                    // missing the flag
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        const Clip& c = p.Tracks()[0].clips[0];
+        CHECK(c.colorIndex == 0 && c.name.empty() && !c.muted);
+        std::remove(path);
+    }
+
+    // Track depth (M2.6): a folded lane round-trips on its own optional line,
+    // an old file loads expanded, and a project that folds nothing writes the
+    // legacy track bytes exactly.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Fold"), a);
+        TrackId t = a.Tracks().front().id;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Open"), a);
+        s.Execute(std::make_unique<SetTrackCollapsedCommand>(t, true), a);
+
+        const char* path = "trackfold_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+        CHECK(b.Tracks().size() == 2);
+        CHECK(b.Tracks()[0].collapsed == true);
+        CHECK(b.Tracks()[1].collapsed == false);
+        std::remove(path);
+
+        // The save side: the folded track writes the line, the other does not,
+        // and the track line itself is untouched.
+        CHECK(ProjectIO::Save(a, path));
+        {
+            std::ifstream in(path);
+            std::string line, foldLine, firstTrack;
+            int folds = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("trackfold ", 0) == 0) { folds++; foldLine = line; }
+                else if (line.rfind("track ", 0) == 0 && firstTrack.empty())
+                    firstTrack = line;
+            }
+            CHECK(folds == 1);
+            CHECK(foldLine == "trackfold 1 1");
+            // The track line itself is unchanged: the fold is a separate line,
+            // never a new tail field.
+            CHECK(firstTrack.rfind("track 1 audio ", 0) == 0);
+            CHECK(firstTrack.find("\"Fold\" 0 72 0 0 0") != std::string::npos);
+        }
+        std::remove(path);
+    }
+
+    // Compat: a file from before the fold existed loads with every lane
+    // expanded, and an unknown/truncated trackfold is skipped rather than
+    // guessing.
+    {
+        const char* path = "legacyfold_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Old\" 0 72 0 0 0\n"
+                << "track 2 midi 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+                << "trackfold 2\n"       // truncated: skipped
+                << "trackfold 9 1\n"     // unknown track id: no effect
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 2);
+        if (p.Tracks().size() == 2) {
+            CHECK(p.Tracks()[0].collapsed == false);
+            CHECK(p.Tracks()[1].collapsed == false);
+        }
+        std::remove(path);
+    }
+
+    // Fold lines are addressed BY ID and applied after the whole file: one
+    // written after a later track still folds the track it names, and one
+    // written before its own record is not lost either.
+    {
+        const char* path = "foldorder_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "trackfold 2 1\n"     // for a track not read yet
+                << "track 1 audio 1 0 0 0 0 \"One\" 0 72 0 0 0\n"
+                << "track 2 audio 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+                << "trackfold 1 1\n"     // for a track already committed
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 2);
+        if (p.Tracks().size() == 2) {
+            CHECK(p.Tracks()[0].collapsed == true);
+            CHECK(p.Tracks()[1].collapsed == true);
+        }
+        std::remove(path);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

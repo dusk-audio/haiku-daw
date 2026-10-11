@@ -258,6 +258,71 @@ int main() {
         e.Stop();
     }
 
+    // --- plugin state: a change is structural, and capture reaches the model --
+    //
+    // Two engine-side rules the host tests cannot reach, because they live in
+    // Engine.cpp (Media Kit):
+    //
+    //   1. A descriptor whose stored STATE changed is a structural mismatch, not
+    //      a pushable one. A plugin's own state is applied at instantiation, so
+    //      SyncFx reporting "matched" for a changed state would silently leave
+    //      the old patch playing — the exact data-loss shape this feature is
+    //      here to end. Asserted against a built-in as well: the rule is about
+    //      the descriptor, not about which type happens to have state.
+    //   2. CaptureFxStates writes the live instance's state into the model, so a
+    //      save (or a render snapshot) has something to serialize. Whether a
+    //      given plugin HAS state is the plugin's business — 4K EQ 2 does, a
+    //      plain parameter plugin does not — so this asserts the contract that
+    //      holds either way: what the model gets back is a state the plugin
+    //      accepts, and capturing twice changes nothing.
+    {
+        Track& t = const_cast<Track&>(p.Tracks().front());
+        const std::string before = t.fx[0].state;
+        CHECK(e.SyncFx(p));                     // untouched: still matched
+        t.fx[0].state = "@prefix pset: <http://lv2plug.in/ns/ext/presets#> .\n"
+                        "<urn:haiku-daw:state:x> a pset:Preset ;\n"
+                        "    lv2:appliesTo <urn:x> .\n";
+        CHECK(!e.SyncFx(p));                    // changed state -> rebuild
+        t.fx[0].state = before;
+        CHECK(e.SyncFx(p));                     // ...and back again
+
+        e.CaptureFxStates(p);
+        const std::string captured = t.fx[0].state;
+        const std::string again = (e.CaptureFxStates(p), t.fx[0].state);
+        CHECK(again == captured);               // idempotent while nothing ran
+        if (!captured.empty()) {
+            // What was captured is a state the plugin accepts: build a fresh
+            // instance from the descriptor and hand it back the same document.
+            std::unique_ptr<IEffect> fx = MakeEffect(t.fx[0], 48000.0);
+            CHECK(fx != nullptr);
+            if (fx) {
+                fx->Prepare(48000.0);
+                CHECK(fx->LoadState(captured));
+            }
+            std::printf("  %s reported %zu bytes of state\n",
+                        pick->name.c_str(), captured.size());
+        } else {
+            std::printf("  %s has no state to capture (fine, not a failure)\n",
+                        pick->name.c_str());
+        }
+
+        // A built-in has none, and capture must not invent one for it.
+        EffectDesc eq = EqDesc();
+        eq.state = "leftover";
+        std::vector<EffectDesc> chain;
+        chain.push_back(eq);
+        // (through the model: a whole-chain replace, then capture)
+        std::vector<EffectDesc> keep;
+        {
+            const Track* tr = p.FindTrack(tid);
+            keep = tr ? tr->fx : std::vector<EffectDesc>{};
+        }
+        t.fx = chain;
+        e.CaptureFxStates(p);
+        CHECK(t.fx[0].state == "leftover");     // untouched, not cleared
+        t.fx = keep;
+    }
+
     std::printf("lv2_live_editor_tests: %d checks, %d failures\n",
                 g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;

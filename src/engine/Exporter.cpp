@@ -90,11 +90,13 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
 }
 
 // Place a decoded clip into a track buffer at its timeline position, applying
-// linear fade-in/out (both measured in output frames) and per-channel gain.
+// the effective fade-in/out (both measured in output frames, with the shape
+// each renders with — M2.5) and per-channel gain.
 void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
                int64_t totalOut, const float* gainLR,
                std::vector<float>& trackBuf,
-               Frame effFadeIn, Frame effFadeOut) {
+               Frame effFadeIn, Frame effFadeOut,
+               FadeShape fadeInShape, FadeShape fadeOutShape) {
     // A clip that starts before the window lands at a negative offset: the loop
     // below skips those frames (they are outside the bounce), which is exactly
     // what a range export wants from a clip straddling the range start.
@@ -123,15 +125,10 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
         if (dst < 0) continue;
         if (dst >= totalOut) break;
 
-        float env = 1.0f;
-        if (fadeIn > 0 && i < fadeIn)
-            env *= static_cast<float>(i) / static_cast<float>(fadeIn);
-        if (fadeOut > 0 && i >= lengthOut - fadeOut) {
-            const int64_t rem = lengthOut - i;   // frames until clip end
-            float f = static_cast<float>(rem) / static_cast<float>(fadeOut);
-            if (f < 0.0f) f = 0.0f;
-            if (f < env)  env = f;   // combine as min so overlapping fades behave
-        }
+        // The same envelope the live engine applies (ClipFadeEnvelope), so a
+        // bounce and playback agree on the curve as well as the length.
+        float env = ClipFadeEnvelope(
+            i, lengthOut, fadeIn, fadeInShape, fadeOut, fadeOutShape);
         env *= c.gain;   // per-clip gain, after the [0,1] fade envelope
 
         trackBuf[dst * 2 + 0] += decoded[i * 2 + 0] * gainLR[0] * env;
@@ -473,8 +470,10 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const Clip& c = t.clips[ci];
                 if (c.sourcePath.empty()) continue;
                 if (c.takeGroup > 0 && !c.takeActive) continue;  // inactive take
+                if (c.muted) continue;                           // per-clip mute
                 PlaceClip(c, scale, winStart, outRate, totalOut, kUnity,
-                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut);
+                          nodeVec(it->second), fades[ci].fadeIn, fades[ci].fadeOut,
+                          fades[ci].inShape, fades[ci].outShape);
             }
         } else if (audible && t.type == TrackType::Midi) {
             // One voice per track, built at the OUTPUT rate. The sampler is

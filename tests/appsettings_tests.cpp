@@ -59,6 +59,39 @@ int main() {
     CHECK(b.bottomVisible == true);
     CHECK(std::fabs(b.bottomHeight - 300.0f) < 1e-3);
 
+    // The dock's page (T2).
+    {
+        AppSettings d;
+        d.dockPage = 2;
+        AppSettings d2;
+        CHECK(d2.Deserialize(d.Serialize()));
+        CHECK(d2.dockPage == 2);
+        AppSettings plain;
+        CHECK(plain.Deserialize("buffer 512\n"));
+        CHECK(plain.dockPage == 0);
+    }
+
+    // The look (T1): the mode survives, and a file that has no theme line --
+    // or a hand-edited one -- stays on System, which is the mode the app is
+    // allowed to draw anywhere.
+    {
+        AppSettings t;
+        t.themeMode = ThemeMode::Dark;
+        AppSettings t2;
+        CHECK(t2.Deserialize(t.Serialize()));
+        CHECK(t2.themeMode == ThemeMode::Dark);
+
+        AppSettings plain;
+        CHECK(plain.Deserialize("buffer 512\n"));
+        CHECK(plain.themeMode == ThemeMode::System);
+
+        AppSettings odd;
+        CHECK(odd.Deserialize("theme midnight\n"));
+        CHECK(odd.themeMode == ThemeMode::System);
+        CHECK(odd.Deserialize("theme dark\n"));
+        CHECK(odd.themeMode == ThemeMode::Dark);
+    }
+
     // An old settings file (no export keys at all) keeps the dialog defaults.
     AppSettings old;
     CHECK(old.Deserialize("buffer 512\nmetronome 0\n"));
@@ -129,6 +162,26 @@ int main() {
         AppSettings r4;
         CHECK(r4.Deserialize(fat));
         CHECK(r4.recentProjects.size() == AppSettings::kMaxRecent);
+    }
+
+    // --- the marker lane (M2.6) ------------------------------------------
+    {
+        // Off by default, round-trips, and a settings file from before the
+        // preference keeps the default.
+        AppSettings m;
+        CHECK(m.markerLaneVisible == false);
+        m.markerLaneVisible = true;
+        AppSettings m2;
+        CHECK(m2.Deserialize(m.Serialize()));
+        CHECK(m2.markerLaneVisible == true);
+
+        AppSettings m3;
+        CHECK(m3.Deserialize("buffer 256\nuimarklane 1\n"));
+        CHECK(m3.markerLaneVisible == true);
+
+        AppSettings m4;
+        CHECK(m4.Deserialize("buffer 256\n"));   // older file: no line
+        CHECK(m4.markerLaneVisible == false);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

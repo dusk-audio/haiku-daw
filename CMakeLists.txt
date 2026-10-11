@@ -39,9 +39,11 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
+    src/app/ThemePalette.cpp    # kit-free theme palette derivation (T1)
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -116,6 +118,12 @@ enable_testing()
 add_executable(model_tests tests/model_tests.cpp)
 target_link_libraries(model_tests PRIVATE daw_model)
 add_test(NAME model_tests COMMAND model_tests)
+
+# The palette derivation: the tokens of both modes, and the contrast the
+# System-mode rules have to keep on a light and a dark system panel.
+add_executable(theme_palette_tests tests/theme_palette_tests.cpp)
+target_link_libraries(theme_palette_tests PRIVATE daw_model)
+add_test(NAME theme_palette_tests COMMAND theme_palette_tests)
 
 add_executable(commandstack_tests tests/commandstack_tests.cpp)
 target_link_libraries(commandstack_tests PRIVATE daw_model)
@@ -270,6 +278,15 @@ if(DAW_LV2_ENABLED)
     add_dependencies(lv2_render_tests daw_test_plugins)
     add_test(NAME lv2_render_tests COMMAND lv2_render_tests)
 
+    # Plugin state and presets against the fixture's stateful plugin: save and
+    # restore asserted on the AUDIO it produces, the factory's load path, the
+    # bundled preset's discovery, and the user preset store. Shares the fixture
+    # and its LV2_PATH.
+    add_executable(lv2_state_tests tests/lv2_state_tests.cpp)
+    target_link_libraries(lv2_state_tests PRIVATE daw_lv2)
+    add_dependencies(lv2_state_tests daw_test_plugins)
+    add_test(NAME lv2_state_tests COMMAND lv2_state_tests)
+
     # LV2_PATH = our fixture + the system SPEC bundles.
     #
     # The spec bundles are not optional decoration. With the fixture dir alone,
@@ -292,17 +309,54 @@ if(DAW_LV2_ENABLED)
     endif()
     # The host's Haiku default path uses setenv(overwrite=0), so this wins there
     # too and the test sees the same world on both platforms.
-    set_tests_properties(lv2_fixture_tests lv2_render_tests PROPERTIES
-        ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
+    set_tests_properties(lv2_fixture_tests lv2_render_tests lv2_state_tests
+        PROPERTIES ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
 endif()
 
 add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
 add_test(NAME projectio_tests COMMAND projectio_tests)
 
+# Plugin state in the project: the base64 codec and the append-only `fxstate` /
+# `masterfxstate` lines, including the patched-file compat both directions. No
+# lilv here on purpose — the format is the model layer's, and this is where a
+# byte lost in it would show up.
+add_executable(fx_state_io_tests tests/fx_state_io_tests.cpp)
+target_link_libraries(fx_state_io_tests PRIVATE daw_model)
+add_test(NAME fx_state_io_tests COMMAND fx_state_io_tests)
+
+# The DAW's own preset files (kit-free header): format, directory-per-plugin
+# isolation, path-hostile names, and the torn/foreign-file policy.
+add_executable(preset_store_tests tests/preset_store_tests.cpp)
+target_link_libraries(preset_store_tests PRIVATE daw_model)
+add_test(NAME preset_store_tests COMMAND preset_store_tests)
+
 add_executable(grid_tests tests/grid_tests.cpp)
 target_link_libraries(grid_tests PRIVATE daw_model)
 add_test(NAME grid_tests COMMAND grid_tests)
+
+# The arrange window's snap values (M2.3): the grid the menu offers, its labels
+# and the beat-space snap through the tempo map.
+add_executable(snapgrid_tests tests/snapgrid_tests.cpp)
+target_link_libraries(snapgrid_tests PRIVATE daw_model)
+add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
+
+# The arrange editing commands M2.1-2.3 add: Glue's two joins, the slip edit.
+add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
+target_link_libraries(arrange_cmd_tests PRIVATE daw_model)
+add_test(NAME arrange_cmd_tests COMMAND arrange_cmd_tests)
+
+# The M2.4/M2.5 model work: fade shapes, the time-range slice/delete/insert
+# arithmetic and the clip-depth commands.
+add_executable(range_edit_tests tests/range_edit_tests.cpp)
+target_link_libraries(range_edit_tests PRIVATE daw_model)
+add_test(NAME range_edit_tests COMMAND range_edit_tests)
+
+# The M2.6 model work: duplicating a whole track (fresh clip ids) and folding
+# a lane.
+add_executable(track_depth_tests tests/track_depth_tests.cpp)
+target_link_libraries(track_depth_tests PRIVATE daw_model)
+add_test(NAME track_depth_tests COMMAND track_depth_tests)
 
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
@@ -518,9 +572,11 @@ if(HAIKU)
         src/ui/ExportProgressWindow.cpp
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
+        src/ui/MarkersWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp
+        src/ui/widgets/DawSegments.cpp
         src/storage/BfsAttr.cpp
         src/plugin/PluginHost.cpp
     )

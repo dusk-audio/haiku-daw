@@ -11,6 +11,8 @@
 // delete act on the whole selection.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Project.h"
 #include "../model/MidiOps.h"
 #include "../model/TempoMap.h"
@@ -49,7 +51,9 @@ constexpr uint32 kMsgRollPlayhead = 'rlph';
 // main window can push the playhead to it during transport.
 constexpr uint32 kMsgRollOpened = 'rlop';
 
-class PianoRollView : public BView {
+class PianoRollView : public BView, public ThemeAware {
+public:
+    void ApplyTheme() override;   // T1: the cached panel colour
 public:
     using Frame = daw::Frame;
     // `playhead` is the transport position when the editor opened (absolute
@@ -61,7 +65,12 @@ public:
                   TempoMap tempo, double sampleRate, Frame playhead,
                   BMessenger apply);
 
-    void SetPlayhead(Frame absFrame) { fPlayhead = absFrame; Invalidate(); }
+    void SetPlayhead(Frame absFrame);   // M2.2: follows it into view
+    // Visible-span introspection for the functional tests, and the follow
+    // policy's own state (region-relative scroll in frames).
+    Frame  ScrollFrame() const { return fScrollFrame; }
+    Frame  VisibleSpan() const;   // frames the grid shows, right of the keyboard
+    double FramesPerPixel() const { return fFramesPerPixel; }
 
     // Which controller the bottom lane shows: -1 = note velocity, else a CC
     // number 0..127. The lane's own popup is where a person picks it (the menu
@@ -173,10 +182,14 @@ private:
 
     double fFramesPerPixel = 128.0;
     Frame  fScrollFrame    = 0;
+    bool   fFollow         = true;  // M2.2: scroll to keep the playhead in view
     int    fTopPitch       = 96;   // highest pitch row at the top
     Frame  fPlayhead       = -1;   // absolute frames; <0 = hidden ("tapehead")
 
     void ZoomBy(double factor);    // horizontal zoom about the view
+    void ZoomAnchoredAt(double factor, float x);   // keeps x's frame in place
+    BPoint fHoverPos{ -1.0f, -1.0f };   // last pointer position (wheel anchor)
+    bool   fHoverSeen = false;
 
     enum class Drag { None, Move, Resize, Velocity, Marquee, Brush, Erase, Cc };
     Drag  fDrag = Drag::None;

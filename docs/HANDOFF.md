@@ -272,23 +272,57 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
   Recover? alert on the window thread and every locked check times out. Delete
   it before a run.
-- **A faulted run leaves Haiku's crash dialog on the screen, and a dialog wedges
-  every later run** (the next team's windows never get the focus, so their
-  locked checks time out). Look at the VM before and after a run —
-  `virsh -c qemu:///system screenshot haiku-beta6 /tmp/x.ppm` — and clear a
-  dialog with `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp
-  'sendkey ret'` (an input event, so it is allowed). The fault itself is named in
-  the syslog: `grep -A 12 DEBUGGER /boot/system/var/log/syslog` prints the
-  faulting frame and the test function, which beats bisecting a hang.
-  A `BView` method called from a test thread without the window lock is the
-  commonest cause — `BView::Invalidate()` trips `BLooper::check_lock()`, which
-  is a `debugger()` call, so the team dies with the crash dialog up. Every view
-  call in `tests/ui_functional_tests.cpp` holds the window's lock
-  (`if (win->LockWithTimeout(1000000) == B_OK) { ...; win->Unlock(); }`), or goes
-  through a posted message.
+- **…and so does the SETTINGS file (`~/config/settings/HaikuDAW/settings`).**
+  It persists the panes (`uiinsp`, `uidockpage`), so a run that ended with the
+  inspector hidden makes every later run start with it hidden: the pane tests
+  that assume it is visible fail, and the run after them (a plugin pick whose
+  message targets the inspector's view) fails too. Delete the file before a
+  run, or let the suite do it (it does since `feature/arrange-depth`).
+- **A pipeline hides a failure: check the exit code yourself.** `sh scripts/vm.sh
+  build` and `test` used to end in `... | tail -3`, so a failed compile (or a
+  failing `ctest`) exited 0 and left the PREVIOUS binaries in place — a stale
+  binary run that looks green. The script now writes the build log, tails it and
+  `exit`s with the real status (fixed on `feature/arrange-feel`, 2026-10-10);
+  any other command you build from a pipeline in a script needs the same
+  treatment. `set -e` does not save you: the pipeline's status is its LAST
+  command's.
+- **A FAULTED run wedges the next one just as hard.** A thread that trips a
+  Haiku assertion (`debugger()`) raises the "has encountered an error" dialog,
+  and until it is answered every later run on that machine hangs — ctest
+  reports the run as `Signal 21`, which is `SIGKILLTHR`, i.e. the Terminate the
+  dialog sends, not the fault. Look at the screen
+  (`virsh -c qemu:///system screenshot haiku-beta6 /tmp/x.png`) and clear it
+  with `virsh -c qemu:///system qemu-monitor-command haiku-beta6 --hmp 'sendkey ret'`
+  (Terminate is the default button; `sendkey` is a keyboard event, not a
+  settings change — changing the debug server's settings is NOT allowed).
+  The fault itself is in the kernel's log: `sh scripts/vm.sh ssh 'grep -A 20
+  DEBUGGER /boot/system/var/log/syslog | tail -30'` prints the assertion and
+  the stack, which is far faster than bisecting.
+- **`debugger()` from the app means one of two shapes.** `BView`/`BLooper` call
+  `check_lock()`/`_CheckOwnerLockAndSwitchCurrent()` and assert when a view
+  method runs off the window lock ("Looper must be locked.") or on a view with
+  no owner ("View method requires owner and doesn't have one." — e.g. drawing
+  into a `BBitmap` built without `B_BITMAP_ACCEPTS_VIEWS`). Tests must hold the
+  window lock around every view call; a view that draws into a bitmap needs
+  `acceptsViews` and `Lock()` before `AddChild`.
 - **Green tests did not mean a working UI.** M1.3/M1.4 merged with the main
   window visibly broken and every check passing. `docs/UI_GUIDELINES.md` is
   the rule that came out of it.
+- **A synthetic click at a hard-coded offset can land on a control that opens a
+  synchronous popup** — and `BPopUpMenu::Go` does NOT return until a choice is
+  made, so the window thread blocks and every later check that wants the window
+  lock times out (it reads as 8 unrelated failures and a wedged run). The
+  arrange-depth package's mid-drag check pressed the header fader at
+  `laneTop + Themed(56)`; the arrange-tracks package moved the fader and left
+  an input picker on that pixel. Tests must ask the view for a control's own
+  rect (`HeaderRectFor`, `HeaderControlAt`) instead of computing one.
+- **Two agents share this VM, and so do its scratch paths.** `refs/heads/_vmwt`
+  (the HANDOFF's own throwaway-ref recipe), `~/haiku-daw`, its `build/` dir and
+  `/tmp/ui.log` are common state: a sync left in an earlier `flock` hold is
+  overwritten by the sibling's next sync, and a run that does not rebuild in
+  the SAME hold executes the sibling's binary (two runs reported 329 checks and
+  "0 failures" for a tree this package never built). Sync, build, run and copy
+  the log to a private name INSIDE ONE hold, and use a per-agent ref name.
 
 ## Commit rules
 
