@@ -51,7 +51,9 @@ public:
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
                 bool audible, Frame seekProjectDelta, float outputRate,
-                Frame fadeIn, Frame fadeOut, float clipGain = 1.0f);
+                Frame fadeIn, Frame fadeOut, float clipGain = 1.0f,
+                FadeShape fadeInShape = FadeShape::Linear,
+                FadeShape fadeOutShape = FadeShape::Linear);
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -94,6 +96,8 @@ private:
     float       fOutputRate;    // engine output rate to resample to
     Frame       fFadeIn;        // fade-in length (timeline frames)
     Frame       fFadeOut;       // fade-out length (timeline frames)
+    FadeShape   fFadeInShape  = FadeShape::Linear;   // the curves they render
+    FadeShape   fFadeOutShape = FadeShape::Linear;   // with (M2.5)
     float       fClipGain = 1.0f;  // per-clip linear gain
     int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan

@@ -5,6 +5,8 @@
 
 #include "Command.h"
 
+#include <algorithm>
+
 namespace daw {
 
 // Add a new track. Allocates a fresh id via Project::NextTrackId in Do()
@@ -1042,6 +1044,123 @@ private:
     TrackId        fTrack;
     int            fIdx;
     AutomationLane fNew, fOld;
+};
+
+// --- clip depth (M2.5) --------------------------------------------------
+
+// Rename an audio clip (its display name; "" = the source file's base name).
+class SetClipNameCommand : public Command {
+public:
+    SetClipNameCommand(TrackId track, ClipId clip, std::string name)
+        : fTrack(track), fClip(clip), fNew(std::move(name)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Rename Clip"; }
+private:
+    TrackId     fTrack;
+    ClipId      fClip;
+    std::string fNew, fOld;
+};
+
+// Set a clip's colour index (0 = inherit the track's, like a MIDI region's).
+class SetClipColorCommand : public Command {
+public:
+    SetClipColorCommand(TrackId track, ClipId clip, int colorIndex)
+        : fTrack(track), fClip(clip), fNew(colorIndex) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Clip Color"; }
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    int     fNew = 0;
+    int     fOld = 0;
+};
+
+// Mute one clip or MIDI region (`midi` selects which list) — the Mute tool's
+// per-clip meaning, and what the engine/exporter/CollectNotes honour.
+class SetClipMuteCommand : public Command {
+public:
+    SetClipMuteCommand(TrackId track, ClipId clip, bool midi, bool muted)
+        : fTrack(track), fClip(clip), fMidi(midi), fNew(muted) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return fNew ? "Mute Clip" : "Unmute Clip"; }
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    bool    fMidi;
+    bool    fNew;
+    bool    fOld = false;
+};
+
+// Set the shape an audio clip's OWN fades render with (an auto-crossfade's
+// contribution renders equal-power regardless — see model/Crossfade.h).
+class SetClipFadeShapeCommand : public Command {
+public:
+    SetClipFadeShapeCommand(TrackId track, ClipId clip, FadeShape shape)
+        : fTrack(track), fClip(clip), fNew(shape) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Fade Shape"; }
+private:
+    TrackId   fTrack;
+    ClipId    fClip;
+    FadeShape fNew = FadeShape::Linear;
+    FadeShape fOld = FadeShape::Linear;
+};
+
+// --- time-range edits (M2.4) --------------------------------------------
+//
+// Both range commands address EVERY track (the range is project-wide; no
+// per-track selection exists until M2.6) and every clip, hidden loop-record
+// takes included — a range edit that skipped a take would desync the group the
+// next time the user cycles takes. They snapshot the affected tracks' clip
+// lists and restore them verbatim, which is exact for edits that can split
+// clips, allocate ids and trim fades.
+
+// Clear the content of [a,b): clips wholly inside are removed, straddling ones
+// are trimmed or split so nothing sounds inside the range and everything
+// outside it is untouched. Do() fails (nothing is pushed) when no clip
+// intersects the range.
+class RangeDeleteCommand : public Command {
+public:
+    RangeDeleteCommand(Frame a, Frame b)
+        : fA(std::min(a, b)), fB(std::max(a, b)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Delete Range"; }
+
+private:
+    Frame fA = 0, fB = 0;
+    struct Saved {
+        TrackId               track = kInvalidTrackId;
+        std::vector<Clip>     clips;
+        std::vector<MidiClip> midi;
+    };
+    std::vector<Saved> fSaved;
+};
+
+// Insert (b-a) frames of silence at `a`: everything that starts at or after
+// `a` moves right by that much, and a clip straddling `a` is split there so its
+// right half moves with the rest. The ripple is over clips only — the playhead,
+// the loop and the markers stay put (markers are M2.7's to move).
+class RangeInsertSilenceCommand : public Command {
+public:
+    RangeInsertSilenceCommand(Frame a, Frame b)
+        : fA(std::min(a, b)), fB(std::max(a, b)) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Insert Silence"; }
+
+private:
+    Frame fA = 0, fB = 0;
+    struct Saved {
+        TrackId               track = kInvalidTrackId;
+        std::vector<Clip>     clips;
+        std::vector<MidiClip> midi;
+    };
+    std::vector<Saved> fSaved;
 };
 
 // Group several commands into one undoable step (multi-select edits: delete /

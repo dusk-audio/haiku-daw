@@ -1445,6 +1445,7 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
 }
 
 void EffectsWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardUndoRedo(m, fApply)) return;          // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fApply)) return;
     BWindow::DispatchMessage(m, h);
 }

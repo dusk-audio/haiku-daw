@@ -128,6 +128,45 @@ public:
     // selection's when there is one, else every track's. `S`.
     void SplitAtPlayhead();
 
+    // --- time-range selection (M2.4) ---------------------------------------
+    //
+    // The range is VIEW state (nothing about a selection belongs in the
+    // project file) and project-wide: no per-track selection exists until
+    // M2.6, so a range edit applies to every track. Public so the Edit menu
+    // and the functional tests drive exactly what the gestures set.
+    void  SetTimeRange(Frame a, Frame b);   // ordered; an empty span clears it
+    void  ClearTimeRange();
+    bool  HasTimeRange() const { return fRangeValid; }
+    Frame RangeStart() const { return fRangeA; }
+    Frame RangeEnd()   const { return fRangeB; }
+
+    // The Edit menu's operations. Copy fills the clipboard from the range (or
+    // from the clip selection when there is no range); Cut is Copy + Delete;
+    // Delete clears the range (or the selection); Insert Silence ripples the
+    // range; Paste drops the clipboard at the playhead; Duplicate re-states
+    // the selection (or the range) one span later; Select All takes every clip
+    // and region. Each is one undo step.
+    void  RangeCopy();
+    void  RangeCut();
+    void  RangeDelete();
+    void  RangeInsertSilence();
+    void  SelectAllClips();
+    void  DuplicateSelection();
+
+    // The clip-depth actions (M2.5) the context menu runs, as methods: a popup
+    // menu cannot be driven without a real pointer, so the functional test
+    // calls the same code the menu entry does rather than a hand-made model
+    // edit. (Same pattern as SetTool/SetSnapGrid in the previous package.)
+    void  ToggleClipMute(TrackId track, ClipId clip, bool midi);
+    void  NextClipColour(TrackId track, ClipId clip);
+    void  SetClipFadeShapeAt(TrackId track, ClipId clip, FadeShape shape);
+
+    // Keyboard nudge (`,` `.`): move the selection by one grid step, `dir`
+    // -1/+1. No-op without a selection.
+    void  NudgeSelection(int dir);
+
+    int   ClipboardCount() const { return (int)fClipboard.size(); }  // tests
+
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);
     // Zoom about the frame under `x`, so the point under the pointer stays put.
@@ -159,12 +198,21 @@ public:
     Grid  GridOf() const;
     Frame Snapped(Frame f) const;
 
-    // Paste the clipboard clip/note at the playhead (Edit > Paste).
+    // Paste the clipboard (many clips) at the playhead — onto the selected
+    // track when it matches the item's kind, else the first track that does
+    // (Edit > Paste / Cmd-V, and the right-click "Paste here" flow).
     void  PasteAtPlayhead();
 
     void SetProject(Project* p) {
         fProject = p;
         fFadeCache.clear();   // a different project, different clips
+        // Selections are ids into the PROJECT that made them: clip ids from the
+        // previous project would silently "select" whatever the new one has
+        // under those ids, and a range would point at frames that no longer
+        // mean anything (UI_GUIDELINES: stale content is a bug).
+        fSelClips.clear();
+        fRangeValid = false;
+        fRangeA = fRangeB = 0;
         Invalidate();
     }
 
@@ -227,12 +275,14 @@ private:
     void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
     void DrawLiveAudio(BRect region);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
-    // `fadeIn`/`fadeOut` are the EFFECTIVE fades (the clip's own combined with
-    // any auto-crossfade from overlapping a neighbour), so the drawing matches
+    // `ef` holds the EFFECTIVE fades (the clip's own combined with any
+    // auto-crossfade from overlapping a neighbour) AND the shape each one
+    // renders with, so the drawing — ramps and waveform envelope — matches
     // what the engine and exporter render. See model/Crossfade.h.
     void DrawClip(const Clip& c, BRect lane, rgb_color base,
-                  Frame fadeIn, Frame fadeOut, BRect update);
-    void DrawClipWave(const Clip& c, BRect block, BRect update);
+                  const ClipFades& ef, BRect update);
+    void DrawClipWave(const Clip& c, BRect block, BRect update,
+                      const ClipFades& ef);
 
     // --- the tool strip (M2.3) --------------------------------------------
     BRect ToolRect(int i) const;        // palette button i
@@ -324,7 +374,7 @@ private:
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
-                      RulerPunch, Pencil, Slip };
+                      RulerPunch, Pencil, Slip, RangeSelect };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -363,21 +413,44 @@ private:
     Frame    fLoopAnchor  = 0;         // frame where a loop drag started
     bool     fLoopDragged = false;     // did the pointer move (drag vs click)?
 
-    // Clipboard (right-click Copy -> Edit > Paste).
+    // Clipboard (right-click Copy -> Edit > Paste, and the range operations).
+    // Many clips (M2.4): a range copy arrives with the pieces' starts relative
+    // to the earliest, so the internal spacing survives the paste.
+    struct ClipItem {
+        bool     midi = false;
+        TrackId  track = kInvalidTrackId;   // where it came from (a range copy)
+        Clip     audio;
+        MidiClip region;
+    };
+    void  SetClipboardToClip(const Clip& c);          // one audio clip
+    void  SetClipboardToRegion(const MidiClip& c);    // one MIDI region
+    void  SetClipboardToSelection();                  // the selected clips
+    // `toSourceTracks` places each item on the track it came from (a range
+    // duplicate); otherwise the paste target rule below applies.
+    void  PasteItems(const std::vector<ClipItem>& items, Frame at,
+                     bool toSourceTracks = false);
+    TrackId PasteTargetFor(bool midi) const;          // selected track, else first
     int      ContextMenu(BPoint where, bool withSplit = false,
                          bool withTake = false) const;   // 0=Copy 1=Delete 2=Split 3=NextTake
-    // Richer audio-clip menu (adds region ops); returns the chosen item's label
-    // ("" if dismissed) so callers switch on meaning, not a fragile index.
+    // Richer audio-clip menu (adds region ops + the clip-depth entries);
+    // returns the chosen item's label ("" if dismissed) so callers switch on
+    // meaning, not a fragile index.
     std::string AudioClipMenu(BPoint where, bool withTake) const;
     bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
-    bool     fHasClipClip = false;
-    Clip     fClipClip;                // copied audio clip
-    bool     fHasClipNote = false;
-    MidiNote fClipNote;                // (legacy; unused)
-    bool     fHasClipMidi = false;
-    MidiClip fClipMidi;                // copied MIDI region
-    TrackType fClipType = TrackType::Audio;  // source track type (paste target)
+    std::vector<ClipItem> fClipboard;
+
+    // The range selection (M2.4). Empty (fRangeValid false) until a drag on
+    // empty lane content or an Alt-drag on the ruler sets it.
+    Frame fRangeA = 0, fRangeB = 0;
+    bool  fRangeValid = false;
+    Frame fRangeAnchor = 0;        // where a range drag started
+    bool  fRangeDragged = false;   // did that drag pass the threshold?
+    void  BeginRangeDrag(BPoint where);   // press on empty lane content
+    void  SetSelectedTrack(TrackId id);   // click in a lane selects its track
+    // Draw the range over the lane area (Draw()) / on the ruler (DrawRuler()).
+    void  DrawTimeRange();
+    std::string ClipNameOf(const Clip& c) const;   // Clip.name or the file's
 
     // Open the piano roll for one MIDI region (notes edited clip-relative).
     void OpenPianoRollForClip(TrackId track, ClipId clip);
@@ -414,7 +487,6 @@ private:
     std::map<ClipId, Frame> fMidiMoveOrig;
     bool  ClipSelected(ClipId id) const { return fSelClips.count(id) != 0; }
     void  DeleteSelection();       // MacroCommand remove of all selected clips
-    void  DuplicateSelection();    // MacroCommand add of offset copies
     Track* TrackOfClip(ClipId id) const;   // owning track, or nullptr
 
     // Rubber-band box select (drag on empty lane content).

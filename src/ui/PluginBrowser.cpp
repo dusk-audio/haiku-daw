@@ -202,6 +202,7 @@ void PluginBrowser::DispatchMessage(BMessage* m, BHandler* h) {
     // Space must reach the transport from any window. Not while the filter field
     // has focus, though -- there a space is a space.
     BTextControl* filter = dynamic_cast<BTextControl*>(FindView("filter"));
+    if (ForwardUndoRedo(m, fMain)) return;           // Cmd-Z from a child window
     if (filter && filter->TextView() && !filter->TextView()->IsFocus())
         if (ForwardSpaceToTransport(m, fMain)) return;
     BWindow::DispatchMessage(m, h);

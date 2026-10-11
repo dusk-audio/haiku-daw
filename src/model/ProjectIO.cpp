@@ -212,7 +212,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
           << (t.soloSafe ? 1 : 0) << " " << t.muteGroup << " "
           << (t.inputMonitor ? 1 : 0) << "\n";
 
-        for (const Clip& c : t.clips)
+        for (const Clip& c : t.clips) {
             f << "clip " << c.id << " "
               << (long long)c.startFrame << " " << (long long)c.lengthFrames << " "
               << (long long)c.sourceOffset << " "
@@ -220,6 +220,19 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << " " << Quote(Relativize(c.sourcePath, baseDir)) << " "
               << c.gain << " " << c.takeGroup << " " << (c.takeActive ? 1 : 0)
               << "\n";
+            // Clip depth (M2.5) rides on its OWN lines, never as extra tail
+            // fields: the clip line's optional tail is parsed from its last
+            // quote, so a quoted name appended there would silently drop
+            // gain/takeGroup/takeActive for every reader. A project that never
+            // touches the new fields writes nothing here and stays
+            // byte-identical to the old format.
+            if (!c.name.empty() || c.colorIndex != 0
+                || c.fadeShape != FadeShape::Linear)
+                f << "clipinfo " << c.id << " " << c.colorIndex << " "
+                  << FadeShapeToInt(c.fadeShape) << " " << Quote(c.name) << "\n";
+            if (c.muted)
+                f << "clipmute " << c.id << " 1\n";
+        }
 
         for (const MidiClip& mc : t.midiClips) {
             f << "midiclip " << mc.id << " " << (long long)mc.startFrame << " "
@@ -227,6 +240,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)mc.fadeInFrames << " "
               << (long long)mc.fadeOutFrames << " "
               << mc.takeGroup << " " << (mc.takeActive ? 1 : 0) << "\n";
+            if (mc.muted)   // ids are project-unique, so one mute line fits both
+                f << "clipmute " << mc.id << " 1\n";
             for (const MidiNote& n : mc.notes)   // frames are clip-relative
                 f << "note " << n.pitch << " " << n.velocity << " "
                   << (long long)n.startFrame << " "
@@ -516,6 +531,36 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             }
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);
+        }
+        else if (kw == "clipinfo" && haveTrack) {
+            // Clip depth (M2.5): colour, fade shape and display name for an
+            // audio clip. Optional; absent in older files, in which case the
+            // clip keeps its defaults (inherit the track's colour, a linear
+            // fade, the file's base name). A truncated record is skipped
+            // rather than applied half-way — these fields are cosmetic, and a
+            // half-applied line would clobber what the clip line set.
+            int id = -1, color = 0, shape = 0;
+            if (!(iss >> id >> color >> shape)) continue;
+            for (Clip& c : cur.clips)
+                if (c.id == (ClipId)id) {
+                    if (color < 0) color = 0;
+                    c.colorIndex = color;
+                    c.fadeShape  = FadeShapeFromInt(shape);
+                    c.name       = Unquote(line, escaped);
+                    break;
+                }
+        }
+        else if (kw == "clipmute" && haveTrack) {
+            // Per-clip / per-region mute (M2.5). Optional, and one keyword for
+            // both: clip ids are unique across the two lists.
+            int id = -1, muted = 0;
+            if (!(iss >> id >> muted)) continue;
+            bool done = false;
+            for (Clip& c : cur.clips)
+                if (c.id == (ClipId)id) { c.muted = (muted != 0); done = true; break; }
+            if (!done)
+                for (MidiClip& c : cur.midiClips)
+                    if (c.id == (ClipId)id) { c.muted = (muted != 0); break; }
         }
         else if (kw == "midiclip" && haveTrack) {
             MidiClip mc;

@@ -1133,6 +1133,7 @@ PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
 }
 
 void PianoRoll::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardUndoRedo(m, fMain)) return;           // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fMain)) return;
     BWindow::DispatchMessage(m, h);
 }

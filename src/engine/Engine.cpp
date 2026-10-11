@@ -69,10 +69,12 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
                          Frame sourceOffset, float gain, float pan,
                          bool audible, Frame seekProjectDelta, float outputRate,
-                         Frame fadeIn, Frame fadeOut, float clipGain)
+                         Frame fadeIn, Frame fadeOut, float clipGain,
+                         FadeShape fadeInShape, FadeShape fadeOutShape)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
+      fFadeInShape(fadeInShape), fFadeOutShape(fadeOutShape),
       fClipGain(clipGain), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
@@ -205,15 +207,12 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         // Always consume the ring above; only sum when audible so an unmute
         // resumes in sample-sync rather than replaying buffered audio.
         if (aud) {
-            // Linear fade-in/out envelope (combined as a min).
-            float fade = 1.0f;
+            // Fade-in/out envelope with the shape this fade renders with
+            // (M2.5) — the same helper the exporter and the drawn waveform use.
             const Frame rel = ph - fStart;
-            if (fFadeIn > 0 && rel < fFadeIn)
-                fade = (float)rel / (float)fFadeIn;
-            if (fFadeOut > 0 && rel >= fLength - fFadeOut) {
-                float fo = (float)(fLength - rel) / (float)fFadeOut;
-                if (fo < fade) fade = fo;
-            }
+            const float fade = ClipFadeEnvelope(rel, fLength, fFadeIn,
+                                                fFadeInShape, fFadeOut,
+                                                fFadeOutShape);
             out[i * 2 + 0] += lr[0] * gl * fade * fClipGain;
             out[i * 2 + 1] += lr[1] * gr * fade * fClipGain;
         }
@@ -279,13 +278,16 @@ status_t Engine::Load(const Project& project, Frame startFrame,
                 continue;
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: don't stream it
+            if (c.muted)
+                continue;   // per-clip mute (M2.5): no stream, no disk thread
             // How far into the clip (in timeline frames) playback starts.
             const Frame seekDelta =
                 (startFrame > c.startFrame) ? startFrame - c.startFrame : 0;
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta, fOutputRate,
-                fades[ci].fadeIn, fades[ci].fadeOut, c.gain);
+                fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
+                fades[ci].inShape, fades[ci].outShape);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());

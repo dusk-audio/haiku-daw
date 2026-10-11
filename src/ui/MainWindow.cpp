@@ -83,8 +83,6 @@ enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
     MSG_REC   = 'rec ',
-    MSG_UNDO  = 'undo',
-    MSG_REDO  = 'redo',
     MSG_OPEN  = 'open',
     MSG_OPEN_RECENT = 'orpj',   // File > Open Recent (path in the message)
     MSG_CLOSE = 'clos',         // File > Close: the window's quit path
@@ -96,7 +94,6 @@ enum {
     MSG_METRONOME = 'metr',
     MSG_IMPORT    = 'impt',
     MSG_IMPORT_REF = 'imrf',
-    MSG_PASTE     = 'past',
     MSG_TEMPO     = 'tmpo',
     MSG_BUFFER    = 'bufs',
     MSG_MASTER_FX = 'mfx ',
@@ -331,11 +328,42 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new ThemedMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
     fileMenu->AddItem(new ThemedMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
     menuBar->AddItem(new ThemedMenuItem(fileMenu));
+    // The full Edit menu (M2.4). Undo/Redo carry the stack's own names
+    // ("Undo Move Clip") and are disabled on an empty stack; the range
+    // operations act on the time range, falling back to the clip selection.
     BMenu* editMenu = new BMenu("Edit");
-    editMenu->AddItem(new ThemedMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
-    editMenu->AddItem(new ThemedMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
+    fUndoItem = new ThemedMenuItem("Undo", new BMessage(MSG_EDIT_UNDO), 'Z');
+    fRedoItem = new ThemedMenuItem("Redo", new BMessage(MSG_EDIT_REDO), 'Z',
+                                   B_SHIFT_KEY);
+    fUndoItem->SetEnabled(false);
+    fRedoItem->SetEnabled(false);
+    editMenu->AddItem(fUndoItem);
+    editMenu->AddItem(fRedoItem);
     editMenu->AddSeparatorItem();
-    editMenu->AddItem(new ThemedMenuItem("Paste", new BMessage(MSG_PASTE), 'V'));
+    fCutItem = new ThemedMenuItem("Cut", new BMessage(MSG_EDIT_CUT), 'X');
+    fCopyItem = new ThemedMenuItem("Copy", new BMessage(MSG_EDIT_COPY), 'C');
+    fPasteItem = new ThemedMenuItem("Paste", new BMessage(MSG_EDIT_PASTE), 'V');
+    // No shortcut on the label: Del is handled by the timeline itself (a
+    // non-printable menu shortcut is not worth the portability risk), and the
+    // menu item is there to be seen and clicked.
+    fDeleteItem = new ThemedMenuItem("Delete", new BMessage(MSG_EDIT_DELETE));
+    fDeleteItem->SetEnabled(false);
+    fSelectAllItem = new ThemedMenuItem("Select All", new BMessage(MSG_EDIT_SELECT_ALL),
+                                        'A');
+    fDupItem = new ThemedMenuItem("Duplicate", new BMessage(MSG_EDIT_DUPLICATE), 'D');
+    fDupItem->SetEnabled(false);
+    editMenu->AddItem(fCutItem);
+    editMenu->AddItem(fCopyItem);
+    editMenu->AddItem(fPasteItem);
+    editMenu->AddItem(fDeleteItem);
+    editMenu->AddItem(fSelectAllItem);
+    editMenu->AddItem(fDupItem);
+    editMenu->AddSeparatorItem();
+    fSilenceItem = new ThemedMenuItem("Insert Silence",
+                                      new BMessage(MSG_EDIT_INSERT_SIL), 'I',
+                                      B_SHIFT_KEY);
+    fSilenceItem->SetEnabled(false);
+    editMenu->AddItem(fSilenceItem);
     menuBar->AddItem(new ThemedMenuItem(editMenu));
     BMenu* trackMenu = new BMenu("Track");
     trackMenu->AddItem(new ThemedMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
@@ -1637,12 +1665,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_SHORTCUTS: {
             BAlert* a = new ThemedAlertWindow("Keyboard Shortcuts",
                 "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
-                "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-V paste\n"
-                "       Ctrl-D duplicate   Del delete selection   Esc clear\n"
+                "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-X/C/V cut/copy/paste\n"
+                "       Cmd-A select all   Cmd-D duplicate   Cmd-Shift-I insert silence\n"
+                "       Del delete range/selection   Esc clear\n"
                 "View:  + / - zoom   F fit   arrows pan   wheel / PgUp-PgDn scroll   Home start\n"
                 "Clips: drag move   right edge resize   top corners fade\n"
-                "       Ctrl-drag gain   Shift free-snap   right-click menu\n"
-                "Select: click / Shift-click / drag rubber-band\n"
+                "       Ctrl-drag gain   Alt-drag slip   Shift free-snap   right-click menu\n"
+                "       , / . nudge one grid step   double-click renames a clip\n"
+                "Range: drag empty lane content (Shift-drag band-selects clips)\n"
+                "       Alt-drag the ruler   then Edit > Cut/Copy/Paste/Delete/Silence\n"
                 "Ruler: click seek   drag loop   Ctrl-drag punch   right-click tempo/meter\n"
                 "Track header: M mute  S solo  R arm  route/FX/sends/auto/inst boxes",
                 "OK");
@@ -1662,7 +1693,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         // instrument, an fx chain, a clip, the tempo. The forward paths reload
         // the engine for those; without the same call here the model and the
         // audio disagree until the next manual stop/play.
-        case MSG_UNDO:
+        case MSG_EDIT_UNDO:
             if (fStack->CanUndo()) {
                 fStack->Undo(*fProject);
                 // An undo can move or remove the insert an open native editor is
@@ -1675,10 +1706,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // chain under an open panel's copy.
                 PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
+                UpdateEditMenu();
                 UpdateTitle();
             }
             break;
-        case MSG_REDO:
+        case MSG_EDIT_REDO:
             if (fStack->CanRedo()) {
                 fStack->Redo(*fProject);
                 ValidateFxWatch();
@@ -1686,11 +1718,38 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 PublishFxParamsNow();   // ... and only then republish
                 PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
+                UpdateEditMenu();
                 UpdateTitle();
             }
             break;
-        case MSG_PASTE:
+        // The Edit menu (M2.4): the timeline owns the range and the clipboard.
+        case MSG_EDIT_PASTE:
             fTimeline->PasteAtPlayhead();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_CUT:
+            fTimeline->RangeCut();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_COPY:
+            fTimeline->RangeCopy();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_DELETE:
+            fTimeline->RangeDelete();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_SELECT_ALL:
+            fTimeline->SelectAllClips();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_DUPLICATE:
+            fTimeline->DuplicateSelection();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_INSERT_SIL:
+            fTimeline->RangeInsertSilence();
+            UpdateEditMenu();
             break;
         case MSG_BUFFER: {
             int32 frames = 512;
@@ -2732,10 +2791,47 @@ void MainWindow::ShowReplacedProject(Frame playhead) {
 }
 
 void MainWindow::UpdateTitle() {
+    // The same 2 Hz poll keeps the Edit menu honest: the timeline executes
+    // commands straight from a gesture, with no message to this window, so
+    // "Undo Move Clip" and the range entries' enabled state would otherwise go
+    // stale until the next undo. Before the early return below -- the title is
+    // usually unchanged, which must not skip the menu.
+    UpdateEditMenu();
     const std::string title = fDoc.Title();
     if (title == fTitleShown) return;   // the poll runs often; only set on change
     fTitleShown = title;
     SetTitle(title.c_str());
+}
+
+// The Edit menu's labels and enabled states (M2.4). Undo/Redo read the stack's
+// own names -- "Undo Move Clip", "Redo Split at Playhead" -- so the menu says
+// what the shortcut will do rather than that something will happen. The range
+// entries dim when there is nothing to act on; the timeline's edits reach the
+// stack without a message to this window, which is why the 2 Hz title poll
+// calls this too.
+void MainWindow::UpdateEditMenu() {
+    if (!fUndoItem) return;   // not built yet (early startup)
+    const std::string u = fStack->UndoName();
+    const std::string r = fStack->RedoName();
+    const std::string ul = u.empty() ? std::string("Undo") : "Undo " + u;
+    const std::string rl = r.empty() ? std::string("Redo") : "Redo " + r;
+    if (fUndoItem->Label() == nullptr || ul != fUndoItem->Label()) {
+        fUndoItem->SetLabel(ul.c_str());
+        fUndoItem->SetEnabled(!u.empty());
+    }
+    if (fRedoItem->Label() == nullptr || rl != fRedoItem->Label()) {
+        fRedoItem->SetLabel(rl.c_str());
+        fRedoItem->SetEnabled(!r.empty());
+    }
+    const bool hasSel = fTimeline && fTimeline->SelectionCount() > 0;
+    const bool hasRange = fTimeline && fTimeline->HasTimeRange();
+    const bool hasClipboard = fTimeline && fTimeline->ClipboardCount() > 0;
+    fCutItem->SetEnabled(hasSel || hasRange);
+    fCopyItem->SetEnabled(hasSel || hasRange);
+    fDeleteItem->SetEnabled(hasSel || hasRange);
+    fDupItem->SetEnabled(hasSel || hasRange);
+    fPasteItem->SetEnabled(hasClipboard);
+    fSilenceItem->SetEnabled(hasRange);
 }
 
 void MainWindow::ReportError(const char* title, const std::string& detail) {

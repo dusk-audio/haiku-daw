@@ -39,6 +39,7 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
@@ -344,6 +345,12 @@ add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
 add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
 target_link_libraries(arrange_cmd_tests PRIVATE daw_model)
 add_test(NAME arrange_cmd_tests COMMAND arrange_cmd_tests)
+
+# The M2.4/M2.5 model work: fade shapes, the time-range slice/delete/insert
+# arithmetic and the clip-depth commands.
+add_executable(range_edit_tests tests/range_edit_tests.cpp)
+target_link_libraries(range_edit_tests PRIVATE daw_model)
+add_test(NAME range_edit_tests COMMAND range_edit_tests)
 
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
