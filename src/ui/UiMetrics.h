@@ -87,6 +87,31 @@ inline bool ForwardSpaceToTransport(BMessage* msg, const BMessenger& main) {
     return false;
 }
 
+// Child window -> MainWindow: Cmd-Z / Cmd-Shift-Z (the same fourccs as
+// MainWindow's own Edit menu messages, MSG_UNDO/MSG_REDO). ForwardUndoRedo
+// below sends them, so a focused child window's Cmd-Z reaches the one undo
+// stack instead of dying in that window.
+constexpr uint32 kMsgEditUndo = 'undo';
+constexpr uint32 kMsgEditRedo = 'redo';
+
+// Forward Cmd-Z / Cmd-Shift-Z to the main window (M2.4: "child windows
+// forward Cmd-Z"). Call from a window's DispatchMessage beside
+// ForwardSpaceToTransport; returns true if it consumed the event.
+inline bool ForwardUndoRedo(BMessage* msg, const BMessenger& main) {
+    if (!msg || msg->what != B_KEY_DOWN) return false;
+    int32 mods = 0;
+    if (msg->FindInt32("modifiers", &mods) != B_OK) return false;
+    if ((mods & B_COMMAND_KEY) == 0) return false;
+    const char* bytes = nullptr;
+    ssize_t len = 0;
+    if (msg->FindData("bytes", B_STRING_TYPE, (const void**)&bytes, &len) != B_OK
+        || len < 1)
+        return false;
+    if (bytes[0] != 'z' && bytes[0] != 'Z') return false;
+    main.SendMessage((mods & B_SHIFT_KEY) ? kMsgEditRedo : kMsgEditUndo);
+    return true;
+}
+
 // TimelineView -> MainWindow: a track was selected (int64 "track"); the main
 // window points the inspector at it.
 constexpr uint32 kMsgTrackSelected = 'tsel';

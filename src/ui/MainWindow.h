@@ -75,6 +75,18 @@ constexpr uint32 MSG_SAVE_AS          = 'svas';   // File > Save As (always a pa
 constexpr uint32 MSG_SAVE_REF         = 'svrf';   // from the save file panel
 constexpr uint32 MSG_OPEN_REF         = 'oprf';   // from the open file panel
 constexpr uint32 MSG_RELINK_REF       = 'rlkr';   // from the Locate… walk's panel
+// The full Edit menu (M2.4). The timeline owns the range and the clipboard, so
+// the window routes these to it. Public ids: the functional tests post exactly
+// what the menu posts.
+constexpr uint32 MSG_EDIT_UNDO        = 'undo';
+constexpr uint32 MSG_EDIT_REDO        = 'redo';
+constexpr uint32 MSG_EDIT_CUT         = 'ecut';
+constexpr uint32 MSG_EDIT_COPY        = 'ecpy';
+constexpr uint32 MSG_EDIT_PASTE       = 'epst';
+constexpr uint32 MSG_EDIT_DELETE      = 'edel';
+constexpr uint32 MSG_EDIT_SELECT_ALL  = 'esel';
+constexpr uint32 MSG_EDIT_DUPLICATE   = 'edup';
+constexpr uint32 MSG_EDIT_INSERT_SIL  = 'eins';
 constexpr uint32 MSG_EXPORT           = 'expt';
 constexpr uint32 MSG_EXPORT_REF       = 'exrf';   // from the export file panel
 constexpr uint32 MSG_EXPORT_STEMS     = 'stem';
@@ -118,6 +130,11 @@ public:
     ~MainWindow() override;
 
     void MessageReceived(BMessage* msg) override;
+    // The Edit menu's Undo/Redo labels come from the stack (M2.4):
+    // "Undo Move Clip" / "Redo Split at Playhead". Called after every undoable
+    // path the window itself runs and from the 2 Hz title poll, which covers
+    // the edits the timeline makes without a message to the window.
+    void UpdateEditMenu();
     // Keys belong to the focused view -- except that the timeline only takes
     // focus on a click, so after anyone touched a text field the transport
     // keys (Space, arrows, Home) went nowhere. Route a key with no command
@@ -202,6 +219,15 @@ private:
     // The window's panes (M1.4): the inspector/timeline split, and the docked
     // bottom pane (the editor and the browsers) under it. Both are BSplitViews,
     // so the user resizes them and the sizes persist in AppSettings.
+    BMenuItem*      fUndoItem      = nullptr;   // Edit > Undo  (its label from
+    BMenuItem*      fRedoItem      = nullptr;   // ... UndoName/RedoName, M2.4)
+    BMenuItem*      fCopyItem      = nullptr;   // Edit > Copy (nothing to copy)
+    BMenuItem*      fCutItem       = nullptr;
+    BMenuItem*      fDeleteItem    = nullptr;
+    BMenuItem*      fPasteItem     = nullptr;
+    BMenuItem*      fSelectAllItem = nullptr;
+    BMenuItem*      fDupItem       = nullptr;
+    BMenuItem*      fSilenceItem   = nullptr;   // Edit > Insert Silence (range)
     BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
     BMenuItem*      fDockItem      = nullptr;   // View > Editor & Browsers (J)
