@@ -154,6 +154,10 @@ struct Track {
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     int               colorIndex = 0;   // index into the UI track-color palette
     int               height     = 72;  // lane height in pixels (UI)
+    // M2.6: the lane folds to a title strip (the header's fold triangle). A
+    // property of the track, not of the view: it persists with the project
+    // (`trackfold`), undoes, and the drawing/geometry read it in one place.
+    bool              collapsed  = false;
     std::vector<Clip>       clips;      // audio clips, kept sorted by startFrame
     std::vector<MidiClip>   midiClips;  // MIDI regions (Midi tracks)
     std::vector<EffectDesc> fx;       // ordered per-track effect chain
