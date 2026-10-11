@@ -206,6 +206,13 @@ public:
     void SetProject(Project* p) {
         fProject = p;
         fFadeCache.clear();   // a different project, different clips
+        // Selections are ids into the PROJECT that made them: clip ids from the
+        // previous project would silently "select" whatever the new one has
+        // under those ids, and a range would point at frames that no longer
+        // mean anything (UI_GUIDELINES: stale content is a bug).
+        fSelClips.clear();
+        fRangeValid = false;
+        fRangeA = fRangeB = 0;
         Invalidate();
     }
 

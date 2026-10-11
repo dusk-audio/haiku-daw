@@ -342,8 +342,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fCutItem = new ThemedMenuItem("Cut", new BMessage(MSG_EDIT_CUT), 'X');
     fCopyItem = new ThemedMenuItem("Copy", new BMessage(MSG_EDIT_COPY), 'C');
     fPasteItem = new ThemedMenuItem("Paste", new BMessage(MSG_EDIT_PASTE), 'V');
-    fDeleteItem = new ThemedMenuItem("Delete", new BMessage(MSG_EDIT_DELETE),
-                                     B_DELETE);
+    // No shortcut on the label: Del is handled by the timeline itself (a
+    // non-printable menu shortcut is not worth the portability risk), and the
+    // menu item is there to be seen and clicked.
+    fDeleteItem = new ThemedMenuItem("Delete", new BMessage(MSG_EDIT_DELETE));
     fDeleteItem->SetEnabled(false);
     fSelectAllItem = new ThemedMenuItem("Select All", new BMessage(MSG_EDIT_SELECT_ALL),
                                         'A');
