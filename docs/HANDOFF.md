@@ -272,6 +272,12 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
   Recover? alert on the window thread and every locked check times out. Delete
   it before a run.
+- **…and so does the SETTINGS file (`~/config/settings/HaikuDAW/settings`).**
+  It persists the panes (`uiinsp`, `uidockpage`), so a run that ended with the
+  inspector hidden makes every later run start with it hidden: the pane tests
+  that assume it is visible fail, and the run after them (a plugin pick whose
+  message targets the inspector's view) fails too. Delete the file before a
+  run, or let the suite do it (it does since `feature/arrange-depth`).
 - **A pipeline hides a failure: check the exit code yourself.** `sh scripts/vm.sh
   build` and `test` used to end in `... | tail -3`, so a failed compile (or a
   failing `ctest`) exited 0 and left the PREVIOUS binaries in place — a stale
