@@ -246,9 +246,9 @@ they differ — a bare `==` in a `CHECK` says nothing about which side was wrong
 | `scripts/haiku_syntax_check.sh` | 0 FAIL (67 files) |
 | VM `build` ctest | 55/55 |
 | VM `build-off` ctest | 51/51 |
-| `ui_functional_tests`, System mode | **296 checks, 0 failures** (was 236) |
-| `ui_functional_tests`, light | **296 checks, 0 failures** |
-| `ui_functional_tests`, dark | **296 checks, 0 failures** |
+| `ui_functional_tests`, System mode | **305 checks, 0 failures** (was 236) |
+| `ui_functional_tests`, light | **305 checks, 0 failures** |
+| `ui_functional_tests`, dark | **305 checks, 0 failures** |
 | Screenshot passes | 36 shots each, both modes, reviewed |
 
 Mutation checks (each broken on purpose in its own commit, built on the VM,
@@ -267,7 +267,12 @@ same checkout: two cycles that had been replaced by another tree's binary
 3. `OpenDockedEditor` adding the roll without the page switch: 285 checks,
    **1 failure** — "the roll took the body" (`samplebrowserview == nullptr`).
 4. `SetDockShown(true)` back in `SetDockPage`: 285 checks, **1 failure** — 
-   `hidden` ("a closed dock stays closed").
+   `hidden` ("a closed dock stays closed"). (This mutation also left the dock
+   hidden when the test clicked a page next, and a click on a *detached*
+   `DawSegments` traps in `BView::ConvertToScreen` — the kit kills the team and
+   leaves a modal dialog that blocks the VM for later runs. The click now checks
+   that the control has a window and fails its check instead; that guard is the
+   `test(ui): a page click on a hidden dock fails instead of crashing` commit.)
 5. `Retarget` dropping the in-flight edit: 285 checks, **1 failure** —
    `modelled == heard` (`TestFxRetargetFlush`).
 6. The browser views' attach-time `ApplyTheme` removed: 285 checks,
@@ -323,6 +328,6 @@ nothing.** The first dark pass produced 23 all-black shots and one failing check
 (`TestFxRetargetFlush`'s drag, whose hit regions only exist after the panel has
 been drawn) because the screen had blanked partway through; a modifier `sendkey`
 wakes the blanker, and the pass was re-run with the screen awake — 36 real shots
-and 296/296. The blanker does not count the suite's own synthetic input as
+and 305/305. The blanker does not count the suite's own synthetic input as
 activity, so wake the screen before each GUI step, not once per session.
 
