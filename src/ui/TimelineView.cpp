@@ -265,7 +265,10 @@ void TimelineView::ScrollVerticalBy(float dy) {
 }
 
 void TimelineView::ScrollToY(float y) {
-    const float viewH = Bounds().Height() - ContentTop();
+    // The visible height is what the lanes get: the horizontal scrollbar sits
+    // over the view's bottom strip, so a scroll that ignored it left the last
+    // lane's bottom row UNDER the bar (the collapsed-lane shot showed it).
+    const float viewH = Bounds().Height() - ContentTop() - fBarThickness;
     const float maxScroll = ContentHeight() - viewH;
     if (y > maxScroll) y = maxScroll;
     if (y < 0.0f)      y = 0.0f;   // (also clamps when all fits)
@@ -1293,7 +1296,11 @@ void TimelineView::SyncScrollBars() {
         fBarLastX = (float)fScrollFrame;
     }
 
-    const float viewH = std::max(1.0f, Bounds().Height() - ContentTop());
+    // Same visible height ScrollToY clamps with (the horizontal scrollbar's
+    // strip is not lane space), so the thumb cannot run past where the view
+    // can actually scroll.
+    const float viewH = std::max(1.0f,
+        Bounds().Height() - ContentTop() - fBarThickness);
     const float contentH = ContentHeight();
     const float maxY = std::max(0.0f, contentH - viewH);
     const float propY = contentH > 0.0f ? std::min(1.0f, viewH / contentH) : 1.0f;
@@ -2874,6 +2881,17 @@ void TimelineView::SetTrackCollapsed(TrackId track, bool collapsed) {
                                                                   collapsed),
                         *fProject)) {
         SyncScrollBars();   // the content height changed
+        // Keep the lane the user just folded or expanded in view: shrinking
+        // the content makes the vertical scrollbar clamp, which shifts every
+        // lane on screen, and the one that was clicked can end up under the
+        // bottom edge.
+        const int idx = fProject->IndexOfTrack(track);
+        if (idx >= 0) {
+            const BRect lane = LaneRect(idx);
+            const float limit = Bounds().bottom - fBarThickness;
+            if (lane.bottom > limit)
+                ScrollToY(fScrollY + (lane.bottom - limit));
+        }
         Invalidate();
         if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
     }

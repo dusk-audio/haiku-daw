@@ -196,7 +196,13 @@ void MarkersView::Draw(BRect update) {
 
 MarkersWindow::MarkersWindow(BRect frame, std::vector<MarkerInfo> markers,
                              Frame playhead, BMessenger apply)
-    : BWindow(frame, "Markers", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+    // BWindow's arguments are (frame, title, LOOK, FEEL, FLAGS). Several older
+    // windows in this app pass the feel in the FLAGS slot of the other
+    // overload, which the app_server clamps to a NORMAL feel -- and a
+    // screenshot of the first cut of this window showed the consequence: it
+    // existed, was not hidden, and sat behind the main window. Passed
+    // correctly here so a locations list actually floats.
+    : BWindow(frame, "Markers", B_TITLED_WINDOW_LOOK, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fApply(apply) {
     fView = new MarkersView(BRect(0, 0, 300, 220), std::move(markers), playhead,
@@ -209,6 +215,15 @@ MarkersWindow::MarkersWindow(BRect frame, std::vector<MarkerInfo> markers,
                                       new BMessage(kMsgMarkerRenameBtn));
     DawButton* del = new DawButton("mk-delete", "Delete",
                                    new BMessage(kMsgMarkerDeleteBtn));
+    // Sized to their labels: a button in a group layout stretches to the
+    // group otherwise, and this row drew as three tall slabs (the first shot
+    // of this window showed exactly that).
+    for (DawButton* b : { add, rename, del }) {
+        float w = 0.0f, h = 0.0f;
+        b->GetPreferredSize(&w, &h);
+        b->SetExplicitMinSize(BSize(w, h));
+        b->SetExplicitMaxSize(BSize(w, h));
+    }
 
     ThemedGroupView* root = new ThemedGroupView("markers-root", B_VERTICAL,
                                                 Themed(0.0f));
@@ -229,6 +244,28 @@ MarkersWindow::MarkersWindow(BRect frame, std::vector<MarkerInfo> markers,
 
 void MarkersWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
+        case kMsgMarkerList: {
+            // The pushed snapshot. Unpacked HERE and handed to the view, the
+            // way the mixer unpacks kMsgMixStrips: a message sent to the
+            // window is not delivered to its child views.
+            std::vector<MarkerInfo> list;
+            const char* name = nullptr;
+            int64 fr = 0;
+            for (int32 i = 0; msg->FindString("name", i, &name) == B_OK; i++) {
+                MarkerInfo mk;
+                msg->FindInt64("frame", i, &fr);
+                mk.frame = (Frame)fr;
+                mk.name = name ? name : "";
+                const char* time = nullptr;
+                if (msg->FindString("time", i, &time) == B_OK && time)
+                    mk.time = time;
+                list.push_back(std::move(mk));
+            }
+            int64 ph = 0;
+            msg->FindInt64("playhead", &ph);
+            if (fView) fView->SetMarkers(std::move(list), (Frame)ph);
+            break;
+        }
         case kMsgMarkerAddBtn:
             if (fView) fView->AddAtPlayhead();
             break;
@@ -239,7 +276,9 @@ void MarkersWindow::MessageReceived(BMessage* msg) {
             if (fView) fView->RenameSelected();
             break;
         case kMsgMarkerActivate:
-            Activate();
+            // The same "come to the front" the mixer's activate uses.
+            Activate(true);
+            SetWorkspaces(B_CURRENT_WORKSPACE);
             break;
         default:
             BWindow::MessageReceived(msg);

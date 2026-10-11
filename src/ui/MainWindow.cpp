@@ -3530,6 +3530,9 @@ void MainWindow::ShowMarkersWindow() {
                                            BMessenger(this));
     fMarkersMsgr = BMessenger(win);
     win->Show();
+    // A list you just asked for is in front and ready for the keyboard: the
+    // same thing the second ask does through kMsgMarkerActivate.
+    win->Activate();
 }
 
 void MainWindow::PushTrackPeaks() {
