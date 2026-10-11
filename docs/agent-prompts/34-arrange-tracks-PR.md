@@ -1,6 +1,7 @@
 # Record — M2 "Arrange window feel" (track depth 2.6, markers 2.7)
 
-Branch `feature/arrange-tracks` off `feature/arrange-depth`. Spec:
+Branch `feature/arrange-tracks` off `feature/arrange-depth`
+(PR: https://github.com/dusk-audio/haiku-daw/pull/12). Spec:
 `34-arrange-tracks.md`. Scope: `docs/PLAN_1.0.md` §M2 items **2.6** and **2.7** —
 the last two arrange-window items.
 
@@ -232,9 +233,10 @@ field, the flags and the list:
    test pressing the wrong control.
 
 **150 %:** the header rows all moved, so the 150 % case matters; the existing
-`14-theme-150` shot is in both passes and shows the reworked header at 1.5×
-(the fold triangle, swatch, In field, fader and M/S/R/I all scale with the
-font, nothing overlaps, the name truncates).
+`14-theme-150` shot was opened in BOTH modes (cropped on the header) and shows
+the reworked header at 1.5×: the fold triangle, swatch, name, M/S/R/I, pan
+knob, `In: —` field and fader all scale with the font, nothing overlaps, and
+the clip names truncate (`haiku_daw…`). Dark mode reads the same.
 
 ## What could not be verified, and questions for Marc
 
