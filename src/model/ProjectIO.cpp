@@ -268,7 +268,7 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             // to a pre-stretch build's file. The ratio reads back with the
             // stream's 9-digit precision (see the top of Save), which is finer
             // than a source frame over any real clip length.
-            if (c.stretchRatio != 1.0 || c.pitchSemis != 0)
+            if (ClipIsStretched(c) || c.pitchSemis != 0)
                 f << "clipstretch " << c.id << " " << c.stretchRatio << " "
                   << c.pitchSemis << "\n";
         }

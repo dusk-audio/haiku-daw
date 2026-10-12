@@ -42,6 +42,12 @@ inline double ClampStretchRatio(double r) {
     return r;
 }
 
+// How close to 1.0 a ratio has to be to count as "not stretched". A value this
+// near 1 is 1: routing it through the stretch stage would window the audio for
+// nothing, and a file that rounds a ratio to 1.000000001 must not make the
+// engine and the exporter take different paths.
+constexpr double kStretchEpsilon = 1e-6;
+
 // A clip's effective ratio: always in range, even for a model built without the
 // command (a loaded file, a test fixture).
 inline double ClipStretchRatio(const Clip& c) {
@@ -49,10 +55,11 @@ inline double ClipStretchRatio(const Clip& c) {
 }
 
 // True for a clip that actually needs the stretch stage. The engine, the
-// exporter and the drawing all key their stretch path off this, so a ratio of
-// 1.0 keeps exactly the code path it had before the feature existed.
+// exporter, the drawing and the serializer all key their stretch path off this,
+// so a ratio of 1.0 keeps exactly the code path (and the exact bytes) it had
+// before the feature existed.
 inline bool ClipIsStretched(const Clip& c) {
-    return ClipStretchRatio(c) != 1.0;
+    return std::fabs(ClipStretchRatio(c) - 1.0) > kStretchEpsilon;
 }
 
 // The clip's referenced source span, in SOURCE FILE frames: what playback reads
