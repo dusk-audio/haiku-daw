@@ -350,6 +350,20 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "input " << t.input.kind << " " << t.input.channel
               << " " << Quote(t.input.name) << "\n";
 
+        // M5 multichannel addressing: the `input` line above keeps its exact
+        // original 3 fields (so an older build still reads this project and
+        // records from its default device), and the device + channel pair and
+        // the track's channel width are SEPARATE lines, written only when they
+        // differ from the default. A file without them loads as the pre-M5
+        // default input (device channels 1-2) and a stereo track.
+        if (t.input.kind == InputSource::kAudioDefault
+            && (!t.input.device.empty() || t.input.channelL != 0
+                || t.input.channelR != 1))
+            f << "inputdev " << t.input.channelL << " " << t.input.channelR
+              << " " << Quote(t.input.device) << "\n";
+        if (t.channels != TrackChannels::Stereo)
+            f << "trackchans " << (int)t.channels << "\n";
+
         f << "endtrack\n";
     }
     f << "enddaw\n";      // completeness trailer (see Load: legacy files lack it)
@@ -751,11 +765,28 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
                 cur.instrument.type = InstrumentType::Synth;
         }
         else if (kw == "input" && haveTrack) {
-            InputSource in;
+            InputSource in = cur.input;   // keep an `inputdev` already read
             iss >> in.kind >> in.channel;
             if (in.kind < 0 || in.kind > InputSource::kMidi) in.kind = InputSource::kNone;
             in.name = Unquote(line, escaped);   // "" if the line has no quotes
             cur.input = in;
+        }
+        else if (kw == "inputdev" && haveTrack) {
+            // M5: the audio device + channel pair, a separate optional line.
+            // A negative channel is clamped away rather than kept -- it would
+            // address outside a capture block.
+            int l = 0, r = 1;
+            iss >> l >> r;
+            cur.input.channelL = l < 0 ? 0 : l;
+            cur.input.channelR = r < 0 ? cur.input.channelL : r;
+            cur.input.device   = Unquote(line, escaped);
+        }
+        else if (kw == "trackchans" && haveTrack) {
+            // M5: 0 = mono, 1 = stereo. Anything else reads as stereo, which
+            // is what a file without the line means.
+            int v = 1;
+            iss >> v;
+            cur.channels = (v == 0) ? TrackChannels::Mono : TrackChannels::Stereo;
         }
         else if (kw == "send" && haveTrack) {
             Send s;
