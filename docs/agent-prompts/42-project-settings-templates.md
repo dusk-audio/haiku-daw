@@ -83,8 +83,10 @@ a big, undoable edit to the whole project.
     alphabetically, so dropping a file into `data/templates` is enough to
     offer it.
   - `LoadTemplate(info, Project&)` — `ProjectIO::Load` + the template's own
-    declared content; the SESSION rate wins afterwards (the same rule
-    `MainWindow::NewProject` has always had: the rate belongs to the device).
+    content. A template brings its TRACKS (names, routing, tempo, meter), not
+    its rate: the new session starts at the default-sample-rate preference
+    (M3.5), which is the rate the user asked new projects to be at. The
+    templates themselves declare 48 kHz, which is the same default.
 - **`src/ui/NewProjectWindow.{h,cpp}`** — own looper, Layout Kit: a
   `DawMenuField` of the templates, a `BStringView` describing the marked one,
   and `Cancel` / `Create` (`Create` is the default button). With no template
