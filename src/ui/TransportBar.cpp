@@ -303,19 +303,28 @@ static void DrawGlyph(BView* v, TransportButton which, BRect r, bool lit,
         case TransportButton::Rec:
             v->FillEllipse(BPoint(cx, cy), 6, 6);
             break;
-        case TransportButton::Loop:
-            // A circular arrow: the arc, then a small head at its end.
+        case TransportButton::Loop: {
+            // A circular arrow. A full ring with a solid head on it reads as
+            // "loop" at 22 px; the first version was an open arc whose head was
+            // lost in the button, so the whole glyph read as the letter C
+            // (found by the screenshot pass).
             v->SetPenSize(2.0f);
-            v->StrokeArc(BPoint(cx, cy), 7, 7, 40.0f, 280.0f);
+            v->StrokeEllipse(BPoint(cx, cy), 6, 6);
             v->SetPenSize(1.0f);
-            tri(cx + 2, 1, 3, 5);
+            BPoint head[3] = { BPoint(cx + 8, cy - 7), BPoint(cx + 1, cy - 7),
+                               BPoint(cx + 5, cy - 1) };
+            v->FillPolygon(head, 3);
             break;
+        }
         case TransportButton::Click: {
-            // The metronome: a body with a pendulum leaning left.
-            BPoint body[3] = { BPoint(cx - 7, cy + 7), BPoint(cx + 7, cy + 7),
-                               BPoint(cx + 3, cy - 6) };
-            v->StrokePolygon(body, 3);
-            v->StrokeLine(BPoint(cx + 3, cy - 6), BPoint(cx - 4, cy + 5));
+            // The metronome: the tapered body every metronome icon has, its
+            // base, and the pendulum leaning to one side. (A bare triangle read
+            // as nothing at all -- the screenshot pass.)
+            BPoint body[4] = { BPoint(cx - 6, cy + 5), BPoint(cx - 3, cy - 6),
+                               BPoint(cx + 3, cy - 6), BPoint(cx + 6, cy + 5) };
+            v->StrokePolygon(body, 4);
+            v->FillRect(BRect(cx - 8, cy + 6, cx + 8, cy + 8));
+            v->StrokeLine(BPoint(cx + 2, cy - 6), BPoint(cx - 4, cy + 3));
             break;
         }
         case TransportButton::Punch:

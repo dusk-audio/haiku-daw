@@ -99,8 +99,14 @@ NewProjectWindow::NewProjectWindow(std::vector<TemplateInfo> templates,
             .Add(create)
         .End()
         .End();
-    ResizeToPreferred();
+    // The TEXT first, then the fit: a BStringView reports the size of the text
+    // it holds, so sizing before the description is set made the window as wide
+    // as an empty string -- the description ran off the right edge (clipped
+    // mid-word) and the Create button was pushed out of the window entirely.
+    // (UpdateDescription re-fits for the same reason: choosing another template
+    // brings a longer text.)
     UpdateDescription();
+    ResizeToPreferred();
 }
 
 void NewProjectWindow::UpdateDescription() {
@@ -131,6 +137,10 @@ void NewProjectWindow::UpdateDescription() {
             fHint->SetText(hint.String());
         }
     }
+    // The dialog is as wide as the text it is showing, and no wider (it is not
+    // resizable): a longer description must not be clipped, and a shorter one
+    // must not leave the buttons stranded at the right of empty space.
+    ResizeToPreferred();
 }
 
 std::string NewProjectWindow::SelectedId() const {
