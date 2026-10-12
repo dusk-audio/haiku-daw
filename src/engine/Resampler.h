@@ -31,6 +31,12 @@ public:
     // the resulting output-rate interleaved frames to `out`.
     void Process(const float* in, size_t inFrames, std::vector<float>& out);
 
+    // Drop the carried interpolation state, for a caller that has just seeked
+    // the source somewhere else (a loop pass start, M4.2). The output frame the
+    // next Process() produces is then the source frame the seek landed on, with
+    // no interpolated remnant of the audio the pass before it ended with.
+    void Reset();
+
     // Ratio of output frames produced per input frame (outRate / inRate).
     double Ratio() const { return fRatio; }
     bool   IsIdentity() const { return fStep == 1.0; }

@@ -11,6 +11,12 @@ Resampler::Resampler(double inRate, double outRate, int channels)
     for (int c = 0; c < kMaxChannels; c++) fPrev[c] = 0.0f;
 }
 
+void Resampler::Reset() {
+    fPos = 0.0;
+    fHavePrev = false;
+    for (int c = 0; c < kMaxChannels; c++) fPrev[c] = 0.0f;
+}
+
 void Resampler::Process(const float* in, size_t inFrames,
                         std::vector<float>& out) {
     if (inFrames == 0)

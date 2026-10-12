@@ -173,8 +173,13 @@ bool TransportController::StartRecordEngine(Frame engineStart) {
     }
     // The record range always extends past content, so this build cannot fail
     // with "nothing to play"; the device above is the only failure it has.
+    //
+    // NO LOOP (M4.2), unlike every other load: the window re-aligns the engine
+    // at each loop-record seam (see MainWindow's pulse), which is what keeps the
+    // passes in time with the capture, so the graph must keep rolling through
+    // the loop end rather than wrap by itself.
     e->RequestLoad(*fWin->fProject, engineStart, engineStart + tenMin,
-                   Engine::LoadMode::NewPosition);
+                   Engine::LoadMode::NewPosition, /*noLoop=*/true);
     // WAITED for, unlike a play: the take's alignment (RecordPlan) is measured
     // from the moment the engine rolls, so the capture must not begin before
     // the graph is in. The record start blocked on the same build before M4.1;
