@@ -64,6 +64,7 @@ add_library(daw_model
     src/dsp/Saturator.cpp       # kit-free tape saturation (tape-echo port)
     src/dsp/Gate.cpp            # kit-free noise gate / expander
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
+    src/dsp/Stretch.cpp         # kit-free WSOLA time-stretch (M7.2)
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
     src/dsp/SincResampler.cpp   # kit-free windowed-sinc SRC for the offline path
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
@@ -452,9 +453,23 @@ add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
 add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)
 
+# The WSOLA time-stretcher (M7.2) itself, plus the model-side stretch policy
+# (the ratio a stretch-to-fit drag derives from a trimmed clip's own span).
+add_executable(stretch_tests tests/stretch_tests.cpp)
+target_link_libraries(stretch_tests PRIVATE daw_model)
+add_test(NAME stretch_tests COMMAND stretch_tests)
+
 add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
+
+# The stretch stage on the exporter's clip path: a stretched clip bounces to
+# the expected timeline length and content, and a trimmed clip consumes exactly
+# its referenced span of source — checked against a source whose later material
+# is a marker that must never sound.
+add_executable(exporter_stretch_tests tests/exporter_stretch_tests.cpp)
+target_link_libraries(exporter_stretch_tests PRIVATE daw_model)
+add_test(NAME exporter_stretch_tests COMMAND exporter_stretch_tests)
 
 # The export job surface: format (bit depth + dither), the timeline range,
 # progress, cancellation, and the temp+rename write.

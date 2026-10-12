@@ -67,6 +67,7 @@
 #include "../model/Sustain.h"         // SustainLatch (CC64, live form)
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
+#include "../dsp/Stretch.h"     // the disk thread's WSOLA stage (M7.2)
 #include "../dsp/MeterMath.h"   // StereoMeter + the clip flag bits (M3.3)
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
@@ -94,13 +95,19 @@ public:
     // startFrame/lengthFrames/seekProjectDelta are in output (timeline) frames;
     // sourceOffset is in source frames. The stream resamples the source to
     // outputRate on its disk thread, so the ring is at the output rate.
+    // `stretchRatio` is the clip's output-duration multiplier (1.0 = play as
+    // recorded): the disk thread then runs the decoded, rate-matched audio
+    // through a Stretcher before the ring, and the source the pass consumes is
+    // that much shorter or longer. The ring stays 1 output frame per timeline
+    // frame, so nothing on the RT side knows (see model/ClipStretch.h).
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
                 bool audible, Frame seekProjectDelta, float outputRate,
                 Frame fadeIn, Frame fadeOut, float clipGain = 1.0f,
                 FadeShape fadeInShape = FadeShape::Linear,
                 FadeShape fadeOutShape = FadeShape::Linear,
-                StreamLoopRange loop = StreamLoopRange{});
+                StreamLoopRange loop = StreamLoopRange{},
+                double stretchRatio = 1.0);
     ~TrackStream();
 
     // Open the clip's file, set up the pass cursor and seek the source. No
@@ -196,6 +203,10 @@ private:
     // Seek the source to the start of the pass the cursor now holds, and drop
     // the resampler's carried state. Disk thread only.
     void SeekToPass();
+    // One stretched pass's worth of progress: feed the resampled source (capped
+    // at the pass's span) through the stretcher and push what it produces into
+    // the ring. Disk thread only; `remaining` is the pass's output frames left.
+    bool FillStretched(Frame remaining);
 
     TrackId     fTrackId;
     std::string fPath;
@@ -251,6 +262,23 @@ private:
     std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
     std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
+
+    // --- the stretch stage (M7.2) -------------------------------------
+    // Null — and every field below unused — unless the clip's ratio is
+    // something other than 1.0, so an unstretched clip's disk path is exactly
+    // the decode -> resample -> ring it always was.
+    double      fStretchRatio = 1.0;
+    std::unique_ptr<Stretcher> fStretcher;   // built once, in Open()
+    std::vector<float> fStretchIn;       // resampled source not yet taken
+    size_t      fStretchInOff    = 0;    // frames into fStretchIn
+    size_t      fStretchInFrames = 0;
+    std::vector<float> fStretchOut;      // stretcher output not yet pushed
+    size_t      fStretchOutOff    = 0;
+    size_t      fStretchOutFrames = 0;
+    int64_t     fStretchFed    = 0;      // source frames fed this pass
+    int64_t     fStretchSpan   = 0;      // source frames this pass may take
+    int64_t     fStretchDrop   = 0;      // output frames to drop (warm start)
+    bool        fStretchFlushed = false;
 };
 
 class Engine {

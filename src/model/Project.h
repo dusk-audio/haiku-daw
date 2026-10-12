@@ -42,6 +42,15 @@ struct Clip {
     int         colorIndex    = 0;
     bool        muted         = false;
     FadeShape   fadeShape     = FadeShape::Linear;
+    // Time-stretch (M7.2). `stretchRatio` is an OUTPUT DURATION multiplier:
+    // 1.0 = play as recorded, 2.0 = twice as long (half speed), 0.5 = twice as
+    // fast; pitch is unchanged. `lengthFrames` above stays the TIMELINE length,
+    // so the source frames consumed are lengthFrames / stretchRatio (see
+    // model/ClipStretch.h for the pinned convention and the range clamp).
+    // `pitchSemis` was serialized with the ratio from the start so the format
+    // is stable, but v1 does not shift pitch (see docs/PLAN_1.0.md M7.2).
+    double      stretchRatio  = 1.0;
+    int         pitchSemis    = 0;
 };
 
 // A single MIDI note. Its position is in frames RELATIVE to the containing

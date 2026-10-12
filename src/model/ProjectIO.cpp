@@ -1,6 +1,7 @@
 #include "ProjectIO.h"
 
 #include "Base64.h"
+#include "ClipStretch.h"   // ClampStretchRatio (the clipstretch line's range)
 
 #include <algorithm>
 #include <cstdio>
@@ -261,6 +262,15 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
                   << FadeShapeToInt(c.fadeShape) << " " << Quote(c.name) << "\n";
             if (c.muted)
                 f << "clipmute " << c.id << " 1\n";
+            // Time-stretch (M7.2): the clip's ratio and (modeled-only) pitch on
+            // their own optional line, written only when either is non-default
+            // — so a project that never stretches anything saves byte-identically
+            // to a pre-stretch build's file. The ratio reads back with the
+            // stream's 9-digit precision (see the top of Save), which is finer
+            // than a source frame over any real clip length.
+            if (ClipIsStretched(c) || c.pitchSemis != 0)
+                f << "clipstretch " << c.id << " " << c.stretchRatio << " "
+                  << c.pitchSemis << "\n";
         }
 
         for (const MidiClip& mc : t.midiClips) {
@@ -617,6 +627,24 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
                     c.colorIndex = color;
                     c.fadeShape  = FadeShapeFromInt(shape);
                     c.name       = Unquote(line, escaped);
+                    break;
+                }
+        }
+        else if (kw == "clipstretch" && haveTrack) {
+            // Time-stretch (M7.2): a clip's ratio + pitch, addressed by id like
+            // the other clip-depth lines. Optional — absent in every older
+            // file, where the clip keeps the default (unstretched) — and a
+            // truncated record is skipped rather than applied half-way. The
+            // ratio is clamped into the model's accepted range: a hand-edited
+            // value outside it would otherwise reach the DSP as a stretch it
+            // was never designed for.
+            int id = -1; double ratio = 1.0; int semis = 0;
+            if (!(iss >> id >> ratio)) continue;
+            iss >> semis;   // optional (absent in a pitch-less file -> 0)
+            for (Clip& c : cur.clips)
+                if (c.id == (ClipId)id) {
+                    c.stretchRatio = ClampStretchRatio(ratio);
+                    c.pitchSemis   = semis;
                     break;
                 }
         }

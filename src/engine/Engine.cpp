@@ -3,6 +3,7 @@
 #include "../dsp/EffectFactory.h"
 #include "../dsp/LatencyProbe.h"
 #include "../model/Crossfade.h"
+#include "../model/ClipStretch.h"
 #include "../model/MidiControl.h"
 
 #include <MediaDefs.h>
@@ -119,12 +120,13 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          bool audible, Frame seekProjectDelta, float outputRate,
                          Frame fadeIn, Frame fadeOut, float clipGain,
                          FadeShape fadeInShape, FadeShape fadeOutShape,
-                         StreamLoopRange loop)
+                         StreamLoopRange loop, double stretchRatio)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
       fFadeInShape(fadeInShape), fFadeOutShape(fadeOutShape),
-      fClipGain(clipGain), fLoop(loop), fRing(kRingFloats) {
+      fClipGain(clipGain), fLoop(loop), fRing(kRingFloats),
+      fStretchRatio(stretchRatio > 0.0 ? stretchRatio : 1.0) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -164,6 +166,18 @@ status_t TrackStream::Open() {
 
     const float srcRate = fSource->FrameRate();
     fResampler.reset(new Resampler(srcRate, fOutputRate));
+
+    // The stretch stage, when the clip is stretched. Built here, once, off the
+    // audio thread — the stretcher allocates its window and its input history
+    // in Prepare and never again, so the disk thread only does arithmetic (and
+    // the RT callback never runs any of it: the ring still holds one output
+    // frame per timeline frame).
+    if (fStretchRatio != 1.0) {
+        fStretcher.reset(new Stretcher);
+        fStretcher->Prepare((double)fOutputRate, 2, fStretchRatio);
+        fStretchIn.reserve(16384 * 2);
+        fStretchOut.resize((size_t)fStretcher->HopFrames() * 2 * 4);
+    }
 
     // The passes this stream produces, in playback order (StreamLoop.h): the
     // first from where this graph's playback begins (the clip's own seek
@@ -231,6 +245,8 @@ bool TrackStream::FillStep() {
         SeekToPass();
         return true;                    // a new pass began
     }
+    if (fStretcher)
+        return FillStretched(remaining);   // decode -> stretch -> ring
     if (fChunkFloats == 0) {
         const float* src = nullptr;
         size_t frames = 0;
@@ -263,12 +279,135 @@ bool TrackStream::FillStep() {
     return pushed > 0;
 }
 
+// One stretched pass's worth of progress. The chain is decode -> resample ->
+// stretch -> ring, all on this stream's fill worker, so the ring still holds
+// one output frame per timeline frame and the RT side is untouched. `remaining`
+// is the pass's output frames still to produce.
+//
+// The source consumed is capped at the pass's span (lengthFrames / ratio, the
+// same arithmetic the exporter uses), and the read past the end of it — or past
+// the end of the file — is silence: the clip plays the material it references,
+// and a clip longer than its source still fills its window, as it did before.
+bool TrackStream::FillStretched(Frame remaining) {
+    if (fStretchOutFrames == 0) {
+        // (Re)fill the output staging: feed the stretcher until it produces.
+        for (;;) {
+            if (!fStretchFlushed && fStretchFed >= fStretchSpan) {
+                fStretcher->Flush();      // the pass's span is exhausted
+                fStretchFlushed = true;
+            }
+            if (!fStretchFlushed && fStretchInOff >= fStretchInFrames) {
+                const float* src = nullptr;
+                size_t frames = 0;
+                if (!fSource->ReadChunk(&src, &frames)) {
+                    fSourceEof.store(true, std::memory_order_relaxed);
+                    fStretcher->Flush();  // the file ended: the rest is silence
+                    fStretchFlushed = true;
+                } else {
+                    fResampled.clear();
+                    fResampler->Process(src, frames, fResampled);
+                    size_t n = fResampled.size() / 2;
+                    const int64_t left = fStretchSpan - fStretchFed;
+                    if ((int64_t)n > left) n = (size_t)left;   // never past the span
+                    fStretchIn.swap(fResampled);
+                    fStretchInOff    = 0;
+                    fStretchInFrames = n;
+                }
+            }
+            const size_t inLeft = fStretchInFrames > fStretchInOff
+                                ? fStretchInFrames - fStretchInOff : 0;
+            Stretcher::Result r = fStretcher->Process(
+                inLeft > 0 ? fStretchIn.data() + fStretchInOff * 2 : nullptr,
+                (int)inLeft, fStretchOut.data(), (int)(fStretchOut.size() / 2));
+            fStretchInOff += (size_t)r.inConsumed;
+            fStretchFed   += r.inConsumed;
+            if (r.outProduced > 0) {
+                fStretchOutOff    = 0;
+                fStretchOutFrames = (size_t)r.outProduced;
+                break;
+            }
+            if (fStretchFlushed && inLeft == 0) {
+                // Nothing to read and nothing left to produce, with the pass
+                // still owing frames: the FILE ended before the pass's material
+                // did (a clip longer than its source). That is the same latch
+                // the unstretched path sets on EOF, set for the same reason —
+                // NeedsFilling() must stop a builder waiting on audio that does
+                // not exist — and it is reached only here, because a pass whose
+                // output is complete is advanced before the stretch stage is
+                // entered at all.
+                fSourceEof.store(true, std::memory_order_relaxed);
+                return false;
+            }
+        }
+    }
+
+    // Drop the warm-up: its frames are BEFORE the pass's first output frame, so
+    // the ring's origin stays the pass's own first frame (1:1 with the timeline,
+    // which is what Mix and RebaseTo assume).
+    if (fStretchDrop > 0) {
+        const size_t n = std::min<size_t>((size_t)fStretchDrop, fStretchOutFrames);
+        fStretchOutOff += n;
+        fStretchOutFrames -= n;
+        fStretchDrop -= (int64_t)n;
+        if (fStretchOutFrames == 0)
+            return true;             // progress: the warm-up is behind us
+    }
+
+    size_t floats = fStretchOutFrames * 2;
+    const size_t limit = (size_t)remaining * 2;
+    if (floats > limit) floats = limit;    // never past the pass's end
+    const size_t pushed = fRing.Write(fStretchOut.data() + fStretchOutOff * 2,
+                                      floats);
+    const size_t pushedFrames = pushed / 2;
+    fStretchOutOff    += pushedFrames;
+    fStretchOutFrames -= pushedFrames;
+    fPassWritten += (Frame)pushedFrames;
+    return pushed > 0;
+}
+
 // Seek the source to the frame the cursor's current pass starts at, and drop
 // the resampler's carried state — the audio before this frame (or before the
 // loop's own start) is not what plays next, so an interpolated remnant of it
 // would be a click at the seam.
 void TrackStream::SeekToPass() {
     if (!fSource) return;
+    if (fStretcher) {
+        // Stretched: the pass's first output frame is clip-relative
+        // `(lo - fStart)`, and the source that plays there is that divided by
+        // the ratio. Start one warm-up earlier when the clip's own material
+        // reaches back that far, so the stretcher also builds the frame BEFORE
+        // the pass's first — its overlap-add tail — and the pass resumes at
+        // full level instead of ramping in over 25 ms. The frames the warm-up
+        // produces are ahead of the pass's first output frame and get dropped
+        // (fStretchDrop below), and quiet: this is a seek, the audio before it
+        // is gone either way.
+        const Frame want = fCursor.lo - fStart;              // clip-relative frame
+        const Frame warm = fStretcher->WarmupFrames();
+        const Frame from = want > warm ? want - warm : 0;
+        const int64_t p = (int64_t)std::llround((double)from / fStretchRatio);
+        fSource->Seek(PassSourceFrame(fSourceOffset, fStart, fStart + from,
+                                      fSource->FrameRate(), fOutputRate,
+                                      fStretchRatio));
+        fResampler->Reset();
+        fStretcher->Reset(p);
+        fStretchDrop = want - fStretcher->OutputIndex();
+        if (fStretchDrop < 0) fStretchDrop = 0;
+        // The source this pass may consume, in output-rate frames: from the
+        // reset point (a little before the pass) to the pass's last frame. The
+        // stretcher reads silence past it, so a stretched clip plays the
+        // material it references and nothing a trim cut away — the same span
+        // the exporter consumes, which is what keeps a bounce and playback
+        // agreeing about a clip's content.
+        const Frame outEnd = fCursor.lo + fCursor.Frames() - fStart;
+        fStretchSpan = (int64_t)std::llround((double)outEnd / fStretchRatio) - p;
+        if (fStretchSpan < 0) fStretchSpan = 0;
+        fStretchFed    = 0;
+        fStretchFlushed = false;
+        fStretchInOff = fStretchInFrames = 0;
+        fStretchOutOff = fStretchOutFrames = 0;
+        fChunkFloats = fChunkOffset = 0;
+        return;
+    }
     fSource->Seek(PassSourceFrame(fSourceOffset, fStart, fCursor.lo,
                                   fSource->FrameRate(), fOutputRate));
     if (fResampler) fResampler->Reset();
@@ -1581,7 +1720,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta,
                 g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
-                fades[ci].inShape, fades[ci].outShape, streamLoop);
+                fades[ci].inShape, fades[ci].outShape, streamLoop,
+                ClipStretchRatio(c));
             if (s->Open() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());

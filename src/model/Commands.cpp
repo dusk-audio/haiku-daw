@@ -1,5 +1,6 @@
 #include "Commands.h"
-#include "RangeEdit.h"   // RangeOverlap/TrimFade (the range commands' geometry)
+#include "RangeEdit.h"    // RangeOverlap/TrimFade (the range commands' geometry)
+#include "ClipStretch.h"  // ClampStretchRatio (the stretch command's range)
 
 #include <algorithm>
 
@@ -1466,6 +1467,34 @@ void SetMidiClipEventsCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack))
         if (MidiClip* c = t->FindMidiClip(fClip))
             c->events = fOld;
+}
+
+// --- SetClipStretchCommand (M7.2) -------------------------------------
+
+bool SetClipStretchCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldLength = c->lengthFrames;
+    fOldRatio  = c->stretchRatio;
+    fOldPitch  = c->pitchSemis;
+    // The same floor ResizeClipCommand applies: a clip is never zero-length,
+    // because zero source frames consumed is not a stretch, it is a hole.
+    c->lengthFrames = fNewLength > 1 ? fNewLength : 1;
+    c->stretchRatio = ClampStretchRatio(fNewRatio);
+    c->pitchSemis   = fNewPitch;
+    return true;
+}
+
+void SetClipStretchCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fClip)) {
+        c->lengthFrames = fOldLength;
+        c->stretchRatio = fOldRatio;
+        c->pitchSemis   = fOldPitch;
+    }
 }
 
 // --- SetTrackColor / SetTrackHeight -----------------------------------

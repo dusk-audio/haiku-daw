@@ -2710,6 +2710,165 @@ static void TestArrangeFeel(MainWindow* win, Project& project) {
 }
 
 // ---------------------------------------------------------------------------
+// M7.2 — time-stretch. The Cmd/Alt right-edge drag stretches a clip to fit
+// instead of trimming it: the ratio is derived from the span the clip already
+// references (never from the file's length), the whole gesture is one undo
+// step, and the clip draws the ratio it plays at.
+static void TestClipStretch(MainWindow* win, Project& project,
+                            CommandStack* stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_clip_stretch\n");
+
+    // A 2 s source and a clip cut out of its MIDDLE: 0.5 s of timeline
+    // referencing the 0.5 s of material that starts 1 s in. Dragged out to 1 s
+    // of timeline the ratio must be 2.0 — the clipped span stretched — and not
+    // 1.0, which is what dividing by the file's own length would give.
+    const char* kPath = "/tmp/haiku_daw_ui_stretch.wav";
+    const Frame kFile = 96000, kOffset = 48000, kLen = 24000;
+    {
+        std::remove(kPath);
+        WavWriter w;
+        CHECK(w.OpenFormat(kPath, 48000, 2, 16, false));
+        std::vector<int16_t> d((size_t)kFile * 2, 0);
+        for (size_t i = 0; i < (size_t)kFile; i++) {
+            const int16_t v = (int16_t)(6000.0
+                * std::sin(2.0 * M_PI * 220.0 * (double)i / 48000.0));
+            d[i * 2 + 0] = v;
+            d[i * 2 + 1] = v;
+        }
+        CHECK(w.WriteInt16(d.data(), (ssize_t)d.size()));
+        CHECK(w.Close());
+    }
+
+    Track ta;
+    ta.id   = project.NextTrackId();
+    ta.type = TrackType::Audio;
+    ta.name = "stretch";
+    Clip ac;
+    ac.id           = project.NextClipId();
+    ac.startFrame   = 48000;      // 1.0 s in (a 16th grid line)
+    ac.lengthFrames = kLen;
+    ac.sourceOffset = kOffset;
+    ac.sourcePath   = kPath;
+    ta.clips.push_back(ac);
+    CHECK(LockedAddTrack(win, project, ta));
+    snooze(120000);
+
+    TimelineView* tv = nullptr;
+    int laneIdx = -1;
+    float scrollY = 0.0f;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        tv = dynamic_cast<TimelineView*>(win->FindView("timeline"));
+        laneIdx = project.IndexOfTrack(ta.id);
+        if (tv) scrollY = tv->ScrollY();
+        win->Unlock();
+    }
+    CHECK(tv != nullptr);
+    CHECK(laneIdx >= 0);
+    if (!tv || laneIdx < 0) return;
+
+    auto frameX = [&](Frame f) { return tv->FrameToX(f); };
+    const float laneTop = TimelineContentTop() - scrollY
+                        + (float)laneIdx * (TrackHeight() + TrackGap());
+    const float laneMid = laneTop + TrackHeight() * 0.7f;   // below the top band
+
+    auto postMouse = [&](uint32 what, BPoint at, uint32 mods) {
+        BPoint screen = at;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(at);
+            win->Unlock();
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+        m.AddInt32("clicks", 1);
+        m.AddInt32("modifiers", (int32)mods);
+        m.AddPoint("where", at);
+        m.AddPoint("screen_where", screen);
+        BMessenger(tv).SendMessage(&m);
+        snooze(30000);
+    };
+    auto clipState = [&](Frame* len, double* ratio, Frame* off) {
+        *len = -1; *ratio = -1.0; *off = -1;
+        if (win->LockWithTimeout(1000000) != B_OK) return;
+        if (const Track* t = project.FindTrack(ta.id))
+            if (const Clip* c = t->FindClip(ac.id)) {
+                *len = c->lengthFrames; *ratio = c->stretchRatio;
+                *off = c->sourceOffset;
+            }
+        win->Unlock();
+    };
+
+    // Cmd-drag the right edge from the clip's end (72000) out to 96000 — one
+    // bar further at 120 BPM — which asks for a 48000-frame clip over the same
+    // material.
+    const BPoint edge(frameX(ac.startFrame + kLen) - Themed(3.0f), laneMid);
+    const BPoint out(frameX(ac.startFrame + 48000), laneMid);
+    postMouse(B_MOUSE_DOWN, edge, B_COMMAND_KEY);
+    postMouse(B_MOUSE_MOVED, out, B_COMMAND_KEY);
+    postMouse(B_MOUSE_UP, out, B_COMMAND_KEY);
+
+    Frame len = 0, off = 0; double ratio = 0.0;
+    clipState(&len, &ratio, &off);
+    std::printf("    dragged: len %lld ratio %.4f offset %lld\n",
+                (long long)len, ratio, (long long)off);
+    CHECK(len == 48000);
+    CHECK(std::fabs(ratio - 2.0) < 1e-6);
+    CHECK(off == kOffset);                      // the span's start is untouched
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        CHECK(stack->UndoName() == "Stretch Clip");   // one step for the drag
+        win->Unlock();
+    }
+
+    // Undo puts the geometry AND the ratio back together; redo re-applies both.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        stack->Undo(project);
+        win->Unlock();
+    }
+    snooze(60000);
+    clipState(&len, &ratio, &off);
+    CHECK(len == kLen);
+    CHECK(ratio == 1.0);
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        stack->Redo(project);
+        win->Unlock();
+    }
+    snooze(60000);
+    clipState(&len, &ratio, &off);
+    CHECK(len == 48000);
+    CHECK(std::fabs(ratio - 2.0) < 1e-6);
+
+    // Shot for the screenshot pass: the clip is stretched, so its name strip
+    // carries the ratio badge.
+    win->PostMessage(kMsgUiRefresh);
+    snooze(120000);
+    Shot("clip-stretch");
+
+    // The plain right-edge drag still TRIMS: same length change, no ratio.
+    const BPoint edge2(frameX(ac.startFrame + 48000) - Themed(3.0f), laneMid);
+    const BPoint in(frameX(ac.startFrame + 36000), laneMid);
+    postMouse(B_MOUSE_DOWN, edge2, 0);
+    postMouse(B_MOUSE_MOVED, in, 0);
+    postMouse(B_MOUSE_UP, in, 0);
+    clipState(&len, &ratio, &off);
+    std::printf("    trimmed: len %lld ratio %.4f\n", (long long)len, ratio);
+    CHECK(len == 36000);
+    CHECK(std::fabs(ratio - 2.0) < 1e-6);       // trimming does not re-derive it
+
+    // Leave the project as it was found: two undos (the trim, then the
+    // stretch) put the clip back to its authored length and ratio.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        stack->Undo(project);
+        stack->Undo(project);
+        win->Unlock();
+    }
+    snooze(60000);
+    clipState(&len, &ratio, &off);
+    CHECK(len == kLen);
+    CHECK(ratio == 1.0);
+}
+
+// ---------------------------------------------------------------------------
 // M2.4 (time-range selection and its edit operations) + M2.5 (clip depth).
 //
 // Everything here is driven through the real paths: the range by the same
@@ -6301,6 +6460,7 @@ static int32 TestThread(void*) {
     TestKeyboardFocus(win, project);
     TestThemeScale(win, project);
     TestArrangeFeel(win, project);
+    TestClipStretch(win, project, &stack);
     TestArrangeDepth(win, project, &stack);
     TestArrangeTracks(win, project, &stack);
     TestWidgetKit(win);

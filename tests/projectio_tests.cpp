@@ -5,9 +5,13 @@
 
 #include "../src/model/ProjectIO.h"
 #include "../src/model/Commands.h"
+#include "../src/model/ClipStretch.h"   // kMinStretchRatio / kMaxStretchRatio
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <sstream>
+#include <string>
 #include <unistd.h>
 
 static int g_checks = 0, g_fails = 0;
@@ -795,7 +799,6 @@ int main() {
         }
         std::remove(path);
     }
-
     // An `inputdev` line a NEWER build might write with values this one cannot
     // mean (a negative channel) is clamped away rather than kept -- it would
     // address outside a capture block.
@@ -822,6 +825,149 @@ int main() {
             CHECK(p.Tracks()[0].input.channelL == 0);
             CHECK(p.Tracks()[0].input.channelR == 0);   // follows the left
             CHECK(p.Tracks()[0].channels == TrackChannels::Stereo);
+        }
+        std::remove(path);
+    }
+    // Time-stretch (M7.2): the clip's ratio + pitch round-trip on their own
+    // optional `clipstretch` line, a truncated or out-of-range one is handled
+    // (skip / clamp) rather than trusted, and a clip that is NOT stretched
+    // writes nothing — the file stays byte-identical to a pre-stretch build's.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Loop"), a);
+        TrackId t = a.Tracks().front().id;
+        Clip c;
+        c.startFrame = 0; c.lengthFrames = 96000; c.sourceOffset = 480;
+        c.sourcePath = "loops/break.wav";
+        s.Execute(std::make_unique<AddClipCommand>(t, c), a);
+        ClipId id = a.Tracks().front().clips.front().id;
+        // The command is the only way to set it (all model edits go through the
+        // stack): stretch to a new timeline length in one edit.
+        CHECK(s.Execute(std::make_unique<SetClipStretchCommand>(
+                            t, id, 102720, 1.07, 2), a));
+        CHECK(a.Tracks().front().clips.front().lengthFrames == 102720);
+        CHECK(std::fabs(a.Tracks().front().clips.front().stretchRatio - 1.07) < 1e-9);
+        CHECK(a.Tracks().front().clips.front().pitchSemis == 2);
+        // Undo restores length, ratio and pitch together.
+        s.Undo(a);
+        CHECK(a.Tracks().front().clips.front().lengthFrames == 96000);
+        CHECK(a.Tracks().front().clips.front().stretchRatio == 1.0);
+        CHECK(a.Tracks().front().clips.front().pitchSemis == 0);
+        s.Redo(a);
+
+        const char* sp = "clipstretch_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, sp));
+        Project b;
+        CHECK(ProjectIO::Load(b, sp));
+        CHECK(b.Tracks().size() == 1);
+        const Clip& rc = b.Tracks()[0].clips[0];
+        CHECK(rc.lengthFrames == 102720);
+        CHECK(std::fabs(rc.stretchRatio - 1.07) < 1e-9);   // 9-digit line precision
+        CHECK(rc.pitchSemis == 2);
+        std::remove(sp);
+
+        // The line itself: present only for a stretched clip, and the clip's own
+        // line is untouched (the ratio rides on its OWN line, never as a new
+        // tail field of `clip`).
+        s.Undo(a);                                    // back to unstretched
+        CHECK(ProjectIO::Save(a, sp));
+        {
+            std::ifstream in(sp);
+            std::string line, clipLine;
+            int stretches = 0;
+            while (std::getline(in, line)) {
+                if (line.rfind("clipstretch ", 0) == 0) stretches++;
+                else if (line.rfind("clip ", 0) == 0) clipLine = line;
+            }
+            CHECK(stretches == 0);
+            CHECK(clipLine.rfind("clip 1 0 96000 480 0 0 ", 0) == 0);
+        }
+        std::remove(sp);
+    }
+
+    // LoadPatched (the pattern instrument_io_tests uses): save a real project,
+    // rewrite the saved TEXT to stand in for another build's file, and load it.
+    // A pre-stretch build's file is exactly this save with the `clipstretch`
+    // line deleted — patching a real save beats hand-writing the format, which
+    // has a dozen fields per record.
+    {
+        auto loadPatched = [](const std::string& from, const std::string& to,
+                              double* ratio) {
+            Project a;
+            CommandStack s;
+            s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "L"), a);
+            Clip c; c.startFrame = 0; c.lengthFrames = 48000;
+            c.sourcePath = "loop.wav";
+            s.Execute(std::make_unique<AddClipCommand>(a.Tracks().front().id, c), a);
+            ClipId id = a.Tracks().front().clips.front().id;
+            s.Execute(std::make_unique<SetClipStretchCommand>(
+                        a.Tracks().front().id, id, 72000, 1.5, 0), a);
+
+            const char* p = "clipstretch_patch_tmp.dawproj";
+            ProjectIO::Save(a, p);
+            std::string text;
+            { std::ifstream in(p); std::stringstream ss; ss << in.rdbuf();
+              text = ss.str(); }
+            const size_t at = text.find(from);
+            if (at != std::string::npos) text.replace(at, from.size(), to);
+            { std::ofstream out(p); out << text; }
+
+            Project b;
+            *ratio = -1.0;
+            if (ProjectIO::Load(b, p) && !b.Tracks().empty()
+                && !b.Tracks()[0].clips.empty())
+                *ratio = b.Tracks()[0].clips[0].stretchRatio;
+            std::remove(p);
+        };
+        double r = 0.0;
+        // An older build's file simply has no such line: the clip is unstretched
+        // and everything else loads as before.
+        loadPatched("clipstretch 1 1.5 0\n", "", &r);
+        CHECK(r == 1.0);
+        // A newer/hand-edited value outside the range is clamped, not trusted.
+        loadPatched("clipstretch 1 1.5 0", "clipstretch 1 42 0", &r);
+        CHECK(r == kMaxStretchRatio);
+    }
+
+    // Compat: a file from before the stretch existed loads unstretched, an
+    // out-of-range ratio is clamped into [0.25, 4.0], a nonsense (0 / negative)
+    // one is read as "no stretch", and a truncated `clipstretch` is skipped
+    // entirely rather than clobbering the ratio with a half-parsed value.
+    {
+        const char* path = "legacystretch_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"T\" 0 72 0 0 0\n"
+                << "clip 1 0 100 0 0 0 \"a.wav\" 1 0 1\n"       // no clipstretch
+                << "clip 2 0 100 0 0 0 \"b.wav\" 1 0 1\n"
+                << "clipstretch 2 99\n"                          // above the max
+                << "clip 3 0 100 0 0 0 \"c.wav\" 1 0 1\n"
+                << "clipstretch 3 -3\n"                          // nonsense
+                << "clip 4 0 100 0 0 0 \"d.wav\" 1 0 1\n"
+                << "clipstretch 4\n"                             // truncated: skipped
+                << "clip 5 0 100 0 0 0 \"e.wav\" 1 0 1\n"
+                << "clipstretch 5 0.1 0\n"                       // below the min
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 1);
+        if (p.Tracks().size() == 1) {
+            const auto& clips = p.Tracks()[0].clips;
+            CHECK(clips.size() == 5);
+            if (clips.size() == 5) {
+                CHECK(clips[0].stretchRatio == 1.0);                    // legacy
+                CHECK(clips[1].stretchRatio == kMaxStretchRatio);       // clamped
+                CHECK(clips[2].stretchRatio == 1.0);                    // nonsense
+                CHECK(clips[3].stretchRatio == 1.0);                    // truncated
+                CHECK(clips[4].stretchRatio == kMinStretchRatio);       // clamped
+            }
         }
         std::remove(path);
     }

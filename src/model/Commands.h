@@ -1172,6 +1172,48 @@ private:
     FadeShape fOld = FadeShape::Linear;
 };
 
+// --- time-stretch (M7.2) ------------------------------------------------
+
+// Set a clip's stretch to fit a new timeline length: the right-edge
+// stretch-to-fit drag (Cmd/Alt) lands here, and it is the ONE edit that moves
+// `lengthFrames` and `stretchRatio` together — they are derived from each other
+// (see model/ClipStretch.h: StretchRatioForDrag), and letting them be set
+// apart would leave the clip playing material it no longer references.
+//
+// `ratio` is clamped into [kMinStretchRatio, kMaxStretchRatio]; `pitchSemis`
+// rides along so the field round-trips, but v1 does not shift pitch. Stores
+// the old length/ratio/pitch for Undo, and coalesces like SetTrackHeightCommand
+// so a drag that pushes per motion event collapses into one undo step.
+class SetClipStretchCommand : public Command {
+public:
+    SetClipStretchCommand(TrackId track, ClipId clip, Frame newLength,
+                          double ratio, int pitchSemis = 0)
+        : fTrack(track), fClip(clip), fNewLength(newLength),
+          fNewRatio(ratio), fNewPitch(pitchSemis) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Stretch Clip"; }
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetClipStretchCommand*>(prev);
+        if (!p || p->fTrack != fTrack || p->fClip != fClip) return false;
+        p->fNewLength = fNewLength;
+        p->fNewRatio  = fNewRatio;
+        p->fNewPitch  = fNewPitch;
+        return true;
+    }
+
+private:
+    TrackId fTrack;
+    ClipId  fClip;
+    Frame   fNewLength;
+    double  fNewRatio;
+    int     fNewPitch = 0;
+    Frame   fOldLength = 0;
+    double  fOldRatio  = 1.0;
+    int     fOldPitch  = 0;
+};
+
 // --- time-range edits (M2.4) --------------------------------------------
 //
 // Both range commands address EVERY track (the range is project-wide; no
