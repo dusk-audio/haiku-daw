@@ -2927,10 +2927,18 @@ void TimelineView::SetTrackColour(TrackId track, int colorIndex) {
 
 void TimelineView::SetTrackInput(TrackId track, InputSource input) {
     if (!fProject || !fStack) return;
-    if (!fProject->FindTrack(track)) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    // A channel choice carries its width too (M5): naming one channel means a
+    // mono take, naming a pair stereo. One gesture, two undoable edits.
+    const TrackChannels width = WidthOfChoice(input);
+    const bool setWidth = (width != t->channels);
     if (fStack->Execute(std::make_unique<SetTrackInputCommand>(track,
                                                               std::move(input)),
                         *fProject)) {
+        if (setWidth)
+            fStack->Execute(std::make_unique<SetTrackChannelsCommand>(track, width),
+                            *fProject);
         Invalidate();
         // A changed input re-evaluates idle monitoring (the same message the
         // inspector's picker posts), and repaints the panes.
@@ -3082,8 +3090,7 @@ void TimelineView::OpenInputPicker(TrackId track, BPoint where) {
     for (size_t i = 0; i < choices.size(); i++) {
         BMenuItem* it = new ThemedMenuItem(
             InputChoiceLabel(choices[i]).c_str(), nullptr);
-        if (choices[i].kind == t->input.kind
-            && choices[i].name == t->input.name)
+        if (SameInput(choices[i], t->input))
             it->SetMarked(true);
         menu->AddItem(it);
     }
@@ -3711,6 +3718,7 @@ void TimelineView::SetRecording(bool active, Frame start, Frame length) {
     if (!active) {                 // take finished: drop live content
         fLiveNotes.clear();
         fLiveRec = nullptr;
+        fLiveTake.clear();
     }
     Invalidate();   // simplest; the region grows every poll anyway
 }
@@ -3740,8 +3748,14 @@ void TimelineView::DrawLiveMidi(BRect region, TrackId track) {
     }
 }
 
-void TimelineView::DrawLiveAudio(BRect region) {
-    const size_t count = fLiveRec->EnvCount();
+void TimelineView::DrawLiveAudio(BRect region, TrackId track) {
+    // The take that BELONGS to this lane: one capture writes one file per
+    // armed track (M5), so drawing take 0 on every lane would show another
+    // track's channels here.
+    const auto ti = fLiveTake.find(track);
+    if (ti == fLiveTake.end() || ti->second < 0) return;
+    const size_t take = (size_t)ti->second;
+    const size_t count = fLiveRec->EnvCount(take);
     const float  recRate = fLiveRec->SampleRate();
     if (count == 0 || recRate <= 0.0f) return;
     const double ratio = fLiveProjRate / recRate;         // timeline / source frames
@@ -3757,7 +3771,8 @@ void TimelineView::DrawLiveAudio(BRect region) {
         // Peak over the buckets this column spans (so striding loses nothing).
         float lo = 0.0f, hi = 0.0f;
         for (size_t j = i; j < i + step && j < count; j++) {
-            const float mn = fLiveRec->EnvMin(j), mx = fLiveRec->EnvMax(j);
+            const float mn = fLiveRec->EnvMin(take, j);
+            const float mx = fLiveRec->EnvMax(take, j);
             if (mn < lo) lo = mn;
             if (mx > hi) hi = mx;
         }
@@ -4191,7 +4206,7 @@ void TimelineView::DrawLanes(BRect update) {
                 if (t.type == TrackType::Midi && fLiveNotes.count(t.id))
                     DrawLiveMidi(rb, t.id);
                 else if (t.type == TrackType::Audio && fLiveRec)
-                    DrawLiveAudio(rb);
+                    DrawLiveAudio(rb, t.id);
                 SetHighColor(ColText());
                 DrawString("\xE2\x97\x8F REC", BPoint(rb.left + Themed(4), rb.top + Themed(14)));
             }

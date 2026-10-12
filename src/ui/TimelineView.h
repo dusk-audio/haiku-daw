@@ -333,9 +333,11 @@ public:
     void SetLiveMidiNotes(std::map<TrackId, std::vector<MidiNote>> perTrack) {
         fLiveNotes = std::move(perTrack);
     }
-    void SetLiveAudio(const Recorder* rec, double projectRate) {
+    void SetLiveAudio(const Recorder* rec, double projectRate,
+                      std::map<TrackId, int> takeFor) {
         fLiveRec      = rec;
         fLiveProjRate = projectRate;
+        fLiveTake     = std::move(takeFor);
     }
 
 private:
@@ -348,7 +350,7 @@ private:
     void DrawTrackHeaderCompact(const Track& t, BRect lane);  // collapsed lane
     void DrawNameField(const Track& t, BRect lane);   // the in-place rename box
     void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
-    void DrawLiveAudio(BRect region);  // in-progress waveform while recording
+    void DrawLiveAudio(BRect region, TrackId track);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
     // `ef` holds the EFFECTIVE fades (the clip's own combined with any
     // auto-crossfade from overlapping a neighbour) AND the shape each one
@@ -618,6 +620,10 @@ private:
     std::map<TrackId, std::vector<MidiNote>> fLiveNotes;
     const Recorder*       fLiveRec = nullptr; // non-owning; valid during capture
     double                fLiveProjRate = 48000.0;
+    // Which TAKE of the capture each armed audio track is being recorded into
+    // (M5): one capture writes one file per track, so the waveform drawn on a
+    // lane has to be that track's take, not the capture's first one.
+    std::map<TrackId, int> fLiveTake;
 };
 
 } // namespace daw
