@@ -666,6 +666,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
 }
 
 MainWindow::~MainWindow() {
+    // The peak loader only touches files and its own list, but it must not
+    // outlive the window that drains it (M4.4).
+    fPeakLoader.Stop();
     // The export worker renders a snapshot taken on this thread, so it has to
     // stop before anything it touches goes away. The cancel flag is polled
     // between blocks, so this waits at most one block (and none at all when
@@ -1959,6 +1962,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // outcome -- failure included -- is picked up here, where the UI may
             // be touched, instead of blocking the window on the load.
             fTransportCtl.PollEngineLoad();
+            // Waveform envelopes arrive the same way (M4.4): the loader keeps its
+            // own copy and hands them over here, under this window's lock — the
+            // same lock the timeline draws the map under, so nothing in the
+            // drawing code needed to learn about the worker.
+            {
+                const size_t got = fPeakLoader.Drain(*fPeaks);
+                if (got > 0 && fTimeline) fTimeline->Invalidate();
+            }
             // An export reports through the pulse: the worker writes only
             // atomics (the codebase's pattern for streamed values), and the bar
             // is a window this looper owns a messenger to.
@@ -2475,7 +2486,8 @@ void MainWindow::UpdatePulse() {
         if (w.editor && w.editor->Alive()) { watching = true; break; }
     const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
                    || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
-                   || !fRender.fExportHandled;   // an export's progress + completion
+                   || !fRender.fExportHandled      // an export's progress + completion
+                   || fPeakLoader.HasWork();       // envelopes still arriving (M4.4)
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
                                     kPulseInterval);
@@ -3290,17 +3302,24 @@ void MainWindow::ExportMidi(const char* path) {
 }
 
 void MainWindow::RebuildPeaks() {
+    // M4.4: the envelopes are built by a worker, off this thread, and a cache
+    // file (keyed by the source's mtime, size and bucket size) spares the second
+    // open the whole scan. This used to open and read EVERY clip's file right
+    // here, on the window thread, on every load — a project with a few hundred
+    // clips froze the window for as long as all that audio takes to read, twice
+    // over on the second open. What is left here is collecting the paths and
+    // dropping the ones already drawn.
     fPeaks->clear();
+    std::vector<std::string> paths;
     for (const Track& t : fProject->Tracks())
         for (const Clip& c : t.clips) {
-            if (c.sourcePath.empty() || fPeaks->count(c.sourcePath))
+            if (c.sourcePath.empty()) continue;
+            if (std::find(paths.begin(), paths.end(), c.sourcePath) != paths.end())
                 continue;
-            // The factory, so a clip pointing at a FLAC or an AIFF gets its
-            // waveform too and not just a flat line.
-            std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
-            if (src)
-                (*fPeaks)[c.sourcePath].Build(*src);
+            paths.push_back(c.sourcePath);
         }
+    fPeakLoader.Start(std::move(paths));
+    UpdatePulse();   // the envelopes are drained by the pulse, so it must run
 }
 
 // A unique path for a rendered region/freeze file: in the take dir (beside the

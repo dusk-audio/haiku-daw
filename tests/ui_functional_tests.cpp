@@ -4644,6 +4644,81 @@ static void TestSeamlessLoop(MainWindow* win, Project& project) {
     }
 }
 
+// M4.4: waveform envelopes are built OFF the window thread and cached on disk.
+//
+// `RebuildPeaks` used to run inline: for every clip, open the file and read it
+// top to bottom while the window was locked, on every load, keeping nothing.
+// This test proves the two things that changed — the window stays responsive
+// while the envelopes are being built, and a second pass over the same media
+// reads them back from the cache instead of decoding the audio again.
+static void TestPeakCache(MainWindow* win, Project& project) {
+    std::printf("peak cache ...\n");
+
+    // A file big enough that scanning it is not instantaneous: 20 s of a signal.
+    const char* wav = "/tmp/haiku_daw_ui_peaks.wav";
+    {
+        WavWriter w;
+        if (w.Open(wav, 48000, 2)) {
+            std::vector<int16_t> f(48000 * 2 * 20);
+            for (size_t i = 0; i < f.size(); i++)
+                f[i] = (int16_t)((i / 32) % 200 - 100);
+            CHECK(w.WriteInt16(f.data(), f.size()));
+            CHECK(w.Close());
+        }
+    }
+    {
+        Track track;
+        track.id = project.NextTrackId();
+        track.type = TrackType::Audio;
+        track.name = "peaks";
+        track.gain = 1.0f;
+        Clip clip;
+        clip.id = project.NextClipId();
+        clip.sourcePath = wav;
+        clip.startFrame = 0;
+        clip.lengthFrames = 48000 * 20;
+        track.clips.push_back(clip);
+        CHECK(LockedAddTrack(win, project, track));
+    }
+
+    win->RebuildPeaksForTest();
+    // The window is FREE while that runs. The old code called the scan from its
+    // own message handler -- inside the window lock -- so this lock would time
+    // out; now the scan is a worker's and the window only drains the results.
+    if (win->PeaksLoading()) {
+        CHECK(win->LockWithTimeout(1000000) == B_OK);
+        win->Unlock();
+    }
+    // Every clip's file ends up with an envelope — and wait for the PASS to
+    // finish, not merely for the first one: a new pass supersedes a running one
+    // (that is what keeps a reload from drawing the old project), and it abandons
+    // the files it had not reached yet, cache writes included.
+    CHECK(WaitFor([&] { return !win->PeaksLoading() && win->PeaksLoaded() > 0; },
+                  30000000));
+    const int loaded = win->PeaksLoaded();
+    std::printf("  peaks: %d envelopes, %d from cache, %d built\n",
+                loaded, win->PeakCacheHits(), win->PeakCacheMisses());
+    CHECK(loaded >= 1);
+
+    // A second pass over the SAME media must come from the cache: that is the
+    // only way the VM can show the on-disk cache is doing anything, and it is
+    // what makes reopening a project cheap.
+    win->RebuildPeaksForTest();
+    CHECK(WaitFor([&] { return !win->PeaksLoading()
+                               && win->PeakOutcome(wav) != 0; }, 20000000));
+    const int hits = win->PeakCacheHits();
+    const int misses = win->PeakCacheMisses();
+    // The claim is about THIS test's file — the project's other clips point at
+    // media that may not be on this machine at all, and a file that is missing is
+    // skipped rather than cached. So: this file came back from the cache, and
+    // some of the pass did too.
+    std::printf("  peaks: second pass %d hits, %d misses, this file -> %d "
+                "(1 = cache)\n", hits, misses, win->PeakOutcome(wav));
+    CHECK(win->PeakOutcome(wav) == 1);
+    CHECK(hits >= 1);
+    CHECK(win->PeaksLoaded() >= loaded);
+}
+
 static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     std::printf("big project playback ...\n");
 
@@ -6237,6 +6312,7 @@ static int32 TestThread(void*) {
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);
     TestEngineGraphSwap(win, project, stack);
+    TestPeakCache(win, project);
     TestSeamlessLoop(win, project);
     TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
