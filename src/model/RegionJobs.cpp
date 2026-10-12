@@ -4,6 +4,8 @@
 #include "../engine/AudioFormats.h"   // OpenAudioSource: any format, one reader
 #include "../engine/WavWriter.h"
 
+#include <unistd.h>   // access (the diagnostic below)
+
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -17,7 +19,11 @@ int64_t DecodeClipRegion(const Clip& c, double projectRate,
     outRate = 0.0;
     // Whatever the clip points at -- a WAV take, an imported FLAC, an AIFF.
     std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
-    if (!src) return 0;
+    if (!src) {
+        fprintf(stderr, "RegionJobs: decode: cannot open '%s' (access=%d)\n",
+                c.sourcePath.c_str(), (int)::access(c.sourcePath.c_str(), F_OK));
+        return 0;
+    }
     outRate = src->FrameRate();
     if (c.sourceOffset > 0) src->Seek(c.sourceOffset);
     // The clip plays lengthFrames project-frames == that many source-frames
@@ -70,7 +76,14 @@ bool RenderReversedClip(const Clip& c, double projectRate,
     std::vector<float> buf;
     double rate = 0.0;
     const int64_t n = DecodeClipRegion(c, projectRate, buf, rate, &job);
-    if (n <= 0 || rate <= 0) return false;
+    if (n <= 0 || rate <= 0) {
+        // Named, because "the job failed" with no reason is the message that
+        // costs an afternoon: WHICH step and WHICH file.
+        std::fprintf(stderr, "RegionJobs: reverse: cannot read '%s' (%lld "
+                             "frames, rate %.0f)\n",
+                     c.sourcePath.c_str(), (long long)n, rate);
+        return false;
+    }
     if (JobCancelled(job)) return false;
     ReverseStereo(buf.data(), n);
     ReportJob(job, 0.75f);
@@ -87,10 +100,12 @@ bool RenderReversedClip(const Clip& c, double projectRate,
         pcm[(size_t)i] = (int16_t)lround(s * 32767.0f);
     }
     WavWriter w;
-    // Exclusive: the path is scanned-free, and if that ever raced, refusing
-    // beats overwriting a file a clip may reference. The .part name is ours.
+    // The .part name is ours: no exclusive flag (a leftover from a crashed run
+    // is overwritten rather than turned into a refusal).
     if (!w.Open(part, (int)lround(rate), 2, /*exclusive*/ false)
         || !w.WriteInt16(pcm.data(), pcm.size()) || !w.Close()) {
+        std::fprintf(stderr, "RegionJobs: reverse: cannot write '%s'\n",
+                     part.c_str());
         std::remove(part.c_str());
         return false;
     }

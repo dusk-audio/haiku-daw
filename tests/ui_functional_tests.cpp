@@ -5402,15 +5402,26 @@ static void TestTransportBar(MainWindow* win, Project& project) {
     auto lock = [&](const std::function<void()>& fn) {
         if (win->LockWithTimeout(1000000) == B_OK) { fn(); win->Unlock(); }
     };
+    // A click the way the harness posts them: "where" in the view's own
+    // coordinates AND "screen_where", which is what the window's dispatcher
+    // hit-tests to decide which view gets the event (a message with only
+    // "where" is delivered to nobody).
     auto click = [&](int which, int32 clicks = 1) {
         BRect r;
         lock([&] { r = win->TransportButtonRect(which); });
-        BMessage m(B_MOUSE_DOWN);
-        m.AddInt32("buttons", 1);
-        m.AddInt32("clicks", clicks);
-        m.AddPoint("where", BPoint((r.left + r.right) * 0.5f,
-                                   (r.top + r.bottom) * 0.5f));
-        BMessenger(bar).SendMessage(&m);
+        const BPoint at((r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f);
+        BPoint screen = at;
+        lock([&] { screen = bar->ConvertToScreen(at); });
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", clicks);
+            m.AddInt32("modifiers", 0);
+            m.AddPoint("where", at);
+            m.AddPoint("screen_where", screen);
+            BMessenger(bar).SendMessage(&m);
+        }
     };
     auto playing = [&] {
         bool p = false;
@@ -5639,11 +5650,14 @@ static void TestRegionJob(MainWindow* win, Project& project) {
     t.clips.push_back(c);
     CHECK(LockedAddTrack(win, project, t));
 
+    // The TRACK's clip, not the id the fixture made: the reverse op replaces
+    // the clip with a fresh one (a new id) pointing at the rendered file, which
+    // is exactly what the test is here to see.
     auto clipPath = [&] {
         std::string s;
         if (win->LockWithTimeout(1000000) == B_OK) {
             if (const Track* p = project.FindTrack(t.id))
-                if (const Clip* cp = p->FindClip(c.id)) s = cp->sourcePath;
+                if (!p->clips.empty()) s = p->clips.front().sourcePath;
             win->Unlock();
         }
         return s;
@@ -5676,18 +5690,27 @@ static void TestRegionJob(MainWindow* win, Project& project) {
     {
         const int32 before = VisibleWindows();
         postReverse();
+        // The bar APPEARS first, then it closes when the job is done. Waiting
+        // for the close alone races: before the progress window is in the
+        // app's window list "no extra window" is already true, so the wait
+        // returns at once -- and a test that then deletes files would delete
+        // them under a worker that is still reading.
+        CHECK(WaitFor([&] { return VisibleWindows() > before; }, 10000000));
         CHECK(WaitFor([&] { return VisibleWindows() == before; }, 120000000));
+        CHECK(WaitFor([&] { return clipPath() != srcPath; }, 10000000));
         const std::string now = clipPath();
         CHECK(!now.empty());
         CHECK(now != srcPath);
         CHECK(FileExists(now));
-        // Put the original clip back for whatever runs after this.
+        // Put the original clip back for whatever runs after this, and take the
+        // rendered file away -- never the source (a cleanup that fires on the
+        // wrong branch is how the first version of this test broke itself).
         if (win->LockWithTimeout(1000000) == B_OK) {
             if (Track* p = project.FindTrack(t.id))
-                if (Clip* cp = p->FindClip(c.id)) cp->sourcePath = srcPath;
+                if (!p->clips.empty()) p->clips.front().sourcePath = srcPath;
             win->Unlock();
         }
-        std::remove(now.c_str());
+        if (!now.empty() && now != srcPath) std::remove(now.c_str());
     }
     std::remove(srcPath);
     CHECK(WaitQuiet());
@@ -6629,8 +6652,12 @@ static void TestFxRetargetFlush(MainWindow* win, Project& project) {
     // A knob drag: press inside the first knob's cell and pull up. One panel
     // sits at kPanelPad with a title row and a header row above the knobs
     // (22 + 22 + 4); the first cell is 68 design px wide from +8. A generous
-    // point in the middle of it.
-    const BPoint from(50.0f, 100.0f), to(50.0f, 60.0f);
+    // point in the middle of it — THEMED, because the panel's own geometry is:
+    // the run's UI scale is the user preference the settings file carries (and
+    // the Preferences window can change it live), so a point in design pixels
+    // stops being the middle of that cell as soon as the scale is not 100%.
+    const BPoint from(Themed(50.0f), Themed(100.0f));
+    const BPoint to(Themed(50.0f), Themed(60.0f));
     BPoint fromScreen = from, toScreen = to;
     if (fw->LockWithTimeout(1000000) == B_OK) {
         fromScreen = view->ConvertToScreen(from);

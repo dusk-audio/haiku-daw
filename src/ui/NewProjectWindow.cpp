@@ -3,6 +3,7 @@
 #include "widgets/DawButton.h"      // the kit (M1.3)
 #include "widgets/DawMenuField.h"
 
+#include <OS.h>   // find_thread (PostChosen quits from its own thread)
 #include <LayoutBuilder.h>
 #include <Menu.h>
 #include <MenuItem.h>
@@ -159,7 +160,17 @@ void NewProjectWindow::PostChosen() {
         m.AddString("path", path.c_str());
         fApply.SendMessage(&m);
     }
-    Quit();
+    // The window puts itself away — but ONLY from its own thread. Quit()
+    // deletes the looper, and a caller that holds this window's lock (the
+    // functional test drives the dialog exactly that way) would then unlock a
+    // destroyed looper: "looper must be locked before proceeding", which does
+    // not fail a check, it stops the whole team and wedges the run. Asking the
+    // window's own looper to quit cannot race a caller's lock: the request is
+    // served after the caller has unlocked.
+    if (find_thread(NULL) == Thread())
+        Quit();
+    else
+        PostMessage(B_QUIT_REQUESTED);
 }
 
 void NewProjectWindow::MessageReceived(BMessage* msg) {
