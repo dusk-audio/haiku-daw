@@ -78,12 +78,16 @@ void RecordController::StopRecording() {
     const bool captured = fRecorder && fRecorder->IsRecording();
     int64_t frames = 0;
     double  recRate = fWin->fProject->sampleRate;
+    std::vector<std::string> takePaths;
     if (captured) {
         fRecorder->Stop();
         frames  = fRecorder->FramesWritten();
         recRate = fRecorder->SampleRate();
+        // One file per armed audio track (M5). Collected before the recorder is
+        // freed, and index-aligned with `targets` below.
+        for (size_t i = 0; i < fRecorder->TakeCount(); i++)
+            takePaths.push_back(fRecorder->TakePath(i));
     }
-    const std::string path = fTakePath;   // the file StartCapture opened
     std::vector<TrackId> targets = fRecTracks;
 
     // Stop the overdub engine + live REC region, end the poll. Detach the
@@ -99,6 +103,8 @@ void RecordController::StopRecording() {
     fCapturePending = false;
     fWin->fTimeline->SetRecording(false, 0, 0);
     fRecTracks.clear();
+    fTakeTracks.clear();       // the drop below works from its own copy
+    fLiveTakeFor.clear();
     fWin->UpdatePulse();
     // Bars to zero; the meter's clip latch and peak hold are its own state
     // (M3.3) and are deliberately kept (see TransportController).
@@ -118,10 +124,21 @@ void RecordController::StopRecording() {
         return;
     }
 
-    // Build the waveform envelope once; the take drops on every armed track.
-    WavSource src;
-    if (src.Open(path))
-        (*fWin->fPeaks)[path].Build(src);
+    // Waveform envelopes (M5): the FIRST take is scanned here, so the track
+    // being recorded gets its waveform the moment the take lands -- as it
+    // always has. Any further take is a second full file to read, which is
+    // exactly what M4.4 moved off the window thread, so those go to the
+    // background loader (and, if a pass of its own is running, wait for the
+    // next project load rather than killing that pass and blanking every other
+    // waveform in the project).
+    if (!takePaths.empty()) {
+        WavSource src;
+        if (src.Open(takePaths[0]))
+            (*fWin->fPeaks)[takePaths[0]].Build(src);
+        if (takePaths.size() > 1)
+            fWin->LoadPeaksInBackground(std::vector<std::string>(takePaths.begin() + 1,
+                                                                 takePaths.end()));
+    }
 
     // lengthFrames is timeline (project-rate) frames, converted from the
     // recorder-rate frame count. `ratio` = project/record rate; a source-frame
@@ -145,7 +162,10 @@ void RecordController::StopRecording() {
             LoopTakes(tr.loopStart, tr.loopEnd, captureLen, fRoundTripFrames);
         fLoopRecord = false;
         if (takes.empty()) { fRecorder.reset(); return; }
-        for (TrackId target : targets) {
+        // Each armed track stacks the passes of ITS OWN take file (M5): the
+        // takes are index-aligned with `targets`.
+        for (size_t i = 0; i < targets.size() && i < takePaths.size(); i++) {
+            const TrackId target = targets[i];
             const int group = ++fTakeGroup;
             auto macro = std::make_unique<MacroCommand>("Loop Takes");
             for (size_t k = 0; k < takes.size(); k++) {
@@ -153,7 +173,7 @@ void RecordController::StopRecording() {
                 clip.startFrame   = takes[k].startFrame;
                 clip.lengthFrames = takes[k].lengthFrames;
                 clip.sourceOffset = toSourceOffset(takes[k].sourceOffset);
-                clip.sourcePath   = path;
+                clip.sourcePath   = takePaths[i];
                 clip.takeGroup    = group;
                 clip.takeActive   = (k + 1 == takes.size());  // last pass active
                 macro->Add(std::make_unique<AddClipCommand>(target, clip));
@@ -187,13 +207,15 @@ void RecordController::StopRecording() {
         region = CompensateRoundTrip(fRecStart, captureLen, fRoundTripFrames);
     }
 
-    for (TrackId target : targets) {
+    // Each armed track gets ITS OWN take file (M5), at the same timeline
+    // position: the takes came out of one capture, so they line up.
+    for (size_t i = 0; i < targets.size() && i < takePaths.size(); i++) {
         Clip clip;
         clip.startFrame   = region.startFrame;
         clip.lengthFrames = region.lengthFrames;
         clip.sourceOffset = toSourceOffset(region.sourceOffset);
-        clip.sourcePath   = path;
-        fWin->fStack->Execute(std::make_unique<AddClipCommand>(target, clip), *fWin->fProject);
+        clip.sourcePath   = takePaths[i];
+        fWin->fStack->Execute(std::make_unique<AddClipCommand>(targets[i], clip), *fWin->fProject);
     }
 
     fRecorder.reset();
@@ -207,20 +229,58 @@ void RecordController::StartCapture() {
     // Audio capture: only when an audio track is armed (a MIDI-only take opens
     // no input device and writes no WAV).
     if (!fRecTracks.empty()) {
-        // Write takes into the project's directory (a self-contained bundle)
-        // when the project has been saved; otherwise the working directory.
-        // The name is the first free take-N.wav THERE -- not a session counter,
-        // which restarts at 0 after reopening a project and would overwrite the
-        // takes that project still uses (the Recorder refuses to clobber, but
-        // scanning means the take lands instead of failing).
-        fTakePath = NextFreeWavPath(fTakeDir, "take");
+        // One take per armed audio track (M5): every take takes its OWN
+        // channels out of ONE capture of the chosen device, written at the
+        // preference's sample format. The names are picked TOGETHER -- the
+        // first pick's file does not exist yet, so a second scan would hand
+        // out the same name (model/TakeNames.h).
+        const TakeFormat fmt = TakeFormatFromInt(fTakeFormat);
+        fTakeTracks = fRecTracks;      // take i belongs to fTakeTracks[i]
+        fLiveTakeFor.clear();
+        for (size_t i = 0; i < fTakeTracks.size(); i++)
+            fLiveTakeFor[fTakeTracks[i]] = (int)i;
+        const std::vector<std::string> paths =
+            NextFreeWavPaths(fTakeDir, "take", (int)fTakeTracks.size());
+        fTakePath = paths.empty() ? std::string() : paths[0];
+
+        std::vector<TakeSpec> specs;
+        std::string device;
+        for (size_t i = 0; i < fTakeTracks.size(); i++) {
+            const Track* t = fWin->fProject->FindTrack(fTakeTracks[i]);
+            // Keep the specs aligned with fTakeTracks: a track that vanished
+            // between arming and capture still gets its slot (the take is then
+            // dropped for nobody, not on the wrong track).
+            const InputSource in = t ? t->input : InputSource{};
+            const TrackChannels width = t ? t->channels : TrackChannels::Stereo;
+            specs.push_back(PlanTake(i < paths.size() ? paths[i] : std::string(),
+                                     in, width, fmt));
+            // ONE capture has ONE device: the first armed track that names one
+            // is what the whole pass records from, and the others' channel
+            // addresses are read on that device (an armed track naming another
+            // interface records this one's channels rather than nothing).
+            if (device.empty() && !in.device.empty())
+                device = in.device;
+        }
+        if (specs.empty() || paths.size() < fTakeTracks.size()) {
+            // A directory with a million takes: NextFreeWavPaths gave up rather
+            // than promising a name twice.
+            std::fprintf(stderr, "MainWindow: no take name available\n");
+            fWin->ReportError("Recording",
+                        std::string("No free take name in ") +
+                        (fTakeDir.empty() ? std::string("the working directory")
+                                          : fTakeDir));
+            fTakeTracks.clear();
+            return;
+        }
+
         fRecorder.reset(new Recorder());
-        if (fRecorder->Start(fTakePath.c_str()) != B_OK) {
+        if (fRecorder->Start(specs, device) != B_OK) {
             std::fprintf(stderr, "MainWindow: recording failed to start\n");
             fWin->ReportError("Recording",
                         std::string("The take could not be started:\n") +
                         fTakePath);
             fRecorder.reset();
+            fTakeTracks.clear();
         } else {
             // Wire input monitoring: the engine mixes the recorder's live input
             // (only if the input rate matches the output rate).
