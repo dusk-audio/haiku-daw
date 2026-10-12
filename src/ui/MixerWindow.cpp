@@ -110,25 +110,14 @@ static BRect FxRowRect(const StripLayout& L, int i) {
     return BRect(L.fx.left, top, L.fx.right, top + kFxRowH - 2.0f);
 }
 
-// The trim knob's mapping (M3.4): unity sits at 12 o'clock, the ceiling
-// (kTrackTrimMax = +12 dB) at the top of the sweep and silence at the bottom.
-// A plain `trim / max` would put unity at a quarter turn, which reads wrong on
-// a control whose whole meaning is "is it at unity?".
+// The trim knob's mapping is the kit-free MeterMath one (M3.4), so the knob's
+// arithmetic is host-tested with the rest of the meter maths.
 float MixerStripsView::TrimToKnob(float trim) {
-    if (!(trim >= 0.0f)) return -1.0f;
-    if (trim >= 1.0f) {
-        const float top = kTrackTrimMax > 1.0f ? kTrackTrimMax - 1.0f : 1.0f;
-        const float v = (trim - 1.0f) / top;
-        return v > 1.0f ? 1.0f : v;
-    }
-    return trim - 1.0f;              // silence (-1) .. unity (0)
+    return daw::TrimToKnob(trim, kTrackTrimMax);
 }
 
 float MixerStripsView::KnobToTrim(float knob) {
-    if (knob < -1.0f) knob = -1.0f;
-    if (knob >  1.0f) knob =  1.0f;
-    if (knob >= 0.0f) return 1.0f + knob * (kTrackTrimMax - 1.0f);
-    return 1.0f + knob;              // 0 .. 1
+    return daw::KnobToTrim(knob, kTrackTrimMax);
 }
 
 int MixerStripsView::FxRowsFor(const MixerStripInfo& s) {

@@ -95,6 +95,29 @@ inline float GainFromDb(float db) {
     return std::pow(10.0f, db / 20.0f);
 }
 
+// The mixer strip's input-trim knob (M3.4): unity sits at 12 o'clock, the
+// ceiling (kTrackTrimMax = +12 dB) at the top of the sweep and silence at the
+// bottom. A plain `trim / max` would put unity at a quarter turn, which reads
+// wrong on a control whose whole meaning is "is it at unity?".
+// (kTrackTrimMax comes from the model; this header stays model-free, so the
+// ceiling is a parameter.)
+inline float TrimToKnob(float trim, float maxTrim) {
+    if (!(trim >= 0.0f)) return -1.0f;
+    if (trim >= 1.0f) {
+        const float top = maxTrim > 1.0f ? maxTrim - 1.0f : 1.0f;
+        const float v = (trim - 1.0f) / top;
+        return v > 1.0f ? 1.0f : v;
+    }
+    return trim - 1.0f;              // silence (-1) .. unity (0)
+}
+
+inline float KnobToTrim(float knob, float maxTrim) {
+    if (knob < -1.0f) knob = -1.0f;
+    if (knob >  1.0f) knob =  1.0f;
+    if (knob >= 0.0f) return 1.0f + knob * (maxTrim - 1.0f);
+    return 1.0f + knob;              // 0 .. 1
+}
+
 // Parse what a user typed into a level field: "-6", "+3.5", "0", "-inf",
 // "-Inf", "-oo" (they mean silence), or a bare number with blanks around it.
 // False means "not a level" — the caller keeps the old value and says so. A

@@ -269,6 +269,26 @@ int main() {
         CHECK(std::fabs(GainFromDb(6.0f) - 1.99526f) < 1e-3f);
         CHECK(GainFromDb(kFaderMinDb) == 0.0f);
         CHECK(GainFromDb(kFaderMinDb - 20.0f) == 0.0f);
+
+        // The trim knob's mapping (M3.4): unity at 12 o'clock, the ceiling at
+        // the top of the sweep, silence at the bottom, and a round trip.
+        const float kMax = 4.0f;             // kTrackTrimMax
+        CHECK(TrimToKnob(1.0f, kMax) == 0.0f);      // unity = centre
+        CHECK(TrimToKnob(0.0f, kMax) == -1.0f);     // silence = floor
+        CHECK(TrimToKnob(kMax, kMax) == 1.0f);      // ceiling = top
+        CHECK(std::fabs(TrimToKnob(0.5f, kMax) + 0.5f) < 1e-6f);
+        CHECK(std::fabs(TrimToKnob(2.5f, kMax) - 0.5f) < 1e-6f);
+        // A value past the ceiling pins the knob rather than running off it.
+        CHECK(TrimToKnob(100.0f, kMax) == 1.0f);
+        CHECK(TrimToKnob(-3.0f, kMax) == -1.0f);
+        // Round trip over the whole sweep.
+        for (float k = -1.0f; k <= 1.0f; k += 0.125f) {
+            const float trim = KnobToTrim(k, kMax);
+            CHECK(std::fabs(TrimToKnob(trim, kMax) - k) < 1e-5f);
+        }
+        CHECK(KnobToTrim(-1.0f, kMax) == 0.0f);
+        CHECK(KnobToTrim(0.0f, kMax) == 1.0f);
+        CHECK(std::fabs(KnobToTrim(1.0f, kMax) - kMax) < 1e-6f);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
