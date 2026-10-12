@@ -21,6 +21,7 @@
 #include "../src/ui/RenameWindow.h"     // kMsgRenameClip (the Edit > Rename flow)
 #include "../src/ui/MixerWindow.h"      // MixerStripsView::Strips (the mid-drag check)
 #include "../src/ui/MarkersWindow.h"    // MarkersView::Markers (the M2.7 list)
+#include "../src/ui/PreferencesWindow.h"   // the Preferences window (M3.5)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
@@ -6110,6 +6111,150 @@ static void TestFxRetargetFlush(MainWindow* win, Project& project) {
 // What the mode switch has to do that a unit test cannot see: leave the
 // system's own colours alone, install the mode's control look, and repaint the
 // windows that cached a colour.
+// M3.5: the Preferences window. It opens from the File menu item, it is single
+// instance, it SHOWS the app's own values, and a change made in it reaches the
+// app, is pushed back to the window, and survives a reload of the settings
+// file. (The Audio menu's radio items and View's Dark Mode live here now; the
+// window is driven the way a user drives it, minus the menus that would block
+// in BPopUpMenu::Go.)
+static void TestPreferences(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("preferences window ...\n");
+
+    auto findPrefs = [&]() -> BWindow* {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Preferences") == 0)
+                return w;
+        }
+        return nullptr;
+    };
+    auto countPrefs = [&] {
+        int n = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Preferences") == 0)
+                n++;
+        }
+        return n;
+    };
+    // What the window is showing, read under its lock.
+    auto shownValues = [&]() {
+        PrefsView v;
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            v = static_cast<PreferencesWindow*>(w)->Values();
+            w->Unlock();
+        }
+        return v;
+    };
+    // Drive one control the way a click does: set it, then take the window's
+    // own change path (both under the lock -- a view method runs on its
+    // window's thread).
+    auto edit = [&](const std::function<void(PreferencesWindow*)>& fn) {
+        BWindow* w = findPrefs();
+        if (w == nullptr || w->LockWithTimeout(1000000) != B_OK) return false;
+        fn(static_cast<PreferencesWindow*>(w));
+        static_cast<PreferencesWindow*>(w)->NotifyChanged();
+        w->Unlock();
+        return true;
+    };
+
+    // What the app had before the window is opened, so the test can put it
+    // back and leave the rest of the run (and the settings file) as it found
+    // them.
+    const int beforeBuffer = (int)win->BufferFramesForTest();
+    const int beforeCountIn = (int)win->CountInBarsForTest();
+    const ThemeMode beforeMode = ActiveThemeMode();
+
+    win->PostMessage(MSG_PREFERENCES);
+    CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
+    Shot("preferences");
+
+    // It shows the app's values, not its own defaults.
+    {
+        const PrefsView v = shownValues();
+        CHECK(v.bufferFrames == beforeBuffer);
+        CHECK(v.countInBars == beforeCountIn);
+        CHECK(v.darkMode == (beforeMode == ThemeMode::Dark));
+    }
+
+    // One window: asking again activates this one (the mixer's rule).
+    win->PostMessage(MSG_PREFERENCES);
+    snooze(400000);
+    CHECK(countPrefs() == 1);
+
+    // Count-in: pick "4 bars" in the window's menu and take its change path.
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->CountInField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 3);      // kCountInChoices[3] = 4
+    }));
+    CHECK(WaitFor([&] { return win->CountInBarsForTest() == 4; }));
+
+    // Buffer size: the same, and the app took it (a Play would use it).
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->BufferField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 3);      // kBufferFrameChoices[3] = 1024
+    }));
+    CHECK(WaitFor([&] { return win->BufferFramesForTest() == 1024; }));
+
+    // The UI scale: a preference the app applies process-wide (Theme.h).
+    const float beforeScale = ThemeScale();
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->ScaleField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 2);      // kUiScaleChoices[2] = 1.25
+    }));
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
+
+    // Dark mode: the control that moved out of the View menu still flips the
+    // whole look (TestThemeMode covers the mode switch itself).
+    CHECK(edit([&](PreferencesWindow* w) {
+        w->DarkCheck()->SetValue(ActiveThemeMode() == ThemeMode::Dark
+                                 ? B_CONTROL_OFF : B_CONTROL_ON);
+    }));
+    CHECK(WaitFor([&] { return ActiveThemeMode() != beforeMode; }));
+
+    // Everything the window did is in the settings file: reload it the way a
+    // restart would and read the values back out of the window.
+    win->ReloadSettings();
+    win->PostMessage(MSG_PREFERENCES);
+    snooze(400000);
+    {
+        const PrefsView v = shownValues();
+        CHECK(v.countInBars == 4);        // the choices the window made came
+        CHECK(v.bufferFrames == 1024);    // back out of the settings file
+    }
+
+    // Put the run's own state back: the settings file is one of the files the
+    // next test run inherits.
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->BufferField()->Menu();
+        m->ItemAt(0)->SetMarked(false);
+        m->ItemAt(2)->SetMarked(true);            // 512
+    }));
+    CHECK(edit([](PreferencesWindow* w) {
+        w->CountInField()->Menu()->ItemAt(0)->SetMarked(true);   // Off
+    }));
+    CHECK(edit([](PreferencesWindow* w) {
+        w->ScaleField()->Menu()->ItemAt(0)->SetMarked(true);     // the font
+    }));
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - beforeScale) < 1e-3f; }));
+    if (ActiveThemeMode() != beforeMode) {
+        win->PostMessage(MSG_THEME_MODE);
+        CHECK(WaitFor([&] { return ActiveThemeMode() == beforeMode; }));
+    }
+    CHECK(WaitFor([&] { return win->BufferFramesForTest() == beforeBuffer; }));
+
+    HideOtherWindows(win);   // the window is ours; put it away
+    CHECK(WaitQuiet());
+}
+
 static void TestThemeMode(MainWindow* win) {
     const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
 
@@ -6306,6 +6451,7 @@ static int32 TestThread(void*) {
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
     TestShortcutsWindow(win);
+    TestPreferences(win, project);   // M3.5: opens and puts itself away
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
     TestDockPages(win, project, &stack);

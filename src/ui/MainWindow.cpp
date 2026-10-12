@@ -340,6 +340,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new ThemedMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
     fileMenu->AddItem(new ThemedMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
+    // Preferences… (M3.5): the window that now carries what used to be the
+    // Audio menu's radio submenus and View's Dark Mode toggle.
+    fileMenu->AddItem(new ThemedMenuItem("Preferences" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_PREFERENCES)));
+    fileMenu->AddSeparatorItem();
     // Close is the window's own quit request, so the unsaved-changes prompt
     // applies exactly as it does to the title-bar button and Cmd-Q.
     fileMenu->AddItem(new ThemedMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
@@ -405,8 +410,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // like the mixer.
     viewMenu->AddItem(new ThemedMenuItem("Markers", new BMessage(MSG_MARKERS),
                                          'M'));
-    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
-    viewMenu->AddItem(fMetItem);
     viewMenu->AddItem(new ThemedMenuItem("Master Effects" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_MASTER_FX)));
     viewMenu->AddSeparatorItem();
@@ -421,13 +424,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(fInspectorItem);
     fDockItem = new ThemedMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
     viewMenu->AddItem(fDockItem);
-    viewMenu->AddSeparatorItem();
-    // The look (T1): the user's own colours and the stock Haiku controls, or
-    // the DAW's dark palette in the DAW's own windows. It moves into the
-    // Preferences window when M3.5 builds one.
-    fThemeItem = new ThemedMenuItem("Dark Mode", new BMessage(MSG_THEME_MODE));
-    fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
-    viewMenu->AddItem(fThemeItem);
+    // (Dark Mode moved into the Preferences window (M3.5), which is where the
+    // theme package promised it would land; MSG_THEME_MODE is unchanged and
+    // the window posts it.)
     viewMenu->AddSeparatorItem();
     viewMenu->AddItem(new ThemedMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
     fFollowItem = new ThemedMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
@@ -443,40 +442,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                     new BMessage(MSG_BROWSER)));
     menuBar->AddItem(new ThemedMenuItem(viewMenu));
 
-    // Audio > Buffer Size (latency vs xrun; applies on the next Play).
+    // Audio: the quick toggles only (M3.5). Buffer size, count-in and input
+    // monitoring are preferences now and live in the Preferences window; what
+    // is left here is what a user flips while working, and the metronome is
+    // the one that belongs to audio.
     BMenu* audioMenu = new BMenu("Audio");
-    fBufMenu = new BMenu("Buffer Size");
-    fBufMenu->SetRadioMode(true);
-    const int bufOpts[] = { 128, 256, 512, 1024, 2048 };
-    for (int n : bufOpts) {
-        char lbl[32];
-        std::snprintf(lbl, sizeof(lbl), "%d frames (~%.1f ms)", n,
-                      1000.0 * n / fProject->sampleRate);
-        BMessage* m = new BMessage(MSG_BUFFER);
-        m->AddInt32("frames", n);
-        BMenuItem* it = new ThemedMenuItem(lbl, m);
-        if ((size_t)n == fTransportCtl.fBufferFrames) it->SetMarked(true);
-        fBufMenu->AddItem(it);
-    }
-    audioMenu->AddItem(new ThemedMenuItem(fBufMenu));
-    audioMenu->AddSeparatorItem();
-    // Count-in: metronome bars before capture begins.
-    fCountInMenu = new BMenu("Count-in");
-    fCountInMenu->SetRadioMode(true);
-    const int ciOpts[] = { 0, 1, 2 };
-    for (int n : ciOpts) {
-        char lbl[24];
-        if (n == 0) std::snprintf(lbl, sizeof(lbl), "Off");
-        else        std::snprintf(lbl, sizeof(lbl), "%d bar%s", n, n > 1 ? "s" : "");
-        BMessage* m = new BMessage(MSG_COUNTIN);
-        m->AddInt32("bars", n);
-        BMenuItem* it = new ThemedMenuItem(lbl, m);
-        if (n == fRecCtl.fCountInBars) it->SetMarked(true);
-        fCountInMenu->AddItem(it);
-    }
-    audioMenu->AddItem(new ThemedMenuItem(fCountInMenu));
-    fMonInItem = new ThemedMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
-    audioMenu->AddItem(fMonInItem);
+    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
+    fMetItem->SetMarked(fTransportCtl.fMetronome);
+    audioMenu->AddItem(fMetItem);
     menuBar->AddItem(new ThemedMenuItem(audioMenu));
 
     // --- Transport bar (below the menu) ---
@@ -656,9 +629,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // time readout and the meter need the room, and a window that clipped them
     // would be showing a fault rather than a small window.
     SetSizeLimits(620.0f, 32767.0f, 300.0f, 32767.0f);
-    // Autosave for crash recovery; check for a leftover once the looper runs.
-    fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
-                                   30LL * 1000 * 1000);   // every 30 s
+    // Autosave for crash recovery at the preference's interval (M3.5; 30 s
+    // unless the user chose otherwise, and off when they chose 0). LoadSettings
+    // above has already put the interval in place; check for a leftover once
+    // the looper runs.
+    StartAutosave(fPrefsAutosaveSeconds);
     fTitlePoll = new BMessageRunner(BMessenger(this), new BMessage(MSG_TITLE),
                                     500LL * 1000);        // 2 Hz dirty marker
     UpdateTitle();
@@ -810,25 +785,24 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMonoItem) fMonoItem->SetMarked(fTransportCtl.fMonMono);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMonitorMono(fTransportCtl.fMonMono);
             break;
+        // Count-in and input monitoring are preferences now (M3.5) and the
+        // Preferences window is where they are chosen; these ids are kept and
+        // land on the same funnel, so anything that still posts them (a test,
+        // a future key) behaves exactly like the window.
         case MSG_COUNTIN: {
             int32 bars = 0;
             msg->FindInt32("bars", &bars);
-            fRecCtl.fCountInBars = bars;
-            if (fCountInMenu)
-                for (int32 i = 0; i < fCountInMenu->CountItems(); i++)
-                    if (BMenuItem* it = fCountInMenu->ItemAt(i))
-                        it->SetMarked(it->Message()
-                            && it->Message()->FindInt32("bars") == bars);
+            PrefsView v = CurrentPrefs();
+            v.countInBars = bars;
+            ApplyPrefs(v);
             break;
         }
-        case MSG_MONITOR_IN:
-            fTransportCtl.fMonitorInput = !fTransportCtl.fMonitorInput;
-            if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
-            if (fTimeline)  fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);  // lane "I" lamp
-            // Live toggle while a take is running.
-            if (fRecCtl.fRecorder) fRecCtl.fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
-            if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
+        case MSG_MONITOR_IN: {
+            PrefsView v = CurrentPrefs();
+            v.monitorInput = !v.monitorInput;
+            ApplyPrefs(v);
             break;
+        }
         case MSG_METRONOME:
         case kMsgClickToggle:   // the C key (M3.2), same as the menu item
             fTransportCtl.fMetronome = !fTransportCtl.fMetronome;
@@ -890,10 +864,38 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
 
         case MSG_THEME_MODE:
-            // View > Dark Mode: a preference, applied live and saved.
+            // The Preferences window's Dark Mode check box (M3.5; it was the
+            // View menu's item before that): a preference, applied live and
+            // saved. Toggling rather than setting is kept because the
+            // functional test and the window's own state both go through it.
             SetThemeMode(ActiveThemeMode() == ThemeMode::Dark ? ThemeMode::System
                                                               : ThemeMode::Dark);
             break;
+
+        case MSG_PREFERENCES:
+            ShowPreferencesWindow();
+            break;
+        case kMsgPrefsChanged: {
+            // One message carries the whole set; missing fields keep what the
+            // window last showed (a partial push cannot blank a preference).
+            PrefsView v = CurrentPrefs();
+            int32 i = 0;
+            float f = 0.0f;
+            bool b = false;
+            const char* s = nullptr;
+            if (msg->FindInt32("buffer", &i)  == B_OK) v.bufferFrames = i;
+            if (msg->FindInt32("defrate", &i) == B_OK) v.defaultSampleRate = i;
+            if (msg->FindInt32("countin", &i) == B_OK) v.countInBars = i;
+            if (msg->FindInt32("metsnd", &i)  == B_OK) v.metronomeSound = i;
+            if (msg->FindFloat("metlvl", &f)  == B_OK) v.metronomeLevel = f;
+            if (msg->FindBool("monin", &b)    == B_OK) v.monitorInput = b;
+            if (msg->FindBool("dark", &b)     == B_OK) v.darkMode = b;
+            if (msg->FindFloat("uiscale", &f) == B_OK) v.uiScale = f;
+            if (msg->FindString("projdir", &s) == B_OK && s) v.projectDir = s;
+            if (msg->FindInt32("autosv", &i)  == B_OK) v.autosaveSeconds = i;
+            ApplyPrefs(v);
+            break;
+        }
 
         case MSG_TOGGLE_DOCK:
             SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
@@ -1843,7 +1845,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_BUFFER: {
             int32 frames = 512;
             msg->FindInt32("frames", &frames);
-            fTransportCtl.fBufferFrames = (size_t)frames;   // applied at the next Play
+            // Buffer size is a preference (M3.5) and lives in the window; the
+            // id still works and applies at the next Play, as it always did.
+            PrefsView v = CurrentPrefs();
+            v.bufferFrames = frames;
+            ApplyPrefs(v);
             break;
         }
         case MSG_TEMPO: {
@@ -1879,6 +1885,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BMessenger to(this);
                 fSavePanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                             new BMessage(MSG_SAVE_REF));
+                // The default project folder (M3.5): where a first save
+                // starts. After the first save the panel remembers the folder
+                // the user actually used, which is the better answer.
+                if (!fPrefsProjectDir.empty())
+                    fSavePanel->SetPanelDirectory(fPrefsProjectDir.c_str());
             }
             ShowPanel(fSavePanel, "Save Project", ProjectDocument::DisplayName(fDoc.Path()) + ".dawproj");
             break;
@@ -3391,15 +3402,6 @@ void MainWindow::OpenExportWindow(bool stems) {
 // means the last session didn't exit cleanly.
 
 
-// Mark the radio item in `menu` whose message's int32 `field` equals `value`.
-static void MarkRadio(BMenu* menu, const char* field, int32 value) {
-    if (!menu) return;
-    for (int32 i = 0; i < menu->CountItems(); i++)
-        if (BMenuItem* it = menu->ItemAt(i))
-            it->SetMarked(it->Message()
-                          && it->Message()->FindInt32(field) == value);
-}
-
 void MainWindow::LoadSettings() {
     BPath p;
     if (!ProjectDocument::SettingsPath(p)) return;
@@ -3478,11 +3480,18 @@ void MainWindow::LoadSettings() {
     fExportChoices.limiter    = s.exportLimiter;
     fExportChoices.range      = s.exportRange;
     fExportChoices.stems      = s.exportStems != 0;
-    MarkRadio(fBufMenu, "frames", (int32)fTransportCtl.fBufferFrames);
-    MarkRadio(fCountInMenu, "bars", fRecCtl.fCountInBars);
-    if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
-    if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
+    // The Preferences window's own keys (M3.5). The UI SCALE is deliberately
+    // not applied here: main.cpp applies it before the first window exists and
+    // ApplyPrefs applies it when it changes, so a reload never fights the
+    // scale a test (or the user) has just chosen.
+    fTransportCtl.fMetronomeSound = s.metronomeSound;
+    fTransportCtl.fMetronomeGain  = s.metronomeLevel;
+    fPrefsSampleRate      = s.defaultSampleRate;
+    fPrefsUiScale         = s.uiScale;
+    fPrefsProjectDir      = s.projectDir;
+    fPrefsAutosaveSeconds = s.autosaveSeconds;
+    StartAutosave(fPrefsAutosaveSeconds);   // 0 = off
     // The marker lane (M2.7): a view preference, restored with the panes.
     if (fTimeline) fTimeline->SetMarkerLane(s.markerLaneVisible);
     if (fMarkerLaneItem) fMarkerLaneItem->SetMarked(s.markerLaneVisible);
@@ -3521,6 +3530,13 @@ void MainWindow::SaveSettings() {
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
+    // The Preferences window's keys (M3.5).
+    s.defaultSampleRate = fPrefsSampleRate;
+    s.metronomeSound    = fTransportCtl.fMetronomeSound;
+    s.metronomeLevel    = fTransportCtl.fMetronomeGain;
+    s.uiScale           = fPrefsUiScale;
+    s.projectDir        = fPrefsProjectDir;
+    s.autosaveSeconds   = fPrefsAutosaveSeconds;
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
     // The panes as the user left them (M1.4).
@@ -3606,7 +3622,6 @@ void MainWindow::SetThemeMode(ThemeMode mode) {
         ReadSystemBaseColors();
     InstallControlLookForMode(mode);
     ApplyThemeToAllWindows();
-    if (fThemeItem != nullptr) fThemeItem->SetMarked(mode == ThemeMode::Dark);
     SaveSettings();   // it is a preference: it survives the quit
 }
 
@@ -3918,6 +3933,133 @@ void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
     // dB by definition.
     std::snprintf(buf, sizeof(buf), "%s  %s  %s", m, s, tp);
     fLoudView->SetText(buf);
+}
+
+// --- the Preferences window (M3.5) -----------------------------------------
+//
+// One window, like the mixer and the markers window: asking again brings the
+// open one forward with the current values. The window owns none of the state
+// -- these five methods are the only place a preference is read or written.
+
+// What the window shows, from wherever the field actually lives: the
+// transport's own prefs in the controllers, the rest in the members beside
+// fPrefsMsgr.
+PrefsView MainWindow::CurrentPrefs() const {
+    PrefsView v;
+    v.bufferFrames      = (int)fTransportCtl.fBufferFrames;
+    v.countInBars       = fRecCtl.fCountInBars;
+    v.metronomeSound    = fTransportCtl.fMetronomeSound;
+    v.metronomeLevel    = fTransportCtl.fMetronomeGain;
+    v.monitorInput      = fTransportCtl.fMonitorInput;
+    v.darkMode          = ActiveThemeMode() == ThemeMode::Dark;
+    v.defaultSampleRate = fPrefsSampleRate;
+    v.uiScale           = fPrefsUiScale;
+    v.projectDir        = fPrefsProjectDir;
+    v.autosaveSeconds   = fPrefsAutosaveSeconds;
+    return v;
+}
+
+void MainWindow::PushPrefsToWindow() {
+    if (!fPrefsMsgr.IsValid()) return;
+    const PrefsView v = CurrentPrefs();
+    BMessage m(kMsgPrefsValues);
+    m.AddInt32("buffer", v.bufferFrames);
+    m.AddInt32("defrate", v.defaultSampleRate);
+    m.AddInt32("countin", v.countInBars);
+    m.AddInt32("metsnd", v.metronomeSound);
+    m.AddFloat("metlvl", v.metronomeLevel);
+    m.AddBool("monin", v.monitorInput);
+    m.AddBool("dark", v.darkMode);
+    m.AddFloat("uiscale", v.uiScale);
+    m.AddString("projdir", v.projectDir.c_str());
+    m.AddInt32("autosv", v.autosaveSeconds);
+    fPrefsMsgr.SendMessage(&m);
+}
+
+void MainWindow::ShowPreferencesWindow() {
+    if (fPrefsMsgr.IsValid()) {
+        PushPrefsToWindow();
+        BMessage act(kMsgPrefsActivate);
+        fPrefsMsgr.SendMessage(&act);
+        return;
+    }
+    PreferencesWindow* win = new PreferencesWindow(CurrentPrefs(),
+                                                   BMessenger(this));
+    fPrefsMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The one funnel every preference goes through: the window's message and the
+// Audio menu's remaining ids both land here, so the two cannot disagree about
+// what changing a preference does.
+void MainWindow::ApplyPrefs(const PrefsView& v) {
+    // Buffer size: applied at the next Play (the engine is rebuilt then, which
+    // is also when a changed click sound or level reaches it).
+    fTransportCtl.fBufferFrames = (size_t)(v.bufferFrames > 0 ? v.bufferFrames
+                                                              : 512);
+    fRecCtl.fCountInBars = v.countInBars;
+
+    // Input monitoring: live, exactly as the Audio menu's toggle did it --
+    // the timeline's "I" lamp, a running take's recorder, and the engine.
+    if (fTransportCtl.fMonitorInput != v.monitorInput) {
+        fTransportCtl.fMonitorInput = v.monitorInput;
+        if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
+        if (fRecCtl.fRecorder)
+            fRecCtl.fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
+        if (fTransportCtl.fEngine)
+            fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
+    }
+
+    // The metronome's sound and level: live on the running engine (a stopped
+    // one gets them from EnsureEngine's next build).
+    fTransportCtl.fMetronomeSound = v.metronomeSound;
+    fTransportCtl.fMetronomeGain  = v.metronomeLevel;
+    if (fTransportCtl.fEngine) {
+        fTransportCtl.fEngine->SetMetronomeSound(v.metronomeSound);
+        fTransportCtl.fEngine->SetMetronomeGain(v.metronomeLevel);
+    }
+
+    fPrefsSampleRate = v.defaultSampleRate;
+
+    // The look: SetThemeMode applies it everywhere and saves it itself.
+    const bool darkNow = ActiveThemeMode() == ThemeMode::Dark;
+    if (darkNow != v.darkMode)
+        SetThemeMode(v.darkMode ? ThemeMode::Dark : ThemeMode::System);
+
+    // The UI scale (0 = the user's font size). Every window re-takes its
+    // geometry colours and redraws at the new scale; a window's frame and its
+    // split positions stay where the user put them (a restart lays everything
+    // out at the new scale).
+    if (fPrefsUiScale != v.uiScale) {
+        fPrefsUiScale = v.uiScale;
+        SetThemeScaleOverride(v.uiScale);
+        ApplyThemeToAllWindows();
+        if (fTimeline) fTimeline->Invalidate();
+    }
+
+    fPrefsProjectDir = v.projectDir;
+
+    if (fPrefsAutosaveSeconds != v.autosaveSeconds) {
+        fPrefsAutosaveSeconds = v.autosaveSeconds;
+        StartAutosave(fPrefsAutosaveSeconds);
+    }
+
+    SaveSettings();          // a preference survives the quit
+    UpdateTitle();           // nothing here dirties the project, but the title
+                             // is cheap and keeps the poll honest
+    // Tell the window what the app actually took (it re-lays itself out at the
+    // new scale on this push), so the controls never show a value the app did
+    // not apply.
+    PushPrefsToWindow();
+}
+
+// The crash-recovery runner at the chosen interval; 0 = no runner at all.
+void MainWindow::StartAutosave(int seconds) {
+    delete fAutosave;
+    fAutosave = nullptr;
+    if (seconds <= 0) return;
+    fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
+                                   (bigtime_t)seconds * 1000000LL);
 }
 
 bool MainWindow::QuitRequested() {

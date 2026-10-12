@@ -696,6 +696,7 @@ if(HAIKU)
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/MarkersWindow.cpp
+        src/ui/PreferencesWindow.cpp   # the Preferences window (M3.5)
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp

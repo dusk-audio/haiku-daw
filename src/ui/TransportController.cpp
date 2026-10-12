@@ -100,6 +100,10 @@ void TransportController::StartPlayback() {
     e->RequestLoad(*fWin->fProject, start, minEnd, Engine::LoadMode::NewPosition);
     e->Start();
     e->SetMetronome(fMetronome);
+    // The click's sound and level are preferences (M3.5) and a fresh engine
+    // starts from the engine's own defaults, so they go on here too.
+    e->SetMetronomeSound(fMetronomeSound);
+    e->SetMetronomeGain(fMetronomeGain);
     e->SetMonitorDim(fMonDim);
     e->SetMonitorMono(fMonMono);
     // Re-apply the effect-meter focus onto the engine (else an open FX
@@ -193,6 +197,8 @@ bool TransportController::StartRecordEngine(Frame engineStart) {
     e->Start();
     // Count-in needs the click; force it on during record if a count-in is set.
     e->SetMetronome(fMetronome || fWin->fRecCtl.fCountInBars > 0);
+    e->SetMetronomeSound(fMetronomeSound);
+    e->SetMetronomeGain(fMetronomeGain);
     e->SetMonitorDim(fMonDim);
     e->SetMonitorMono(fMonMono);
     // Re-attach input monitoring across an engine restart (loop-record seam).
