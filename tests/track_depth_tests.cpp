@@ -199,6 +199,24 @@ int main() {
         std::remove(path.c_str());
     }
 
+    // --- M5: the channel width is an undoable document edit ----------------
+    {
+        Project p;
+        CommandStack st;
+        st.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Gtr"), p);
+        const TrackId id = p.Tracks().front().id;
+        CHECK(p.FindTrack(id)->channels == TrackChannels::Stereo);   // the default
+        CHECK(st.Execute(std::make_unique<SetTrackChannelsCommand>(
+                            id, TrackChannels::Mono), p));
+        CHECK(p.FindTrack(id)->channels == TrackChannels::Mono);
+        CHECK(st.Undo(p));
+        CHECK(p.FindTrack(id)->channels == TrackChannels::Stereo);
+        CHECK(st.Redo(p));
+        CHECK(p.FindTrack(id)->channels == TrackChannels::Mono);
+        // A track that is gone refuses rather than crashing.
+        CHECK(!SetTrackChannelsCommand(9999, TrackChannels::Mono).Do(p));
+    }
+
     std::printf("track_depth_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

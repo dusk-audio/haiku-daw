@@ -203,6 +203,12 @@ add_executable(takenames_tests tests/takenames_tests.cpp)
 target_link_libraries(takenames_tests PRIVATE daw_model)
 add_test(NAME takenames_tests COMMAND takenames_tests)
 
+# Multichannel capture addressing (M5): which device channel a take reads, the
+# take sample format, and the de-interleave out of the shared capture block.
+add_executable(channelsplit_tests tests/channelsplit_tests.cpp)
+target_link_libraries(channelsplit_tests PRIVATE daw_model)
+add_test(NAME channelsplit_tests COMMAND channelsplit_tests)
+
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)
