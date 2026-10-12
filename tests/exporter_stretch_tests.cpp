@@ -135,10 +135,21 @@ int main() {
         std::printf("    levels: %.3f %.3f\n", head, tail);
         CHECK(std::fabs(head - 0.6f) < 0.05f);
         CHECK(std::fabs(tail - 0.2f) < 0.05f);
-        // Nothing that lives past the span (the 0.9 section) sounded.
+        // Nothing that lives past the span (the 0.9 section) sounded — not in
+        // the middle, and not in the last frames either, where the frames'
+        // windows still reach past the span and the stretch stage must read
+        // silence there rather than continue into material the clip does not
+        // reference. (That is the assertion that catches an over-long decode:
+        // a leak of the 0.9 section shows up as level in this tail.)
         float pk = 0.0f;
         for (int64_t i = 0; i < frames; i++) pk = std::max(pk, std::fabs(v[(size_t)i * 2]));
         CHECK(pk < 0.7f);
+        // (The window tapers over the last ~50 ms, so the tail is quiet but not
+        // necessarily zero: 0.09 measured here, against the ~0.45 a leaked 0.9
+        // section would show.)
+        const float tailLevel = PeakL(v, frames - 1000, frames);
+        std::printf("    tail level: %.4f\n", tailLevel);
+        CHECK(tailLevel < 0.3f);
 
         // The stretch is a TIME stretch, not a rate change: the tone keeps its
         // frequency (counted well inside the 0.6 section).

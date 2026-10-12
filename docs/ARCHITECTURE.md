@@ -190,6 +190,22 @@ Audio tracks stream from disk, not RAM (a DAW can't hold hours of audio in
 - The audio thread *never* does file I/O or allocation. It only reads from
   the ring buffer. If the buffer underruns → emit silence + flag xrun,
   never block.
+- **Time-stretch sits between the decoder and the ring** (M7.2): a clip with a
+  `stretchRatio` other than 1.0 runs its decoded, rate-matched audio through a
+  WSOLA `Stretcher` on the *disk* thread, so the ring still holds one output
+  frame per timeline frame and the RT callback is untouched — the search's
+  lookahead and its arithmetic are fine off-RT, an allocation in the callback is
+  not. The offline `Exporter` runs the identical class over the identical source
+  span, which is what keeps a bounce and playback sample-identical. The
+  determinism invariant is the grid: synthesis frames are anchored at the clip's
+  own source origin, so a seek (or a loop pass, or a rebuild) can resume at any
+  source position and land on the exact frame phase continuous playback had
+  there — `Reset(sourcePos)` puts the stream at output frame `round(sourcePos *
+  ratio)`, and every frame reads within its ±10 ms similarity window of that
+  position. A clip's model window is unchanged by stretching: `lengthFrames`
+  stays the timeline length and the source consumed is `lengthFrames / ratio`,
+  which is also the span the exporter and the UI's stretch drag derive
+  everything from.
 
 ---
 
