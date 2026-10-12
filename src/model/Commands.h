@@ -6,6 +6,9 @@
 #include "Command.h"
 
 #include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace daw {
 
@@ -1239,6 +1242,77 @@ private:
     std::string                           fName;
     std::vector<std::unique_ptr<Command>> fCmds;
     std::vector<bool>                     fDone;   // which sub-Do()s succeeded
+};
+
+// --- the Project Settings window's edits (M3.6) -----------------------------
+
+// The meter: `timeSig` and the tempo map's frame-0 meter together -- they are
+// the same fact stored twice (Project::Clear resets both), so a change that
+// wrote only one of them would leave the ruler and the transport disagreeing.
+// Undo restores both.
+class SetMeterCommand : public Command {
+public:
+    SetMeterCommand(int numerator, int denominator)
+        : fNum(numerator), fDenom(denominator) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Meter"; }
+
+private:
+    int  fNum, fDenom;
+    int  fOldNum = 4, fOldDenom = 4;         // the project's time signature
+    int  fOldMapNum = 4, fOldMapDenom = 4;   // the map's frame-0 meter
+    bool fCaptured = false;
+};
+
+// The project's own notes (free text, saved with the project). An edit like any
+// other: it dirties the project and undoes cleanly.
+class SetProjectNotesCommand : public Command {
+public:
+    explicit SetProjectNotesCommand(std::string notes)
+        : fNotes(std::move(notes)) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Project Notes"; }
+
+private:
+    std::string fNotes;
+    std::string fOld;
+    bool        fCaptured = false;
+};
+
+// The project's sample rate. Frames are samples at the project's own rate, so
+// this rescales the whole timeline by the ratio (src/model/ProjectTimebase.h)
+// and, when asked, rewrites the media at the new rate first
+// (src/model/ProjectResample.h) and repoints every clip at it.
+//
+// Undo restores the project exactly (a copy taken on the first Do: the model is
+// plain data and this runs on the window thread). The FILES a resample wrote
+// stay on disk -- they are new files beside the originals, and a redo overwrites
+// them rather than making more.
+class SetSampleRateCommand : public Command {
+public:
+    SetSampleRateCommand(double newRate, bool resampleMedia)
+        : fNewRate(newRate), fResample(resampleMedia) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Sample Rate"; }
+
+    // The rewrite the last Do() performed, old path -> new path (empty when
+    // the media was not resampled, or when a file could not be converted).
+    const std::vector<std::pair<std::string, std::string>>& Resampled() const {
+        return fResampled;
+    }
+
+private:
+    double  fNewRate;
+    bool    fResample;
+    Project fBefore;              // the exact state to go back to
+    bool    fCaptured = false;
+    std::vector<std::pair<std::string, std::string>> fResampled;
 };
 
 } // namespace daw

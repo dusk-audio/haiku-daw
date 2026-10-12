@@ -826,9 +826,12 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
         for (size_t i = 0; i < nfloats; i++)
             out[i] *= mg;
 
-    // Metronome click on top of the mix (not affected by master gain).
+    // Metronome click on top of the mix (not affected by master gain), at the
+    // level and with the sound the Preferences window set (M3.5).
     if (e.fMetronomeOn.load(std::memory_order_relaxed))
-        fMetronome.Render(out, frames, blockStart, 0.3f);
+        fMetronome.Render(out, frames, blockStart,
+                          e.fMetronomeGain.load(std::memory_order_relaxed),
+                          e.fMetronomeSound.load(std::memory_order_relaxed));
 
     // Input monitoring: mix the live input into the output. Equal rate is a
     // direct copy; otherwise a linear resampler (carried across blocks) brings

@@ -57,6 +57,12 @@ public:
     bool        fMonitoring = false;   // idle live-monitor engine up
     size_t      fBufferFrames = 512;   // output buffer frames/channel
     bool        fMetronome = false;
+    // What the click sounds like (M3.5): the level it always had, and the
+    // sound the Preferences window offers. Applied wherever the engine is
+    // built or re-programmed, so a preference set while stopped is heard on
+    // the next Play (the engine is rebuilt then).
+    float       fMetronomeGain  = 0.30f;
+    int         fMetronomeSound = 0;
     bool        fMonDim = false;
     bool        fMonMono = false;
     bool        fMonitorInput = false; // hear live input while armed

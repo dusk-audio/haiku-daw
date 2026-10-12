@@ -19,6 +19,9 @@
 #include "../midi/MidiRecorder.h"
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
+#include "PreferencesWindow.h"        // PrefsView (M3.5)
+#include "ProjectSettingsWindow.h"    // ProjectSettingsView (M3.6)
+#include "NewProjectWindow.h"         // TemplateInfo rows (M3.7)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
 #include "Theme.h"                    // ThemeAware + the tokens (T1)
 #include "RecordController.h"         // the record state + the recorder
@@ -107,6 +110,14 @@ constexpr uint32 MSG_DOCK_PAGE        = 'dkpg';
 // MainWindow -> itself, a moment after a file panel is shown: the panel builds
 // its views after Show() returns, so the themed colours go on a second time.
 constexpr uint32 MSG_THEME_STOCK      = 'thst';
+// --- M3.5, added here so this block stays the end of the file --------------
+// File > Preferences…: the Preferences window, single-instance. What the
+// window itself posts back (kMsgPrefsChanged and friends) is in
+// PreferencesWindow.h — this is only the id that opens it, and what the
+// functional tests post.
+constexpr uint32 MSG_PREFERENCES      = 'prfs';
+// File > Project Settings… (M3.6): sample rate, tempo, meter and notes.
+constexpr uint32 MSG_PROJECT_SETTINGS = 'prjs';
 
 class MainWindow : public BWindow, public ThemeAware {
 public:
@@ -214,6 +225,10 @@ public:
     }
     bool IsRecording() const { return fRecCtl.fRecMode; }
     bool MetronomeOn() const { return fTransportCtl.fMetronome; }
+    // The Preferences window's effect on the transport, for the functional
+    // test (both are private state the window's message changes; M3.5).
+    int BufferFramesForTest() const { return (int)fTransportCtl.fBufferFrames; }
+    int CountInBarsForTest()  const { return fRecCtl.fCountInBars; }
     // For the functional tests: re-run the settings load, which a restart would
     // do. The suite keeps ONE window for the whole run (closing it quits the
     // app), so the restore path is otherwise unreachable from a test.
@@ -243,8 +258,12 @@ private:
     void SaveFxPreset(TrackId tid, int fx, const char* name);
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path, bool asRecovery = false);
-    // File > New: ask, then a fresh empty project at the session's rate.
-    void NewProject();
+    // File > New (M3.7): the New Project dialog (Empty or a template), then
+    // the unsaved-changes prompt, then the new session. `templatePath` empty
+    // means the built-in Empty.
+    void ShowNewProjectWindow();
+    void NewProjectFrom(const std::string& templateId,
+                        const std::string& templatePath);
     void RememberProject(const std::string& path);  // recent list + menu
     // After a load: one dialog for media that is gone, then either silence
     // (Skip) or a walk to find each file (Locate…), applied as one command.
@@ -305,7 +324,6 @@ private:
     BMenuItem*      fSelectAllItem = nullptr;
     BMenuItem*      fDupItem       = nullptr;
     BMenuItem*      fSilenceItem   = nullptr;   // Edit > Insert Silence (range)
-    BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
     BMenuItem*      fMarkerLaneItem = nullptr;  // View > Marker Lane (M2.7)
     BMenuItem*      fDupTrackItem  = nullptr;   // Track > Duplicate Track (M2.6)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
@@ -438,12 +456,11 @@ private:
     BFilePanel*               fImportPanel = nullptr;
     BFilePanel*               fMidiImportPanel = nullptr;
     BFilePanel*               fMidiExportPanel = nullptr;
-    BMenuItem*                fMetItem = nullptr;   // metronome toggle
+    BMenuItem*                fMetItem = nullptr;   // Audio > Metronome toggle
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
-    BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
-    BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
-    BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
+    // (Buffer size, count-in and input monitoring left the Audio menu for the
+    // Preferences window in M3.5; the menu keeps the quick toggles.)
     BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
     std::string               fLastDir;      // last Open/Save/Import directory
     ProjectDocument           fDoc;          // the file, recovery copy, recent list
@@ -459,6 +476,37 @@ private:
     ExportChoices             fExportChoices;    // the dialog's last settings
 
     void OpenExportWindow(bool stems);            // the options dialog
+
+    // --- the Preferences window (M3.5), grouped at the end ----------------
+    // Show and activate the one that exists, or make it — the same
+    // single-instance rule the mixer and the markers window follow.
+    void ShowPreferencesWindow();
+    void PushPrefsToWindow();      // the current state -> the open window
+    // The state the window shows, taken from where each field actually lives
+    // (the controllers for the transport's own, the members below for the rest).
+    PrefsView CurrentPrefs() const;
+    // One funnel for every way a preference arrives (the window's message and
+    // the Audio menu's ids): applies, tells the engine, and persists.
+    void ApplyPrefs(const PrefsView& values);
+    // The crash-recovery runner at the chosen interval; 0 = no runner at all.
+    void StartAutosave(int seconds);
+    // --- the Project Settings window (M3.6), the same shape ----------------
+    void ShowProjectSettingsWindow();
+    void PushProjectSettingsToWindow();
+    ProjectSettingsView CurrentProjectSettings() const;
+    // The differences between `values` and the project become ONE undoable
+    // command-stack edit ("Project Settings"), applied here.
+    void ApplyProjectSettings(const ProjectSettingsView& values);
+    BMessenger fProjSettingsMsgr;       // the open Project Settings window
+    BMessenger fPrefsMsgr;              // the open Preferences window
+    BMessenger fNewProjectMsgr;         // the open New Project dialog (M3.7)
+    // The preferences nothing else owns: the rate a NEW project starts at, the
+    // UI scale (0 = the user's font), the default project folder and the
+    // autosave interval. Loaded/saved with the rest of AppSettings.
+    int         fPrefsSampleRate    = 48000;
+    float       fPrefsUiScale       = 0.0f;
+    std::string fPrefsProjectDir;
+    int         fPrefsAutosaveSeconds = 30;
 };
 
 } // namespace daw

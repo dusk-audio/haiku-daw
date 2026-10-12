@@ -1,7 +1,11 @@
 #include "Commands.h"
-#include "RangeEdit.h"   // RangeOverlap/TrimFade (the range commands' geometry)
+#include "RangeEdit.h"       // RangeOverlap/TrimFade (the range commands' geometry)
+#include "ProjectTimebase.h" // ScaleProjectTimebase (the sample-rate command)
+#include "ProjectResample.h" // ResampleMediaFile (its "resample the media" half)
 
 #include <algorithm>
+#include <cstdio>
+#include <map>
 
 namespace daw {
 namespace {
@@ -1594,6 +1598,101 @@ void FreezeTrackCommand::Undo(Project& p) {
     t->freezeGain   = fSFreezeGain;
     t->freezePan    = fSFreezePan;
     t->freezeType   = fSFreezeType;
+}
+
+// --- the Project Settings window's edits (M3.6) -----------------------------
+
+bool SetMeterCommand::Do(Project& p) {
+    if (!fCaptured) {
+        fOldNum = p.timeSig.numerator;
+        fOldDenom = p.timeSig.denominator;
+        const MeterChange& m0 = p.tempoMap.Meters().front();
+        fOldMapNum = m0.num;
+        fOldMapDenom = m0.denom;
+        fCaptured = true;
+    }
+    p.timeSig.numerator   = fNum > 0 ? fNum : 1;
+    p.timeSig.denominator = fDenom > 0 ? fDenom : 1;
+    p.tempoMap.sampleRate = p.sampleRate;
+    p.tempoMap.SetMeterAt(0, p.timeSig.numerator, p.timeSig.denominator);
+    return true;
+}
+
+void SetMeterCommand::Undo(Project& p) {
+    p.timeSig.numerator   = fOldNum;
+    p.timeSig.denominator = fOldDenom;
+    p.tempoMap.SetMeterAt(0, fOldMapNum, fOldMapDenom);
+}
+
+bool SetProjectNotesCommand::Do(Project& p) {
+    if (!fCaptured) {
+        fOld = p.notes;
+        fCaptured = true;
+    }
+    p.notes = fNotes;
+    return true;
+}
+
+void SetProjectNotesCommand::Undo(Project& p) {
+    p.notes = fOld;
+}
+
+bool SetSampleRateCommand::Do(Project& p) {
+    if (!(fNewRate > 0.0)) return false;
+    if (!(p.sampleRate > 0.0)) return false;   // nothing to rescale FROM
+    // Captured once: a redo re-runs Do() from the state Undo() restored, so
+    // the origin is the same every time.
+    if (!fCaptured) {
+        fBefore = p;
+        fCaptured = true;
+    }
+
+    // The media first, while the clips still name the old files: every DISTINCT
+    // source is converted once, then the clips that used it follow. A file that
+    // cannot be converted keeps the clip where it is -- the engine plays any
+    // source rate at the right pitch, so nothing is broken by leaving it.
+    fResampled.clear();
+    if (fResample) {
+        std::map<std::string, std::string> rewritten;
+        for (const Track& t : p.Tracks()) {
+            for (const Clip& c : t.clips) {
+                if (c.sourcePath.empty()) continue;
+                if (rewritten.find(c.sourcePath) != rewritten.end()) continue;
+                std::string err;
+                const std::string out =
+                    ResampleMediaFile(c.sourcePath, fNewRate, &err);
+                if (out.empty()) {
+                    std::fprintf(stderr,
+                                 "daw: %s stays at its own rate (%s)\n",
+                                 c.sourcePath.c_str(),
+                                 err.empty() ? "not converted" : err.c_str());
+                }
+                rewritten.emplace(c.sourcePath, out);
+            }
+        }
+        for (Track& t : p.Tracks()) {
+            for (Clip& c : t.clips) {
+                const auto it = rewritten.find(c.sourcePath);
+                if (it == rewritten.end() || it->second.empty()) continue;
+                c.sourcePath = it->second;
+            }
+        }
+        for (const auto& kv : rewritten)
+            if (!kv.second.empty()) fResampled.push_back(kv);
+    }
+
+    // Then the timeline: frames are samples at the project's rate, so the
+    // ratio moves every position, length and anchor with the rate.
+    ScaleProjectTimebase(p, fNewRate / p.sampleRate);
+    p.sampleRate = fNewRate;
+    p.tempoMap.sampleRate = fNewRate;
+    return true;
+}
+
+void SetSampleRateCommand::Undo(Project& p) {
+    // The whole project, so the undo is exact whatever the ratio rounded to
+    // (and whatever the resample did to the clip paths).
+    p = fBefore;
 }
 
 } // namespace daw

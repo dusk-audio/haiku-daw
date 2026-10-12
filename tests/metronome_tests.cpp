@@ -3,6 +3,7 @@
 // rendering (deterministic), and the bar downbeat differs from a plain beat.
 
 #include "../src/engine/Metronome.h"
+#include "../src/app/AppSettings.h"   // kMetronomeSoundCount (the one table)
 
 #include <cmath>
 #include <cstdio>
@@ -71,6 +72,59 @@ int main() {
         CHECK(tickAt(96000));                    // beat 4 (tempo change point)
         CHECK(tickAt(108000));                   // beat 5, 12000 frames later
         CHECK(rms(buf, 102000 * 2, 107000 * 2) < 1e-4f);  // silence between
+    }
+
+    // The three click sounds (M3.5, the Preferences window): a timbre is all
+    // they are -- the tick stays on its beat, the accent stays on bar 1, and
+    // the sound changes what the tick is made of.
+    {
+        std::vector<std::vector<float>> ticks;
+        for (int snd = 0; snd < kMetronomeSoundCount; snd++) {
+            std::vector<float> b(24000 * 2, 0.0f);
+            m.Render(b.data(), 24000, 0, 1.0f, snd);
+            // Every sound ticks at beat 0, accents it, and is silent between.
+            CHECK(rms(b, 0, 1440 * 2) > 0.01f);
+            CHECK(rms(b, 5000 * 2, 20000 * 2) < 1e-4f);
+            ticks.push_back(std::move(b));
+
+            // ... and the accent differs from a plain beat, in every sound.
+            std::vector<float> b1(1440 * 2, 0.0f);
+            m.Render(b1.data(), 1440, 24000, 1.0f, snd);
+            bool accentDiffers = false;
+            for (size_t i = 0; i < b1.size(); i++)
+                if (std::fabs(ticks.back()[i] - b1[i]) > 1e-3f)
+                    accentDiffers = true;
+            CHECK(accentDiffers);
+        }
+        // The sounds are actually different from one another (a menu whose
+        // three entries all sound the same is a bug, not a preference).
+        auto differ = [](const std::vector<float>& a,
+                         const std::vector<float>& b) {
+            for (size_t i = 0; i < a.size() && i < b.size(); i++)
+                if (std::fabs(a[i] - b[i]) > 1e-3f) return true;
+            return false;
+        };
+        CHECK(differ(ticks[0], ticks[1]));
+        CHECK(differ(ticks[0], ticks[2]));
+        CHECK(differ(ticks[1], ticks[2]));
+
+        // An index no build knows is the default click, not silence.
+        std::vector<float> odd(1440 * 2, 0.0f);
+        m.Render(odd.data(), 1440, 0, 1.0f, 99);
+        bool sameAsClick = true;
+        for (size_t i = 0; i < odd.size(); i++)
+            if (std::fabs(odd[i] - ticks[0][i]) > 1e-6f) sameAsClick = false;
+        CHECK(sameAsClick);
+
+        // The level is the caller's gain, and it scales the tick linearly
+        // (the Preferences window's metronome level rides on this).
+        std::vector<float> half(24000 * 2, 0.0f);
+        m.Render(half.data(), 24000, 0, 0.5f);
+        bool halfOfClick = true;
+        for (size_t i = 0; i < half.size(); i++)
+            if (std::fabs(half[i] - ticks[0][i] * 0.5f) > 1e-5f)
+                halfOfClick = false;
+        CHECK(halfOfClick);
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

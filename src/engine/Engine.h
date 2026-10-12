@@ -854,6 +854,13 @@ public:
 
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
+    // The click's level and sound (M3.5, the Preferences window). RT-safe
+    // atomics like the toggle: a change is audible on the next block, and the
+    // default (0.3, click) is exactly what the engine always played.
+    void SetMetronomeGain(float gain) { fMetronomeGain.store(gain); }
+    void SetMetronomeSound(int sound) { fMetronomeSound.store(sound); }
+    float MetronomeGain() const { return fMetronomeGain.load(); }
+    int   MetronomeSound() const { return fMetronomeSound.load(); }
 
     // Monitor section (RT-safe atomics). These affect only what is played out,
     // NOT the peak meters (which reflect the true mix). Dim drops the monitor
@@ -1142,6 +1149,10 @@ private:
     std::atomic<uint32_t> fClipFlags{0};
     std::atomic<float> fMasterGain{1.0f};
     std::atomic<bool>  fMetronomeOn{false};
+    // What the click sounds like (M3.5): the level it has always had, and the
+    // click timbre the Preferences window offers.
+    std::atomic<float> fMetronomeGain{0.3f};
+    std::atomic<int>   fMetronomeSound{0};
     std::atomic<bool>  fMonitorDim{false};
     std::atomic<bool>  fMonitorMono{false};
     std::atomic<IMonitorSource*> fMonSource{nullptr};

@@ -29,7 +29,13 @@ public:
 
     // Add click ticks for [blockStart, blockStart+frames) into `out`, scaled
     // by `gain`. Never allocates.
-    void Render(float* out, size_t frames, Frame blockStart, float gain) const;
+    //
+    // `sound` is the click's timbre (the Preferences window's metronome sound,
+    // M3.5): 0 = click, 1 = beep, 2 = wood block. Every sound keeps the same
+    // 30 ms envelope and the same accent on the bar's first beat, so which one
+    // is chosen never moves a tick off its beat or hides the accent.
+    void Render(float* out, size_t frames, Frame blockStart, float gain,
+                int sound = 0) const;
 
 private:
     TempoMap fMap;
