@@ -35,7 +35,10 @@ static std::vector<float> Render(Stretcher& st, const std::vector<float>& in,
     std::vector<float> buf((size_t)chunkOut);
     size_t pos = from;
     bool flushed = false;
-    long guard = 0;
+    // A runaway guard, not a tolerance: a stretcher that never stops producing
+    // (the mutation that removes its end rule) must terminate the test, and the
+    // length assertions below then fail the way they should.
+    const size_t cap = in.size() * 4 + 100000;
     for (;;) {
         const size_t want = (pos < in.size())
             ? std::min<size_t>((size_t)chunkIn, in.size() - pos) : 0;
@@ -46,7 +49,7 @@ static std::vector<float> Render(Stretcher& st, const std::vector<float>& in,
             out.insert(out.end(), buf.begin(), buf.begin() + r.outProduced);
         if (pos >= in.size() && !flushed) { st.Flush(); flushed = true; }
         if (flushed && r.inConsumed == 0 && r.outProduced == 0) break;
-        if (++guard > 1000000) { CHECK(false); break; }   // never spin forever
+        if (out.size() > cap) break;
     }
     return out;
 }
