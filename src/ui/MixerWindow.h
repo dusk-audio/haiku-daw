@@ -35,6 +35,13 @@ struct MixerInsertInfo {
     bool        bypassed = false;
 };
 
+// One aux send, as much of it as the strip draws: where it goes and how loud
+// it is. Same rule as MixerInsertInfo -- a label, not a model structure.
+struct MixerSendInfo {
+    std::string label;    // the destination's short name
+    float       level = 1.0f;
+};
+
 struct MixerStripInfo {
     uint64      trackId;
     std::string name;
@@ -47,14 +54,25 @@ struct MixerStripInfo {
     int         colorIndex = 0;
     int         type = 0;        // 0 audio, 1 midi, 2 bus
     std::vector<MixerInsertInfo> fx;   // the insert chain, in order
-    int         sendCount = 0;
+    // Mixer strip extras (M3.4).
+    float       trim = 1.0f;           // input trim (linear; kTrackTrimMax ceiling)
+    bool        phaseInvert = false;   // polarity flip
+    int         soloGroup = 0;         // >0 = the strip's solo group
+    std::vector<MixerSendInfo> sends;  // the aux sends, in the model's order
     bool        hasInput = false;
     std::string outLabel;        // "Mst" or a bus name
 };
 
 // One strip's edited state -> the model. Fields: int64 "track", float "gain",
-// float "pan", bool "mute", bool "solo".
+// float "pan", bool "mute", bool "solo", and (M3.4) float "trim", bool
+// "phase", int32 "sgroup".
 constexpr uint32 kMsgApplyMix    = 'mxap';
+// One send's level (M3.4): int64 "track", int32 "index", float "level". A knob
+// drag posts continuously and the window coalesces it into one undo step.
+constexpr uint32 kMsgMixSend     = 'mxsl';
+// The inline level field's commit, handled INSIDE the strips view (the field
+// is its child): string "text" is the dB figure.
+constexpr uint32 kMsgMixLevelCommit = 'mxlc';
 // Master gain -> the model. Field: float "gain".
 constexpr uint32 kMsgApplyMaster = 'mmst';
 // Live peaks pushed from the main window. Per track: int64 "tid", float "pl",
@@ -119,6 +137,7 @@ private:
                     float peakL, float peakR, bool master);
     int   StripAt(BPoint where) const;   // -1 none, count == master
     void  ApplyStrip(int i);
+    void  PostSendLevel(int i, int index, float level);   // one send (M3.4)
     void  Post(uint32 what, uint64 track);   // section-button message helper
 
     // Rows the insert block reserves. Every strip reserves the SAME number --
@@ -130,6 +149,21 @@ private:
     // Rows strip `s` actually draws: one per insert plus a trailing empty slot,
     // or the cap with the last row standing in for the remainder.
     static int  FxRowsFor(const MixerStripInfo& s);
+    // ... and how many aux-send rows it needs (M3.4), capped at kMaxSendRows.
+    static int  SendRowsFor(const MixerStripInfo& s);
+    int   SendRows() const { return fSendRows; }
+    // The strip's trim as a knob value (kTrackTrimMax..unity..0 mapped to
+    // -1..0..+1) and back. Unity at 12 o'clock, which is what a trim knob is.
+    static float TrimToKnob(float trim);
+    static float KnobToTrim(float knob);
+
+    // The inline dB entry (M3.4): a real text field, placed over the strip's
+    // value row on a double-click. Built once and hidden until then.
+    void BeginLevelEntry(int strip);
+    void CommitLevelEntry();
+    void CancelLevelEntry();
+    class DawTextField* fLevelField = nullptr;
+    int   fLevelStrip = -1;
 
     float fScrollX = 0.0f;           // horizontal pan when the rack is wider
     float ContentWidth() const;      // all strips + master + margins
@@ -140,12 +174,18 @@ private:
     float      fMasterL = 0.0f, fMasterR = 0.0f;
     BMessenger fApply;
     int        fFxRows = 1;
+    int        fSendRows = 0;
 
-    enum class Drag { None, Fader, Pan, FxSlot };
+    enum class Drag { None, Fader, Pan, FxSlot, Trim, Send };
     Drag  fDrag = Drag::None;
     int   fDragStrip = -1;   // count == master
     float fPanGrabY = 0.0f;  // pan knob drags vertically
     float fPanOrig  = 0.0f;
+    float fTrimGrabY = 0.0f; // trim knob: vertical drag, like the pan knob
+    float fTrimOrig  = 1.0f;
+    float fSendGrabY = 0.0f; // send knob: the same gesture
+    float fSendOrig  = 1.0f;
+    int   fSendIndex = -1;
     // Insert reorder: the row grabbed, the row it would land on, and the track
     // it started on. The id is what the move is posted against, so a strip list
     // that has been rebuilt underneath cannot redirect the edit at another track.

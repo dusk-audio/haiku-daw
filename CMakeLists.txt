@@ -39,6 +39,7 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RegionJobs.cpp    # the region ops + freeze as worker-thread jobs (M4.4)
     src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
@@ -605,6 +606,11 @@ add_test(NAME regionops_tests COMMAND regionops_tests)
 add_executable(smfio_tests tests/smfio_tests.cpp)
 target_link_libraries(smfio_tests PRIVATE daw_model)
 add_test(NAME smfio_tests COMMAND smfio_tests)
+
+# The transport's time formats and their inverse (M3.1): header-only, kit-free.
+add_executable(time_display_tests tests/time_display_tests.cpp)
+target_link_libraries(time_display_tests PRIVATE daw_model)
+add_test(NAME time_display_tests COMMAND time_display_tests)
 
 add_executable(midi_tests tests/midi_tests.cpp)
 target_link_libraries(midi_tests PRIVATE daw_model)

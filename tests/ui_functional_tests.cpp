@@ -48,6 +48,7 @@
 // -DDAW_LV2=OFF build too.
 #include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
 #include "../src/ui/MixerWindow.h"      // kMsgMixFx (open the effects editor)
+#include "../src/ui/TransportBar.h"     // TransportButton + ButtonRect (M3.1)
 #include "../src/dsp/SidechainKey.h"    // kExtKeySlot (the picker's appended slot)
 #ifdef DAW_HAVE_LV2
 #include "../src/plugin/Lv2Host.h"
@@ -5344,6 +5345,549 @@ static void CheckViewColor(MainWindow* win, const char* parent, const char* name
                 expected.red, expected.green, expected.blue);
 }
 
+// --- 26. M3.1: the transport bar --------------------------------------------
+
+// Every button posts its own action, the big display cycles its format and
+// takes a typed position, and the readout line names the tempo, the meter, the
+// callback load and the xrun count. Every click goes to the BAR at the rect
+// the bar itself reports (`TransportButtonRect`), so a control that moved
+// cannot still pass through an offset a test remembered (docs/HANDOFF.md).
+static void TestTransportBar(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_transport_bar\n");
+
+    // Something to play: an empty project stops playback again immediately,
+    // which would read as "the Play button does nothing".
+    {
+        const char* wav = "/tmp/haiku_daw_ui_tbar.wav";
+        std::remove(wav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 3000, -3000 };
+        CHECK(w.Open(wav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "tbar-track";
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000 * 8;
+        c.sourcePath = wav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+    }
+
+    BView* bar = nullptr;
+    BView* timeView = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        bar = win->TransportBarView();
+        if (bar) timeView = bar->FindView("time");
+        win->Unlock();
+    }
+    CHECK(bar != nullptr);
+    CHECK(timeView != nullptr);
+    Shot("transport-bar");
+
+    auto lock = [&](const std::function<void()>& fn) {
+        if (win->LockWithTimeout(1000000) == B_OK) { fn(); win->Unlock(); }
+    };
+    auto click = [&](int which, int32 clicks = 1) {
+        BRect r;
+        lock([&] { r = win->TransportButtonRect(which); });
+        BMessage m(B_MOUSE_DOWN);
+        m.AddInt32("buttons", 1);
+        m.AddInt32("clicks", clicks);
+        m.AddPoint("where", BPoint((r.left + r.right) * 0.5f,
+                                   (r.top + r.bottom) * 0.5f));
+        BMessenger(bar).SendMessage(&m);
+    };
+    auto playing = [&] {
+        bool p = false;
+        lock([&] { p = win->IsPlaying(); });
+        return p;
+    };
+    auto loopOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.loopEnabled; });
+        return on;
+    };
+    auto punchOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.punchEnabled; });
+        return on;
+    };
+    auto metronomeOn = [&] {
+        bool on = false;
+        lock([&] { on = win->MetronomeOn(); });
+        return on;
+    };
+    auto playhead = [&] {
+        Frame f = -1;
+        lock([&] { f = project.transport.playhead; });
+        return f;
+    };
+    auto setPlayhead = [&](Frame f) {
+        lock([&] {
+            project.transport.playhead = f;
+            if (TimelineView* tv = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                tv->SetPlayhead(f);
+        });
+    };
+
+    const int kRtz = (int)TransportButton::Rtz;
+    const int kRewind = (int)TransportButton::Rewind;
+    const int kForward = (int)TransportButton::Forward;
+    const int kPlay = (int)TransportButton::Play;
+    const int kStop = (int)TransportButton::Stop;
+    const int kLoop = (int)TransportButton::Loop;
+    const int kClick = (int)TransportButton::Click;
+    const int kPunch = (int)TransportButton::Punch;
+    const int kZoomIn = (int)TransportButton::ZoomIn;
+
+    // Play / Stop: the two the bar has always had, now through the same hit
+    // test as the rest.
+    CHECK(!playing());
+    click(kPlay);
+    CHECK(WaitFor([&] { return playing(); }));
+    Shot("transport-bar-playing");
+    click(kStop);
+    CHECK(WaitFor([&] { return !playing(); }));
+
+    // Loop, metronome and punch: each button flips the state it stands for,
+    // and flips it back (the state is the model's/the controller's, not the
+    // button's own copy).
+    CHECK(!loopOn());
+    click(kLoop);
+    CHECK(WaitFor([&] { return loopOn(); }));
+    click(kLoop);
+    CHECK(WaitFor([&] { return !loopOn(); }));
+    CHECK(!metronomeOn());
+    click(kClick);
+    CHECK(WaitFor([&] { return metronomeOn(); }));
+    click(kClick);
+    CHECK(WaitFor([&] { return !metronomeOn(); }));
+    CHECK(!punchOn());
+    click(kPunch);
+    CHECK(WaitFor([&] { return punchOn(); }));
+    click(kPunch);
+    CHECK(WaitFor([&] { return !punchOn(); }));
+
+    // Return to zero: back to frame 0 wherever the playhead was.
+    setPlayhead(48000);
+    CHECK(playhead() == 48000);
+    click(kRtz);
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // Rewind / fast-forward: one bar, on the tempo map's own boundaries. At
+    // 120 BPM 4/4 and 48 kHz a bar is 96000 frames, so bar 3 starts at
+    // 192000 and bar 4 at 288000.
+    setPlayhead(288000);                       // in bar 4
+    click(kRewind);
+    CHECK(WaitFor([&] { return playhead() == 192000; }));   // bar 3's downbeat
+    click(kForward);
+    CHECK(WaitFor([&] { return playhead() == 288000; }));   // bar 4's
+    setPlayhead(0);
+    click(kRewind);                            // already at the first bar
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // The zoom pair still zooms (it moved; its action did not).
+    {
+        double before = 0.0, after = 0.0;
+        auto framesPerPixel = [&] {
+            double fpp = 0.0;
+            lock([&] {
+                if (TimelineView* tv =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                    const float x0 = tv->FrameToX(0);
+                    const float x1 = tv->FrameToX(48000);
+                    if (x1 > x0) fpp = 48000.0 / (double)(x1 - x0);
+                }
+            });
+            return fpp;
+        };
+        before = framesPerPixel();
+        click(kZoomIn);
+        CHECK(WaitFor([&] { after = framesPerPixel(); return after < before * 0.75; }));
+    }
+
+    // The big display: a click cycles the format, and what the bar shows is
+    // what the window says the current format is (one piece of state).
+    {
+        int mode = -1;
+        lock([&] { mode = win->TransportTimeMode(); });
+        BMessage m(B_MOUSE_DOWN);
+        m.AddInt32("buttons", 1);
+        m.AddInt32("clicks", 1);
+        m.AddPoint("where", BPoint(40, 20));   // inside the display's frame
+        BMessenger(timeView).SendMessage(&m);
+        CHECK(WaitFor([&] {
+            int now = -1;
+            lock([&] { now = win->TransportTimeMode(); });
+            return now != mode;
+        }));
+        // ... and the tag under it names that format.
+        std::string tag;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                tag = tv->TagText();
+        });
+        int now = -1;
+        lock([&] { now = win->TransportTimeMode(); });
+        CHECK(!tag.empty());
+        CHECK(tag == TimeModeTag((TimeMode)now));
+
+        // Cycle on to minutes:seconds, then type a position into the display
+        // and check the playhead MOVED there.
+        for (int guard = 0; guard < 5; guard++) {
+            int m2 = -1;
+            lock([&] { m2 = win->TransportTimeMode(); });
+            if (m2 == (int)TimeMode::MinSec) break;
+            BMessage c(B_MOUSE_DOWN);
+            c.AddInt32("buttons", 1);
+            c.AddInt32("clicks", 1);
+            c.AddPoint("where", BPoint(40, 20));
+            BMessenger(timeView).SendMessage(&c);
+            snooze(120000);
+        }
+        int modeNow = -1;
+        lock([&] { modeNow = win->TransportTimeMode(); });
+        CHECK(modeNow == (int)TimeMode::MinSec);
+
+        BMessage entry(kMsgTimeEntry);
+        entry.AddString("text", "1:30");
+        win->PostMessage(&entry);
+        CHECK(WaitFor([&] { return playhead() == (Frame)(90 * 48000); }));
+
+        // A position that cannot be read changes NOTHING and says so (a
+        // plausible-but-wrong seek would be worse than the refusal).
+        BMessage bad(kMsgTimeEntry);
+        bad.AddString("text", "banana");
+        win->PostMessage(&bad);
+        snooze(400000);
+        CHECK(playhead() == (Frame)(90 * 48000));
+        std::string status;
+        lock([&] {
+            if (auto* b = dynamic_cast<TransportBar*>(bar)) status = b->StatusText();
+        });
+        CHECK(status.find("Cannot read") != std::string::npos);
+    }
+
+    // The readout line: tempo, meter, the callback's load and the xruns.
+    {
+        std::string info;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                info = tv->InfoText();
+        });
+        CHECK(info.find("BPM") != std::string::npos);
+        CHECK(info.find("DSP") != std::string::npos);
+        CHECK(info.find("XR") != std::string::npos);
+    }
+
+    // Leave the transport as the rest of the suite expects to find it.
+    setPlayhead(0);
+    CHECK(WaitQuiet());
+}
+
+// --- 26b. M4.4: a region job runs off the window thread ---------------------
+
+// Reverse a real clip through the same message the timeline's clip menu posts:
+// the decode happens on a worker thread with the progress bar up (the window
+// keeps answering meanwhile), a cancel leaves the project EXACTLY as it was,
+// and a completed run swaps the clip onto the rendered file.
+static void TestRegionJob(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_region_job\n");
+
+    // Long enough that the decode is a real piece of work: the cancel has to
+    // land while the worker is still running for the check to mean anything.
+    const char* srcPath = "/tmp/haiku_daw_ui_region_src.wav";
+    std::remove(srcPath);
+    {
+        WavWriter w;
+        CHECK(w.Open(srcPath, 48000, 2));
+        // 20 s in 1 s blocks, so a failed write is visible rather than silent.
+        std::vector<int16_t> block(48000 * 2);
+        for (size_t i = 0; i < block.size(); i++)
+            block[i] = (int16_t)((int)(i % 8000) - 4000);
+        bool all = true;
+        for (int s = 0; s < 20; s++) all = all && w.WriteInt16(block.data(), block.size());
+        CHECK(all);
+        CHECK(w.Close());
+    }
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "region-job";
+    Clip c;
+    c.id = project.NextClipId();
+    c.startFrame = 0;
+    c.lengthFrames = 48000 * 20;
+    c.sourcePath = srcPath;
+    t.clips.push_back(c);
+    CHECK(LockedAddTrack(win, project, t));
+
+    auto clipPath = [&] {
+        std::string s;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id))
+                if (const Clip* cp = p->FindClip(c.id)) s = cp->sourcePath;
+            win->Unlock();
+        }
+        return s;
+    };
+    auto postReverse = [&] {
+        BMessage m(kMsgRegionReverse);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt64("clip", (int64)c.id);
+        win->PostMessage(&m);
+    };
+
+    // --- cancel: the bar goes up, and the project is untouched ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        const bool barUp = WaitFor([&] { return VisibleWindows() > before; },
+                                   10000000);
+        std::printf("  region job: the bar %s\n", barUp ? "came up" : "was missed");
+        // The window keeps answering while the worker decodes: this post has to
+        // be handled (the pulse runs, the looper is not blocked).
+        CHECK(barUp);
+        win->PostMessage(kMsgExportCancel);      // the bar's Cancel button
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 60000000));
+        // Nothing changed: same path, and no reversed file anywhere near it.
+        CHECK(clipPath() == srcPath);
+        CHECK(WaitQuiet());
+    }
+
+    // --- and to completion: the clip now points at the rendered file ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 120000000));
+        const std::string now = clipPath();
+        CHECK(!now.empty());
+        CHECK(now != srcPath);
+        CHECK(FileExists(now));
+        // Put the original clip back for whatever runs after this.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (Track* p = project.FindTrack(t.id))
+                if (Clip* cp = p->FindClip(c.id)) cp->sourcePath = srcPath;
+            win->Unlock();
+        }
+        std::remove(now.c_str());
+    }
+    std::remove(srcPath);
+    CHECK(WaitQuiet());
+}
+
+// --- 27. M3.4: the mixer strip's own edits ----------------------------------
+
+// The strip's new intents reach the model through the command stack and come
+// back in the strip's snapshot: the input trim, the polarity, the solo group
+// and a send's level. The window is driven by the exact messages the strip
+// posts (kMsgApplyMix / kMsgMixSend), which is also what the strip itself
+// sends — the drawing and the drags are looked at in the screenshot pass.
+static void TestMixerStripExtras(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_mixer_strip_extras\n");
+
+    // An audio track with a send into a bus, so there is something to trim and
+    // something to send to.
+    Track bus;
+    bus.id = project.NextTrackId();
+    bus.type = TrackType::Bus;
+    bus.name = "FX bus";
+    CHECK(LockedAddTrack(win, project, bus));
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "strip-track";
+    t.sends.push_back(Send{ bus.id, 1.0f, false });
+    CHECK(LockedAddTrack(win, project, t));
+
+    win->PostMessage(MSG_MIXER_TEST);
+    MixerStripsView* strips = nullptr;
+    BWindow* mixer = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || w == win) continue;
+            if (w->LockWithTimeout(500000) != B_OK) continue;
+            BView* v = w->FindView("strips");
+            if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+            w->Unlock();
+            if (strips) return true;
+        }
+        return false;
+    }));
+    CHECK(strips != nullptr);
+    if (strips == nullptr) return;
+
+    auto trackOf = [&] {
+        Track out;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id)) out = *p;
+            win->Unlock();
+        }
+        return out;
+    };
+
+    // --- input trim: through the strip's own message ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 0.5f; }));
+    }
+    // --- polarity ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().phaseInvert; }));
+    }
+    // --- the solo group, and the cascade it implies ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 2);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().soloGroup == 2; }));
+
+        // Put the bus in the same group and solo the audio track: the bus has
+        // to come along (the group's whole point).
+        {
+            BMessage b(kMsgApplyMix);
+            b.AddInt64("track", (int64)bus.id);
+            b.AddFloat("gain", 1.0f);
+            b.AddFloat("pan", 0.0f);
+            b.AddBool("mute", false);
+            b.AddBool("solo", false);
+            b.AddFloat("trim", 1.0f);
+            b.AddBool("phase", false);
+            b.AddInt32("sgroup", 2);
+            win->PostMessage(&b);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && bt->soloGroup == 2;
+            win->Unlock();
+            return ok;
+        }));
+        {
+            BMessage s(kMsgApplyMix);
+            s.AddInt64("track", (int64)t.id);
+            s.AddFloat("gain", 1.0f);
+            s.AddFloat("pan", 0.0f);
+            s.AddBool("mute", false);
+            s.AddBool("solo", true);
+            s.AddFloat("trim", 0.5f);
+            s.AddBool("phase", true);
+            s.AddInt32("sgroup", 2);
+            win->PostMessage(&s);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const Track* at = project.FindTrack(t.id);
+            const bool ok = bt && at && bt->soloed && at->soloed;
+            win->Unlock();
+            return ok;
+        }));
+        // Leave it unsoloed again for the tests after this one.
+        BMessage s2(kMsgApplyMix);
+        s2.AddInt64("track", (int64)t.id);
+        s2.AddFloat("gain", 1.0f);
+        s2.AddFloat("pan", 0.0f);
+        s2.AddBool("mute", false);
+        s2.AddBool("solo", false);
+        s2.AddFloat("trim", 0.5f);
+        s2.AddBool("phase", true);
+        s2.AddInt32("sgroup", 2);
+        win->PostMessage(&s2);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && !bt->soloed;
+            win->Unlock();
+            return ok;
+        }));
+    }
+    // --- a send's level: the knob's own message ---
+    {
+        BMessage m(kMsgMixSend);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt32("index", 0);
+        m.AddFloat("level", 0.25f);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] {
+            const Track tr = trackOf();
+            return tr.sends.size() == 1
+                && std::fabs(tr.sends[0].level - 0.25f) < 1e-4f;
+        }));
+    }
+
+    // ... and the strip's own snapshot carries all of it after a refresh.
+    win->PostMessage(kMsgUiRefresh);
+    CHECK(WaitFor([&] {
+        bool ok = false;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            for (const MixerStripInfo& s : strips->Strips())
+                if (s.trackId == t.id)
+                    ok = std::fabs(s.trim - 0.5f) < 1e-4f && s.phaseInvert
+                      && s.soloGroup == 2 && s.sends.size() == 1
+                      && std::fabs(s.sends[0].level - 0.25f) < 1e-4f;
+            mixer->Unlock();
+        }
+        return ok;
+    }));
+    Shot("mixer-strips");
+
+    // Back to the model's defaults for whatever runs next.
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 1.0f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 1.0f; }));
+    }
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
 // The dock hosts one page at a time, switched from the strip's segmented
 // control: the editor (the roll or its hint), the samples and the plugins. The
 // browsers are the SAME views their windows host, so what is checked here is
@@ -6755,6 +7299,9 @@ static int32 TestThread(void*) {
     TestProjectSettings(win, project, stack);   // M3.6: applies and undoes
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
+    TestTransportBar(win, project);
+    TestRegionJob(win, project);
+    TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);

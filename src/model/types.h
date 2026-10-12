@@ -26,6 +26,11 @@ constexpr ClipId  kInvalidClipId  = 0;
 
 enum class TrackType { Audio, Midi, Bus };
 
+// The input trim's ceiling (M3.4): +12 dB. A trim is a corrective gain, not a
+// second fader — a fader's range lives in Track::gain. Here (rather than with
+// the command that writes it) because the mixer strip's knob maps over it too.
+constexpr float kTrackTrimMax = 4.0f;
+
 struct TimeSignature {
     int numerator   = 4;
     int denominator = 4;

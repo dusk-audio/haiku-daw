@@ -145,7 +145,10 @@ private:
     int     fOldGroup = 0;
 };
 
-// Set a track's solo flag. Stores previous for Undo().
+// Set a track's solo flag. If the track belongs to a solo group (soloGroup>0)
+// the new state is applied to every member of that group -- the mute-group
+// cascade's counterpart (M3.4). Stores each affected track's previous state
+// for Undo().
 class SetTrackSoloCommand : public Command {
 public:
     SetTrackSoloCommand(TrackId track, bool soloed)
@@ -158,7 +161,63 @@ public:
 private:
     TrackId fTrack;
     bool    fNewSoloed;
-    bool    fOldSoloed = false;
+    std::vector<std::pair<TrackId, bool>> fOld;   // affected tracks' prior solo
+};
+
+// Assign a track's solo group (0 = none). Stores the old group for Undo().
+class SetTrackSoloGroupCommand : public Command {
+public:
+    SetTrackSoloGroupCommand(TrackId track, int group)
+        : fTrack(track), fNewGroup(group) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Solo Group"; }
+
+private:
+    TrackId fTrack;
+    int     fNewGroup;
+    int     fOldGroup = 0;
+};
+
+// Set a track's input trim (linear, pre-fader, pre-inserts; M3.4). Clamped to
+// 0..kTrackTrimMax so a drag cannot drive it to something unrepresentable.
+class SetTrackTrimCommand : public Command {
+public:
+    SetTrackTrimCommand(TrackId track, float trim)
+        : fTrack(track), fNewTrim(trim) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Input Trim"; }
+    // A knob drag posts continuously: one undo step per gesture.
+    bool CoalesceInto(Command* prev) override {
+        auto* p = dynamic_cast<SetTrackTrimCommand*>(prev);
+        if (!p || p->fTrack != fTrack) return false;
+        p->fNewTrim = fNewTrim;
+        return true;
+    }
+
+private:
+    TrackId fTrack;
+    float   fNewTrim;
+    float   fOldTrim = 1.0f;
+};
+
+// Flip a track's polarity (M3.4).
+class SetTrackPhaseCommand : public Command {
+public:
+    SetTrackPhaseCommand(TrackId track, bool invert)
+        : fTrack(track), fNewInvert(invert) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Invert Phase"; }
+
+private:
+    TrackId fTrack;
+    bool    fNewInvert;
+    bool    fOldInvert = false;
 };
 
 // Set a track's record input source (MIDI endpoint / audio input). Discrete

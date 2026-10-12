@@ -9,13 +9,10 @@
 
 #include "TimelineView.h"
 #include "../model/Commands.h"
-#include "../model/RegionOps.h"
 #include "../model/TakeNames.h"
 #include "../engine/Exporter.h"
 #include "../engine/WavSource.h"
 #include "../engine/AudioFormats.h"   // OpenAudioSource: any format, one reader
-#include "../engine/WavWriter.h"
-#include "../engine/Resampler.h"
 
 #include <cstdio>
 #include <cmath>
@@ -121,16 +118,12 @@ void RenderJobs::FinishExport() {
     fWin->UpdatePulse();
 }
 
+// Freeze/Unfreeze. Unfreezing is a pure model restore and stays synchronous;
+// freezing renders the track and is a JOB (M4.4), because that render is the
+// long part — an embed of a 3-minute track froze the window for seconds.
 void RenderJobs::FreezeTrack(TrackId track, bool freeze) {
-
     Track* t = fWin->fProject->FindTrack(track);
     if (!t) return;
-
-    // Freezing renders this track from the model, so an editor gesture still
-    // inside its debounce has to land first -- otherwise the frozen audio is
-    // missing the change the user just heard (unfreezing only checks the flag).
-    if (freeze) fWin->FlushFxEditors();
-
     if (!freeze) {                     // unfreeze: pure model restore
         if (!t->frozen) return;
         fWin->fStack->Execute(std::make_unique<FreezeTrackCommand>(track, false),
@@ -139,153 +132,239 @@ void RenderJobs::FreezeTrack(TrackId track, bool freeze) {
         fWin->fTimeline->Invalidate();
         return;
     }
-    if (t->frozen) return;
-
-    const std::string path = RenderPath("frozen");
-    if (!RenderTrackToWav(*fWin->fProject, track, path)) {
-        std::fprintf(stderr, "Freeze: render failed for track %ld\n", (long)track);
-        return;
-    }
-    // The freeze render is a WAV we just wrote, but it goes through the same
-    // factory as any import so this path cannot drift from the others.
-    std::unique_ptr<IAudioSource> src = OpenAudioSource(path);
-    if (!src) return;
-    const double fileRate = src->FrameRate();
-    const double projRate = fWin->fProject->sampleRate;
-    Clip fc;
-    fc.startFrame   = 0;
-    fc.sourceOffset = 0;
-    fc.sourcePath   = path;
-    fc.lengthFrames = (Frame)llround(src->TotalFrames()
-                        * (fileRate > 0 ? projRate / fileRate : 1.0));
-    fWin->fStack->Execute(std::make_unique<FreezeTrackCommand>(track, true, fc),
-                    *fWin->fProject);
-    (*fWin->fPeaks)[path].Build(*src);
-    fWin->fTimeline->Invalidate();
+    StartRegionJob(RegionOp::Freeze, track);
 }
 
-void RenderJobs::RegionNormalize(TrackId track, ClipId clip) {
+// --- region jobs (M4.4) ----------------------------------------------------
 
-    const Track* t = fWin->fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0) return;
-    const float peak = PeakLinear(buf.data(), n);
-    if (peak <= 1e-6f) return;              // silent: nothing to normalize
-    float g = 1.0f / peak;
-    if (g > 64.0f) g = 64.0f;               // ceiling for near-silent clips
-    fWin->fStack->Execute(std::make_unique<SetClipGainCommand>(track, clip, g), *fWin->fProject);
-    fWin->fTimeline->Invalidate();
-}
-
-void RenderJobs::RegionReverse(TrackId track, ClipId clip) {
-
-    const Track* t = fWin->fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0 || rate <= 0) return;
-    ReverseStereo(buf.data(), n);
-
-    const std::string path = RenderPath("reversed");
-    std::vector<int16_t> pcm((size_t)n * 2);
-    for (int64_t i = 0; i < n * 2; ++i) {
-        float s = buf[i];
-        if (s >  1.0f) s =  1.0f;
-        if (s < -1.0f) s = -1.0f;
-        pcm[i] = (int16_t)lround(s * 32767.0f);
-    }
-    WavWriter w;
-    // Exclusive: the path is scanned-free, and if that ever raced, refusing
-    // beats overwriting a file a clip may reference.
-    if (!w.Open(path, (int)lround(rate), 2, /*exclusive*/ true)
-        || !w.WriteInt16(pcm.data(), pcm.size()) || !w.Close()) {
-        std::fprintf(stderr, "Reverse: cannot write %s\n", path.c_str());
+void RenderJobs::StartRegionJob(RegionOp op, TrackId track, ClipId clip) {
+    // One job at a time, whichever kind: a second request while one runs is
+    // refused (the caller says so in the status line), and the export is the
+    // same job family.
+    if (fRegionThread.joinable() || fExportThread.joinable()) {
+        fWin->SetTransportStatus("A render is already running");
         return;
     }
 
-    // Replace the clip with one pointing at the reversed file (fades swap so the
-    // fade follows the now-reversed audio); same position, length, gain.
-    Clip nc = *c;
-    nc.id = kInvalidClipId;
-    nc.sourcePath   = path;
-    nc.sourceOffset = 0;
-    nc.takeGroup    = 0;
-    std::swap(nc.fadeInFrames, nc.fadeOutFrames);
-    auto macro = std::make_unique<MacroCommand>("Reverse Clip");
-    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
-    macro->Add(std::make_unique<AddClipCommand>(track, nc));
-    fWin->fStack->Execute(std::move(macro), *fWin->fProject);
-
-    std::unique_ptr<IAudioSource> src = OpenAudioSource(path);
-    if (src) (*fWin->fPeaks)[path].Build(*src);
-    fWin->fTimeline->Invalidate();
-}
-
-void RenderJobs::RegionStripSilence(TrackId track, ClipId clip) {
-
     const Track* t = fWin->fProject->FindTrack(track);
-    const Clip*  c = t ? t->FindClip(clip) : nullptr;
-    if (!c) return;
-    std::vector<float> buf; double rate = 0;
-    const int64_t n = DecodeClipRegion(*c, buf, rate);
-    if (n <= 0 || rate <= 0) return;
+    if (!t) return;
+    const Clip* c = (clip != kInvalidClipId) ? t->FindClip(clip) : nullptr;
+    if (op != RegionOp::Freeze && c == nullptr) return;
+    if (op == RegionOp::Freeze && t->frozen) return;
 
-    const float   thresh = 0.00316f;               // ~ -50 dBFS
-    const int64_t minSil = (int64_t)(0.25 * rate); // 250 ms of silence = a gap
-    const int64_t pad    = (int64_t)(0.02 * rate); // keep 20 ms of air each side
-    auto spans = NonSilentSpans(buf.data(), n, thresh, minSil, pad);
-    if (spans.size() <= 1) return;                 // no gaps worth cutting
+    // A freeze renders the track from the model, so an editor gesture still
+    // inside its debounce has to land first -- otherwise the frozen audio is
+    // missing the change the user just heard.
+    if (op == RegionOp::Freeze) fWin->FlushFxEditors();
 
-    const double projRate = fWin->fProject->sampleRate;
-    const double toProj = (rate > 0) ? projRate / rate : 1.0;   // src -> project
-    auto macro = std::make_unique<MacroCommand>("Strip Silence");
-    macro->Add(std::make_unique<RemoveClipCommand>(track, clip));
-    for (const daw::Span& s : spans) {
-        Clip nc = *c;
-        nc.id           = kInvalidClipId;
-        nc.sourceOffset = c->sourceOffset + s.start;              // source frames
-        nc.startFrame   = c->startFrame + (Frame)llround(s.start * toProj);
-        nc.lengthFrames = (Frame)llround((s.end - s.start) * toProj);
-        nc.fadeInFrames = 0;
-        nc.fadeOutFrames = 0;
-        nc.takeGroup    = 0;
-        macro->Add(std::make_unique<AddClipCommand>(track, nc));
-    }
-    fWin->fStack->Execute(std::move(macro), *fWin->fProject);
-    fWin->fTimeline->Invalidate();
+    // The snapshot the worker reads. Freeze needs the whole project (its
+    // clips, instrument and chain); the region ops need the clip and the rate.
+    fRegionSnapshot.reset();
+    if (op == RegionOp::Freeze)
+        fRegionSnapshot = std::make_unique<Project>(*fWin->fProject);
+    fRegionClipCopy = c ? *c : Clip{};
+    fRegionProjectRate = fWin->fProject->sampleRate;
+    fRegionTrack = track;
+    fRegionClipId = clip;
+    fRegionOp = op;
+    fRegionOk = false;
+    fRegionHandled = false;
+    fRegionGain = 1.0f;
+    fRegionSpans.clear();
+    fRegionSourceRate = 0.0;
+    fRegionPath.clear();
+    fRegionProgress.store(-1.0f, std::memory_order_relaxed);
+    fRegionCancel.store(false, std::memory_order_relaxed);
+
+    const char* tag = op == RegionOp::Freeze   ? "frozen"
+                    : op == RegionOp::Reverse  ? "reversed" : "region";
+    if (op == RegionOp::Reverse || op == RegionOp::Freeze)
+        fRegionPath = RenderPath(tag);
+    fRegionLabel = op == RegionOp::Freeze       ? "Freezing track"
+                 : op == RegionOp::Normalize    ? "Normalizing region"
+                 : op == RegionOp::Reverse      ? "Reversing region"
+                                                : "Stripping silence";
+
+    // The bar goes up BEFORE the thread starts, so a very short job cannot
+    // finish and be handled before there is anything to close.
+    BRect wr(240, 240, 240 + 320, 240 + 96);
+    ExportProgressWindow* w = new ExportProgressWindow(wr, BMessenger(fWin),
+                                                       fRegionLabel.c_str());
+    fRegionProgMsgr = BMessenger(w);
+    w->Show();
+
+    fRegionRunning.store(true, std::memory_order_release);
+    fRegionThread = std::thread([this, op]() {
+        RegionJob job;
+        job.cancel = &fRegionCancel;
+        job.progress = [this](float v) {
+            fRegionProgress.store(v, std::memory_order_relaxed);
+        };
+        switch (op) {
+            case RegionOp::Freeze: {
+                // The exporter's own progress/cancel, wired to this job's
+                // atomics; the bar shows the bounce's real fraction.
+                const ExportJob fj = FreezeExportJob();
+                fRegionOk = RenderTrackToWav(*fRegionSnapshot, fRegionTrack,
+                                             fRegionPath, &fj);
+                break;
+            }
+            case RegionOp::Normalize: {
+                float gain = 1.0f;
+                fRegionOk = MeasureClipPeak(fRegionClipCopy, fRegionProjectRate, job,
+                                            &gain);
+                fRegionGain = gain;
+                break;
+            }
+            case RegionOp::Reverse:
+                fRegionOk = RenderReversedClip(fRegionClipCopy, fRegionProjectRate,
+                                               fRegionPath, job);
+                break;
+            case RegionOp::StripSilence: {
+                StripSilenceParams params;
+                fRegionOk = AnalyzeClipSilence(fRegionClipCopy, fRegionProjectRate,
+                                               params, &fRegionSpans,
+                                               &fRegionSourceRate, job);
+                break;
+            }
+        }
+        fRegionRunning.store(false, std::memory_order_release);
+    });
+    fWin->UpdatePulse();
 }
 
-int64_t RenderJobs::DecodeClipRegion(const Clip& c, std::vector<float>& out,
-                                    double& outRate) {
-
-    out.clear();
-    outRate = 0.0;
-    // Whatever the clip points at -- a WAV take, an imported FLAC, an AIFF.
-    std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
-    if (!src)
-        return 0;
-    outRate = src->FrameRate();
-    if (c.sourceOffset > 0)
-        src->Seek(c.sourceOffset);
-    // The clip plays lengthFrames project-frames == that many source-frames
-    // scaled by the rate ratio, starting at sourceOffset.
-    const double projRate = fWin->fProject->sampleRate;
-    int64_t wantSrc = c.lengthFrames;
-    if (outRate > 0 && projRate > 0)
-        wantSrc = (int64_t)llround((double)c.lengthFrames * outRate / projRate);
-    const float* chunk = nullptr;
-    size_t frames = 0;
-    while ((int64_t)(out.size() / 2) < wantSrc && src->ReadChunk(&chunk, &frames)) {
-        int64_t have = (int64_t)(out.size() / 2);
-        int64_t take = wantSrc - have;
-        if ((int64_t)frames > take) frames = (size_t)take;
-        out.insert(out.end(), chunk, chunk + frames * 2);
+void RenderJobs::FinishRegionJob() {
+    fRegionHandled = true;
+    if (fRegionProgMsgr.IsValid()) {
+        BMessage q(B_QUIT_REQUESTED);
+        fRegionProgMsgr.SendMessage(&q);
+        fRegionProgMsgr = BMessenger();
     }
-    return (int64_t)(out.size() / 2);
+    if (fRegionThread.joinable()) fRegionThread.join();
+    fRegionSnapshot.reset();
+
+    const bool cancelled = fRegionCancel.load();
+    if (cancelled || !fRegionOk) {
+        // The project is untouched: nothing below this line ran.
+        std::fprintf(stderr, "Region job: %s (%s)\n", cancelled ? "cancelled"
+                     : "failed", fRegionLabel.c_str());
+        fWin->SetTransportStatus(cancelled ? "Render cancelled"
+                                           : "Render failed");
+        fWin->UpdatePulse();
+        return;
+    }
+
+    // Everything past here runs on the LOOPER, against the CURRENT model: the
+    // track and the clip are re-found by id, so an edit made while the worker
+    // ran cannot be applied to something that moved (or no longer exists).
+    Track* t = fWin->fProject->FindTrack(fRegionTrack);
+    if (t == nullptr) {
+        fWin->SetTransportStatus("Render finished: track is gone");
+        fWin->UpdatePulse();
+        return;
+    }
+    switch (fRegionOp) {
+        case RegionOp::Freeze: {
+            // The render is a WAV we just wrote, but it goes through the same
+            // factory as any import so this path cannot drift from the others.
+            std::unique_ptr<IAudioSource> src = OpenAudioSource(fRegionPath);
+            if (!src) {
+                fWin->SetTransportStatus("Freeze failed");
+                break;
+            }
+            const double fileRate = src->FrameRate();
+            const double projRate = fWin->fProject->sampleRate;
+            Clip fc;
+            fc.startFrame   = 0;
+            fc.sourceOffset = 0;
+            fc.sourcePath   = fRegionPath;
+            fc.lengthFrames = (Frame)llround(src->TotalFrames()
+                                * (fileRate > 0 ? projRate / fileRate : 1.0));
+            fWin->fStack->Execute(
+                std::make_unique<FreezeTrackCommand>(fRegionTrack, true, fc),
+                *fWin->fProject);
+            (*fWin->fPeaks)[fRegionPath].Build(*src);
+            fWin->fTimeline->Invalidate();
+            fWin->SetTransportStatus("Track frozen");
+            break;
+        }
+        case RegionOp::Normalize: {
+            if (t->FindClip(fRegionClipId) == nullptr) {
+                fWin->SetTransportStatus("Render finished: region is gone");
+                break;
+            }
+            fWin->fStack->Execute(
+                std::make_unique<SetClipGainCommand>(fRegionTrack, fRegionClipId,
+                                                     fRegionGain),
+                *fWin->fProject);
+            fWin->fTimeline->Invalidate();
+            fWin->SetTransportStatus("Region normalized");
+            break;
+        }
+        case RegionOp::Reverse: {
+            const Clip* cur = t->FindClip(fRegionClipId);
+            if (cur == nullptr) {
+                fWin->SetTransportStatus("Render finished: region is gone");
+                break;
+            }
+            // Replace the clip with one pointing at the reversed file (fades
+            // swap so the fade follows the now-reversed audio); same position,
+            // length, gain.
+            Clip nc = *cur;
+            nc.id = kInvalidClipId;
+            nc.sourcePath   = fRegionPath;
+            nc.sourceOffset = 0;
+            nc.takeGroup    = 0;
+            std::swap(nc.fadeInFrames, nc.fadeOutFrames);
+            auto macro = std::make_unique<MacroCommand>("Reverse Clip");
+            macro->Add(std::make_unique<RemoveClipCommand>(fRegionTrack,
+                                                           fRegionClipId));
+            macro->Add(std::make_unique<AddClipCommand>(fRegionTrack, nc));
+            fWin->fStack->Execute(std::move(macro), *fWin->fProject);
+            std::unique_ptr<IAudioSource> src = OpenAudioSource(fRegionPath);
+            if (src) (*fWin->fPeaks)[fRegionPath].Build(*src);
+            fWin->fTimeline->Invalidate();
+            fWin->SetTransportStatus("Region reversed");
+            break;
+        }
+        case RegionOp::StripSilence: {
+            const Clip* cur = t->FindClip(fRegionClipId);
+            if (cur == nullptr) {
+                fWin->SetTransportStatus("Render finished: region is gone");
+                break;
+            }
+            if (fRegionSpans.size() <= 1) {   // no gaps worth cutting
+                fWin->SetTransportStatus("No silence to strip");
+                break;
+            }
+            const double toProj = (fRegionSourceRate > 0)
+                                ? fWin->fProject->sampleRate / fRegionSourceRate
+                                : 1.0;   // src frames -> project frames
+            auto macro = std::make_unique<MacroCommand>("Strip Silence");
+            macro->Add(std::make_unique<RemoveClipCommand>(fRegionTrack,
+                                                           fRegionClipId));
+            for (const daw::Span& s : fRegionSpans) {
+                Clip nc = *cur;
+                nc.id           = kInvalidClipId;
+                nc.sourceOffset = cur->sourceOffset + s.start;   // source frames
+                nc.startFrame   = cur->startFrame
+                                + (Frame)llround(s.start * toProj);
+                nc.lengthFrames = (Frame)llround((s.end - s.start) * toProj);
+                nc.fadeInFrames = 0;
+                nc.fadeOutFrames = 0;
+                nc.takeGroup    = 0;
+                macro->Add(std::make_unique<AddClipCommand>(fRegionTrack, nc));
+            }
+            fWin->fStack->Execute(std::move(macro), *fWin->fProject);
+            fWin->fTimeline->Invalidate();
+            char msg[64];
+            std::snprintf(msg, sizeof(msg), "Stripped to %d regions",
+                          (int)fRegionSpans.size());
+            fWin->SetTransportStatus(msg);
+            break;
+        }
+    }
+    fWin->UpdatePulse();
 }
 
 std::string RenderJobs::RenderPath(const std::string& tag) const {

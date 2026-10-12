@@ -24,7 +24,10 @@ constexpr float kDesignTrackGap    = 1.0f;   // divider between lanes
 constexpr float kDesignHeaderWidth = 150.0f; // slim per-lane header
 constexpr float kDesignHdrMeterW   = 16.0f;  // per-track meter strip (right edge)
 constexpr float kDesignInspectorW  = 190.0f; // left inspector column
-constexpr float kDesignTransportH  = 36.0f;  // the transport strip
+// The transport strip (M3.1): two rows — the transport buttons and the LCD on
+// top, the status line under them (MainWindow::LayoutTransportBar pins the
+// bar's children to this height).
+constexpr float kDesignTransportH  = 54.0f;
 // The arrange tool strip (M2.3), above the ruler: six tool buttons at the
 // piano roll's button pitch, then the snap field and the zoom pair.
 constexpr float kDesignToolbarHeight = 28.0f;
@@ -103,6 +106,27 @@ constexpr uint32 kMsgMeterClipReset  = 'xpcr';
 // TransportBar -> MainWindow: the bar's width changed (a pane re-layout can do
 // that without the window resizing), so re-place its pinned children.
 constexpr uint32 kMsgTransportLayout = 'xtly';
+
+// --- M3.1: the transport bar's own controls ---------------------------------
+// The bar's buttons, the time display's format cycle and its typed entry. The
+// MainWindow handles all of them; the functional tests post exactly these.
+// (Play/Stop/Rec use MainWindow's own MSG_PLAY/MSG_STOP/MSG_REC, and the
+// metronome shares kMsgClickToggle above — the button and the C key are one
+// action.)
+constexpr uint32 kMsgTransportRtz     = 'xprz';   // return to zero
+constexpr uint32 kMsgTransportRewind  = 'xprw';   // back one bar
+constexpr uint32 kMsgTransportForward = 'xpfw';   // forward one bar
+constexpr uint32 kMsgTransportLoop    = 'xplp';   // loop on/off (the timeline's own)
+constexpr uint32 kMsgTransportPunch   = 'xppc';   // punch on/off
+// The time display: a click cycles BBT -> min:sec -> samples -> timecode, and
+// a typed entry arrives as a string to parse in the mode it was typed in.
+constexpr uint32 kMsgTimeCycle        = 'xptm';   // no fields
+constexpr uint32 kMsgTimeEntry        = 'xpte';   // string "text", int32 "mode"
+// MainWindow -> TransportBar: the strings it draws (status left, readouts in
+// the LCD's info line). Public because the tests post the same ones to prove a
+// finished job (or a bad time entry) reaches the screen.
+constexpr uint32 kMsgTransportStatus  = 'xpts';   // string "s"
+constexpr uint32 kMsgTransportInfo    = 'xpti';   // string "s"
 
 // Forward a spacebar key-down to the main window as a transport toggle, so any
 // child window (FX, Mixer, piano roll, ...) can start/stop playback. Call from a
