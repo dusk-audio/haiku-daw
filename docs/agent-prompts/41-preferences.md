@@ -87,9 +87,11 @@ control to this window. What this package leaves behind for it:
   `SetMetronomeSound(int)` (atomics, read in the callback, like
   `SetMetronome(bool)`). `Metronome` is kit-free and its tests already exist
   (`tests/metronome_tests.cpp`).
-- **Dark mode** — the window posts `MSG_THEME_MODE`; `MainWindow` keeps that
-  handler and its `SetThemeMode()` (it saves the preference itself). Only the
-  View menu item goes away.
+- **Dark mode** — the check box rides in the window's own `kMsgPrefsChanged`
+  (one funnel, so a click cannot arrive twice), and `MainWindow::ApplyPrefs`
+  calls the same `SetThemeMode()` the View menu item did (which saves the
+  preference itself). Only the View menu ITEM goes away; `MSG_THEME_MODE` stays
+  as the toggle the functional suite drives.
 - **UI scale** — `SetThemeScaleOverride(scale)` (`0` = follow the system
   font), then `ApplyThemeToAllWindows()` so every window re-takes its cached
   geometry colours; and it is applied in `main.cpp` *before* the first window

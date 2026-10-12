@@ -868,10 +868,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
 
         case MSG_THEME_MODE:
-            // The Preferences window's Dark Mode check box (M3.5; it was the
-            // View menu's item before that): a preference, applied live and
-            // saved. Toggling rather than setting is kept because the
-            // functional test and the window's own state both go through it.
+            // Toggle the look. It was the View menu's Dark Mode item; that
+            // item moved into the Preferences window (M3.5), which posts its
+            // whole state as kMsgPrefsChanged instead (ApplyPrefs sets the
+            // mode from the "dark" field). This id is kept for the functional
+            // test, which is what drives the switch now.
             SetThemeMode(ActiveThemeMode() == ThemeMode::Dark ? ThemeMode::System
                                                               : ThemeMode::Dark);
             break;
