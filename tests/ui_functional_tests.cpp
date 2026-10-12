@@ -1102,19 +1102,27 @@ static void TestPianoRollTransforms(MainWindow* win, Project& project,
 
     // Humanize: a fresh take each time (times/velocities move, and the model
     // says so).
-    roll->Lock();
-    rv->RunMidiOp(MidiOp::Humanize);
-    roll->Unlock();
+    //
+    // The snapshot is taken BEFORE the op, and the wait comes after it: taking
+    // it afterwards races the edit the op posts, which made this check fail
+    // once in a handful of runs (observed on the M5 branch's VM pass) -- and
+    // humanize draws for each note, so a clamped timing draw plus a zero
+    // velocity draw can leave the notes as they were. Retry, so a draw that
+    // changes nothing is not a test failure.
     std::vector<MidiNote> before;
     CHECK(notes(&before));
     std::vector<MidiNote> h;
-    // Against the state before it, not against one note: humanize draws for
-    // each note, and a clamped timing draw plus a zero velocity draw can leave
-    // any single note exactly as it was.
-    CHECK(WaitFor([&] {
-        if (!notes(&h) || h.size() != before.size()) return false;
-        return !NotesEqual(h, before);
-    }));
+    bool changed = false;
+    for (int attempt = 0; attempt < 3 && !changed; attempt++) {
+        roll->Lock();
+        rv->RunMidiOp(MidiOp::Humanize);
+        roll->Unlock();
+        changed = WaitFor([&] {
+            if (!notes(&h) || h.size() != before.size()) return false;
+            return !NotesEqual(h, before);
+        });
+    }
+    CHECK(changed);
     CHECK(stack.UndoName() == "Humanize");
 
     // Legato: the first note stretches to the second one's start.
