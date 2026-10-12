@@ -171,14 +171,76 @@ void SetTrackMuteGroupCommand::Undo(Project& p) {
 bool SetTrackSoloCommand::Do(Project& p) {
     Track* t = p.FindTrack(fTrack);
     if (!t) return false;
-    fOldSoloed = t->soloed;
-    t->soloed  = fNewSoloed;
+    fOld.clear();
+    const int group = t->soloGroup;
+    if (group > 0) {
+        // Solo-group: the new state goes to every member of the group, exactly
+        // as SetTrackMuteCommand's does for a mute group. Soloing one member
+        // therefore solos the group, which is what a solo group is FOR.
+        for (Track& o : p.Tracks())
+            if (o.soloGroup == group) {
+                fOld.push_back({o.id, o.soloed});
+                o.soloed = fNewSoloed;
+            }
+    } else {
+        fOld.push_back({t->id, t->soloed});
+        t->soloed = fNewSoloed;
+    }
     return true;
 }
 
 void SetTrackSoloCommand::Undo(Project& p) {
+    for (const auto& pr : fOld)
+        if (Track* t = p.FindTrack(pr.first))
+            t->soloed = pr.second;
+}
+
+// --- SetTrackSoloGroupCommand -----------------------------------------
+
+bool SetTrackSoloGroupCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldGroup = t->soloGroup;
+    t->soloGroup = fNewGroup < 0 ? 0 : fNewGroup;
+    return true;
+}
+
+void SetTrackSoloGroupCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack))
-        t->soloed = fOldSoloed;
+        t->soloGroup = fOldGroup;
+}
+
+// --- SetTrackTrimCommand ----------------------------------------------
+
+bool SetTrackTrimCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldTrim = t->trim;
+    float v = fNewTrim;
+    if (!(v >= 0.0f)) v = 0.0f;              // NaN -> silence, not garbage
+    if (v > kTrackTrimMax) v = kTrackTrimMax;
+    t->trim = v;
+    return true;
+}
+
+void SetTrackTrimCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->trim = fOldTrim;
+}
+
+// --- SetTrackPhaseCommand ---------------------------------------------
+
+bool SetTrackPhaseCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOldInvert = t->phaseInvert;
+    t->phaseInvert = fNewInvert;
+    return true;
+}
+
+void SetTrackPhaseCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack))
+        t->phaseInvert = fOldInvert;
 }
 
 // --- AddMidiClipCommand -----------------------------------------------

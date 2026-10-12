@@ -1083,6 +1083,96 @@ static void test_undo_gaps() {
     CHECK(!p.FindTrack(tid)->muted && !p.FindTrack(tid2)->muted);
 }
 
+// The mixer strip's own edits (M3.4): input trim (clamped, one undo step per
+// drag), polarity, and solo groups — the cascade that makes "solo one member"
+// mean "solo the group", beside the mute groups that already did.
+static void test_mixer_strip_extras() {
+    Project p;
+    CommandStack stack;
+
+    auto add = std::make_unique<AddTrackCommand>(TrackType::Audio, "A");
+    AddTrackCommand* raw = add.get();
+    CHECK(stack.Execute(std::move(add), p));
+    const TrackId a = raw->CreatedId();
+    auto add2 = std::make_unique<AddTrackCommand>(TrackType::Audio, "B");
+    AddTrackCommand* raw2 = add2.get();
+    CHECK(stack.Execute(std::move(add2), p));
+    const TrackId b = raw2->CreatedId();
+
+    // --- input trim -------------------------------------------------------
+    CHECK(p.FindTrack(a)->trim == 1.0f);           // unity by default
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, 0.5f), p));
+    CHECK(p.FindTrack(a)->trim == 0.5f);
+    CHECK(stack.UndoName() == "Set Input Trim");
+    CHECK(stack.Undo(p));
+    CHECK(p.FindTrack(a)->trim == 1.0f);
+    CHECK(stack.Redo(p));
+    CHECK(p.FindTrack(a)->trim == 0.5f);
+
+    // A drag posts continuously: all of it is ONE undo step.
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, 1.25f), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, 1.75f), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, 2.0f), p));
+    CHECK(p.FindTrack(a)->trim == 2.0f);
+    CHECK(stack.Undo(p));                          // back past the whole drag
+    // ... to the value the coalesced entry was opened on, which is the state
+    // before the FIRST of the merged edits (1.0 here: the 0.5 above is that
+    // same entry's redo target).
+    CHECK(p.FindTrack(a)->trim == 1.0f);
+
+    // Clamped, never rejected: below zero is silence, above the ceiling is the
+    // ceiling (a trim is not a second fader).
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, -3.0f), p));
+    CHECK(p.FindTrack(a)->trim == 0.0f);
+    CHECK(stack.Execute(std::make_unique<SetTrackTrimCommand>(a, 100.0f), p));
+    CHECK(p.FindTrack(a)->trim == kTrackTrimMax);
+    CHECK(stack.Undo(p));                          // one step: the whole pair
+    CHECK(p.FindTrack(a)->trim == 1.0f);
+
+    // --- polarity ---------------------------------------------------------
+    CHECK(!p.FindTrack(a)->phaseInvert);
+    CHECK(stack.Execute(std::make_unique<SetTrackPhaseCommand>(a, true), p));
+    CHECK(p.FindTrack(a)->phaseInvert);
+    CHECK(stack.UndoName() == "Invert Phase");
+    CHECK(stack.Undo(p));
+    CHECK(!p.FindTrack(a)->phaseInvert);
+
+    // --- solo groups ------------------------------------------------------
+    CHECK(p.FindTrack(a)->soloGroup == 0);
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(a, 3), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(b, 3), p));
+    CHECK(p.FindTrack(a)->soloGroup == 3 && p.FindTrack(b)->soloGroup == 3);
+
+    // Soloing ONE member solos the group...
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloCommand>(a, true), p));
+    CHECK(p.FindTrack(a)->soloed);
+    CHECK(p.FindTrack(b)->soloed);
+    // ...and one undo puts every member back.
+    CHECK(stack.Undo(p));
+    CHECK(!p.FindTrack(a)->soloed);
+    CHECK(!p.FindTrack(b)->soloed);
+
+    // Clearing the group puts the plain single-track behaviour back: soloing A
+    // must not touch B any more.
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(a, 0), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(b, 0), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloCommand>(a, true), p));
+    CHECK(p.FindTrack(a)->soloed);
+    CHECK(!p.FindTrack(b)->soloed);
+    CHECK(stack.Undo(p));
+
+    // A group whose members were already soloed: unsoloing one unsolos all,
+    // and undo restores each member's own prior state.
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(a, 5), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloGroupCommand>(b, 5), p));
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloCommand>(b, true), p));
+    CHECK(p.FindTrack(a)->soloed && p.FindTrack(b)->soloed);
+    CHECK(stack.Execute(std::make_unique<SetTrackSoloCommand>(a, false), p));
+    CHECK(!p.FindTrack(a)->soloed && !p.FindTrack(b)->soloed);
+    CHECK(stack.Undo(p));
+    CHECK(p.FindTrack(a)->soloed && p.FindTrack(b)->soloed);
+}
+
 int main() {
     test_undo_history_cap();
     test_add_and_undo_track();
@@ -1107,6 +1197,7 @@ int main() {
     test_frame_seconds_roundtrip();
     test_relink_media();
     test_undo_gaps();
+    test_mixer_strip_extras();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
