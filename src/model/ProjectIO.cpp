@@ -223,6 +223,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     for (const Marker& mk : p.markers)
         f << "marker " << (long long)mk.frame << " " << Quote(mk.name) << "\n";
 
+    // The project's notes (M3.6). An optional line, written only when there is
+    // something to write -- the append-only rule every post-1.0 field follows,
+    // so a project that never sets notes saves the bytes it always did.
+    if (!p.notes.empty())
+        f << "notes " << Quote(p.notes) << "\n";
+
     for (const Track& t : p.Tracks()) {
         const char* ty = t.type == TrackType::Midi ? "midi"
                        : t.type == TrackType::Bus  ? "bus" : "audio";
@@ -509,6 +515,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             long long fr = 0; iss >> fr;
             Marker mk; mk.frame = (Frame)fr; mk.name = Unquote(line, escaped);
             p.markers.push_back(mk);
+        }
+        else if (kw == "notes") {
+            // The project's own notes (M3.6). Optional: a file without the line
+            // loads as a project with no notes, which is what it is.
+            p.notes = Unquote(line, escaped);
         }
         else if (kw == "transport") {
             long long ph = 0, ls = 0, le = 0; int loop = 0;

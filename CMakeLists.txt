@@ -42,6 +42,8 @@ add_library(daw_model
     src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
+    src/model/ProjectTimebase.cpp # kit-free frame rescale for a sample-rate change
+    src/model/ProjectResample.cpp # kit-free media conversion at another rate
     src/app/AppSettings.cpp     # kit-free app settings text serializer
     src/app/ThemePalette.cpp    # kit-free theme palette derivation (T1)
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
@@ -537,6 +539,13 @@ add_test(NAME recordplan_tests COMMAND recordplan_tests)
 add_executable(appsettings_tests tests/appsettings_tests.cpp)
 target_link_libraries(appsettings_tests PRIVATE daw_model)
 add_test(NAME appsettings_tests COMMAND appsettings_tests)
+
+# Project Settings (M3.6): the meter/notes commands and their round trip, the
+# timeline rescale a sample-rate change performs (against every frame-bearing
+# field), the undo's exactness, and the media conversion's own output.
+add_executable(project_settings_tests tests/project_settings_tests.cpp)
+target_link_libraries(project_settings_tests PRIVATE daw_model)
+add_test(NAME project_settings_tests COMMAND project_settings_tests)
 
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)

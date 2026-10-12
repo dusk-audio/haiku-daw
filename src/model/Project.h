@@ -291,6 +291,10 @@ public:
     TempoMap      tempoMap;            // variable tempo + meter (authoritative)
     Transport     transport;
     std::vector<Marker> markers;      // named position markers (sorted by frame)
+    // The project's own notes (M3.6): free text the Project Settings window
+    // edits, saved with the project. Empty writes no line at all, so a project
+    // that never uses it stays byte-identical to the format before it.
+    std::string   notes;
 
     const std::vector<Track>& Tracks() const { return fTracks; }
     std::vector<Track>&       Tracks()       { return fTracks; }
@@ -317,6 +321,7 @@ public:
         tempoMap   = TempoMap{};
         transport  = Transport{};
         markers.clear();
+        notes.clear();
         fLastTrackId = kInvalidTrackId;
         fLastClipId  = kInvalidClipId;
     }
