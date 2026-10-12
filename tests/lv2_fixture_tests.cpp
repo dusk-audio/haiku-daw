@@ -46,6 +46,7 @@ const char* kMonoGain    = "urn:haiku-daw:test:mono-gain";
 const char* kTwoUi       = "urn:haiku-daw:test:two-ui";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
 const char* kLatencyStep  = "urn:haiku-daw:test:latency-step";
+const char* kSidechainGain= "urn:haiku-daw:test:sidechain-gain";
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
 const char* kCvPort      = "urn:haiku-daw:test:cv-port";
@@ -96,13 +97,15 @@ int main() {
         return 1;
     }
 
-    // Eight fixtures: five hostable (mono gain, stereo latent, latency step,
-    // the two-UI one, and the stateful one), three deliberately refused.
-    CHECK(mineHosted == 5);
+    // Nine fixtures: six hostable (mono gain, stereo latent, latency step,
+    // sidechain gain, the two-UI one, and the stateful one), three deliberately
+    // refused.
+    CHECK(mineHosted == 6);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
     CHECK(host.Find(kLatencyStep) != nullptr);
+    CHECK(host.Find(kSidechainGain) != nullptr);
 
     // --- Rejection, deterministically ------------------------------------
     {
@@ -166,6 +169,16 @@ int main() {
                 CHECK(p->params[1].isInteger);
             }
         }
+        // Which plugins take a sidechain key (M7.1 tail): the flag the hosts
+        // and the editor route on, read from a real bundle's port properties.
+        if (const Lv2PluginInfo* k = host.Find(kSidechainGain)) {
+            CHECK(k->sidechain);          // two connectionOptional audio inputs
+            CHECK(!k->monoDual);          // 2 in / 2 out stays one instance
+            CHECK(k->params.size() == 1); // gain; the key ports are not controls
+        }
+        if (const Lv2PluginInfo* l = host.Find(kStereoLatent))
+            CHECK(!l->sidechain);         // no optional inputs, so no key
+
         const Lv2PluginInfo* m = host.Find(kMonoGain);
         CHECK(m != nullptr);
         if (m) {

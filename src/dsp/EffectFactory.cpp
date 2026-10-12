@@ -18,6 +18,16 @@ void SetPluginFactory(PluginFactoryFn fn) { gPluginFactory = fn; }
 static Lv2FactoryFn gLv2Factory = nullptr;
 void SetLv2Factory(Lv2FactoryFn fn) { gLv2Factory = fn; }
 
+static Lv2SidechainProbeFn gLv2Sidechain = nullptr;
+void SetLv2SidechainProbe(Lv2SidechainProbeFn fn) { gLv2Sidechain = fn; }
+
+bool EffectTakesSidechain(const EffectDesc& d) {
+    if (EffectSupportsSidechain(d.type)) return true;
+    if (d.type == EffectType::Lv2 && gLv2Sidechain && !d.pluginName.empty())
+        return gLv2Sidechain(d.pluginName);
+    return false;
+}
+
 std::unique_ptr<IEffect> MakeEffect(const EffectDesc& d, double sampleRate) {
     if (d.type == EffectType::Plugin) {
         if (!gPluginFactory) return nullptr;

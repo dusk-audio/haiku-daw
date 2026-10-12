@@ -260,7 +260,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // "source feeds its own detector" has no order in which it can be read.
     for (const Track& t : tracks)
         for (const EffectDesc& d : t.fx)
-            if (EffectSupportsSidechain(d.type)
+            if (EffectTakesSidechain(d)
                 && d.sidechainSource != kInvalidTrackId
                 && d.sidechainSource != t.id)
                 edges.push_back({d.sidechainSource, t.id});
@@ -389,7 +389,9 @@ bool ExportWav(const Project& project, const std::string& outPath,
     const bool keysSolvable = routingOk && pdcOk;
     auto addKeyRoute = [&](const EffectDesc& d, TrackId consumer, int* out) {
         *out = -1;
-        if (!keysSolvable || !EffectSupportsSidechain(d.type)) return;
+        // The same predicate the engine routes with: a built-in dynamics
+        // insert, or an LV2 plugin whose topology has a sidechain pair.
+        if (!keysSolvable || !EffectTakesSidechain(d)) return;
         if (d.sidechainSource == kInvalidTrackId) return;          // none
         if (consumer != kRoutingMaster && d.sidechainSource == consumer)
             return;   // self-key: no order can read a node's own output first

@@ -1742,7 +1742,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     std::vector<std::pair<TrackId, TrackId>> keyEdges;
     std::vector<TrackId>                     keySrcIds;   // deduped, for nodes
     auto addKey = [&](const EffectDesc& d, TrackId consumer) {
-        if (!EffectSupportsSidechain(d.type)) return;
+        // EffectTakesSidechain, not the model's type test: an LV2 insert takes
+        // a key when its PLUGIN has a sidechain pair (M7.1 tail), and the
+        // plugin layer answers that through the factory's probe.
+        if (!EffectTakesSidechain(d)) return;
         const TrackId src = d.sidechainSource;
         if (src == kInvalidTrackId || src == consumer) return;
         keyEdges.push_back({src, consumer});
@@ -2028,7 +2031,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // puts the key on the same timeline as the mix it is ducking. (The key
         // is a TRACK even here: nothing keys the master.)
         long keyNode = -1;
-        if (pdcKnown && sidechainSolvable && EffectSupportsSidechain(d.type)
+        if (pdcKnown && sidechainSolvable && EffectTakesSidechain(d)
             && d.sidechainSource != kInvalidTrackId
             && project.FindTrack(d.sidechainSource)) {
             keyNode = nodeIndexOf(d.sidechainSource);

@@ -244,6 +244,62 @@ void LatencyStepRun(LV2_Handle handle, uint32_t frames) {
 void LatencyStepCleanup(LV2_Handle h) { delete static_cast<LatencyStep*>(h); }
 
 // ---------------------------------------------------------------------------
+// urn:haiku-daw:test:sidechain-gain — out = in * key: a keyed VCA.
+//
+// 2 required in / 2 required out plus a TWO-PORT OPTIONAL key pair, which is
+// how LV2 spells "sidechain": the host may leave a connectionOptional input
+// unconnected, so it is exactly the port a host may or may not feed a key.
+// The DSP is one multiply, so a test can assert the key really arrived, on the
+// right channel and at the right time — and with no key routed the key buffers
+// are silence, which makes the output silence (the fail-soft this fixture
+// demonstrates).
+//
+// A NULL key port would be the old host behaviour (optional ports were left
+// unconnected before package 05's place for a signal existed). The guard below
+// keeps that a clean silence rather than a crash, so the test reports a wrong
+// value instead of taking the suite down.
+// ---------------------------------------------------------------------------
+struct SidechainGain {
+    const float* in[2]  = {nullptr, nullptr};
+    float*       out[2] = {nullptr, nullptr};
+    const float* key[2] = {nullptr, nullptr};
+    const float* gain   = nullptr;
+};
+
+LV2_Handle SidechainGainInstantiate(const LV2_Descriptor*, double,
+                                    const char*, const LV2_Feature* const*) {
+    return new SidechainGain();
+}
+
+void SidechainGainConnect(LV2_Handle handle, uint32_t port, void* data) {
+    SidechainGain* self = static_cast<SidechainGain*>(handle);
+    switch (port) {
+        case 0: self->in[0]  = static_cast<const float*>(data); break;
+        case 1: self->in[1]  = static_cast<const float*>(data); break;
+        case 2: self->out[0] = static_cast<float*>(data);       break;
+        case 3: self->out[1] = static_cast<float*>(data);       break;
+        case 4: self->key[0] = static_cast<const float*>(data); break;
+        case 5: self->key[1] = static_cast<const float*>(data); break;
+        case 6: self->gain   = static_cast<const float*>(data); break;
+        default: break;
+    }
+}
+
+void SidechainGainRun(LV2_Handle handle, uint32_t frames) {
+    SidechainGain* self = static_cast<SidechainGain*>(handle);
+    if (!self->in[0] || !self->in[1] || !self->out[0] || !self->out[1]) return;
+    const float g = self->gain ? *self->gain : 1.0f;
+    for (uint32_t i = 0; i < frames; i++) {
+        for (int c = 0; c < 2; c++) {
+            const float k = self->key[c] ? self->key[c][i] : 0.0f;
+            self->out[c][i] = self->in[c][i] * k * g;
+        }
+    }
+}
+
+void SidechainGainCleanup(LV2_Handle h) { delete static_cast<SidechainGain*>(h); }
+
+// ---------------------------------------------------------------------------
 // Two plugins that MUST be refused, so the rejection paths are tested without
 // depending on a particular broken bundle being installed:
 //   bad-topology  — 3 audio in / 1 audio out, none optional.
@@ -407,6 +463,9 @@ const LV2_Descriptor kDescriptors[] = {
     { "urn:haiku-daw:test:latency-step",
       LatencyStepInstantiate, LatencyStepConnect, LatencyStepActivate,
       LatencyStepRun, nullptr, LatencyStepCleanup, nullptr },
+    { "urn:haiku-daw:test:sidechain-gain",
+      SidechainGainInstantiate, SidechainGainConnect, nullptr,
+      SidechainGainRun, nullptr, SidechainGainCleanup, nullptr },
     { "urn:haiku-daw:test:bad-topology",
       InertInstantiate, InertConnect, nullptr,
       InertRun, nullptr, InertCleanup, nullptr },

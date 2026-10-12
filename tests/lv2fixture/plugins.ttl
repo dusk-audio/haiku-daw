@@ -103,6 +103,43 @@
         lv2:minimum 0 ; lv2:maximum 8192 ; units:unit units:frame
     ] .
 
+# --- A keyed VCA: the optional audio input pair IS the sidechain ------------
+# Ports 4 and 5 are `lv2:connectionOptional` audio inputs, which is the LV2
+# spelling of "this input may be left unconnected" — i.e. exactly the ports a
+# host can feed a key to. The host classifies them as required? No: they do not
+# count toward the topology (so this plugin is a clean 2-in/2-out stereo
+# insert), and it connects them to the insert's resolved key, or to silence.
+# out = in * key * gain, so a wrong connection is measurable, not subtle.
+<urn:haiku-daw:test:sidechain-gain>
+    a lv2:Plugin ;
+    doap:name "DAW Test Sidechain Gain" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "in_l" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "in_r" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "out_l" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "out_r" ; lv2:name "Out R"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:portProperty lv2:connectionOptional ;
+        lv2:index 4 ; lv2:symbol "key_l" ; lv2:name "Key L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:portProperty lv2:connectionOptional ;
+        lv2:index 5 ; lv2:symbol "key_r" ; lv2:name "Key R"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 6 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
+    ] .
+
 # --- Must be REJECTED: 3 mandatory audio in, 1 out --------------------------
 <urn:haiku-daw:test:bad-topology>
     a lv2:Plugin ;
