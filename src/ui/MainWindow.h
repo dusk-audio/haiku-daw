@@ -20,6 +20,8 @@
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
 #include "PreferencesWindow.h"        // PrefsView (M3.5)
+#include "ProjectSettingsWindow.h"    // ProjectSettingsView (M3.6)
+#include "NewProjectWindow.h"         // TemplateInfo rows (M3.7)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
 #include "Theme.h"                    // ThemeAware + the tokens (T1)
 #include "RecordController.h"         // the record state + the recorder
@@ -256,8 +258,12 @@ private:
     void SaveFxPreset(TrackId tid, int fx, const char* name);
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path, bool asRecovery = false);
-    // File > New: ask, then a fresh empty project at the session's rate.
-    void NewProject();
+    // File > New (M3.7): the New Project dialog (Empty or a template), then
+    // the unsaved-changes prompt, then the new session. `templatePath` empty
+    // means the built-in Empty.
+    void ShowNewProjectWindow();
+    void NewProjectFrom(const std::string& templateId,
+                        const std::string& templatePath);
     void RememberProject(const std::string& path);  // recent list + menu
     // After a load: one dialog for media that is gone, then either silence
     // (Skip) or a walk to find each file (Locate…), applied as one command.
@@ -484,7 +490,16 @@ private:
     void ApplyPrefs(const PrefsView& values);
     // The crash-recovery runner at the chosen interval; 0 = no runner at all.
     void StartAutosave(int seconds);
+    // --- the Project Settings window (M3.6), the same shape ----------------
+    void ShowProjectSettingsWindow();
+    void PushProjectSettingsToWindow();
+    ProjectSettingsView CurrentProjectSettings() const;
+    // The differences between `values` and the project become ONE undoable
+    // command-stack edit ("Project Settings"), applied here.
+    void ApplyProjectSettings(const ProjectSettingsView& values);
+    BMessenger fProjSettingsMsgr;       // the open Project Settings window
     BMessenger fPrefsMsgr;              // the open Preferences window
+    BMessenger fNewProjectMsgr;         // the open New Project dialog (M3.7)
     // The preferences nothing else owns: the rate a NEW project starts at, the
     // UI scale (0 = the user's font), the default project folder and the
     // autosave interval. Loaded/saved with the rest of AppSettings.

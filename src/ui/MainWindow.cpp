@@ -58,6 +58,7 @@
 #include <Button.h>
 #include <File.h>
 #include <FindDirectory.h>
+#include <kernel/image.h>   // B_APP_IMAGE_SYMBOL (the template lookup, M3.7)
 #include <Entry.h>
 #include <Directory.h>   // create_directory (stems folder)
 #include <FilePanel.h>
@@ -340,6 +341,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new ThemedMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
     fileMenu->AddItem(new ThemedMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
+    // Project Settings… (M3.6): the project's own rate, tempo, meter and notes.
+    fileMenu->AddItem(new ThemedMenuItem("Project Settings" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_PROJECT_SETTINGS)));
     // Preferences… (M3.5): the window that now carries what used to be the
     // Audio menu's radio submenus and View's Dark Mode toggle.
     fileMenu->AddItem(new ThemedMenuItem("Preferences" B_UTF8_ELLIPSIS,
@@ -872,6 +876,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                                               : ThemeMode::Dark);
             break;
 
+        case MSG_PROJECT_SETTINGS:      // File > Project Settings… (M3.6)
+            ShowProjectSettingsWindow();
+            break;
+        case kMsgProjSettingsChanged: {
+            // Apply was pressed: the differences are one edit (see
+            // ApplyProjectSettings).
+            ProjectSettingsView v = CurrentProjectSettings();
+            double d = 0.0;
+            int32 i = 0;
+            bool b = false;
+            const char* s = nullptr;
+            if (msg->FindDouble("rate", &d) == B_OK)  v.sampleRate = d;
+            if (msg->FindDouble("tempo", &d) == B_OK) v.tempoBPM = d;
+            if (msg->FindInt32("mnum", &i) == B_OK)   v.meterNum = i;
+            if (msg->FindInt32("mdenom", &i) == B_OK) v.meterDenom = i;
+            if (msg->FindString("notes", &s) == B_OK && s) v.notes = s;
+            if (msg->FindBool("resample", &b) == B_OK) v.resampleMedia = b;
+            ApplyProjectSettings(v);
+            break;
+        }
         case MSG_PREFERENCES:
             ShowPreferencesWindow();
             break;
@@ -1869,9 +1893,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTransportCtl.ReloadActiveEngine();
             break;
         }
-        case MSG_NEW_PROJECT:
-            NewProject();
+        case MSG_NEW_PROJECT:          // File > New: the dialog (M3.7)
+            ShowNewProjectWindow();
             break;
+        case kMsgNewProjectChosen: {
+            const char* id = nullptr;
+            const char* path = nullptr;
+            msg->FindString("id", &id);
+            msg->FindString("path", &path);
+            NewProjectFrom(id != nullptr ? id : "empty",
+                           path != nullptr ? path : "");
+            break;
+        }
         case MSG_SAVE:
         case MSG_SAVE_AS:
             // Save goes straight to the project's own file once it has one --
@@ -3077,17 +3110,88 @@ void MainWindow::FinishRelink() {
     UpdateTitle();         // a repair is an edit: the project is dirty now
 }
 
-// File > New: a fresh, empty session. The sample rate stays -- it belongs to
-// the session (the device), not to the project's content -- and everything
-// else goes. Same "the engine rebuilds at the next play" stance as LoadFrom.
-void MainWindow::NewProject() {
+// --- File > New (M3.7): the dialog, then the new session -------------------
+
+// Where the app's own binary is (a build tree's `build/daw`), for the template
+// lookup. Best effort: an empty answer drops that candidate, it never fails.
+static std::string AppImageDir() {
+    char buf[B_PATH_NAME_LENGTH];
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_IMAGE_PATH, NULL, buf,
+                  sizeof(buf)) != B_OK)
+        return std::string();
+    const std::string path(buf);
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// The installation's data directory (an installed app: the package puts the
+// templates in data/haiku-daw/templates). Best effort, like the above.
+static std::string InstalledDataDir() {
+    char buf[B_PATH_NAME_LENGTH];
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_DATA_DIRECTORY, NULL, buf,
+                  sizeof(buf)) != B_OK)
+        return std::string();
+    return std::string(buf);
+}
+
+void MainWindow::ShowNewProjectWindow() {
+    if (fNewProjectMsgr.IsValid()) {
+        BMessage act(kMsgNewProjectActivate);
+        fNewProjectMsgr.SendMessage(&act);
+        return;
+    }
+    const std::vector<std::string> candidates =
+        TemplateCandidates(AppImageDir(), InstalledDataDir());
+    std::vector<TemplateInfo> templates =
+        ScanTemplates(FindTemplatesDir(candidates));
+    // The dialog always offers Empty. With a template directory that is the
+    // shipped data/templates/empty.dawproj; without one it is the built-in row
+    // (no file), which is also what makes a missing directory a non-event.
+    bool haveEmpty = false;
+    for (const TemplateInfo& t : templates)
+        if (t.id == "empty") haveEmpty = true;
+    if (!haveEmpty) templates.insert(templates.begin(), EmptyTemplate());
+
+    NewProjectWindow* win = new NewProjectWindow(std::move(templates),
+                                                 candidates, BMessenger(this));
+    fNewProjectMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The session a New (or a template) starts. The sample rate is the
+// default-sample-rate preference (M3.5) -- the rate belongs to the session
+// and to what the user asked new projects to be at, not to the template's
+// content, and the template's tracks, names and routing are what it brings.
+// Same "the engine rebuilds at the next play" stance as LoadFrom.
+void MainWindow::NewProjectFrom(const std::string& templateId,
+                                const std::string& templatePath) {
     if (!ConfirmDiscardChanges()) return;
     fTransportCtl.StopPlayback();
     fRecCtl.StopRecording();
     FlushFxEditors();
     CloseFxEditors();
-    const double rate = fProject->sampleRate;
-    *fProject = Project{};
+
+    bool fromTemplate = !templatePath.empty() && templateId != "empty";
+    if (fromTemplate) {
+        TemplateInfo info;
+        info.id = templateId;
+        info.path = templatePath;
+        Project loaded;
+        if (LoadTemplate(info, loaded)) {
+            *fProject = std::move(loaded);
+        } else {
+            // A template that cannot be read is reported and the user gets the
+            // empty session they asked for the new project to be -- never a
+            // half-loaded one.
+            ReportError("New Project",
+                        std::string("The template could not be read: ")
+                        + templatePath + "\nStarting an empty project.");
+            fromTemplate = false;
+        }
+    }
+    if (!fromTemplate) *fProject = Project{};
+
+    const double rate = fPrefsSampleRate > 0 ? (double)fPrefsSampleRate : 48000.0;
     fProject->sampleRate = rate;
     fProject->tempoMap.sampleRate = rate;
     fStack->Clear();
@@ -4051,6 +4155,102 @@ void MainWindow::ApplyPrefs(const PrefsView& v) {
     // new scale on this push), so the controls never show a value the app did
     // not apply.
     PushPrefsToWindow();
+}
+
+// --- the Project Settings window (M3.6) -------------------------------------
+
+// What the project IS, as the window shows it. The meter comes from the tempo
+// map's frame-0 change (the authoritative copy the engine and the ruler read;
+// SetMeterCommand keeps the project's own timeSig equal to it).
+ProjectSettingsView MainWindow::CurrentProjectSettings() const {
+    ProjectSettingsView v;
+    v.sampleRate = fProject->sampleRate;
+    v.tempoBPM   = fProject->tempoBPM;
+    const MeterChange& m0 = fProject->tempoMap.Meters().front();
+    v.meterNum   = m0.num;
+    v.meterDenom = m0.denom;
+    v.notes      = fProject->notes;
+    for (const Track& t : fProject->Tracks())
+        for (const Clip& c : t.clips)
+            if (!c.sourcePath.empty()) v.hasMedia = true;
+    return v;
+}
+
+void MainWindow::PushProjectSettingsToWindow() {
+    if (!fProjSettingsMsgr.IsValid()) return;
+    const ProjectSettingsView v = CurrentProjectSettings();
+    BMessage m(kMsgProjSettingsValues);
+    m.AddDouble("rate", v.sampleRate);
+    m.AddDouble("tempo", v.tempoBPM);
+    m.AddInt32("mnum", v.meterNum);
+    m.AddInt32("mdenom", v.meterDenom);
+    m.AddString("notes", v.notes.c_str());
+    m.AddBool("hasmedia", v.hasMedia);
+    fProjSettingsMsgr.SendMessage(&m);
+}
+
+void MainWindow::ShowProjectSettingsWindow() {
+    if (fProjSettingsMsgr.IsValid()) {
+        PushProjectSettingsToWindow();
+        BMessage act(kMsgProjSettingsActivate);
+        fProjSettingsMsgr.SendMessage(&act);
+        return;
+    }
+    ProjectSettingsWindow* win =
+        new ProjectSettingsWindow(CurrentProjectSettings(), BMessenger(this));
+    fProjSettingsMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The differences become ONE macro command, applied and undone as a unit: a
+// change to the rate AND the tempo AND the notes is one "Project Settings"
+// step in the Edit menu, not four.
+void MainWindow::ApplyProjectSettings(const ProjectSettingsView& values) {
+    const ProjectSettingsView cur = CurrentProjectSettings();
+    auto macro = std::make_unique<MacroCommand>("Project Settings");
+    bool any = false;
+
+    const bool rateChanged = values.sampleRate > 0.0
+        && std::fabs(values.sampleRate - cur.sampleRate) >= 0.5;
+    if (rateChanged) {
+        // First: it rescales the timeline the other edits are positioned in.
+        macro->Add(std::make_unique<SetSampleRateCommand>(
+            values.sampleRate, values.resampleMedia));
+        any = true;
+    }
+    if (std::fabs(values.tempoBPM - cur.tempoBPM) > 1e-6) {
+        double bpm = values.tempoBPM;
+        if (bpm < 20.0)  bpm = 20.0;
+        if (bpm > 300.0) bpm = 300.0;
+        macro->Add(std::make_unique<SetTempoCommand>(bpm));
+        any = true;
+    }
+    if (values.meterNum != cur.meterNum || values.meterDenom != cur.meterDenom) {
+        macro->Add(std::make_unique<SetMeterCommand>(values.meterNum,
+                                                     values.meterDenom));
+        any = true;
+    }
+    if (values.notes != cur.notes) {
+        macro->Add(std::make_unique<SetProjectNotesCommand>(values.notes));
+        any = true;
+    }
+    if (!any) return;              // Apply with nothing changed: a no-op, and
+                                   // not an empty undo step
+
+    if (!fStack->Execute(std::move(macro), *fProject)) return;
+
+    // The window's other views follow the model: the transport's tempo field,
+    // the ruler's grid, the waveforms (a rate change can repoint every clip at
+    // a converted file) and the running engine.
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.0f", fProject->tempoBPM);
+    if (fTempo != nullptr) fTempo->SetText(buf);
+    if (rateChanged) RebuildPeaks();
+    if (fTimeline != nullptr) fTimeline->Invalidate();
+    fTransportCtl.ReloadActiveEngine();
+    UpdateEditMenu();
+    UpdateTitle();
+    PushProjectSettingsToWindow();   // the window shows what was actually applied
 }
 
 // The crash-recovery runner at the chosen interval; 0 = no runner at all.
