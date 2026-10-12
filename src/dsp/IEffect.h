@@ -78,11 +78,48 @@ public:
     // no per-channel doubling is ever applied. Plugin-delay
     // compensation (Phase Y) reads this after Prepare() to delay-align sibling
     // signal paths so a latent effect on one track doesn't smear against a dry
-    // sibling. Must be constant across a Prepare()/Process() lifetime (the graph
-    // sizes its delay lines from it once). Default 0 = zero-latency (all the
-    // built-in effects: their feedback/IIR state adds no reported delay). An
-    // effect that reports N delays its output by exactly N frames.
+    // sibling. Default 0 = zero-latency (all the built-in effects: their
+    // feedback/IIR state adds no reported delay). An effect that reports N
+    // delays its output by exactly N frames.
+    //
+    // This is the value the HOST HAS COMMITTED TO: every delay line sized from
+    // it (PDC edges, RunInsertSlot's dry delay, the sidechain key routes) was
+    // built once and cannot be resized under the running graph. It must
+    // therefore stay constant for as long as that graph lives, and Process()
+    // must never change it. A latency that MOVES is reported through
+    // ObservedLatencySamples() and adopted through RelatchLatency(), both off
+    // the RT thread, and only into the NEXT graph (M4.6 — see the two calls
+    // below, and 02-lv2-host-PR.md for why).
     virtual int LatencySamples() const { return 0; }
+
+    // The latency this effect would report NOW, which can differ from
+    // LatencySamples() after it has been run: an LV2 plugin is allowed to move
+    // its latency port at any time (4K EQ 2 was measured going 0 -> 27 -> 0 as
+    // its oversampler engages), and the host has to be able to notice without
+    // touching the plugin from a foreign thread.
+    //
+    // Called OFF the RT thread (the engine's latency poll, from the UI pulse).
+    // An implementation that reads a plugin's port must return host-side state
+    // the RT thread has already PUBLISHED, never read the plugin itself.
+    //
+    // The default returns LatencySamples(): an effect whose latency cannot move
+    // (every built-in, and any plugin that keeps the port constant) reports no
+    // change, so the poll stays free.
+    virtual int ObservedLatencySamples() const { return LatencySamples(); }
+
+    // Adopt the latency this effect currently OBSERVES as the committed one
+    // (what LatencySamples() will now return), and return it. The host calls it
+    // off the RT thread, after giving the effect a short pre-roll —
+    // dsp/LatencyProbe.h's SettleLatency() — and BEFORE it sizes anything from
+    // the value (the engine's graph build, the exporter's PDC solve).
+    //
+    // The pre-roll is the point: a plugin's latency port is only authoritative
+    // once the plugin has run, so latching straight after activation is how v1
+    // reported 0 for a plugin actually running at 27.
+    //
+    // Default: return LatencySamples() unchanged — an effect that cannot move
+    // is already committed to the right value.
+    virtual int RelatchLatency() { return LatencySamples(); }
 
     // Live metering for the effect editor (read off the RT thread; effects
     // update these in Process). Default: no meter.

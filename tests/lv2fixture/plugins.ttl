@@ -29,10 +29,13 @@
         lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
     ] .
 
-# --- Stereo, and the only plugin here that reports non-zero latency ---------
-# Declares BOTH latency mechanisms on the same port, exactly as every real
+# --- Stereo, fixed latency, and it declares BOTH latency mechanisms ---------
+# 64 frames, reported and applied, unchanged for the plugin's whole lifetime.
+# Declares `lv2:designation lv2:latency` AND the deprecated
+# `lv2:portProperty lv2:reportsLatency` on the same port, exactly as every real
 # plugin encountered does, so the host's designation-over-property preference is
 # exercised against a real bundle and not only in the pure unit tests.
+# (The moving-latency case is `latency-step` below.)
 <urn:haiku-daw:test:stereo-latent>
     a lv2:Plugin ;
     ui:ui <urn:haiku-daw:test:stereo-latent#ui> ;
@@ -62,6 +65,39 @@
     ] , [
         a lv2:ControlPort , lv2:OutputPort ;
         lv2:index 6 ; lv2:symbol "latency" ; lv2:name "Latency" ;
+        lv2:designation lv2:latency ;
+        lv2:portProperty lv2:reportsLatency , lv2:integer ;
+        lv2:minimum 0 ; lv2:maximum 8192 ; units:unit units:frame
+    ] .
+
+# --- Stereo, and its latency MOVES after the first run ----------------------
+# Reports and applies 0 frames on its first run, then `kStepFrames` (128) from
+# its second: the shape a plugin with a switchable oversampler really has, and
+# the one a host that latches at activation gets wrong. See the C++ fixture for
+# what the two states do to the audio.
+<urn:haiku-daw:test:latency-step>
+    a lv2:Plugin ;
+    doap:name "DAW Test Latency Step" ;
+    lv2:optionalFeature lv2:hardRTCapable ;
+    lv2:port [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 0 ; lv2:symbol "inL" ; lv2:name "In L"
+    ] , [
+        a lv2:AudioPort , lv2:InputPort ;
+        lv2:index 1 ; lv2:symbol "inR" ; lv2:name "In R"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 2 ; lv2:symbol "outL" ; lv2:name "Out L"
+    ] , [
+        a lv2:AudioPort , lv2:OutputPort ;
+        lv2:index 3 ; lv2:symbol "outR" ; lv2:name "Out R"
+    ] , [
+        a lv2:ControlPort , lv2:InputPort ;
+        lv2:index 4 ; lv2:symbol "gain" ; lv2:name "Gain" ;
+        lv2:default 1.0 ; lv2:minimum 0.0 ; lv2:maximum 4.0
+    ] , [
+        a lv2:ControlPort , lv2:OutputPort ;
+        lv2:index 5 ; lv2:symbol "latency" ; lv2:name "Latency" ;
         lv2:designation lv2:latency ;
         lv2:portProperty lv2:reportsLatency , lv2:integer ;
         lv2:minimum 0 ; lv2:maximum 8192 ; units:unit units:frame

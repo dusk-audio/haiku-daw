@@ -4,6 +4,7 @@
 #include "IAudioSink.h"
 #include "Resampler.h"
 #include "../dsp/SincResampler.h"
+#include "../dsp/LatencyProbe.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
 #include "../synth/IInstrument.h"
@@ -286,7 +287,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
         int lat = 0;
         for (const EffectDesc& d : fxDescs) {
             auto e = MakeEffect(d, outRate);
-            if (e) { e->Prepare(outRate); lat += e->LatencySamples(); }
+            if (!e) continue;
+            e->Prepare(outRate);
+            // M4.6: the exporter's re-latch after its pre-roll. A plugin
+            // publishes its latency during run(), so the value readable
+            // straight after activation is not necessarily the one it works
+            // with; SettleLatency runs it briefly and adopts what it reports,
+            // and EVERY delay below -- the PDC solve, the pad that gets
+            // trimmed, the per-insert dry lines -- is sized from that number.
+            lat += SettleLatency(*e);
         }
         return lat;
     };
@@ -481,7 +490,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
         std::vector<char>       bypassed(chain.size(), 0);
         for (size_t i = 0; i < chain.size(); i++) {
             if (!chain[i]) continue;   // unavailable plugin: nothing to run
-            const int lat = chain[i]->LatencySamples();
+            // The same settle chainLatency measured with, so the line this
+            // sizes agrees with the PDC solve that decided `pad` (M4.6). The
+            // pre-roll also primes the plugin's own delay line with silence,
+            // which is what makes the rendered signal come out delayed by
+            // exactly its latency -- and therefore aligned once `pad` is
+            // trimmed off.
+            const int lat = SettleLatency(*chain[i]);
             mixes[i]    = ClampFxMix(fxDescs[i].mix);
             bypassed[i] = fxDescs[i].bypassed ? 1 : 0;
             dryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);

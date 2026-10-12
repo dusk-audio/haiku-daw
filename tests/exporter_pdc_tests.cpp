@@ -57,10 +57,59 @@ private:
     size_t             fW = 0;
 };
 
-// Factory: "latency:N" -> an N-sample LatencyPlugin.
+// A test effect whose latency MOVES (M4.6): it reports and applies 0 frames
+// until it has run twice, then N. That is the shape of a real plugin that
+// engages an oversampler on its first block or two — 4K EQ 2 was measured
+// 0 -> 27 -> 0 — and it is the case a host that sizes anything from the
+// activation-time reading gets wrong by N frames for the whole render.
+//
+// LatencySamples() is the COMMITTED value (what a running graph was built
+// from), ObservedLatencySamples() is what the plugin is doing NOW, and only
+// RelatchLatency() moves the first onto the second — exactly the split
+// IEffect documents, and exactly what dsp/LatencyProbe.h drives.
+class MovingLatencyPlugin : public IEffect {
+public:
+    explicit MovingLatencyPlugin(int n)
+        : fN(n < 0 ? 0 : n), fBuf(static_cast<size_t>(fN < 0 ? 0 : fN) * 2, 0.0f) {}
+    void Prepare(double) override {}
+    void Process(float* s, int frames) override {
+        for (int i = 0; i < frames; ++i) {           // read-then-write ring == N
+            const float ol = fN > 0 ? fBuf[fW * 2 + 0] : 0.0f;
+            const float orr = fN > 0 ? fBuf[fW * 2 + 1] : 0.0f;
+            if (fN > 0) {
+                fBuf[fW * 2 + 0] = s[i * 2 + 0];
+                fBuf[fW * 2 + 1] = s[i * 2 + 1];
+                if (++fW >= static_cast<size_t>(fN)) fW = 0;
+            }
+            if (fEngaged) { s[i * 2 + 0] = ol; s[i * 2 + 1] = orr; }
+        }
+        if (++fRuns >= 2) fEngaged = true;           // the step, after two runs
+    }
+    void Reset() override {
+        std::fill(fBuf.begin(), fBuf.end(), 0.0f);
+        fW = 0; fRuns = 0; fEngaged = false;
+    }
+    int LatencySamples() const override { return fCommitted; }
+    int ObservedLatencySamples() const override { return fEngaged ? fN : 0; }
+    int RelatchLatency() override { fCommitted = ObservedLatencySamples(); return fCommitted; }
+    const char* Name() const override { return "MovingLatencyTest"; }
+private:
+    int                fN;
+    std::vector<float> fBuf;
+    size_t             fW        = 0;
+    int                fRuns     = 0;
+    bool               fEngaged  = false;
+    int                fCommitted = 0;
+};
+
+// Factory: "latency:N" -> an N-sample LatencyPlugin; "moving-latency:N" -> the
+// same delay, but only after the plugin has run twice.
 static std::unique_ptr<IEffect> TestPluginFactory(const std::string& name) {
     if (name.rfind("latency:", 0) == 0)
         return std::unique_ptr<IEffect>(new LatencyPlugin(std::atoi(name.c_str() + 8)));
+    if (name.rfind("moving-latency:", 0) == 0)
+        return std::unique_ptr<IEffect>(
+            new MovingLatencyPlugin(std::atoi(name.c_str() + 15)));
     return nullptr;
 }
 
@@ -68,6 +117,13 @@ static EffectDesc LatencyFx(int n) {
     EffectDesc d;
     d.type = EffectType::Plugin;
     d.pluginName = "latency:" + std::to_string(n);
+    return d;
+}
+
+static EffectDesc MovingLatencyFx(int n) {
+    EffectDesc d;
+    d.type = EffectType::Plugin;
+    d.pluginName = "moving-latency:" + std::to_string(n);
     return d;
 }
 
@@ -194,6 +250,36 @@ int main() {
     // P-N (dry early) — alignment collapsed both onto P.
     CHECK(MaxAbsIn(sib, P + N - 2, P + N + 3) < 0.3f);
     CHECK(MaxAbsIn(sib, P - N - 2, P - N + 3) < 0.3f);
+
+    // --- A latency that MOVES, and the settle that gets it right (M4.6) -----
+    // The effect reports 0 until it has run twice, then N, and really applies
+    // N from then on. The exporter's pre-roll settles it BEFORE the PDC solve
+    // and before the per-insert dry line is sized, so the whole render is
+    // delayed by exactly N and the pad that gets trimmed is N: the impulse
+    // lands where the dry render puts it.
+    //
+    // A host that kept the activation-time 0 (the v1 behaviour, and what
+    // removing SettleLatency reproduces) pads by 0, renders N frames late and
+    // cuts N frames off the tail — the two assertions below then fail.
+    {
+        Project prM;
+        prM.sampleRate = SR; prM.masterGain = 1.0f;
+        Track tM; tM.id = prM.NextTrackId(); tM.type = TrackType::Audio;
+        tM.gain = 1.0f; tM.pan = 0.0f;
+        { Clip c; c.id = prM.NextClipId(); c.startFrame = P; c.lengthFrames = LEN;
+          c.sourcePath = wav; tM.clips.push_back(c); }
+        tM.fx.push_back(MovingLatencyFx(N));
+        prM.AddTrack(tM);
+        const std::string movPath = "/tmp/haiku_daw_pdc_moving.wav";
+        std::remove(movPath.c_str());
+        CHECK(ExportWav(prM, movPath, SR, {ExportFormat{32}}));
+        int64_t nMov = 0;
+        std::vector<float> mov = ReadAll(movPath, &nMov);
+        CHECK(std::llabs(PeakFrame(mov) - P) <= 1);            // settled: at P
+        CHECK(MaxAbsIn(mov, P + N - 2, P + N + 3) < 0.25f);    // not late by N
+        CHECK(std::llabs(nMov - nDry) <= 1);                   // nothing cut
+        std::remove(movPath.c_str());
+    }
 
     // --- A zero-latency plugin exercises the Plugin path with pad == 0 (must be
     // identical to dry).

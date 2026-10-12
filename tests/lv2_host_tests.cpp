@@ -141,11 +141,17 @@ int main() {
         fx->Prepare(48000.0);
         CHECK(fx->Name() != nullptr);
 
-        // Latency is latched, so it must not move under Reset() — the engine
-        // calls Reset mid-playback on a seek, and every delay line sized from
-        // this value (PDC, RunInsertSlot's dry delay) has already been built.
+        // Latency is committed per graph, so it must not move under Reset() —
+        // the engine calls Reset mid-playback on a seek, and every delay line
+        // sized from this value (PDC, RunInsertSlot's dry delay) has already
+        // been built.
         const int latency = fx->LatencySamples();
         CHECK(latency >= 0);
+        // The M4.6 poll's two reads are usable for every hostable plugin: the
+        // live reading is a real frame count, and adopting it is what an
+        // explicit relatch does. (The engine's poll compares the two; a
+        // negative or garbage Observed would make it re-solve on every block.)
+        CHECK(fx->ObservedLatencySamples() >= 0);
         fx->Reset();
         CHECK(fx->LatencySamples() == latency);
 
@@ -154,6 +160,11 @@ int main() {
         const std::vector<float> in = buf;
         fx->Process(buf.data(), kFrames);
         CHECK(fx->LatencySamples() == latency);     // nor under Process
+        CHECK(fx->ObservedLatencySamples() >= 0);   // the poll has a number
+        // Nothing ran between the publish above and this read, so adopting now
+        // gives exactly what was observed -- the value the next build would
+        // size its delay lines from.
+        CHECK(fx->RelatchLatency() == fx->ObservedLatencySamples());
         CHECK(AllFinite(buf));
         CHECK(Bounded(buf));
         if (buf != in) altered++;

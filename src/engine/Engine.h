@@ -766,6 +766,27 @@ public:
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
     void SetFxTempo(double bpm);
 
+    // Has any live insert's effect moved its own latency? (M4.6)
+    //
+    // An LV2 plugin may publish a new latency at any time (4K EQ 2 was
+    // measured 0 -> 27 -> 0), and the delay lines that compensate it were
+    // sized once, from the value the graph was BUILT with. Comparing each
+    // effect's ObservedLatencySamples() with its committed LatencySamples()
+    // decides whether the graph has to be re-solved.
+    //
+    // OFF the RT thread (the UI pulse calls it): it pins the active graph and
+    // reads atomics the RT thread publishes — no locks, no plugin calls. A
+    // true answer means "rebuild in place", which re-settles every effect
+    // (LatencyProbe.h) so the new PDC solve and the new delay lines use the
+    // value the plugin is really running with, and GraphSwap publishes them
+    // at a block boundary.
+    //
+    // Asking twice about the same unchanged value answers false the second
+    // time: the record of what a rebuild was already requested for is what
+    // stops a plugin whose report never matches a fresh instance's settle from
+    // asking for a rebuild on every pulse.
+    bool FxLatencyMoved();
+
     // Pull every live insert's own state (IEffect::SaveState) into the matching
     // descriptor of `project` — what a save, an export snapshot or an autosave
     // calls first, so the file (and the render) holds the patch the engine is
@@ -1171,6 +1192,12 @@ private:
     // Off-RT users of the active graph (GraphPin). The reclaimer waits for this
     // to be zero as well. Mutable: the meter readers are const.
     mutable std::atomic<int> fGraphUsers{0};
+    // A latency re-solve already asked for, per insert (M4.6): the identity
+    // hash the graph stores for the insert and the observed latency the
+    // rebuild was requested with. Touched only by FxLatencyMoved(), which the
+    // UI pulse calls on one thread — no lock, and no RT access.
+    struct LatencyAsked { uint64_t identity; int observed; };
+    std::vector<LatencyAsked> fLatencyAsked;
     std::atomic<float> fLufsM{Loudness::kSilenceLufs};
     std::atomic<float> fLufsS{Loudness::kSilenceLufs};
     std::atomic<float> fTpDb{Loudness::kSilenceDb};

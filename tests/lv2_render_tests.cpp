@@ -41,7 +41,9 @@ namespace {
 
 const char* kMonoGain     = "urn:haiku-daw:test:mono-gain";
 const char* kStereoLatent = "urn:haiku-daw:test:stereo-latent";
+const char* kLatencyStep  = "urn:haiku-daw:test:latency-step";
 constexpr int kLatentFrames = 64;      // must match the fixture
+constexpr int kStepFrames   = 128;     // latency-step's settled latency
 const double SR = 48000.0;
 
 void PutNote(Track& t, const MidiNote& n) {
@@ -197,6 +199,21 @@ int main() {
         const std::vector<float> wet = Render({ d });
         CHECK(!wet.empty());
         if (!wet.empty()) CHECK(SameSamples(wet, dry));
+    }
+
+    // --- A latency that MOVES, settled before anything is sized (M4.6) -----
+    // `latency-step` reports and applies 0 on its first run and 128 from its
+    // second, so a host that read the port at activation -- or latched what it
+    // read there -- would pad this insert by zero and render the whole bounce
+    // 128 frames late (and cut that much off the tail). The exporter's
+    // pre-roll settles it first, so the bounce is aligned bit-identically.
+    {
+        const std::vector<float> wet = Render({ Lv2Desc(kLatencyStep, { 1.0f }) });
+        CHECK(!wet.empty());
+        if (!wet.empty()) {
+            CHECK(SameSamples(wet, dry));                    // aligned
+            CHECK(!SameShifted(wet, dry, kStepFrames));      // and NOT shifted
+        }
     }
 
     // --- A missing plugin degrades to a hole, not to a broken render -------

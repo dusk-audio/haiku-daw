@@ -17,6 +17,7 @@
 #include <lv2/urid/urid.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>   // setenv, for the Haiku bundle search path
 #include <cstring>
 #include <mutex>
@@ -220,6 +221,15 @@ public:
                 lilv_instance_run(inst.handle, (uint32_t)n);
             }
 
+            // Publish what the plugin now says its latency is (M4.6). A float
+            // load out of host memory the plugin writes, a guard, and an atomic
+            // store: no lock, no allocation, no call into the plugin, so this
+            // is legal on the audio thread. LatencySamples() itself is NOT
+            // changed here -- the delay lines sized from it belong to the
+            // running graph -- the off-RT poll reads THIS and asks for a
+            // rebuild when it differs from what the graph was built with.
+            fLatencyLive.store(ReadLatencyPort(), std::memory_order_relaxed);
+
             for (int i = 0; i < n; i++) {
                 block[(size_t)i * 2]     = fOut[0][(size_t)i];
                 block[(size_t)i * 2 + 1] = fOut[1][(size_t)i];
@@ -231,9 +241,10 @@ public:
     // Deactivate/activate is LV2's documented way to return a plugin to its
     // initial state. It must NOT re-read the latency port: the engine calls
     // Reset() mid-playback on a seek, and IEffect requires LatencySamples() to
-    // stay constant for the whole Prepare()/Process() lifetime — every delay
+    // stay constant for as long as the graph built from it lives — every delay
     // line sized from it (PDC, and RunInsertSlot's per-insert dry delay) has
-    // already been built.
+    // already been built. A plugin whose latency has moved is picked up by the
+    // poll and a rebuild instead (ObservedLatencySamples/RelatchLatency).
     void Reset() override {
         for (Inst& inst : fInstances) {
             lilv_instance_deactivate(inst.handle);
@@ -269,6 +280,24 @@ public:
 
     int LatencySamples() const override { return fLatency; }
     const char* Name() const override { return fName.c_str(); }
+
+    // What the plugin reports RIGHT NOW, as published by the RT thread above.
+    // Read by the engine's off-RT latency poll; never touches the plugin.
+    int ObservedLatencySamples() const override {
+        return fLatencyLive.load(std::memory_order_relaxed);
+    }
+
+    // Adopt the value the plugin is reporting now (M4.6) as this Prepare
+    // lifetime's committed one. Called off the RT thread on an instance the
+    // caller owns exclusively -- the engine's build and the exporter both do
+    // it right after a pre-roll (dsp/LatencyProbe.h), when nothing else can be
+    // running the plugin. Reading the port here directly is therefore safe,
+    // and it is the freshest reading available.
+    int RelatchLatency() override {
+        fLatency = ReadLatencyPort();
+        fLatencyLive.store(fLatency, std::memory_order_relaxed);
+        return fLatency;
+    }
 
     // The plugin's own state, through its state:interface, as a lilv document.
     //
@@ -468,21 +497,29 @@ private:
             lilv_instance_connect_port(h, idx, nullptr);
     }
 
-    // Read the latency port ONCE, after activate, and keep that number for the
-    // rest of this Prepare lifetime. A plugin that moves its latency port at
-    // runtime is thereby ignored on purpose: the value has already been baked
-    // into the PDC solve and into RunInsertSlot's dry-delay line, and letting it
-    // drift would misalign soft bypass and the wet/dry blend with no way for
-    // either to notice.
-    void LatchLatency() {
-        fLatency = 0;
-        if (fLayout.latencyOut < 0) return;
-        if ((size_t)fLayout.latencyOut >= fControlOut.size()) return;
+    // The latency the plugin is reporting at this instant, validated: 0 when
+    // there is no port, or the value is NaN or non-positive; clamped to
+    // kMaxLatencyFrames. Plain arithmetic over a host-side float the plugin
+    // writes -- never a call into the plugin, so it is safe from the audio
+    // thread (Process publishes it) and from an off-RT relatch alike.
+    int ReadLatencyPort() const {
+        if (fLayout.latencyOut < 0) return 0;
+        if ((size_t)fLayout.latencyOut >= fControlOut.size()) return 0;
 
         const float v = fControlOut[(size_t)fLayout.latencyOut];
-        if (!(v == v) || v <= 0.0f) return;                  // NaN or none
-        if (v > (float)kMaxLatencyFrames) { fLatency = kMaxLatencyFrames; return; }
-        fLatency = (int)(v + 0.5f);
+        if (!(v == v) || v <= 0.0f) return 0;                // NaN or none
+        if (v > (float)kMaxLatencyFrames) return kMaxLatencyFrames;
+        return (int)(v + 0.5f);
+    }
+
+    // Commit the port's value as this Prepare lifetime's latency: called at
+    // activate (where it is the plugin's own published value) and from
+    // RelatchLatency (after a pre-roll, where it is the value the plugin is
+    // actually working with). The two must agree, so both go through the same
+    // reader and both keep fLatencyLive in step.
+    void LatchLatency() {
+        fLatency = ReadLatencyPort();
+        fLatencyLive.store(fLatency, std::memory_order_relaxed);
     }
 
     // A sane ceiling on a self-reported number that sizes host-side delay lines.
@@ -511,6 +548,10 @@ private:
 
     double fRate      = 0.0;
     int    fLatency   = 0;
+    // What Process last saw on the latency port. The committed fLatency above
+    // is what every delay line was built from; this is only ever a REQUEST for
+    // the next graph (M4.6), published by the RT thread and read by the poll.
+    std::atomic<int> fLatencyLive{0};
     bool   fActivated = false;   // guards deactivate(); see Teardown
 
     LV2_URID fSequenceType = 0;
