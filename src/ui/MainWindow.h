@@ -167,6 +167,12 @@ public:
         return fTransportCtl.fEngine
                    ? fTransportCtl.fEngine->PlayerStarts() : 0;
     }
+    // How many times the transport has crossed a loop end (M4.2). A seamless
+    // loop is exactly this counter moving while the three above do not.
+    uint64_t EngineWraps() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->Wraps() : 0;
+    }
     // Is a graph in place for the RT side (i.e. has the last rebuild landed)?
     bool EngineGraphReady() const {
         return fTransportCtl.fEngine && fTransportCtl.fEngine->HasGraph();

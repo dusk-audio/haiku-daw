@@ -74,6 +74,15 @@ inline uint32 EventModifiers(const BMessage* msg) {
 // TimelineView -> MainWindow: user clicked the ruler to move the playhead.
 constexpr uint32 kMsgSeek = 'seek';
 
+// TimelineView -> MainWindow: the transport's loop range or its on/off state
+// changed (M4.2). The running graph walks the range it was BUILT with, so this
+// is a re-position like a seek and not a structural edit: the window starts
+// playback again from the current position, and the new graph walks the new
+// range. (An edit that leaves the range alone — a clip moved, an insert added —
+// keeps its in-place join: that one IS exact, because both graphs walk the same
+// loop.) int64 fields, none: the model already holds the range.
+constexpr uint32 kMsgTransportRange = 'xprg';
+
 // TimelineView -> MainWindow: arming or a track's input changed; re-evaluate
 // idle MIDI monitoring (start/stop the monitor engine).
 constexpr uint32 kMsgMonitorRefresh = 'mon?';

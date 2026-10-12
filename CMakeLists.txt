@@ -489,6 +489,15 @@ add_executable(engine_graph_tests tests/engine_graph_tests.cpp)
 target_link_libraries(engine_graph_tests PRIVATE daw_model)
 add_test(NAME engine_graph_tests COMMAND engine_graph_tests)
 
+# The seamless loop's kit-free half (M4.2): the callback's block splitter, the
+# disk thread's pass walker, the loop-aware in-place join — and the property
+# that ties them together (what the walker produces is what the transport
+# visits), which is what makes a stream's ring hand the callback the right
+# audio after a seam.
+add_executable(stream_loop_tests tests/stream_loop_tests.cpp)
+target_link_libraries(stream_loop_tests PRIVATE daw_model)
+add_test(NAME stream_loop_tests COMMAND stream_loop_tests)
+
 add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)

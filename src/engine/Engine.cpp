@@ -75,12 +75,13 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame sourceOffset, float gain, float pan,
                          bool audible, Frame seekProjectDelta, float outputRate,
                          Frame fadeIn, Frame fadeOut, float clipGain,
-                         FadeShape fadeInShape, FadeShape fadeOutShape)
+                         FadeShape fadeInShape, FadeShape fadeOutShape,
+                         StreamLoopRange loop)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
       fFadeInShape(fadeInShape), fFadeOutShape(fadeOutShape),
-      fClipGain(clipGain), fRing(kRingFloats) {
+      fClipGain(clipGain), fLoop(loop), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -114,7 +115,8 @@ TrackStream::~TrackStream() {
 status_t TrackStream::Prepare() {
     // Whatever container the clip's file is, through the one factory: a WAV
     // take, an imported FLAC, an AIFF. Each reader seeks by sample through its
-    // own API, which is what makes a seeked playhead land correctly.
+    // own API, which is what makes a seeked playhead — and a loop pass — land
+    // correctly.
     fSource = OpenAudioSource(fPath);
     if (!fSource)
         return B_ERROR;
@@ -122,15 +124,20 @@ status_t TrackStream::Prepare() {
     const float srcRate = fSource->FrameRate();
     fResampler.reset(new Resampler(srcRate, fOutputRate));
 
-    // Seek the source to match the start playhead. fSeekDelta is in output
-    // frames; convert to source frames by the rate ratio.
-    if (fSeekDelta > 0 && fOutputRate > 0) {
-        const Frame srcSkip = static_cast<Frame>(
-            fSeekDelta * (double)srcRate / fOutputRate + 0.5);
-        fSource->Seek(fSourceOffset + srcSkip);
-    } else if (fSourceOffset > 0) {
-        fSource->Seek(fSourceOffset);
-    }
+    // The passes this stream produces, in playback order (StreamLoop.h): the
+    // first from where this graph's playback begins (the clip's own seek
+    // position, or its start), then one per loop pass. Seek the source to the
+    // first pass's own frame: the ring's origin — the timeline frame of its
+    // next unread frame — is exactly fStart + fSeekDelta, which is what Mix
+    // and RebaseTo assume.
+    fCursor.clipStart = fStart;
+    fCursor.clipEnd   = fStart + fLength;
+    fCursor.looping   = fLoop.on;
+    fCursor.loopStart = fLoop.start;
+    fCursor.loopEnd   = fLoop.end;
+    fCursor.Start(fStart + fSeekDelta);
+    fPassWritten = 0;
+    SeekToPass();
 
     fRunning.store(true);
     fDiskThread = std::thread(&TrackStream::DiskLoop, this);
@@ -149,14 +156,46 @@ void TrackStream::StopThread() {
         fDiskThread.join();
 }
 
-// Producer thread: decode chunks and push them into the ring. Carries the
-// unpushed remainder of a chunk across iterations when the ring is full.
+// Seek the source to the frame the cursor's current pass starts at, and drop
+// the resampler's carried state — the audio before this frame (or before the
+// loop's own start) is not what plays next, so an interpolated remnant of it
+// would be a click at the seam.
+void TrackStream::SeekToPass() {
+    if (!fSource) return;
+    fSource->Seek(PassSourceFrame(fSourceOffset, fStart, fCursor.lo,
+                                  fSource->FrameRate(), fOutputRate));
+    if (fResampler) fResampler->Reset();
+}
+
+// Producer thread: decode chunks and push them into the ring, ONE PASS AT A
+// TIME. Playback order is the order the ring must hold, and under a loop that
+// order has a seam in it: the frames after the last one before the loop end are
+// the loop start's. The pass walker says where each pass begins, so the thread
+// seeks at every pass start and never writes past a pass end — the frames a
+// pass skips (a clip's tail past the loop end) would otherwise sit in the ring
+// in place of the ones the transport is about to ask for.
 void TrackStream::DiskLoop() {
     const float* chunk = nullptr;   // points into fResampled
     size_t chunkFloats = 0;         // remaining floats to push
     size_t chunkOffset = 0;
 
     while (fRunning.load()) {
+        if (fCursor.done) {
+            // Every pass this stream has is in the ring: nothing it could
+            // produce is ever played. Idle until stopped.
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        const Frame remaining = fCursor.Frames() - fPassWritten;
+        if (remaining <= 0) {
+            // The pass is in the ring: the next frames to produce are the next
+            // pass's, which start with a seek (the loop's jump).
+            chunkFloats = chunkOffset = 0;
+            if (!fCursor.Next()) continue;
+            fPassWritten = 0;
+            SeekToPass();
+            continue;
+        }
         if (chunkFloats == 0) {
             const float* src = nullptr;
             size_t frames = 0;
@@ -171,14 +210,21 @@ void TrackStream::DiskLoop() {
             fResampler->Process(src, frames, fResampled);
             if (fResampled.empty())
                 continue;   // produced nothing this pass (heavy downsample)
+            // Never push past the pass end: what lies beyond it belongs to a
+            // timeline range this pass does not visit (the loop jumps over it),
+            // and the next pass re-seeks to its own start anyway.
+            size_t floats = fResampled.size();
+            const size_t limit = (size_t)remaining * 2;
+            if (floats > limit) floats = limit;
             chunk = fResampled.data();
-            chunkFloats = fResampled.size();
+            chunkFloats = floats;
             chunkOffset = 0;
         }
 
         size_t pushed = fRing.Write(chunk + chunkOffset, chunkFloats);
         chunkOffset += pushed;
         chunkFloats -= pushed;
+        fPassWritten += (Frame)(pushed / 2);
 
         if (pushed == 0)   // ring full: wait for the RT thread to drain
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -188,11 +234,18 @@ void TrackStream::DiskLoop() {
 // Re-align the ring with a playhead that has moved on since this stream's graph
 // was built (an in-place rebuild published while the transport kept rolling).
 // The ring's origin — the timeline frame of its next unread frame — is
-// fStart + fSeekDelta (Prepare seeks the source by exactly that), and Mix
-// consumes one ring frame per timeline frame inside the clip's window.
-void TrackStream::RebaseTo(Frame timelineFrame) {
-    const Frame skip = RebaseSkipFrames(fStart + fSeekDelta, fStart,
-                                        fStart + fLength, timelineFrame);
+// fStart + fSeekDelta (Prepare seeks the source by exactly that, and the
+// producer's pass walker starts there), and Mix consumes one ring frame per
+// timeline frame inside the clip's window.
+//
+// Under a loop the transport's path is not a straight line: it may have crossed
+// the loop end — possibly more than once — while this graph was being built, and
+// the producer's passes walked with it (LoopRebaseSkipFrames).
+void TrackStream::RebaseTo(Frame timelineFrame, uint64_t wraps) {
+    const Frame skip = LoopRebaseSkipFrames(fStart + fSeekDelta, fStart,
+                                           fStart + fLength, timelineFrame,
+                                           fLoop.on, fLoop.start, fLoop.end,
+                                           wraps);
     if (skip <= 0) return;
     // Two floats (L/R) per frame; Skip is the consumer-side O(1) advance. What
     // the ring does not hold yet becomes under-run debt, which Mix's resync
@@ -201,13 +254,14 @@ void TrackStream::RebaseTo(Frame timelineFrame) {
     fSkipDebt += skip - (Frame)(got / 2);
 }
 
-void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
+void TrackStream::Mix(float* out, size_t frames, Frame blockStart,
+                      uint64_t wraps) {
     // First block after this stream's graph became active: drop what the
     // transport moved past while the graph was being built. Nothing to do when
     // the graph was built for exactly this frame (play, seek, the sync path).
     if (fRebasePending) {
         fRebasePending = false;
-        RebaseTo(blockStart);
+        RebaseTo(blockStart, wraps);
     }
 
     const Frame clipEnd = fStart + fLength;
@@ -466,24 +520,60 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
 // The RT body. `e` carries the state that outlives this graph; everything else
 // read here belongs to the graph and is only ever written by the RT thread or
 // by an atomic live-parameter store from the UI.
+//
+// It renders in SEGMENTS: one per straight run of transport positions the
+// callback covers (M4.2). Without a loop that is the whole block; with one it is
+// [pos, loopEnd) and then [loopStart, ...) for the rest, so the loop's jump
+// lands on the exact frame rather than on a block boundary. Everything inside
+// the segment — fades, automation, MIDI notes, the click, the meters — is
+// rendered at the position it actually plays at, and only the position is the
+// driver's business.
 void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
     if (e.fMonitorOnly.load(std::memory_order_relaxed)) {
         RenderMonitorOnly(e, out, frames);
         return;
     }
-
     if (!e.fPlaying.load()) {
         e.fPeakL.store(0.0f); e.fPeakR.store(0.0f);
         return;
     }
 
-    const Frame blockStart = e.fPlayhead.load();
-    if (blockStart >= fEndFrame) {
-        e.fFinished.store(true);   // main thread will Stop(); RT stays silent
-        e.fPeakL.store(0.0f); e.fPeakR.store(0.0f);
-        return;
+    Frame pos = e.fPlayhead.load();
+    size_t done = 0;
+    while (done < frames) {
+        if (fLooping && pos >= fLoopEnd) {
+            // The loop end: the transport jumps to the loop start. The audio
+            // for it is already in the streams' rings — their disk threads
+            // produce in playback order across the seam — so this is a jump,
+            // not a rebuild: nothing is re-opened, nothing is re-built, and the
+            // device keeps running.
+            pos = fLoopStart;
+            e.fWraps.fetch_add(1, std::memory_order_relaxed);
+        } else if (!fLooping && pos >= fEndFrame) {
+            // Past all content (and not looping): the main thread will Stop().
+            e.fFinished.store(true);
+            e.fPeakL.store(0.0f);
+            e.fPeakR.store(0.0f);
+            return;
+        }
+        size_t n = frames - done;
+        if (fLooping) {
+            const size_t beforeWrap = SegmentFrames(pos, n, fLoopStart, fLoopEnd);
+            if (beforeWrap < n) n = beforeWrap;   // 0 is handled by the wrap above
+        }
+        RenderSegment(e, out + done * 2, n, pos,
+                      fInPlaceJoin
+                          ? e.fWraps.load(std::memory_order_relaxed)
+                                - fWrapsAtRequest
+                          : 0);
+        done += n;
+        pos += static_cast<Frame>(n);
     }
+    e.fPlayhead.store(pos);
+}
 
+void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
+                                  Frame blockStart, uint64_t wraps) {
     // Live MIDI monitoring: drain incoming events and advance held voices, then
     // rebuild fLiveNotes for this block. Rendered per armed MIDI bus below.
     UpdateLiveVoices(e, blockStart, frames);
@@ -548,7 +638,7 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
         if (delayOwn) std::memset(mb, 0, nfloats * sizeof(float));
 
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
-            s->Mix(mb, frames, blockStart);
+            s->Mix(mb, frames, blockStart, wraps);
         const bool live = b.liveMonitor && !b.liveNotes.empty();
         if (!b.notes.empty() || live) {     // MIDI: render dry then fader
             if (!b.notes.empty()) {
@@ -790,8 +880,6 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
     if (e.fMonitorDim.load(std::memory_order_relaxed))
         for (size_t i = 0; i < nfloats; i++)
             out[i] *= 0.1f;   // ~-20 dB
-
-    e.fPlayhead.store(blockStart + static_cast<Frame>(frames));
 }
 
 // --- Engine -----------------------------------------------------------
@@ -873,7 +961,7 @@ status_t Engine::EnsurePlayer(const Project& project) {
 }
 
 void Engine::RequestLoad(const Project& project, Frame startFrame,
-                         Frame minEndFrame, LoadMode mode) {
+                         Frame minEndFrame, LoadMode mode, bool noLoop) {
     const uint64_t gen = fRequestGen.fetch_add(1, std::memory_order_acq_rel) + 1;
 
     // The device first: a build whose player cannot open is a completed failed
@@ -910,6 +998,13 @@ void Engine::RequestLoad(const Project& project, Frame startFrame,
     req->gen           = gen;
     req->outputRate    = fOutputRate;
     req->playerBufferBytes = fPlayerBufferBytes;
+    req->noLoop        = noLoop;
+    // The loop the graph will walk, and how far round the transport already is:
+    // the builder resolves the first (LoopActive), the RT's in-place join needs
+    // the second to know how many passes a build spanned (M4.2).
+    req->blockFrames   = fPlayerBufferBytes > 0
+        ? (Frame)(fPlayerBufferBytes / (2 * sizeof(float))) : fBufferFrames;
+    req->wrapsAtRequest = fWraps.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(fBuildMutex);
         fRequest = std::move(req);         // newest wins; a queued one is dropped
@@ -1003,7 +1098,8 @@ void Engine::Start() {
     fPlayhead.store(fStartFrame);
     GraphPin pin(*this);
     Graph* g = pin.Active();
-    fFinished.store(g != nullptr && fStartFrame >= g->EndFrame());
+    fFinished.store(g != nullptr && !g->fLooping
+                    && fStartFrame >= g->EndFrame());
     if (g) g->fMonFrame = fStartFrame;   // monitor-only clock restarts here
     // The loudness readout starts from silence, as it did when every start was
     // preceded by a load (the RT replaces these on its first block).
@@ -1336,6 +1432,21 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     g.fEndFrame   = 0;
     g.fOutputRate = req.outputRate;
     g.fMonFrame   = req.startFrame;   // free-running clock for monitor-only mode
+    // The loop (M4.2). Resolved ONCE, here, and fixed for the graph's life: the
+    // RT wrap and every disk thread's pass walker read the same answer, which is
+    // what lets them meet at the seam without any handshake. A range too short
+    // to walk (LoopActive) or a record start (noLoop) leaves the graph unlooped,
+    // and then it simply plays the transport's range to the end.
+    g.fLooping = !req.noLoop && !req.monitorOnly
+                 && LoopActive(req.project.transport.loopEnabled,
+                               req.project.transport.loopStart,
+                               req.project.transport.loopEnd,
+                               req.blockFrames);
+    g.fLoopStart     = req.project.transport.loopStart;
+    g.fLoopEnd       = req.project.transport.loopEnd;
+    g.fWrapsAtRequest = req.wrapsAtRequest;
+    g.fInPlaceJoin    = (req.mode == LoadMode::InPlace);
+    const StreamLoopRange streamLoop{g.fLooping, g.fLoopStart, g.fLoopEnd};
     // The old Load opened the device on every call; the graph is now built for
     // the format the (persistent) player already has.
     g.fMetronome = Metronome(g.fOutputRate, project.tempoBPM,
@@ -1378,7 +1489,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta,
                 g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
-                fades[ci].inShape, fades[ci].outShape);
+                fades[ci].inShape, fades[ci].outShape, streamLoop);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
@@ -1529,6 +1640,11 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     // Extend the play range past content for looping / a metronome-only run.
     if (req.minEndFrame > g.fEndFrame)
         g.fEndFrame = req.minEndFrame;
+    // A looping graph always covers the frame it wraps at: the transport's range
+    // must not end inside its own loop (the RT stops consulting fEndFrame while
+    // looping, and this is what keeps that consistent with Start()/IsFinished).
+    if (g.fLooping && g.fLoopEnd > g.fEndFrame)
+        g.fEndFrame = g.fLoopEnd;
 
     // Set each node's routing output + audibility, and build its effect chain.
     for (Graph::Bus& b : g.fBuses) {

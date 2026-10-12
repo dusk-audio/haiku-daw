@@ -787,7 +787,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (msg->FindMessenger("m", &m) == B_OK) fRollMsgr = m;
             break;
         }
-        case kMsgSeek: {
+        case kMsgSeek:
+        case kMsgTransportRange: {   // M4.2: the loop range changed under a roll
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
             if (fTransportCtl.fPlaying)        // restart from the new position
@@ -2027,6 +2028,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     }
                     // Loop-record: at the loop end, rewind the engine to the
                     // loop start (the recorder keeps capturing across the seam).
+                    //
+                    // The record engine is built WITHOUT a loop on purpose
+                    // (TransportController::StartRecordEngine), so this seam is
+                    // still the window's, exactly as it was before M4.2: the
+                    // take layout is measured from the moment the engine rolls
+                    // (RecordPlan), and re-rolling per pass is what keeps the
+                    // passes aligned with the capture. Playback loops inside the
+                    // engine; recording still re-aligns here.
                     if (fRecCtl.fLoopRecord && tr.loopEnabled && ph >= tr.loopEnd) {
                         fProject->transport.playhead = tr.loopStart;
                         if (!fTransportCtl.StartRecordEngine(tr.loopStart)) {
@@ -2059,13 +2068,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     break;
                 }
 
-                // Playback loop: restart at the loop start past the loop end.
-                if (tr.loopEnabled && tr.loopEnd > tr.loopStart
-                    && ph >= tr.loopEnd) {
-                    fProject->transport.playhead = tr.loopStart;
-                    fTransportCtl.StartPlayback();
-                    break;
-                }
+                // The playback loop is the ENGINE's (M4.2): the graph walks the
+                // range it was built with, splitting the callback at the loop
+                // end so the jump is sample-exact, while the disk threads
+                // produce the loop start's audio in playback order behind it. No
+                // rebuild, no device gap — which is what this branch used to do
+                // (StartPlayback per pass, a whole graph each time). All the
+                // window has to do is show where the transport is, including
+                // when it has just wrapped.
                 fTimeline->SetPlayhead(ph);
                 PushRollPlayhead(ph);
                 UpdateTimeReadout(ph);

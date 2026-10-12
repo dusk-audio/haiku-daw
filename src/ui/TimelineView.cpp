@@ -541,12 +541,23 @@ void TimelineView::ReturnToZero() {
 // L (M3.2): loop on/off. Turning it on with no range adopts the last one the
 // ruler set; with no range at all it takes the markers around the playhead
 // (the marker-to-marker loop, which keeps its own Shift-L binding).
+//
+// The engine walks the loop itself now (M4.2), and the range it walks is part of
+// the graph it is playing, so a toggle is a re-position and not an in-place
+// edit: the window starts playback again from where it is, and the new graph
+// walks the new range.
 void TimelineView::ToggleLoop() {
     Transport& tr = fProject->transport;
-    if (tr.loopEnabled) { tr.loopEnabled = false; Invalidate(); return; }
+    if (tr.loopEnabled) {
+        tr.loopEnabled = false;
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgTransportRange);
+        return;
+    }
     if (tr.loopEnd <= tr.loopStart) LoopBetweenMarkers();   // may set nothing
     tr.loopEnabled = true;
     Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgTransportRange);
 }
 
 // M: a marker at the playhead -- the same path the marker lane's click takes
@@ -3504,6 +3515,11 @@ void TimelineView::MouseUp(BPoint where) {
             SetPlayhead(fLoopAnchor);
             if (BWindow* w = Window())
                 w->PostMessage(kMsgSeek);
+        } else if (BWindow* w = Window()) {
+            // The drag committed a range: the running graph walks the range it
+            // was built with (M4.2), so this re-positions the engine — once,
+            // here, not on every step of the drag.
+            w->PostMessage(kMsgTransportRange);
         }
         fDrag = Drag::None;
         Invalidate();
@@ -4011,6 +4027,9 @@ void TimelineView::LoopBetweenMarkers() {
     Transport& tr = fProject->transport;
     tr.loopStart = lo; tr.loopEnd = hi; tr.loopEnabled = true;
     Invalidate();
+    // The running graph walks a range it was built with (M4.2): re-position so
+    // the new one is what plays.
+    if (BWindow* w = Window()) w->PostMessage(kMsgTransportRange);
 }
 
 // The marker whose flag is under `where` on the ruler, or nullptr.

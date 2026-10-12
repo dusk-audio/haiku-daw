@@ -4526,6 +4526,124 @@ static void TestEngineGraphSwap(MainWindow* win, Project& project,
 // DAW_TIMELINE_TIMING (see the DrawTimer); this check builds the project,
 // starts the transport, and asserts what the test can see -- that playback
 // started, and started promptly.
+// M4.2: the loop is walked by the RUNNING graph. Every pass used to go through
+// the window: the pulse saw the playhead reach the loop end, rewound it and
+// called StartPlayback -- a position-changing rebuild, which detaches the graph
+// (silence, the playhead frozen) and builds a whole new one (every clip file
+// re-opened, every disk thread restarted, every ring primed). On the 32-track
+// project that is seconds of hole per pass.
+//
+// This runs a real loop on the real engine and proves the wrap is the engine's
+// own: across several passes the wrap counter moves while the published-graph
+// count, the player count and the player-start count do not move at all --
+// i.e. nothing was re-opened, nothing was re-built, and the device never
+// stopped. The playhead it reports stays inside the loop, which is what the
+// timeline draws.
+static void TestSeamlessLoop(MainWindow* win, Project& project) {
+    std::printf("seamless loop ...\n");
+
+    // One real WAV, long enough to cover the loop and the material before it.
+    // What the samples ARE does not matter: nothing is audible on the VM, so
+    // what this test can prove is the transport and the counters.
+    const char* wav = "/tmp/haiku_daw_ui_loop.wav";
+    {
+        WavWriter w;
+        if (w.Open(wav, 48000, 2)) {
+            std::vector<int16_t> frames(48000 * 2 * 6, 0);   // 6 s of silence
+            CHECK(w.WriteInt16(frames.data(), frames.size()));
+            CHECK(w.Close());
+        }
+    }
+
+    TrackId trackId = kInvalidTrackId;
+    {
+        Track track;
+        track.id = project.NextTrackId();
+        track.type = TrackType::Audio;
+        track.name = "loop";
+        track.gain = 1.0f;
+        Clip clip;
+        clip.id = project.NextClipId();
+        clip.sourcePath = wav;
+        clip.startFrame = 0;
+        clip.lengthFrames = 48000 * 6;
+        track.clips.push_back(clip);
+        CHECK(LockedAddTrack(win, project, track));
+        trackId = track.id;
+    }
+
+    // A 1 s loop starting 2 s in, played from the top: the transport plays
+    // [0, loopEnd), wraps, and then stays on the loop.
+    const Frame loopStart = 96000, loopEnd = 144000;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.playhead   = 0;
+        project.transport.loopStart  = loopStart;
+        project.transport.loopEnd    = loopEnd;
+        project.transport.loopEnabled = true;
+        win->Unlock();
+    }
+    {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return win->IsPlaying(); }, 5000000));
+    CHECK(WaitFor([&] { return win->EngineGraphReady(); }, 20000000));
+
+    const uint64_t swaps0   = win->EngineGraphsPublished();
+    const uint64_t players0 = win->EnginePlayersOpened();
+    const uint64_t starts0  = win->EnginePlayerStarts();
+    const uint64_t wraps0   = win->EngineWraps();
+
+    // Three wraps: enough that the old code would have rebuilt the engine three
+    // times (and, before M4.1, three times on the window thread).
+    const bigtime_t t0 = system_time();
+    CHECK(WaitFor([&] { return win->EngineWraps() >= wraps0 + 3; }, 20000000));
+    const bigtime_t ms = system_time() - t0;
+    const uint64_t wraps = win->EngineWraps() - wraps0;
+    std::printf("  loop: %llu wraps in %.0f ms (%.0f ms per pass)\n",
+                (unsigned long long)wraps, (double)ms / 1000.0,
+                (double)ms / 1000.0 / (double)(wraps > 0 ? wraps : 1));
+
+    CHECK(wraps >= 3);
+    // Nothing was rebuilt, nothing was re-opened, the device never stopped:
+    // this is the whole point of M4.2.
+    CHECK(win->EngineGraphsPublished() == swaps0);
+    CHECK(win->EnginePlayersOpened() == players0);
+    CHECK(win->EnginePlayerStarts() == starts0);
+    CHECK(win->IsPlaying());                    // and it is still rolling
+    // The transport is inside the loop, wherever in a pass it happens to be.
+    // The bound is inclusive at the loop end: a callback whose block ends
+    // exactly there leaves the playhead ON it until the next block wraps.
+    {
+        const Frame ph = win->EnginePlayhead();
+        std::printf("  loop: playhead %lld, loop [%lld, %lld)\n",
+                    (long long)ph, (long long)loopStart, (long long)loopEnd);
+        CHECK(ph >= loopStart && ph <= loopEnd);
+    }
+    // ~1 s of audio per pass, at whatever the VM manages: a bound so a wrap
+    // that took the old path (a whole graph build) fails here.
+    CHECK(ms < 20000000);
+
+    snooze(500000);            // let the timeline draw the loop while it rolls
+    Shot("seamless-loop");
+
+    {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", " ");
+        key.AddInt32("modifiers", 0);
+        win->PostMessage(&key);
+    }
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    // Leave the transport as the next test expects to find it.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        project.transport.loopEnabled = false;
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+}
+
 static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     std::printf("big project playback ...\n");
 
@@ -6094,6 +6212,7 @@ static int32 TestThread(void*) {
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);
     TestEngineGraphSwap(win, project, stack);
+    TestSeamlessLoop(win, project);
     TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still
     // exercises the save-panel branch.

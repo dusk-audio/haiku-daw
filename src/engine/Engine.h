@@ -24,13 +24,28 @@
 //   - The BSoundPlayer is persistent: it is created once per output format and
 //     survives every rebuild, so an edit during playback has no device gap and
 //     no `BSoundPlayer` re-create. Only Start/Stop bracket playback.
-//   - A position-changing rebuild (`LoadMode::NewPosition`: play, seek, loop
-//     wrap, record start) detaches the active graph first — the RT goes silent
+//   - A position-changing rebuild (`LoadMode::NewPosition`: play, seek, record
+//     start) detaches the active graph first — the RT goes silent
 //     and the playhead stands still until the new graph is in, which is what a
 //     seek did before, minus the frozen window. A content rebuild
 //     (`LoadMode::InPlace`: a structural edit while playing) leaves the old
 //     graph playing and lets the new one join at the current playhead through
 //     the per-stream rebase (StreamRebase.h), so the edit is heard with no gap.
+//
+// M4.2 — the loop is walked inside one graph:
+//   - The loop range is part of the graph (built from the snapshot), so the RT
+//     callback and every disk thread derive the seam from the same description.
+//     The callback splits its block at the loop end and renders the rest at the
+//     loop start (sample-exact); the disk threads produce each clip's audio in
+//     PLAYBACK ORDER across the wraps, pre-rolling the loop start into their
+//     rings. No rebuild, no device re-create, no seek at the seam —
+//     `Engine::Wraps()` counts the wraps and nothing else moves.
+//   - A loop-range edit is not a content edit: the range the transport walks is
+//     part of the position it plays at, so it re-positions the engine (the
+//     window's kMsgTransportRange -> StartPlayback) and the new graph walks the
+//     new range. An edit that leaves the range alone — a clip moved, an insert
+//     added — keeps its in-place join, which walks the passes the build spanned
+//     (StreamLoop.h).
 //
 // Haiku-only: depends on the Media Kit (BSoundPlayer).
 #pragma once
@@ -42,6 +57,7 @@
 #include "FrameDelay.h"
 #include "InsertSlot.h"
 #include "StreamRebase.h"
+#include "StreamLoop.h"
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
@@ -81,7 +97,8 @@ public:
                 bool audible, Frame seekProjectDelta, float outputRate,
                 Frame fadeIn, Frame fadeOut, float clipGain = 1.0f,
                 FadeShape fadeInShape = FadeShape::Linear,
-                FadeShape fadeOutShape = FadeShape::Linear);
+                FadeShape fadeOutShape = FadeShape::Linear,
+                StreamLoopRange loop = StreamLoopRange{});
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -95,7 +112,12 @@ public:
     //
     // The FIRST call after this stream's graph was published also re-aligns the
     // ring: see RebaseTo.
-    void Mix(float* out, size_t frames, Frame blockStart);
+    //
+    // `wraps` is the engine's loop-wrap counter (how many times the transport
+    // has crossed the loop end, ever). Only the first call reads it, to know how
+    // many loop passes the transport ran through while this graph was being
+    // built (M4.2).
+    void Mix(float* out, size_t frames, Frame blockStart, uint64_t wraps);
 
     // Live mix update from the UI thread: recompute per-channel gains and the
     // audible flag. Lock-free (atomic stores); the RT callback picks them up
@@ -118,13 +140,17 @@ public:
     // Drop the frames this stream would have consumed since the graph was built
     // (the ring's origin is fStart + fSeekDelta) up to `timelineFrame`, so an
     // in-place rebuild joins the running transport in sync instead of playing
-    // that far behind it for the life of the clip. RT thread only, from Mix;
-    // RingBuffer::Skip is O(1) and anything the ring does not hold yet is
-    // carried in the existing under-run debt (fSkipDebt).
-    void RebaseTo(Frame timelineFrame);
+    // that far behind it for the life of the clip — under a loop, walking the
+    // passes the transport ran through meanwhile (StreamLoop.h). RT thread only,
+    // from Mix; RingBuffer::Skip is O(1) and anything the ring does not hold yet
+    // is carried in the existing under-run debt (fSkipDebt).
+    void RebaseTo(Frame timelineFrame, uint64_t wraps);
 
 private:
     void DiskLoop();             // producer thread body
+    // Seek the source to the start of the pass the cursor now holds, and drop
+    // the resampler's carried state. Disk thread only.
+    void SeekToPass();
 
     TrackId     fTrackId;
     std::string fPath;
@@ -138,6 +164,12 @@ private:
     FadeShape   fFadeInShape  = FadeShape::Linear;   // the curves they render
     FadeShape   fFadeOutShape = FadeShape::Linear;   // with (M2.5)
     float       fClipGain = 1.0f;  // per-clip linear gain
+    StreamLoopRange fLoop;      // the loop this stream plays under (M4.2)
+    // The disk thread's pass walker (StreamLoop.h): which range of the clip it
+    // is producing, and whether there is one left at all.
+    ProduceCursor fCursor;
+    Frame       fPassWritten = 0;  // output frames of the current pass already
+                                   // pushed into the ring (disk thread only)
     int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
     // One-shot: the first Mix after this stream's graph became active re-aligns
     // the ring (the publisher set nothing else; the origin is derivable from
@@ -414,6 +446,16 @@ public:
         // transport, the live toggles, the UI-facing publishing storage).
         void Render(Engine& e, float* out, size_t frames);
 
+        // One segment of a callback: the body of Render for the block
+        // [blockStart, blockStart+frames). Render calls it once per block, or
+        // twice when the block straddles the loop end — the second segment
+        // starting at the loop start, which is what makes the loop's jump
+        // sample-exact (M4.2). It does not touch the playhead: the position is
+        // the driver's. `wraps` is Engine::fWraps minus this graph's
+        // fWrapsAtRequest: the pass count the in-place join needs.
+        void RenderSegment(Engine& e, float* out, size_t frames, Frame blockStart,
+                           uint64_t wraps);
+
         // Drop every live voice, so a note held at Stop can't sustain (up to
         // kHeld) or re-sound if the same engine restarts. Safe once the player
         // is stopped. The live controllers are cleared with them: a bend or a
@@ -440,6 +482,25 @@ public:
         Frame                                     fBuildStart = 0;   // ring origins
         Frame                                     fEndFrame   = 0;
         float                                     fOutputRate = 48000.0f;
+        // The loop this graph plays under (M4.2), resolved at build from the
+        // snapshot with LoopActive() — so a range too short to walk is off, and
+        // the streams got the same answer this graph wraps by. Fixed for the
+        // graph's life: a loop edit re-positions the engine rather than editing
+        // content in place, which is what lets the disk threads and the RT
+        // callback agree on the seam without any handshake at all.
+        bool                                      fLooping    = false;
+        Frame                                     fLoopStart  = 0;
+        Frame                                     fLoopEnd    = 0;
+        // The engine's wrap counter when this graph was REQUESTED, and whether
+        // this graph joins a transport that kept rolling (an in-place rebuild).
+        // Together they tell the join how many passes the transport ran through
+        // while this graph was being built (LoopRebaseSkipFrames). A
+        // position-changing load needs neither: its playhead is set to its own
+        // origin and nothing advances until it is published, so it joins with no
+        // skip at all — and counting the wraps the graph it replaced performed
+        // in the meantime would skip a loop's worth of audio.
+        uint64_t                                  fWrapsAtRequest = 0;
+        bool                                      fInPlaceJoin = false;
         std::vector<std::unique_ptr<TrackStream>> fStreams;
         std::vector<Bus>                          fBuses;
         std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
@@ -533,10 +594,12 @@ public:
 
     // What a rebuild request means for the transport:
     enum class LoadMode {
-        // The transport is (re)positioning: play, seek, loop wrap, record
-        // start, monitor start. The active graph is detached at request time —
+        // The transport is (re)positioning: play, seek, record start, monitor
+        // start. The active graph is detached at request time —
         // its content belongs to the old position — so the RT renders silence
         // and the playhead stands still until the new graph is published.
+        // (A loop wrap is NOT one of these any more: the running graph walks
+        // the loop itself, M4.2.)
         NewPosition,
         // The content changed at an unchanged position (a structural edit
         // during playback). The active graph keeps playing and keeps advancing;
@@ -557,9 +620,10 @@ public:
     // free immediately; the graph lands when the builder is done. A newer
     // request replaces a queued one (superseding a build already in flight,
     // whose result is then discarded rather than published stale). The
-    // synchronous wrapper below waits.
+    // synchronous wrapper below waits. `noLoop` builds the graph without the
+    // snapshot's loop (the record path; see BuildRequest).
     void RequestLoad(const Project& project, Frame startFrame, Frame minEndFrame,
-                     LoadMode mode);
+                     LoadMode mode, bool noLoop = false);
 
     // Old synchronous entry point (prototypes and the monitor path): ensure the
     // player, request, wait, and return the build's status.
@@ -593,6 +657,14 @@ public:
     // either: stop/start is what would make an edit audible as a gap).
     uint64_t PlayerStarts() const {
         return fPlayerStarts.load(std::memory_order_relaxed);
+    }
+    // How many times the transport has crossed a loop end (M4.2). A seamless
+    // loop leaves GraphsPublished, PlayersOpened and PlayerStarts exactly where
+    // they were and moves only this one — which is what the functional test
+    // asserts, and what the window's pulse watches to know a record pass has
+    // come round again.
+    uint64_t Wraps() const {
+        return fWraps.load(std::memory_order_relaxed);
     }
     // Is a graph in place for the RT side to render?
     bool HasGraph() const { return fGraphs->Active() != nullptr; }
@@ -873,6 +945,16 @@ private:
         Frame        minEndFrame = 0;
         LoadMode     mode        = LoadMode::NewPosition;
         bool         monitorOnly = false;
+        // Build the graph without a loop even when the snapshot's transport has
+        // one enabled. The record path sets it: a record pass rolls a long
+        // transport through the loop end and the window re-aligns the engine at
+        // the seam itself (see MainWindow's pulse), because the take layout is
+        // measured from the engine's roll (M4.2 keeps that path as it is).
+        bool         noLoop      = false;
+        // The loop the graph plays under, resolved by the builder from the
+        // snapshot and LoopActive(); see Graph::fLooping.
+        Frame        blockFrames = 512;   // what the device renders per callback
+        uint64_t     wrapsAtRequest = 0;  // Engine::fWraps when this was queued
         uint64_t     gen         = 0;
         // The device format the graph must be built for, captured with the
         // request (the player cannot be swapped out from under a build).
@@ -996,6 +1078,10 @@ private:
     // to bound the monitor/live-MIDI source teardown UAF window, and the graph
     // reclaimer waits on it to know a retired graph is out of the callback.
     std::atomic<uint64_t> fCallbackGen{0};
+    // Loop wraps performed by the transport, ever (M4.2). Bumped by the RT
+    // callback at each wrap, read by the window (the record seam, the test
+    // hooks) and by the in-place join to learn how many passes a build spanned.
+    std::atomic<uint64_t> fWraps{0};
     // True only while the BSoundPlayer is actually running: set BEFORE
     // fPlayer->Start() and cleared AFTER fPlayer->Stop() returns (Stop blocks
     // until the last callback exits). Unlike fPlaying — which Stop() clears
