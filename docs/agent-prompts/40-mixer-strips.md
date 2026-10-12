@@ -125,7 +125,9 @@ and double-clicking the fader or the value readout opens an inline
 `DawTextField` over that strip's value row, filled with the current gain in dB,
 focused. Enter parses it (kit-free `ParseDecibels` in `src/dsp/MeterMath.h`),
 converts to a linear gain and applies it through the same `kMsgApplyMix` path;
-Escape or a click elsewhere cancels. `-99.9`/`-inf` means silence (gain 0).
+a click elsewhere abandons it. (Escape is not handled: the field's inner
+`BTextView` receives it before anything else can.) `-99.9`/`-inf` means
+silence (gain 0).
 
 ## Work items
 

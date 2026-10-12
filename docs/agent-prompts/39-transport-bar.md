@@ -111,8 +111,11 @@ that had no message (RTZ, rewind, fast-forward, loop, punch) in the same
   the formatted text back, so the mode is one piece of state, not two); a
   double click starts typed entry — the view takes focus, shows what is being
   typed with a caret, Enter posts `kMsgTimeEntry` with the string and the
-  mode, Escape cancels. The window parses, seeks (`TimelineView::SeekTo`) and
-  reports a bad entry in the status line.
+  mode, and a click anywhere else abandons it. (Escape is not handled: a
+  `BTextControl`'s inner text view takes it before the view sees it. The typed
+  entry is a `DawTextField` in the mixer's case and this view's own buffer
+  here, and neither route gets the Escape.) The window parses, seeks
+  (`TimelineView::SeekTo`) and reports a bad entry in the status line.
 
 ### 4. CPU/DSP load and the xrun counter
 
