@@ -64,6 +64,8 @@
 #include <MenuBar.h>
 #include <MenuItem.h>
 #include <Directory.h>
+#include <FindDirectory.h>   // find_path (the template directory, M3.7)
+#include <kernel/image.h>    // B_APP_IMAGE_SYMBOL
 #include <Entry.h>
 #include <File.h>
 #include <ListView.h>
@@ -291,6 +293,30 @@ static bool WindowUp(const char* title) {
             return true;
     }
     return false;
+}
+
+// The one VISIBLE window with this title (nullptr when there is none), and how
+// many there are -- "asking again activates the open one instead of stacking a
+// second" is checked with the count. Neither takes a lock: a modal prompt holds
+// the main window's looper, so a locking predicate would block instead of
+// failing.
+static BWindow* FindVisibleWindow(const char* title) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
+            return w;
+    }
+    return nullptr;
+}
+
+static int CountVisibleWindows(const char* title) {
+    int n = 0;
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
+            n++;
+    }
+    return n;
 }
 
 // Is a window with this title still in the application's list AT ALL --
@@ -1395,9 +1421,21 @@ static void TestFileMenuFlows(MainWindow* win, Project& project,
     CHECK(VisibleWindows() == 1);
     CHECK(FileExists(savePath));
 
-    // New over the dirty project: the prompt, then Discard.
+    // New over the dirty project: the New Project dialog (M3.7) first, then
+    // the prompt for the unsaved changes, then Discard.
     CHECK(dirtyIt());
     win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return WindowUp("New Project"); }));
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        CHECK(np != nullptr);
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            chooser->SelectId("empty");
+            chooser->PostChosen();     // Create
+            np->Unlock();
+        }
+    }
     CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
     Shot("unsaved-changes-alert");
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
@@ -6111,6 +6149,268 @@ static void TestFxRetargetFlush(MainWindow* win, Project& project) {
 // What the mode switch has to do that a unit test cannot see: leave the
 // system's own colours alone, install the mode's control look, and repaint the
 // windows that cached a colour.
+// M3.6: the Project Settings window. It opens from the File menu, it is single
+// instance, it shows the PROJECT's own values, and Apply turns what changed
+// into ONE undoable edit (one "Project Settings" step in the Edit menu, not
+// four). The model arithmetic behind it is host-tested; what this drives is the
+// wiring: window -> message -> CommandStack -> model -> window.
+static void TestProjectSettings(MainWindow* win, Project& project,
+                                CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("project settings ...\n");
+
+    win->PostMessage(MSG_PROJECT_SETTINGS);
+    CHECK(WaitFor([&] { return FindVisibleWindow("Project Settings") != nullptr; }));
+    Shot("project-settings");
+
+    // One window: asking again activates it.
+    win->PostMessage(MSG_PROJECT_SETTINGS);
+    snooze(400000);
+    CHECK(CountVisibleWindows("Project Settings") == 1);
+
+    // What the window shows is what the project IS (not its own defaults).
+    double beforeRate = 0.0, beforeTempo = 0.0;
+    std::string beforeNotes;
+    int beforeNum = 0, beforeDenom = 0;
+    {
+        // The project first, on the main window's lock -- and let it go before
+        // the dialog's lock is taken: locking one window inside the other's
+        // lock is how a suite wedges.
+        win->Lock();
+        beforeRate  = project.sampleRate;
+        beforeTempo = project.tempoBPM;
+        beforeNotes = project.notes;
+        beforeNum   = project.tempoMap.Meters().front().num;
+        beforeDenom = project.tempoMap.Meters().front().denom;
+        win->Unlock();
+    }
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            const ProjectSettingsView shown =
+                static_cast<ProjectSettingsWindow*>(ps)->Values();
+            CHECK(std::fabs(shown.sampleRate - beforeRate) < 0.5);
+            CHECK(std::fabs(shown.tempoBPM - beforeTempo) < 1e-6);
+            CHECK(shown.meterNum == beforeNum && shown.meterDenom == beforeDenom);
+            CHECK(shown.notes == beforeNotes);
+
+            // Change the tempo, the meter and the notes, and apply.
+            static_cast<ProjectSettingsWindow*>(ps)->TempoField()
+                ->SetText("128");
+            BMenu* mm = static_cast<ProjectSettingsWindow*>(ps)->MeterField()->Menu();
+            for (int32 i = 0; i < mm->CountItems(); i++)
+                if (mm->ItemAt(i) != nullptr)
+                    mm->ItemAt(i)->SetMarked(
+                        std::strcmp(mm->ItemAt(i)->Label(), "6/8") == 0);
+            static_cast<ProjectSettingsWindow*>(ps)->NotesView()
+                ->SetText("take 3 is the keeper");
+            static_cast<ProjectSettingsWindow*>(ps)->PostChanges();
+            ps->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = std::fabs(project.tempoBPM - 128.0) < 1e-6
+                     && project.tempoMap.Meters().front().num == 6
+                     && project.tempoMap.Meters().front().denom == 8
+                     && project.notes == "take 3 is the keeper";
+        win->Unlock();
+        return ok;
+    }));
+    // The project's own timeSig followed the map (they are one fact).
+    win->Lock();
+    CHECK(project.timeSig.numerator == 6 && project.timeSig.denominator == 8);
+    // ... and the three changes are ONE edit: the Edit menu's next undo is the
+    // whole thing (the macro), not one of its parts.
+    CHECK(stack.UndoName() == "Project Settings");
+    win->Unlock();
+    Shot("project-settings-applied");
+
+    // The window was told what was applied (a stale dialog is a bug).
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            const ProjectSettingsView shown =
+                static_cast<ProjectSettingsWindow*>(ps)->Values();
+            CHECK(std::fabs(shown.tempoBPM - 128.0) < 1e-6);
+            CHECK(shown.notes == "take 3 is the keeper");
+            ps->Unlock();
+        }
+    }
+
+    // One undo puts all three back: the macro is one step.
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool back = std::fabs(project.tempoBPM - beforeTempo) < 1e-6
+                       && project.notes == beforeNotes
+                       && project.tempoMap.Meters().front().num == beforeNum;
+        win->Unlock();
+        return back;
+    }));
+
+    // The sample rate: the same path, and the map's rate follows the project's
+    // (the whole-project rescale is host-tested; this is the wiring).
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            ProjectSettingsWindow* pw = static_cast<ProjectSettingsWindow*>(ps);
+            BMenu* rm = pw->RateField()->Menu();
+            for (int32 i = 0; i < rm->CountItems(); i++)
+                if (rm->ItemAt(i) != nullptr
+                    && std::strstr(rm->ItemAt(i)->Label(), "96000") != nullptr)
+                    rm->ItemAt(i)->SetMarked(true);
+            pw->ResampleCheck()->SetValue(B_CONTROL_OFF);   // no file work here
+            pw->PostChanges();
+            ps->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = std::fabs(project.sampleRate - 96000.0) < 1e-9
+                     && std::fabs(project.tempoMap.sampleRate - 96000.0) < 1e-9;
+        win->Unlock();
+        return ok;
+    }));
+    // ... and its undo puts the project back exactly (a Project copy).
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool back = std::fabs(project.sampleRate - beforeRate) < 1e-9;
+        win->Unlock();
+        return back;
+    }));
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
+// M3.7: File > New offers the templates. The suite runs from a build tree, so
+// the app finds data/templates beside its own binary; the directory is named
+// explicitly here so the check does not depend on that copy having happened.
+static void TestNewProjectTemplates(MainWindow* win, Project& project,
+                                    CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("new project templates ...\n");
+
+    // The same lookup the app makes (the suite binary sits beside the app):
+    // point the environment at it so this test drives the code path a build
+    // tree uses, not the installed one.
+    char imageBuf[B_PATH_NAME_LENGTH];
+    std::string buildTemplates;
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_IMAGE_PATH, NULL, imageBuf,
+                  sizeof(imageBuf)) == B_OK) {
+        std::string image(imageBuf);
+        const size_t slash = image.find_last_of('/');
+        if (slash != std::string::npos)
+            buildTemplates = image.substr(0, slash) + "/data/templates";
+    }
+    if (!buildTemplates.empty())
+        setenv("DAW_TEMPLATES_DIR", buildTemplates.c_str(), 1);
+
+    win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
+    Shot("new-project");
+
+    // The rows the shipped templates produce (when the copy rule ran, which is
+    // what makes a build tree usable at all).
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            const std::vector<TemplateInfo>& rows =
+                static_cast<NewProjectWindow*>(np)->Templates();
+            bool hasEmpty = false, hasBand = false, hasProducer = false;
+            for (const TemplateInfo& t : rows) {
+                if (t.id == "empty")    hasEmpty = true;
+                if (t.id == "band")     hasBand = true;
+                if (t.id == "producer") hasProducer = true;
+            }
+            CHECK(hasEmpty);
+            CHECK(!rows.empty() && rows[0].id == "empty");
+            if (!buildTemplates.empty()) {
+                CHECK(hasBand);
+                CHECK(hasProducer);
+            }
+            // Asking again brings the open dialog forward instead of stacking.
+            np->Unlock();
+        }
+    }
+    win->PostMessage(MSG_NEW_PROJECT);
+    snooze(400000);
+    CHECK(CountVisibleWindows("New Project") == 1);
+
+    // Choose Band and create it: the session is replaced by the template's.
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            chooser->SelectId("band");
+            CHECK(chooser->SelectedId() == "band");
+            chooser->PostChosen();
+            np->Unlock();
+        }
+    }
+    // The demo session is dirty by now, so the prompt comes up first.
+    if (WaitFor([&] { return AlertUp("Unsaved Changes"); }, 3000000))
+        AnswerAlertWhenUp("Unsaved Changes", 1);       // Discard
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = project.Tracks().size() == 9 && !stack.IsDirty();
+        win->Unlock();
+        return ok;
+    }));
+    // The template's shape arrived: 8 audio tracks into a bus, named, at the
+    // default sample rate (the template's tracks, not its rate, is what it
+    // brings).
+    {
+        win->Lock();
+        int audio = 0, busy = 0;
+        bool named = true;
+        for (const Track& t : project.Tracks()) {
+            if (t.type == TrackType::Audio) audio++;
+            if (t.type == TrackType::Bus)   busy++;
+            if (t.name.empty()) named = false;
+        }
+        CHECK(audio == 8);
+        CHECK(busy == 1);
+        CHECK(named);
+        win->Unlock();
+    }
+    Shot("new-project-band");
+
+    // A missing template directory is a normal state, not a crash or a dead
+    // end: the dialog still opens, offering the built-in Empty.
+    setenv("DAW_TEMPLATES_DIR", "/tmp/haiku_daw_no_such_templates", 1);
+    win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            // The env override points at nothing, but the build-tree copy is
+            // still a candidate, so at least Empty must be there and the
+            // dialog must be answerable.
+            CHECK(!chooser->Templates().empty());
+            CHECK(chooser->Templates()[0].id == "empty");
+            chooser->SelectId("empty");
+            chooser->PostChosen();       // and it answers: Create
+            np->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool empty = project.Tracks().empty();
+        win->Unlock();
+        return empty;
+    }));
+    unsetenv("DAW_TEMPLATES_DIR");
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
 // M3.5: the Preferences window. It opens from the File menu item, it is single
 // instance, it SHOWS the app's own values, and a change made in it reaches the
 // app, is pushed back to the window, and survives a reload of the settings
@@ -6452,6 +6752,7 @@ static int32 TestThread(void*) {
     TestDockedEditor(win, project, &stack);
     TestShortcutsWindow(win);
     TestPreferences(win, project);   // M3.5: opens and puts itself away
+    TestProjectSettings(win, project, stack);   // M3.6: applies and undoes
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
     TestDockPages(win, project, &stack);
@@ -6461,8 +6762,10 @@ static int32 TestThread(void*) {
     TestPeakCache(win, project);
     TestSeamlessLoop(win, project);
     TestBigProjectPlayback(win, project);
-    // New leaves no path behind, so the unsaved-changes flow after it still
-    // exercises the save-panel branch.
+    // Both replace the session, so they run here: New leaves no path behind,
+    // so the unsaved-changes flow after it still exercises the save-panel
+    // branch.
+    TestNewProjectTemplates(win, project, stack);
     TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
     // The theme switch flips the whole process and puts it back; last, so no
