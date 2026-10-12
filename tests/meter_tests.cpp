@@ -236,6 +236,41 @@ int main() {
         CHECK(c.Clipped());
     }
 
+    // The mixer strip's typed level entry (M3.4): what a user types into a dB
+    // field, and what it means as a gain.
+    {
+        float db = 123.0f;
+        CHECK(ParseDecibels("0", &db) && std::fabs(db - 0.0f) < 1e-4f);
+        CHECK(ParseDecibels("-6", &db) && std::fabs(db + 6.0f) < 1e-4f);
+        CHECK(ParseDecibels("+3.5", &db) && std::fabs(db - 3.5f) < 1e-4f);
+        CHECK(ParseDecibels(" -12.25 ", &db) && std::fabs(db + 12.25f) < 1e-4f);
+        // Silence: every spelling of -inf a user might reach for.
+        CHECK(ParseDecibels("-inf", &db) && db == kFaderMinDb);
+        CHECK(ParseDecibels("-INF", &db) && db == kFaderMinDb);
+        CHECK(ParseDecibels("-oo", &db) && db == kFaderMinDb);
+        CHECK(ParseDecibels("-99.9", &db) && db == kFaderMinDb);   // clamped
+        // Clamped, not rejected: the fader's own range is the limit.
+        CHECK(ParseDecibels("100", &db) && db == kFaderMaxDb);
+        CHECK(ParseDecibels("-1000", &db) && db == kFaderMinDb);
+        // Not a level: the caller keeps the old value.
+        db = 42.0f;
+        CHECK(!ParseDecibels("", &db));
+        CHECK(!ParseDecibels("banana", &db));
+        CHECK(!ParseDecibels("-6dB", &db));      // unit is implicit
+        CHECK(!ParseDecibels("inf", &db));       // only a DOWNWARD inf
+        CHECK(!ParseDecibels("6 7", &db));
+        CHECK(!ParseDecibels("--6", &db));
+        CHECK(db == 42.0f);                      // a refusal changes nothing
+
+        // The gain conversion: 0 dB is unity, -6 dB is about a half, and the
+        // floor is real silence (never a denormal-sized gain).
+        CHECK(std::fabs(GainFromDb(0.0f) - 1.0f) < 1e-6f);
+        CHECK(std::fabs(GainFromDb(-6.0206f) - 0.5f) < 1e-3f);
+        CHECK(std::fabs(GainFromDb(6.0f) - 1.99526f) < 1e-3f);
+        CHECK(GainFromDb(kFaderMinDb) == 0.0f);
+        CHECK(GainFromDb(kFaderMinDb - 20.0f) == 0.0f);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

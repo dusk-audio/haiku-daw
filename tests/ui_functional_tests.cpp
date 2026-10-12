@@ -5553,6 +5553,209 @@ static void TestTransportBar(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
 }
 
+// --- 27. M3.4: the mixer strip's own edits ----------------------------------
+
+// The strip's new intents reach the model through the command stack and come
+// back in the strip's snapshot: the input trim, the polarity, the solo group
+// and a send's level. The window is driven by the exact messages the strip
+// posts (kMsgApplyMix / kMsgMixSend), which is also what the strip itself
+// sends — the drawing and the drags are looked at in the screenshot pass.
+static void TestMixerStripExtras(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_mixer_strip_extras\n");
+
+    // An audio track with a send into a bus, so there is something to trim and
+    // something to send to.
+    Track bus;
+    bus.id = project.NextTrackId();
+    bus.type = TrackType::Bus;
+    bus.name = "FX bus";
+    CHECK(LockedAddTrack(win, project, bus));
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "strip-track";
+    t.sends.push_back(Send{ bus.id, 1.0f, false });
+    CHECK(LockedAddTrack(win, project, t));
+
+    win->PostMessage(MSG_MIXER_TEST);
+    MixerStripsView* strips = nullptr;
+    BWindow* mixer = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || w == win) continue;
+            if (w->LockWithTimeout(500000) != B_OK) continue;
+            BView* v = w->FindView("strips");
+            if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+            w->Unlock();
+            if (strips) return true;
+        }
+        return false;
+    }));
+    CHECK(strips != nullptr);
+    if (strips == nullptr) return;
+
+    auto trackOf = [&] {
+        Track out;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id)) out = *p;
+            win->Unlock();
+        }
+        return out;
+    };
+
+    // --- input trim: through the strip's own message ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 0.5f; }));
+    }
+    // --- polarity ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().phaseInvert; }));
+    }
+    // --- the solo group, and the cascade it implies ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 2);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().soloGroup == 2; }));
+
+        // Put the bus in the same group and solo the audio track: the bus has
+        // to come along (the group's whole point).
+        {
+            BMessage b(kMsgApplyMix);
+            b.AddInt64("track", (int64)bus.id);
+            b.AddFloat("gain", 1.0f);
+            b.AddFloat("pan", 0.0f);
+            b.AddBool("mute", false);
+            b.AddBool("solo", false);
+            b.AddFloat("trim", 1.0f);
+            b.AddBool("phase", false);
+            b.AddInt32("sgroup", 2);
+            win->PostMessage(&b);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && bt->soloGroup == 2;
+            win->Unlock();
+            return ok;
+        }));
+        {
+            BMessage s(kMsgApplyMix);
+            s.AddInt64("track", (int64)t.id);
+            s.AddFloat("gain", 1.0f);
+            s.AddFloat("pan", 0.0f);
+            s.AddBool("mute", false);
+            s.AddBool("solo", true);
+            s.AddFloat("trim", 0.5f);
+            s.AddBool("phase", true);
+            s.AddInt32("sgroup", 2);
+            win->PostMessage(&s);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const Track* at = project.FindTrack(t.id);
+            const bool ok = bt && at && bt->soloed && at->soloed;
+            win->Unlock();
+            return ok;
+        }));
+        // Leave it unsoloed again for the tests after this one.
+        BMessage s2(kMsgApplyMix);
+        s2.AddInt64("track", (int64)t.id);
+        s2.AddFloat("gain", 1.0f);
+        s2.AddFloat("pan", 0.0f);
+        s2.AddBool("mute", false);
+        s2.AddBool("solo", false);
+        s2.AddFloat("trim", 0.5f);
+        s2.AddBool("phase", true);
+        s2.AddInt32("sgroup", 2);
+        win->PostMessage(&s2);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && !bt->soloed;
+            win->Unlock();
+            return ok;
+        }));
+    }
+    // --- a send's level: the knob's own message ---
+    {
+        BMessage m(kMsgMixSend);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt32("index", 0);
+        m.AddFloat("level", 0.25f);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] {
+            const Track tr = trackOf();
+            return tr.sends.size() == 1
+                && std::fabs(tr.sends[0].level - 0.25f) < 1e-4f;
+        }));
+    }
+
+    // ... and the strip's own snapshot carries all of it after a refresh.
+    win->PostMessage(kMsgUiRefresh);
+    CHECK(WaitFor([&] {
+        bool ok = false;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            for (const MixerStripInfo& s : strips->Strips())
+                if (s.trackId == t.id)
+                    ok = std::fabs(s.trim - 0.5f) < 1e-4f && s.phaseInvert
+                      && s.soloGroup == 2 && s.sends.size() == 1
+                      && std::fabs(s.sends[0].level - 0.25f) < 1e-4f;
+            mixer->Unlock();
+        }
+        return ok;
+    }));
+    Shot("mixer-strips");
+
+    // Back to the model's defaults for whatever runs next.
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 1.0f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 1.0f; }));
+    }
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
 // The dock hosts one page at a time, switched from the strip's segmented
 // control: the editor (the roll or its hint), the samples and the plugins. The
 // browsers are the SAME views their windows host, so what is checked here is
@@ -6557,6 +6760,7 @@ static int32 TestThread(void*) {
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
     TestTransportBar(win, project);
+    TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);

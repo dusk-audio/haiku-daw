@@ -16,9 +16,12 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 namespace daw {
@@ -76,6 +79,53 @@ inline float DbToFrac(float db) {
 
 // The one call a view needs: a linear peak -> where the bar ends.
 inline float LinToFrac(float lin) { return DbToFrac(LinToDb(lin)); }
+
+// --- typed level entry (M3.4) -------------------------------------------
+
+// A fader's own range, in dB: what a typed level is clamped to. Wider than the
+// meter scale on purpose — a fader may push a quiet track up past unity — and
+// -inf is expressed as the bottom of it.
+constexpr float kFaderMinDb = -96.0f;
+constexpr float kFaderMaxDb =  12.0f;
+
+// Linear gain for a dB figure. The floor (and anything below it) is true
+// silence, not a very small number: this is what "-inf" in a level field means.
+inline float GainFromDb(float db) {
+    if (!(db > kFaderMinDb)) return 0.0f;
+    return std::pow(10.0f, db / 20.0f);
+}
+
+// Parse what a user typed into a level field: "-6", "+3.5", "0", "-inf",
+// "-Inf", "-oo" (they mean silence), or a bare number with blanks around it.
+// False means "not a level" — the caller keeps the old value and says so. A
+// finite value is clamped to [kFaderMinDb, kFaderMaxDb].
+inline bool ParseDecibels(const std::string& text, float* db) {
+    // Blanks around the figure are fine; blanks INSIDE it are not ("6 7" is
+    // not a level, and collapsing them would make it 67).
+    std::string t = text;
+    while (!t.empty() && (t.front() == ' ' || t.front() == '\t'))
+        t.erase(t.begin());
+    while (!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.pop_back();
+    if (t.empty()) return false;
+    // The inf spellings: "-inf", "-oo", "-∞".
+    std::string lower;
+    for (char c : t) lower.push_back((char)std::tolower((unsigned char)c));
+    if (lower == "-inf" || lower == "-oo"
+        || lower == "-\xe2\x88\x9e" || lower == "-infinity") {
+        if (db) *db = kFaderMinDb;
+        return true;
+    }
+    if (lower == "+inf" || lower == "inf") return false;   // not a level
+    char* end = nullptr;
+    const double v = std::strtod(t.c_str(), &end);
+    if (end == t.c_str() || end == nullptr || *end != '\0') return false;
+    if (std::isnan(v)) return false;
+    double c = v;
+    if (c < (double)kFaderMinDb) c = (double)kFaderMinDb;
+    if (c > (double)kFaderMaxDb) c = (double)kFaderMaxDb;
+    if (db) *db = (float)c;
+    return true;
+}
 
 // --- peak hold ------------------------------------------------------------
 

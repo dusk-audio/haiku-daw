@@ -217,7 +217,21 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         // LV2 URI through the host -- which the mixer's own looper must not do.
         for (const EffectDesc& d : t.fx)
             s.fx.push_back(MixerInsertInfo{ EffectDisplayName(d), d.bypassed });
-        s.sendCount = (int)t.sends.size();
+        // The strip extras (M3.4): the trim, the polarity, the solo group and
+        // one entry per aux send — the destination's NAME, resolved here on
+        // the main thread, never an id the mixer would have to look up.
+        s.trim        = t.trim;
+        s.phaseInvert = t.phaseInvert;
+        s.soloGroup   = t.soloGroup;
+        for (const Send& send : t.sends) {
+            MixerSendInfo si;
+            si.level = send.level;
+            if (const Track* dest = p.FindTrack(send.dest))
+                si.label = dest->name.substr(0, 4);
+            else
+                si.label = "?";
+            s.sends.push_back(std::move(si));
+        }
         s.hasInput = t.input.kind != InputSource::kNone;
         if (t.output == kInvalidTrackId) s.outLabel = "Mst";
         else if (const Track* bt = p.FindTrack(t.output))
@@ -785,7 +799,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         m.AddString("fxn", ins.name.c_str());
                         m.AddBool("fxb", ins.bypassed);
                     }
-                    m.AddInt32("sn", s.sendCount);
+                    m.AddInt32("sn", (int32)s.sends.size());
+                    // The send labels/levels travel the same way the inserts
+                    // do: one flat run across all strips, sliced by "sn".
+                    for (const MixerSendInfo& si : s.sends) {
+                        m.AddString("sdn", si.label.c_str());
+                        m.AddFloat("slv", si.level);
+                    }
+                    m.AddFloat("tr", s.trim);
+                    m.AddBool("ph", s.phaseInvert);
+                    m.AddInt32("sg", s.soloGroup);
                     m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
                 }
                 m.AddFloat("mg", fProject->masterGain);
@@ -1415,22 +1438,63 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgMixSend: {
+            // One aux send's level (M3.4). The strip's knob writes the same
+            // list the sends editor does — SetSendsCommand — so there is ONE
+            // path from the UI to the model and one place the guarantee lives.
+            int64 tid = 0; int32 index = -1; float level = 1.0f;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("index", &index);
+            msg->FindFloat("level", &level);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                if (index >= 0 && index < (int32)t->sends.size()) {
+                    std::vector<Send> sends = t->sends;
+                    sends[(size_t)index].level = level;
+                    fStack->Execute(std::make_unique<SetSendsCommand>((TrackId)tid,
+                                                                     std::move(sends)),
+                                    *fProject);
+                    UpdateTitle();
+                    // A send's level is read from the graph's own send tables,
+                    // which are built with the graph — the same "applies on
+                    // the next Play" the sends editor's edits have had since
+                    // A3. Rebuilding per knob move would rebuild a 320-clip
+                    // project's graph dozens of times per gesture.
+                    fTimeline->Invalidate();
+                }
+            }
+            break;
+        }
         case kMsgApplyMix: {
             int64 tid = 0; float g = 1, p = 0; bool mu = false, so = false;
+            float trim = 1.0f; bool phase = false; int32 sgroup = 0;
             msg->FindInt64("track", &tid);
             msg->FindFloat("gain", &g);
             msg->FindFloat("pan", &p);
             msg->FindBool("mute", &mu);
             msg->FindBool("solo", &so);
+            msg->FindFloat("trim", &trim);
+            msg->FindBool("phase", &phase);
+            msg->FindInt32("sgroup", &sgroup);
             if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                // One macro, so the whole strip -- gain, pan, mute, solo and the
-                // mute-group cascade -- is one undo step. Unchanged fields get
-                // no sub-command at all.
+                // One macro, so the whole strip -- gain, pan, mute, solo, the
+                // trim, the polarity, the solo group and the mute-group
+                // cascade -- is one undo step. Unchanged fields get no
+                // sub-command at all.
                 auto macro = std::make_unique<MacroCommand>("Mixer Strip");
                 if (t->gain   != g)  macro->Add(std::make_unique<SetTrackGainCommand>((TrackId)tid, g));
                 if (t->pan    != p)  macro->Add(std::make_unique<SetTrackPanCommand>((TrackId)tid, p));
                 if (t->muted  != mu) macro->Add(std::make_unique<SetTrackMuteCommand>((TrackId)tid, mu));
                 if (t->soloed != so) macro->Add(std::make_unique<SetTrackSoloCommand>((TrackId)tid, so));
+                // The M3.4 fields are sent as their OWN fields, and only acted
+                // on when the message actually carries them: a poster that
+                // knows only gain/pan/mute/solo (an older editor, a test) must
+                // not silently reset a trim it never had an opinion about.
+                if (msg->HasFloat("trim") && t->trim != trim)
+                    macro->Add(std::make_unique<SetTrackTrimCommand>((TrackId)tid, trim));
+                if (msg->HasBool("phase") && t->phaseInvert != phase)
+                    macro->Add(std::make_unique<SetTrackPhaseCommand>((TrackId)tid, phase));
+                if (msg->HasInt32("sgroup") && t->soloGroup != (int)sgroup)
+                    macro->Add(std::make_unique<SetTrackSoloGroupCommand>((TrackId)tid, (int)sgroup));
                 if (t->muteGroup > 0 && t->muted != mu) {
                     const int grp = t->muteGroup;
                     for (const Track& o : fProject->Tracks())
