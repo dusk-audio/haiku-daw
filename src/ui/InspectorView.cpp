@@ -360,16 +360,25 @@ void InspectorView::MouseDown(BPoint where) {
         BPopUpMenu* menu = new BPopUpMenu("input", false, false);
         for (const InputSource& c : choices) {
             BMenuItem* it = new ThemedMenuItem(InputChoiceLabel(c).c_str(), NULL);
-            if (c.kind == t->input.kind && c.name == t->input.name)
+            if (SameInput(c, t->input))
                 it->SetMarked(true);
             menu->AddItem(it);
         }
         BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
         const int32 pick = sel ? menu->IndexOf(sel) : -1;
         delete menu;
-        if (pick >= 0 && (size_t)pick < choices.size())
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                id, choices[(size_t)pick]), *fProject);
+        if (pick >= 0 && (size_t)pick < choices.size()) {
+            const InputSource chosen = choices[(size_t)pick];
+            const TrackChannels width = WidthOfChoice(chosen);
+            const bool setWidth = (width != t->channels);
+            fStack->Execute(std::make_unique<SetTrackInputCommand>(id, chosen),
+                            *fProject);
+            // A channel choice says how wide the take is (M5): one channel is
+            // mono, a pair stereo. One gesture, two undoable document edits.
+            if (setWidth)
+                fStack->Execute(std::make_unique<SetTrackChannelsCommand>(id, width),
+                                *fProject);
+        }
         Refresh();
         if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;

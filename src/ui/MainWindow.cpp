@@ -2065,7 +2065,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         // Growing recording region + its live content.
                         fTimeline->SetRecording(true, fRecCtl.fRecStart, ph - fRecCtl.fRecStart);
                         if (capturing)
-                            fTimeline->SetLiveAudio(fRecCtl.fRecorder.get(), fProject->sampleRate);
+                            fTimeline->SetLiveAudio(fRecCtl.fRecorder.get(),
+                                                    fProject->sampleRate,
+                                                    fRecCtl.fLiveTakeFor);
                         if (midiCap) {
                             std::map<TrackId, std::vector<MidiNote>> live;
                             for (TrackId id : fRecCtl.fMidiRecTracks)
@@ -3428,6 +3430,7 @@ void MainWindow::LoadSettings() {
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
+    s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
     if (!s.Deserialize(text)) return;
 
     // The panes (M1.4). The width goes on as the inspector's preferred size
@@ -3455,6 +3458,8 @@ void MainWindow::LoadSettings() {
 
     fTransportCtl.fBufferFrames = (size_t)s.bufferFrames;
     fRecCtl.fCountInBars  = s.countInBars;
+    fRecCtl.fTakeFormat   = s.takeFormat;   // take depth (M5); the recorder
+                                            // clamps an unknown value itself
     fTransportCtl.fMetronome    = s.metronome;
     fTransportCtl.fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
@@ -3521,6 +3526,7 @@ void MainWindow::SaveSettings() {
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
+    s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
     // The panes as the user left them (M1.4).

@@ -182,6 +182,16 @@ public:
     int PeakOutcome(const std::string& path) const {
         return fPeakLoader.OutcomeOf(path);
     }
+    // Hand the waveform-envelope loader files to build off this thread (M5:
+    // the extra takes of one capture). A pass of its own that is still running
+    // is LEFT ALONE -- starting a new one stops the old from publishing, and
+    // killing a project-wide pass to add a take would blank every other
+    // waveform in the project.
+    void LoadPeaksInBackground(std::vector<std::string> paths) {
+        if (paths.empty() || fPeakLoader.HasWork()) return;
+        fPeakLoader.Start(std::move(paths));
+        UpdatePulse();
+    }
     // Re-run the waveform pass the way a project load does (the tests cannot ask
     // for a file panel mid-suite).
     void RebuildPeaksForTest() { RebuildPeaks(); }

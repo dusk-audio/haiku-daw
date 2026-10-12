@@ -175,6 +175,26 @@ private:
     InputSource fOld;
 };
 
+// Set a track's channel width (M5): mono records one device channel into a
+// 1-channel take, stereo a pair. Discrete choice from the input picker; stores
+// the old width for Undo(). A document edit like any other -- it changes what
+// the next take is and how the track pans, so it undoes and marks the project
+// dirty.
+class SetTrackChannelsCommand : public Command {
+public:
+    SetTrackChannelsCommand(TrackId track, TrackChannels channels)
+        : fTrack(track), fNew(channels) {}
+
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Set Track Channels"; }
+
+private:
+    TrackId       fTrack;
+    TrackChannels fNew;
+    TrackChannels fOld = TrackChannels::Stereo;
+};
+
 // --- Markers (named timeline positions) -------------------------------
 
 // Add a named marker (Project::markers stays sorted by frame). Undo removes it.

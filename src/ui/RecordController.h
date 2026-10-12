@@ -51,7 +51,19 @@ public:
     // earlier by it (RecordPlan::CompensateRoundTrip).
     Frame  fRoundTripFrames = 0;
     std::string fTakeDir;                 // where recorded takes are written
-    std::string fTakePath;                // full path of the current take
+    std::string fTakePath;                // full path of the FIRST take
+    // M5: one take file per armed audio track. `fTakeTracks[i]` is the track
+    // `fRecorder->TakePath(i)` belongs to, so each take drops on its own track;
+    // fTakePath stays the first of them (what the pre-M5 code called "the take").
+    std::vector<TrackId> fTakeTracks;
+    // Track -> take index for the live waveform the timeline draws on each
+    // armed lane while capturing (M5). Built once at StartCapture, so the
+    // 60 Hz poll does not build it.
+    std::map<TrackId, int> fLiveTakeFor;
+    // Take sample format (M5): 0 = 16-bit, 1 = 24-bit, 2 = 32-bit float.
+    // Persisted by MainWindow as the `takefmt` setting; the Preferences window
+    // (another package) is what will put a control in front of it.
+    int    fTakeFormat = 1;
     std::vector<TrackId> fRecTracks;      // all armed targets for the take
     // MIDI capture: a consumer connected to the armed MIDI tracks' input
     // endpoints, feeding a note-pairing recorder. One recorder per armed track,

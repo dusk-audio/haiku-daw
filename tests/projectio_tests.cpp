@@ -726,6 +726,106 @@ int main() {
         std::remove(path);
     }
 
+    // M5: the multichannel input address. A track pointed at device channels
+    // 3 and 4 and set to mono must come back exactly; the address lives on its
+    // OWN line, so the `input` line an older build reads is untouched.
+    {
+        const char* path = "inputaddr_tmp.dawproj";
+        Project a;
+        CommandStack stack;
+        stack.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Kick"), a);
+        const TrackId id = a.Tracks().front().id;
+        InputSource in;
+        in.kind = InputSource::kAudioDefault;
+        in.device = "/dev/audio/hmulti/0-0 in";   // note the space
+        in.channelL = 2;
+        in.channelR = 3;
+        stack.Execute(std::make_unique<SetTrackInputCommand>(id, in), a);
+        stack.Execute(std::make_unique<SetTrackChannelsCommand>(id,
+                                                               TrackChannels::Mono), a);
+        CHECK(ProjectIO::Save(a, path));
+
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+        CHECK(b.Tracks().size() == 1);
+        if (b.Tracks().size() == 1) {
+            CHECK(b.Tracks()[0].input.kind == InputSource::kAudioDefault);
+            CHECK(b.Tracks()[0].input.device == "/dev/audio/hmulti/0-0 in");
+            CHECK(b.Tracks()[0].input.channelL == 2);
+            CHECK(b.Tracks()[0].input.channelR == 3);
+            CHECK(b.Tracks()[0].channels == TrackChannels::Mono);
+        }
+
+        // The written text: one `inputdev` line, one `trackchans 0` line, and
+        // the `input` line still exactly the three fields it always had.
+        std::string text, line;
+        { std::ifstream in2(path); while (std::getline(in2, line)) text += line + "\n"; }
+        CHECK(text.find("inputdev 2 3 \"/dev/audio/hmulti/0-0 in\"") != std::string::npos);
+        CHECK(text.find("trackchans 0") != std::string::npos);
+        CHECK(text.find("input 1 0 \"\"") != std::string::npos);
+        std::remove(path);
+    }
+
+    // A file from BEFORE M5 -- an `input` line and nothing else -- still loads,
+    // and lands on what the pre-M5 recorder did with every take: the default
+    // device, its first channel pair, stereo.
+    {
+        const char* path = "inputlegacy_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Old\" 0 72 0 0 0\n"
+                << "input 1 0 \"\"\n"
+                << "endtrack\n"
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 1);
+        if (p.Tracks().size() == 1) {
+            CHECK(p.Tracks()[0].input.kind == InputSource::kAudioDefault);
+            CHECK(p.Tracks()[0].input.device.empty());
+            CHECK(p.Tracks()[0].input.channelL == 0);
+            CHECK(p.Tracks()[0].input.channelR == 1);
+            CHECK(p.Tracks()[0].channels == TrackChannels::Stereo);
+        }
+        std::remove(path);
+    }
+
+    // An `inputdev` line a NEWER build might write with values this one cannot
+    // mean (a negative channel) is clamped away rather than kept -- it would
+    // address outside a capture block.
+    {
+        const char* path = "inputbad_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Odd\" 0 72 0 0 0\n"
+                << "input 1 0 \"\"\n"
+                << "inputdev -4 -9 \"\"\n"
+                << "trackchans 7\n"      // unknown width: reads as stereo
+                << "endtrack\n"
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 1);
+        if (p.Tracks().size() == 1) {
+            CHECK(p.Tracks()[0].input.channelL == 0);
+            CHECK(p.Tracks()[0].input.channelR == 0);   // follows the left
+            CHECK(p.Tracks()[0].channels == TrackChannels::Stereo);
+        }
+        std::remove(path);
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

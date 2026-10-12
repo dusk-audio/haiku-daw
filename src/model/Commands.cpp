@@ -1283,6 +1283,20 @@ bool SetTrackInputCommand::Do(Project& p) {
     t->input = fNew;
     return true;
 }
+
+// --- SetTrackChannelsCommand (M5) -------------------------------------
+
+bool SetTrackChannelsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->channels;
+    t->channels = fNew;
+    return true;
+}
+
+void SetTrackChannelsCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->channels = fOld;
+}
 void SetTrackInputCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->input = fOld;
 }
