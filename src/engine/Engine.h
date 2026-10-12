@@ -173,6 +173,15 @@ public:
     // automated tracks, where automation owns the gain/pan).
     void SetAudible(bool audible);
 
+    // The track's input trim and polarity (M3.4). Separate atoms from the
+    // fader's: they are applied to this clip's contribution on the way into
+    // the track, so a gain/pan automation pass — which overwrites fGainL/R
+    // every block — can never drop them.
+    void SetTrimPhase(float trim, bool invert) {
+        fTrim.store(trim, std::memory_order_relaxed);
+        fPhase.store(invert, std::memory_order_relaxed);
+    }
+
     // The engine's xrun counter (M3.1): Mix increments it once per block in
     // which this clip's ring could not supply a frame. The ENGINE outlives
     // every graph it publishes, so the pointer stays valid for the stream's
@@ -251,6 +260,8 @@ private:
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
     std::atomic<uint64_t>* fXruns = nullptr;   // the engine's counter (M3.1)
+    std::atomic<float> fTrim{1.0f};    // input trim, pre-fader (M3.4)
+    std::atomic<bool>  fPhase{false};  // polarity flip (M3.4)
 
     // The factory's reader for whatever the clip's file is: WAV, AIFF, FLAC or
     // Ogg Vorbis. Owned (the concrete readers are not copyable and their
@@ -304,6 +315,12 @@ public:
             std::atomic<float>                    midiGainR{1.0f};
             std::atomic<float>                    busGainL{1.0f};   // bus fader
             std::atomic<float>                    busGainR{1.0f};
+            // Input trim + polarity (M3.4), applied where the node's OWN
+            // material is scaled (the MIDI fader / the bus fader). Separate
+            // from the gain atoms above for the same reason the streams' are:
+            // automation writes those every block.
+            std::atomic<float>                    trim{1.0f};
+            std::atomic<bool>                     phaseInv{false};
             bool                                  isBus   = false;
             std::atomic<bool>                     audible{true};
             bool                                  liveMonitor = false;  // armed MIDI: synth live input

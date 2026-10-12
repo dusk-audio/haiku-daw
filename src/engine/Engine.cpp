@@ -298,9 +298,18 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart,
 
     const Frame clipEnd = fStart + fLength;
     // Snapshot the live params once per block.
-    const float gl  = fGainL.load(std::memory_order_relaxed);
-    const float gr  = fGainR.load(std::memory_order_relaxed);
+    float gl  = fGainL.load(std::memory_order_relaxed);
+    float gr  = fGainR.load(std::memory_order_relaxed);
     const bool  aud = fAudible.load(std::memory_order_relaxed);
+    // The track's input trim and polarity (M3.4) fold into the same multiply:
+    // they scale this clip's contribution on its way into the track, ahead of
+    // the track's inserts, which is what an input trim is.
+    {
+        const float trim = fTrim.load(std::memory_order_relaxed);
+        const float sgn  = fPhase.load(std::memory_order_relaxed) ? -1.0f : 1.0f;
+        gl *= trim * sgn;
+        gr *= trim * sgn;
+    }
 
     // Whether this block found the ring starved at any point. Counted once for
     // the block, not once per starved frame: an xrun is a moment the audio
@@ -716,8 +725,11 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
                     b.instrument->Render(b.liveNotes, mb, frames, blockStart, 1.0f,
                                          liveExpr);
             }
-            const float mgl = b.midiGainL.load(std::memory_order_relaxed);
-            const float mgr = b.midiGainR.load(std::memory_order_relaxed);
+            // The node's own trim/polarity ride along with its fader (M3.4).
+            const float tp = b.trim.load(std::memory_order_relaxed)
+                           * (b.phaseInv.load(std::memory_order_relaxed) ? -1.0f : 1.0f);
+            const float mgl = b.midiGainL.load(std::memory_order_relaxed) * tp;
+            const float mgr = b.midiGainR.load(std::memory_order_relaxed) * tp;
             for (size_t i = 0; i < frames; i++) {
                 mb[i * 2 + 0] *= mgl;
                 mb[i * 2 + 1] *= mgr;
@@ -728,8 +740,10 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
         // already sit at that position and must not be delayed a second time.
         if (delayOwn) b.inDelay.ProcessAdd(mb, nb, frames, 1.0f);
         if (b.isBus) {                      // bus: fader on the summed upstream
-            const float bgl = b.busGainL.load(std::memory_order_relaxed);
-            const float bgr = b.busGainR.load(std::memory_order_relaxed);
+            const float tp = b.trim.load(std::memory_order_relaxed)
+                           * (b.phaseInv.load(std::memory_order_relaxed) ? -1.0f : 1.0f);
+            const float bgl = b.busGainL.load(std::memory_order_relaxed) * tp;
+            const float bgr = b.busGainR.load(std::memory_order_relaxed) * tp;
             for (size_t i = 0; i < frames; i++) {
                 nb[i * 2 + 0] *= bgl;
                 nb[i * 2 + 1] *= bgr;
@@ -1308,6 +1322,9 @@ void Engine::UpdateMix(const Project& project) {
             if (s->Track() == t.id) {
                 if (automated) s->SetAudible(audible);
                 else           s->SetMix(t.gain, t.pan, audible);
+                // The trim and polarity are not part of the fader, so they are
+                // pushed on BOTH paths (M3.4).
+                s->SetTrimPhase(t.trim, t.phaseInvert);
             }
     }
 
@@ -1318,6 +1335,8 @@ void Engine::UpdateMix(const Project& project) {
         if (!t) continue;
         const bool audible = !t->muted && (!anySolo || t->soloed || t->soloSafe);
         const bool automated = t->gainAuto.Count() > 0 || t->panAuto.Count() > 0;
+        b.trim.store(t->trim, std::memory_order_relaxed);
+        b.phaseInv.store(t->phaseInvert, std::memory_order_relaxed);
         if (t->type == TrackType::Midi) {
             b.audible.store(audible || b.liveMonitor, std::memory_order_relaxed);  // keep monitored input audible
             if (!automated) {

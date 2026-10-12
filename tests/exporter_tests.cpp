@@ -184,6 +184,59 @@ int main() {
         CHECK(std::fabs(pk - pDirect) < pDirect * 0.05f);   // == plain direct
     }
 
+    // --- M3.4: the input trim and the polarity ----------------------------
+    // A trim scales the track's own material (pre-fader, pre-inserts) and a
+    // polarity flip inverts it, both on the live engine and in a bounce (the
+    // engine's rule is in Engine.cpp; this is the exporter's half).
+    auto renderTrimmed = [&](float trim, bool invert, float* firstSample) -> float {
+        Project pr;
+        pr.sampleRate = SR;
+        pr.masterGain = 1.0f;
+        Track m;
+        m.id = pr.NextTrackId(); m.type = TrackType::Midi;
+        m.gain = 1.0f; m.pan = 0.0f;
+        m.trim = trim;
+        m.phaseInvert = invert;
+        PutNote(m, note);
+        pr.AddTrack(m);
+
+        const std::string p = "/tmp/haiku_daw_export_trim.wav";
+        std::remove(p.c_str());
+        if (!ExportWav(pr, p, SR)) return -1.0f;
+        WavSource s;
+        if (!s.Open(p)) return -1.0f;
+        float pk = 0.0f, first = 0.0f;
+        const float* c = nullptr; size_t f = 0;
+        while (s.ReadChunk(&c, &f)) {
+            for (size_t i = 0; i < f * 2; ++i) {
+                const float a = std::fabs(c[i]);
+                if (a > pk) pk = a;
+                if (first == 0.0f && a > 1e-6f) first = c[i];
+            }
+        }
+        std::remove(p.c_str());
+        if (firstSample) *firstSample = first;
+        return pk;
+    };
+    float firstUnity = 0.0f, firstInverted = 0.0f;
+    const float pUnity2    = renderTrimmed(1.0f, false, &firstUnity);
+    const float pHalfTrim2 = renderTrimmed(0.5f, false, nullptr);
+    const float pInverted  = renderTrimmed(1.0f, true, &firstInverted);
+    CHECK(pUnity2 > 0.01f);
+    CHECK(std::fabs(pHalfTrim2 - pUnity2 * 0.5f) < pUnity2 * 0.1f);
+    // The polarity flip keeps the LEVEL and inverts the samples.
+    CHECK(std::fabs(pInverted - pUnity2) < pUnity2 * 0.02f);
+    CHECK(firstUnity != 0.0f && firstInverted != 0.0f);
+    CHECK((firstUnity > 0.0f) != (firstInverted > 0.0f));
+
+    // --- M3.4: a send's level reaches the bus ------------------------------
+    // What the strip's send knob writes (Sends[].level) is what the bounce
+    // mixes with; 0.5 must land halfway between no send and a unity send.
+    const float pSendHalf = peakWithSend(0.5f);
+    CHECK(pSendHalf > pDirect);
+    CHECK(std::fabs(pSendHalf - pDirect * (1.0f + 0.5f * kBusPan))
+          < pDirect * 0.05f);
+
     // --- Gain automation: a full-scale note with a 1.0 -> 0.0 gain ramp over
     // the buffer should leave the second half much quieter than the first.
     {
