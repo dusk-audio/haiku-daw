@@ -51,6 +51,10 @@ public:
 
     // Where settings live (the window's own preferences use it too).
     static bool SettingsPath(BPath& out);
+    // <settings>/HaikuDAW/peaks, created on demand: the waveform envelope cache
+    // (M4.4). Beside the settings file, because it belongs to this machine's
+    // view of the media, not to the project.
+    static bool PeakCacheDir(BPath& out);
 
     // The settings file as data (defaults when it is missing or garbage).
     // DawApplication reads the theme mode through this before any window

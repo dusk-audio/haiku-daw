@@ -682,6 +682,7 @@ if(HAIKU)
         src/ui/TransportController.cpp
         src/ui/RecordController.cpp
         src/ui/RenderJobs.cpp
+        src/ui/PeakLoader.cpp        # waveform envelopes off the window thread (M4.4)
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
         src/ui/ShortcutsWindow.cpp   # the keyboard map, on screen (M3.2)

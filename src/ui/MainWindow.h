@@ -11,6 +11,7 @@
 
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
+#include "PeakLoader.h"
 #include "../model/Commands.h"   // RelinkEntry (the Locate… walk)
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
@@ -167,6 +168,24 @@ public:
         return fTransportCtl.fEngine
                    ? fTransportCtl.fEngine->PlayerStarts() : 0;
     }
+    // Waveform envelopes (M4.4), for the tests: how many the loader has handed
+    // over, and whether it is still working.
+    int PeaksLoaded() const {
+        int n = 0;
+        for (const auto& kv : *fPeaks) if (kv.second.IsValid()) n++;
+        return n;
+    }
+    int PeakCacheHits()   const { return fPeakLoader.CacheHits(); }
+    int PeakCacheMisses() const { return fPeakLoader.CacheMisses(); }
+    bool PeaksLoading()   const { return fPeakLoader.Busy(); }
+    // What the last pass did with one path (PeakLoader::Outcome).
+    int PeakOutcome(const std::string& path) const {
+        return fPeakLoader.OutcomeOf(path);
+    }
+    // Re-run the waveform pass the way a project load does (the tests cannot ask
+    // for a file panel mid-suite).
+    void RebuildPeaksForTest() { RebuildPeaks(); }
+
     // The master output peak of the last rendered block (the audio-out guard).
     float MasterPeakL() const {
         return fTransportCtl.fEngine ? fTransportCtl.fEngine->PeakL() : 0.0f;
@@ -272,6 +291,7 @@ private:
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
     PeakMap*        fPeaks;          // non-owning; new takes add entries here
+    PeakLoader      fPeakLoader;     // waveform envelopes, off this thread (M4.4)
 
     // The window's panes (M1.4): the inspector/timeline split, and the docked
     // bottom pane (the editor and the browsers) under it. Both are BSplitViews,

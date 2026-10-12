@@ -75,6 +75,17 @@ bool ProjectDocument::SettingsPath(BPath& out) {
     return true;
 }
 
+bool ProjectDocument::PeakCacheDir(BPath& out) {
+    BPath p;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &p) != B_OK) return false;
+    p.Append("HaikuDAW");
+    mkdir(p.Path(), 0755);   // ignore EEXIST
+    p.Append("peaks");
+    mkdir(p.Path(), 0755);
+    out = p;
+    return true;
+}
+
 // The settings as data. DawApplication reads the theme mode through this
 // before any window exists (the control look is process-wide, so it has to be
 // chosen before the first window draws), and MainWindow reads the rest on top
