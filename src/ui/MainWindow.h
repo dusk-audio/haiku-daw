@@ -234,7 +234,26 @@ public:
     // For the functional tests: re-run the settings load, which a restart would
     // do. The suite keeps ONE window for the whole run (closing it quits the
     // app), so the restore path is otherwise unreachable from a test.
-    void ReloadSettings() { LoadSettings(); }
+    //
+    // The hook takes the window lock ITSELF when the caller is not the window
+    // thread. LoadSettings walks views (the marker lane, the dock page, the
+    // master slider, the panes), and a BView call off the window's thread does
+    // not merely fail: Haiku asserts "Looper must be locked.", the debug_server
+    // stops the whole team, and the run wedges — which is exactly what M3.5's
+    // preferences test did to the suite (stack in `41-preferences-PR.md`'s
+    // follow-up record). A caller that already holds the lock still works: the
+    // load then runs inline, on the thread that owns it.
+    void ReloadSettings() {
+        if (find_thread(NULL) == Thread()) { LoadSettings(); return; }
+        if (Lock()) { LoadSettings(); Unlock(); }
+    }
+    // The engine's own buffer size, for the test that checks what the
+    // Preferences row PROMISES: a change applies at the next Play. 0 = no
+    // engine yet.
+    int EngineBufferFramesForTest() const {
+        return fTransportCtl.fEngine ? (int)fTransportCtl.fEngine->BufferFrames()
+                                     : 0;
+    }
     // The transport bar's own state (M3.1), for the functional tests: which
     // format the big display is showing, and the two text lines it draws.
     int TransportTimeMode() const { return (int)fTimeMode; }

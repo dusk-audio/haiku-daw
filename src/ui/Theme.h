@@ -205,12 +205,19 @@ inline void ApplyThemeToWindowViews(BWindow* window) {
 // which never returns until the alert is answered).
 inline void ThemeStockWindow(BWindow* window);
 
+// The walk locks every window, and it runs on whoever applied the theme (the
+// main window's looper, when a preference changed). The wait is therefore
+// BOUNDED: an unbounded Lock() here holds the main window — the app's front
+// door — for as long as any other window's looper is busy, and one that is
+// wedged would freeze the app for good. A window that cannot be locked in a
+// second is skipped; it keeps the previous mode's cached colours until its next
+// theme change, which is a cosmetic miss and not a frozen application.
 inline void ApplyThemeToAllWindows() {
     if (be_app == nullptr) return;
     for (int32 i = 0;; i++) {
         BWindow* window = be_app->WindowAt(i);
         if (window == nullptr) break;
-        if (!window->Lock())
+        if (window->LockWithTimeout(1000000) != B_OK)
             continue;
         if (auto* aware = dynamic_cast<ThemeAware*>(window))
             aware->ApplyTheme();

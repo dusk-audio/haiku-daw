@@ -3748,15 +3748,25 @@ void MainWindow::LoadSettings() {
     fExportChoices.range      = s.exportRange;
     fExportChoices.stems      = s.exportStems != 0;
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
-    // The Preferences window's own keys (M3.5). The UI SCALE is deliberately
-    // not applied here: main.cpp applies it before the first window exists and
-    // ApplyPrefs applies it when it changes, so a reload never fights the
-    // scale a test (or the user) has just chosen.
+    // The Preferences window's own keys (M3.5).
     fTransportCtl.fMetronomeSound = s.metronomeSound;
     fTransportCtl.fMetronomeGain  = s.metronomeLevel;
     fPrefsSampleRate      = s.defaultSampleRate;
-    fPrefsUiScale         = s.uiScale;
     fPrefsProjectDir      = s.projectDir;
+    // The UI SCALE is APPLIED here, not only read. main.cpp applies the stored
+    // scale before the first window exists, so for a fresh launch the two
+    // agree — but any other reload (the suite's ReloadSettings, and the
+    // startup path in a process that does not go through main.cpp) left the
+    // app REMEMBERING one scale and DRAWING at another. The visible symptom is
+    // a Preferences row showing 125% over a 100% layout, and a change to the
+    // same value being a no-op that never reaches the screen. One number, one
+    // place: what was read is what is drawn.
+    if (fPrefsUiScale != s.uiScale) {
+        fPrefsUiScale = s.uiScale;
+        SetThemeScaleOverride(s.uiScale);
+        ApplyThemeToAllWindows();
+        if (fTimeline) fTimeline->Invalidate();
+    }
     fPrefsAutosaveSeconds = s.autosaveSeconds;
     StartAutosave(fPrefsAutosaveSeconds);   // 0 = off
     // The marker lane (M2.7): a view preference, restored with the panes.

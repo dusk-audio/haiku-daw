@@ -208,6 +208,11 @@ void PreferencesWindow::BuildRows(BView* root) {
         .Add(new PrefsLabel("dvh", "(device selection arrives with the "
                                    "multichannel-input package)"))
         .Add(fBuffer)
+        // What the row PROMISES, next to the row: the buffer is the audio
+        // device's block size, and a running device is not re-opened under the
+        // transport (the Audio menu has behaved this way since it existed), so
+        // the new size takes effect when playback next starts.
+        .Add(new PrefsLabel("bfh", "Applied at the next Play."))
         .Add(fRate)
         .Add(fCountIn)
         .Add(fSound)
@@ -221,6 +226,11 @@ void PreferencesWindow::BuildRows(BView* root) {
         .Add(fMonitor)
         .Add(fDark)
         .Add(fScale)
+        // The scale IS applied now (the whole process re-lays out at it); what
+        // waits for a launch is the window FRAMES, which stay where the user
+        // put them rather than jumping under the pointer.
+        .Add(new PrefsLabel("ush", "Applied now; window sizes settle at the "
+                                   "next launch."))
         .AddGroup(B_HORIZONTAL, Themed(6.0f))
             .Add(fDir)
             .Add(chooseDir)

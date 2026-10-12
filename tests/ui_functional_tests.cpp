@@ -7017,10 +7017,32 @@ static void TestPreferences(MainWindow* win, Project& project) {
 
     // What the app had before the window is opened, so the test can put it
     // back and leave the rest of the run (and the settings file) as it found
-    // them.
+    // them. The scale is kept BOTH ways: the live theme scale (what the screen
+    // is drawn at) and the stored preference the window shows (0 = "follow the
+    // system font", which is a value and not a scale).
     const int beforeBuffer = (int)win->BufferFramesForTest();
     const int beforeCountIn = (int)win->CountInBarsForTest();
     const ThemeMode beforeMode = ActiveThemeMode();
+    const float beforeScaleLive = ThemeScale();
+    const float beforeScalePref = shownValues().uiScale;
+
+    // Mark the menu item whose label carries this number ("1024 frames",
+    // "125%", "4 bars", "Off" = 0). Restoring by VALUE, not by index, is what
+    // makes the test indifferent to the settings file it inherits: a run that
+    // crashed mid-way leaves one behind, and a hard-coded restore then makes a
+    // different change than the one it is undoing.
+    auto markValue = [](BMenu* m, int value) {
+        if (m == nullptr) return false;
+        for (int32 i = 0; i < m->CountItems(); i++) {
+            BMenuItem* it = m->ItemAt(i);
+            if (it == nullptr || it->Label() == nullptr) continue;
+            if (std::atoi(it->Label()) == value) {
+                it->SetMarked(true);
+                return true;
+            }
+        }
+        return false;
+    };
 
     win->PostMessage(MSG_PREFERENCES);
     CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
@@ -7032,6 +7054,22 @@ static void TestPreferences(MainWindow* win, Project& project) {
         CHECK(v.bufferFrames == beforeBuffer);
         CHECK(v.countInBars == beforeCountIn);
         CHECK(v.darkMode == (beforeMode == ThemeMode::Dark));
+    }
+    // ... and it SAYS what its two timing-sensitive rows promise (M3.5): the
+    // buffer at the next Play, the scale now. A row whose effect is not where
+    // the user looks for it is a row that appears not to work.
+    {
+        BWindow* w = findPrefs();
+        bool haveBufferHint = false, haveScaleHint = false;
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("bfh")))
+                haveBufferHint = BString(h->Text()).FindFirst("next Play") >= 0;
+            if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("ush")))
+                haveScaleHint = BString(h->Text()).FindFirst("Applied now") >= 0;
+            w->Unlock();
+        }
+        CHECK(haveBufferHint);
+        CHECK(haveScaleHint);
     }
 
     // One window: asking again activates this one (the mixer's rule).
@@ -7047,22 +7085,33 @@ static void TestPreferences(MainWindow* win, Project& project) {
     }));
     CHECK(WaitFor([&] { return win->CountInBarsForTest() == 4; }));
 
-    // Buffer size: the same, and the app took it (a Play would use it).
+    // Buffer size: what the row PROMISES is "applied at the next Play" — the
+    // device is not re-opened under a running transport — so BOTH halves are
+    // checked: the value the app now holds, and the engine that the next Play
+    // builds with it. (The check the row makes is honest only if the Play
+    // really uses it; a value nothing reads would pass a state check and still
+    // be a dead control.)
     CHECK(edit([](PreferencesWindow* w) {
         BMenu* m = w->BufferField()->Menu();
         for (int32 i = 0; i < m->CountItems(); i++)
             m->ItemAt(i)->SetMarked(i == 3);      // kBufferFrameChoices[3] = 1024
     }));
     CHECK(WaitFor([&] { return win->BufferFramesForTest() == 1024; }));
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->EngineBufferFramesForTest() == 1024; }));
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
 
-    // The UI scale: a preference the app applies process-wide (Theme.h).
-    const float beforeScale = ThemeScale();
+    // The UI scale: applied NOW, process-wide (Theme.h), and the app's own
+    // record of it moves with it — a record that disagreed with the screen is
+    // how a 125% row ended up over a 100% layout.
     CHECK(edit([](PreferencesWindow* w) {
         BMenu* m = w->ScaleField()->Menu();
         for (int32 i = 0; i < m->CountItems(); i++)
             m->ItemAt(i)->SetMarked(i == 2);      // kUiScaleChoices[2] = 1.25
     }));
     CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
+    CHECK(shownValues().uiScale == 1.25f);
 
     // Dark mode: the control that moved out of the View menu still flips the
     // whole look (TestThemeMode covers the mode switch itself).
@@ -7073,7 +7122,9 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return ActiveThemeMode() != beforeMode; }));
 
     // Everything the window did is in the settings file: reload it the way a
-    // restart would and read the values back out of the window.
+    // restart would and read the values back out of the window. The SCALE is
+    // the interesting one here — a reload reads the preference and must apply
+    // it, or the app remembers 125% while drawing at 100%.
     win->ReloadSettings();
     win->PostMessage(MSG_PREFERENCES);
     snooze(400000);
@@ -7081,27 +7132,34 @@ static void TestPreferences(MainWindow* win, Project& project) {
         const PrefsView v = shownValues();
         CHECK(v.countInBars == 4);        // the choices the window made came
         CHECK(v.bufferFrames == 1024);    // back out of the settings file
+        CHECK(v.uiScale == 1.25f);
     }
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
 
-    // Put the run's own state back: the settings file is one of the files the
-    // next test run inherits.
-    CHECK(edit([](PreferencesWindow* w) {
-        BMenu* m = w->BufferField()->Menu();
-        m->ItemAt(0)->SetMarked(false);
-        m->ItemAt(2)->SetMarked(true);            // 512
+    // Put the run's own state back, by value: the settings file is one of the
+    // files the next test run inherits, and a run that crashed before this
+    // point leaves the values it had reached.
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->BufferField()->Menu(), beforeBuffer);
     }));
-    CHECK(edit([](PreferencesWindow* w) {
-        w->CountInField()->Menu()->ItemAt(0)->SetMarked(true);   // Off
+    CHECK(WaitFor([&] { return win->BufferFramesForTest() == beforeBuffer; }));
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->CountInField()->Menu(), beforeCountIn);
     }));
-    CHECK(edit([](PreferencesWindow* w) {
-        w->ScaleField()->Menu()->ItemAt(0)->SetMarked(true);     // the font
+    CHECK(WaitFor([&] { return win->CountInBarsForTest() == beforeCountIn; }));
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->ScaleField()->Menu(),
+                         (int)(beforeScalePref * 100.0f + 0.5f));
     }));
-    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - beforeScale) < 1e-3f; }));
+    CHECK(WaitFor([&] {
+        return std::fabs(ThemeScale()
+                         - (beforeScalePref > 0.0f ? beforeScalePref
+                                                   : beforeScaleLive)) < 1e-3f;
+    }));
     if (ActiveThemeMode() != beforeMode) {
         win->PostMessage(MSG_THEME_MODE);
         CHECK(WaitFor([&] { return ActiveThemeMode() == beforeMode; }));
     }
-    CHECK(WaitFor([&] { return win->BufferFramesForTest() == beforeBuffer; }));
 
     HideOtherWindows(win);   // the window is ours; put it away
     CHECK(WaitQuiet());
