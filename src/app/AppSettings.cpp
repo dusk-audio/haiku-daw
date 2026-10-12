@@ -35,7 +35,8 @@ std::string AppSettings::Serialize() const {
       << "explim "    << (exportLimiter ? 1 : 0) << "\n"
       << "exprange "  << exportRange << "\n"
       << "expstems "  << exportStems << "\n"
-      << "theme "     << ThemeModeToString(themeMode) << "\n";
+      << "theme "     << ThemeModeToString(themeMode) << "\n"
+      << "takefmt "   << takeFormat << "\n";
     // The recent list is one line per entry (paths may contain spaces -> rest
     // of the line, like lastdir below).
     for (const std::string& r : recentProjects)
@@ -96,6 +97,7 @@ bool AppSettings::Deserialize(const std::string& text) {
             // file must not be able to leave the app in a look it cannot draw.
             if (ls >> v) themeMode = ThemeModeFromString(v.c_str());
         }
+        else if (kw == "takefmt") { int v; if (ls >> v) takeFormat = v; }
         else if (kw == "recent") {
             std::string rest;
             std::getline(ls, rest);
