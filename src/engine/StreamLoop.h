@@ -75,10 +75,17 @@ inline size_t SegmentFrames(Frame pos, size_t frames, Frame loopStart, Frame loo
 // seeks to at the start of a pass, and what `Prepare` seeks to for the first
 // one. One rounding rule for both, so a pass start and the graph's opening seek
 // cannot land a frame apart.
+//
+// `stretchRatio` (M7.2, 1.0 = play as recorded) divides the timeline distance
+// before it becomes source frames: a clip stretched to twice the timeline
+// length walks its source at half speed, which is the same convention the
+// model pins in model/ClipStretch.h (source consumed = timeline / ratio).
 inline int64_t PassSourceFrame(int64_t sourceOffset, Frame clipStart, Frame t,
-                               double srcRate, double outRate) {
+                               double srcRate, double outRate,
+                               double stretchRatio = 1.0) {
+    const double ratio = stretchRatio > 0.0 ? stretchRatio : 1.0;
     const double d = (double)(t - clipStart)
-                     * (outRate > 0.0 ? srcRate / outRate : 1.0);
+                     * (outRate > 0.0 ? srcRate / outRate : 1.0) / ratio;
     return sourceOffset + (int64_t)(d + 0.5);
 }
 
