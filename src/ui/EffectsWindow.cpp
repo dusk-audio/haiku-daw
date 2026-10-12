@@ -419,8 +419,11 @@ void EffectsView::Retarget(std::vector<EffectDesc> chain, TrackId track,
     fTrack = track;
     // The sidechain picker's candidates, re-snapshotted for the new track: on
     // the OLD track's list the new track's own id would be an offered self-key.
-    // An empty list (an older sender) keeps the window's snapshot.
-    if (!keySources.empty()) fKeySources = std::move(keySources);
+    // Always replaced, even when empty: the one sender (ShowFxWindow) always
+    // sends the list, so empty means "no other track can key this chain" -- and
+    // keeping the old list then is exactly the self-key (a one-track project,
+    // retargeted from the master chain to that track).
+    fKeySources = std::move(keySources);
     fFocus = (focusSlot >= 0 && focusSlot < (int)fChain.size()) ? focusSlot : -1;
     fHits.clear();
     UpdateScrollRange();

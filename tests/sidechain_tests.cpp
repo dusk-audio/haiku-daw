@@ -587,6 +587,33 @@ static void TestProjectIo() {
         CHECK(ReadFile(path).find("fxsc") == std::string::npos);
         CHECK(ReadFile(path).find("masterfxsc") == std::string::npos);
     }
+    // One insert that carries BOTH a key source and a plugin's own state (M7.4's
+    // `fxstate`): the two optional lines address the same slot and neither may
+    // cost the other its value, on a track and on the master chain.
+    {
+        Duo s = MakeDuo({ Comp(true) });
+        WireKey(s);
+        Track* bt = s.p.FindTrack(s.bass);
+        bt->fx[0].state = "opaque plugin state \"with\" quotes\nand a newline";
+        EffectDesc mg = GateKeyed(GateDesc());
+        mg.sidechainSource = s.kick;
+        mg.state = "master insert state";
+        s.p.masterFx = { mg };
+        CHECK(ProjectIO::Save(s.p, path));
+        Project r;
+        CHECK(ProjectIO::Load(r, path));
+        const Track* rb = r.FindTrack(s.bass);
+        CHECK(rb && !rb->fx.empty());
+        if (rb && !rb->fx.empty()) {
+            CHECK(rb->fx[0].sidechainSource == s.kick);
+            CHECK(rb->fx[0].state == bt->fx[0].state);
+        }
+        CHECK(r.masterFx.size() == 1);
+        if (!r.masterFx.empty()) {
+            CHECK(r.masterFx[0].sidechainSource == s.kick);
+            CHECK(r.masterFx[0].state == "master insert state");
+        }
+    }
     std::remove(path.c_str());
 }
 

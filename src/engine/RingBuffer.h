@@ -59,6 +59,20 @@ public:
         return n;
     }
 
+    // Consumer side only (the RT thread is the single reader): drop up to
+    // `count` floats without copying them, and report how many were dropped.
+    // Used to re-align a stream after its graph is swapped in mid-playback
+    // (TrackStream::RebaseTo) — O(1) where a Read of the same frames would be
+    // O(n), and still just arithmetic on the same atomics as Read.
+    size_t Skip(size_t count) {
+        const size_t r = fRead.load(std::memory_order_relaxed);
+        const size_t w = fWrite.load(std::memory_order_acquire);
+        const size_t avail = w - r;
+        const size_t n = count < avail ? count : avail;
+        fRead.store(r + n, std::memory_order_release);
+        return n;
+    }
+
     size_t Capacity() const { return fCapacity; }
 
 private:
