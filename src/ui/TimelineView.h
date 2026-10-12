@@ -468,7 +468,8 @@ private:
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
-                      RulerPunch, Pencil, Slip, RangeSelect, LaneResize };
+                      RulerPunch, Pencil, Slip, RangeSelect, LaneResize,
+                      ClipStretch };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -486,6 +487,11 @@ private:
     // instead of being trimmed.
     Frame   fDragClipSrcOrig = 0;
     Frame   fDragClipOrigLen = 0;      // clip lengthFrames at drag start
+    // Stretch drag (Cmd/Alt on the right edge, M7.2): the ratio at drag start.
+    // The dragged ratio is derived from the PRE-drag length + ratio (the span
+    // the clip references today), never from the values the preview has already
+    // written into the model — a drag that read its own preview would compound.
+    double  fDragRatioOrig   = 1.0;
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
     Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)
     Frame   fDragFadeOutOrig = 0;
