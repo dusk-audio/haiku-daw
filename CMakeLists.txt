@@ -586,6 +586,11 @@ add_executable(smfio_tests tests/smfio_tests.cpp)
 target_link_libraries(smfio_tests PRIVATE daw_model)
 add_test(NAME smfio_tests COMMAND smfio_tests)
 
+# The transport's time formats and their inverse (M3.1): header-only, kit-free.
+add_executable(time_display_tests tests/time_display_tests.cpp)
+target_link_libraries(time_display_tests PRIVATE daw_model)
+add_test(NAME time_display_tests COMMAND time_display_tests)
+
 add_executable(midi_tests tests/midi_tests.cpp)
 target_link_libraries(midi_tests PRIVATE daw_model)
 add_test(NAME midi_tests COMMAND midi_tests)
