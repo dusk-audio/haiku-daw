@@ -388,7 +388,10 @@ int main() {
             CHECK(seen.size() > 1);          // it reported more than once
             CHECK(inRange);
             CHECK(monotonic);
-            CHECK(seen.back() == 1.0f);
+            // Guarded: a job that reported nothing must FAIL the check above,
+            // not walk off an empty vector into a crash (a suite that segfaults
+            // says much less than one that reports the failing check).
+            if (!seen.empty()) CHECK(seen.back() == 1.0f);
             CHECK(Exists(outPath));
             CHECK(!Exists(outPath + ".part"));
 
@@ -425,7 +428,9 @@ int main() {
             CHECK(!Exists(outPath + ".part"));
         }
 
-        // Cancel MID-JOB, from inside the progress callback: the same rule.
+        // Cancel MID-JOB, from inside the progress callback: the same rule —
+        // and the work really STOPS (the decode of a 2 s file reports dozens of
+        // times, so a handful of reports after the flag is the proof).
         {
             const std::string outPath = path + ".revm.wav";
             std::remove(outPath.c_str());
@@ -434,12 +439,53 @@ int main() {
             RegionJob job;
             job.cancel = &cancel;
             job.progress = [&](float) {
-                if (++calls >= 2) cancel = true;
+                ++calls;
+                cancel = true;               // at the very first report
             };
             CHECK(!RenderReversedClip(c, SR, outPath, job));
-            CHECK(calls >= 2);
+            CHECK(calls >= 1);
+            CHECK(calls <= 3);               // it stopped, it did not run on
             CHECK(!Exists(outPath));
             CHECK(!Exists(outPath + ".part"));
+        }
+
+        // Cancel at the END of the render — after the samples are done, before
+        // the file is in place: the temp must not be renamed over the
+        // destination, and nothing may be left where a finished file goes.
+        {
+            const std::string outPath = path + ".revlate.wav";
+            std::remove(outPath.c_str());
+            std::atomic<bool> cancel{false};
+            RegionJob job;
+            job.cancel = &cancel;
+            job.progress = [&](float f) {
+                if (f > 0.7f) cancel = true;   // past the decode, before the write
+            };
+            CHECK(!RenderReversedClip(c, SR, outPath, job));
+            CHECK(!Exists(outPath));
+            CHECK(!Exists(outPath + ".part"));
+        }
+
+        // A silent source has no peak to normalize to: the op refuses rather
+        // than dividing by (almost) nothing.
+        {
+            const std::string quiet = path + ".silent.wav";
+            {
+                WavWriter w;
+                CHECK(w.Open(quiet, (int)SR, 2));
+                std::vector<int16_t> zeros(48000 * 2, 0);
+                CHECK(w.WriteInt16(zeros.data(), zeros.size()));
+                CHECK(w.Close());
+            }
+            Clip sc;
+            sc.id = 9;
+            sc.startFrame = 0;
+            sc.lengthFrames = 48000;
+            sc.sourcePath = quiet;
+            float gain = 1.0f;
+            RegionJob job;
+            CHECK(!MeasureClipPeak(sc, SR, job, &gain));
+            std::remove(quiet.c_str());
         }
 
         // Normalize: the ramp's peak is 3000/32768, so unity peak needs ~10.9x.
@@ -505,7 +551,7 @@ int main() {
         CHECK(RenderTrackToWav(fr, tid, outPath, &job));
         CHECK(!seen.empty());
         CHECK(inRange && monotonic);
-        CHECK(seen.back() == 1.0f);
+        if (!seen.empty()) CHECK(seen.back() == 1.0f);   // guarded: see above
         CHECK(Exists(outPath));
         {   // ... and it carries the track's audio, not silence.
             const std::vector<float> frames = ReadFrames(outPath);
