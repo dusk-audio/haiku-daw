@@ -450,6 +450,14 @@ add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
 
+# The stretch stage on the exporter's clip path: a stretched clip bounces to
+# the expected timeline length and content, and a trimmed clip consumes exactly
+# its referenced span of source — checked against a source whose later material
+# is a marker that must never sound.
+add_executable(exporter_stretch_tests tests/exporter_stretch_tests.cpp)
+target_link_libraries(exporter_stretch_tests PRIVATE daw_model)
+add_test(NAME exporter_stretch_tests COMMAND exporter_stretch_tests)
+
 # The export job surface: format (bit depth + dither), the timeline range,
 # progress, cancellation, and the temp+rename write.
 add_executable(exporter_job_tests tests/exporter_job_tests.cpp)

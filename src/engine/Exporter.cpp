@@ -16,6 +16,8 @@
 #include "../model/MidiControl.h"
 #include "../model/MidiExpression.h"
 #include "../model/Crossfade.h"
+#include "../model/ClipStretch.h"
+#include "../dsp/Stretch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,6 +91,63 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
     return out.size() / 2;
 }
 
+// The clip's material at the output rate, ready to place: frame i is what the
+// clip's timeline frame i plays.
+//
+// Unstretched, this is the decode, straight through — no stretcher is
+// constructed at all, which is what keeps an unstretched bounce byte-identical
+// to the pre-M7.2 exporter. Stretched, the decode is the clip's source SPAN
+// (lengthFrames / ratio, exactly — never more: a clip is a window into its
+// file, and the material a trim cut away must not be pulled back in) and that
+// span goes through the SAME Stretcher the live engine runs on its disk thread,
+// with the same grid, so a bounce and playback agree.
+//
+// Fewer than `outFrames` frames come back when the source runs out first; the
+// caller places what there is, as it did before (the rest of the clip's window
+// is silence).
+size_t ClipMaterial(const Clip& c, double outRate, int64_t outFrames,
+                    std::vector<float>& out) {
+    out.clear();
+    if (!ClipIsStretched(c)) {
+        DecodeClip(c, outRate, out, outFrames + 64);
+        return out.size() / 2;
+    }
+
+    const double ratio = ClipStretchRatio(c);
+    const int64_t spanSrc = (int64_t)std::llround((double)outFrames / ratio);
+    std::vector<float> src;
+    DecodeClip(c, outRate, src, spanSrc + 1);
+    // The stretch stage consumes the span and nothing past it. (The decoder
+    // reads in chunks, so its buffer can hold a few frames more than the span;
+    // they are material the clip does not reference, and they stay out.)
+    if (src.size() > (size_t)spanSrc * 2)
+        src.resize((size_t)spanSrc * 2);
+
+    Stretcher st;
+    st.Prepare(outRate, 2, ratio);
+    st.Reset(0);
+
+    const size_t inFrames = src.size() / 2;
+    std::vector<float> buf((size_t)st.HopFrames() * 2 * 4);
+    size_t pos = 0;
+    bool flushed = false;
+    while ((int64_t)(out.size() / 2) < outFrames) {
+        const size_t want = std::min<size_t>(32768, inFrames - pos);
+        Stretcher::Result r = st.Process(
+            want > 0 ? src.data() + pos * 2 : nullptr, (int)want,
+            buf.data(), (int)(buf.size() / 2));
+        pos += (size_t)r.inConsumed;
+        if (r.outProduced > 0)
+            out.insert(out.end(), buf.begin(),
+                       buf.begin() + (size_t)r.outProduced * 2);
+        if (pos >= inFrames && !flushed) { st.Flush(); flushed = true; }
+        if (flushed && r.inConsumed == 0 && r.outProduced == 0) break;
+    }
+    if (out.size() / 2 > (size_t)outFrames)
+        out.resize((size_t)outFrames * 2);
+    return out.size() / 2;
+}
+
 // Place a decoded clip into a track buffer at its timeline position, applying
 // the effective fade-in/out (both measured in output frames, with the shape
 // each renders with — M2.5) and per-channel gain.
@@ -110,9 +169,11 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
         return;
 
     std::vector<float> decoded;
-    // Only decode enough source to cover the clip window (+ a small resampler
-    // slack) rather than the entire source file.
-    const size_t decodedFrames = DecodeClip(c, outRate, decoded, lengthOut + 64);
+    // Only the clip's own window's worth of source — never the entire file —
+    // and, when the clip is stretched, through the stretch stage (see
+    // ClipMaterial). A stretch consumes lengthOut/ratio source frames and
+    // produces the timeline's lengthOut output frames.
+    const size_t decodedFrames = ClipMaterial(c, outRate, lengthOut, decoded);
     if (decodedFrames == 0)
         return;
 
