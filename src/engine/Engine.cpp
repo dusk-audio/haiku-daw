@@ -1,6 +1,7 @@
 #include "Engine.h"
 
 #include "../dsp/EffectFactory.h"
+#include "../dsp/LatencyProbe.h"
 #include "../model/Crossfade.h"
 #include "../model/MidiControl.h"
 
@@ -1373,6 +1374,56 @@ bool Engine::SyncFx(const Project& project) {
     return allMatched;
 }
 
+bool Engine::FxLatencyMoved() {
+    // The M4.6 poll. Off the RT thread by construction -- the UI pulse calls it
+    // beside UpdateMix() -- and it reads only atomics the RT thread publishes
+    // (Lv2Effect::Process keeps ObservedLatencySamples() current), so no plugin
+    // is ever touched from here. The pin is what makes walking the graph legal
+    // while the callback renders it: the reclaimer cannot free a pinned graph.
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
+    if (!g) return false;   // a rebuild is in flight; the next pulse re-checks
+
+    bool moved = false;
+    auto forget = [&](uint64_t key) {
+        for (size_t a = 0; a < fLatencyAsked.size(); ) {
+            if (fLatencyAsked[a].identity == key)
+                fLatencyAsked.erase(fLatencyAsked.begin() + (long)a);
+            else
+                a++;
+        }
+    };
+    auto check = [&](const std::vector<std::unique_ptr<IEffect>>& fx,
+                     const std::vector<uint64_t>& identity) {
+        for (size_t i = 0; i < fx.size(); i++) {
+            if (!fx[i]) continue;          // an unavailable plugin has no latency
+            // The identity hash is what the graph already records for SyncFx:
+            // two inserts of the same plugin share it, which makes this guard
+            // coarser than the slot it guards. That is deliberate -- it can
+            // only ever suppress a repeat ask for a plugin that has already
+            // been re-solved once, never route a key or size a line wrong.
+            const uint64_t key = i < identity.size() ? identity[i] : 0;
+            const int observed = fx[i]->ObservedLatencySamples();
+            if (observed == fx[i]->LatencySamples()) {
+                forget(key);               // agreed: a later move asks afresh
+                continue;
+            }
+            bool alreadyAsked = false;
+            for (const LatencyAsked& q : fLatencyAsked)
+                if (q.identity == key && q.observed == observed) {
+                    alreadyAsked = true;
+                    break;
+                }
+            if (alreadyAsked) continue;    // the rebuild for this did not stick
+            fLatencyAsked.push_back({key, observed});
+            moved = true;
+        }
+    };
+    for (const Graph::Bus& b : g->fBuses) check(b.fx, b.fxIdentity);
+    check(g->fMasterFx, g->fMasterFxIdentity);
+    return moved;
+}
+
 void Engine::CaptureFxStates(Project& project) {
     // One insert: ask the live instance for its own state and store it on the
     // descriptor it came from. An insert the engine could not build (no
@@ -1691,7 +1742,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     std::vector<std::pair<TrackId, TrackId>> keyEdges;
     std::vector<TrackId>                     keySrcIds;   // deduped, for nodes
     auto addKey = [&](const EffectDesc& d, TrackId consumer) {
-        if (!EffectSupportsSidechain(d.type)) return;
+        // EffectTakesSidechain, not the model's type test: an LV2 insert takes
+        // a key when its PLUGIN has a sidechain pair (M7.1 tail), and the
+        // plugin layer answers that through the factory's probe.
+        if (!EffectTakesSidechain(d)) return;
         const TrackId src = d.sidechainSource;
         if (src == kInvalidTrackId || src == consumer) return;
         keyEdges.push_back({src, consumer});
@@ -1776,7 +1830,17 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
         for (const EffectDesc& d : t->fx) {
             auto fx = MakeEffect(d, g.fOutputRate);
-            if (fx) { fx->Prepare(g.fOutputRate); fx->SetTempo(project.tempoBPM); }
+            if (fx) {
+                fx->Prepare(g.fOutputRate);
+                fx->SetTempo(project.tempoBPM);
+                // M4.6: run it briefly before anything is sized from its
+                // latency -- a plugin publishes that value during run(), so the
+                // activation-time reading is not necessarily what it is working
+                // with. This is also what makes a latency-triggered rebuild
+                // converge: the fresh instance settles on the same value the
+                // old one reported.
+                SettleLatency(*fx);
+            }
             b.fx.push_back(std::move(fx));
             b.fxTypes.push_back(d.type);
             b.fxIdentity.push_back(FxIdentity(d));
@@ -1955,6 +2019,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         if (!fx) continue;
         fx->Prepare(g.fOutputRate);
         fx->SetTempo(project.tempoBPM);
+        SettleLatency(*fx);            // M4.6 pre-roll + re-latch, as above
         const int lat = fx->LatencySamples();   // fixed once Prepare has run
         g.fMasterFxDelay.emplace_back();
         g.fMasterFxDelay.back().Prepare(lat > 0 ? (size_t)lat : 0);
@@ -1966,7 +2031,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // puts the key on the same timeline as the mix it is ducking. (The key
         // is a TRACK even here: nothing keys the master.)
         long keyNode = -1;
-        if (pdcKnown && sidechainSolvable && EffectSupportsSidechain(d.type)
+        if (pdcKnown && sidechainSolvable && EffectTakesSidechain(d)
             && d.sidechainSource != kInvalidTrackId
             && project.FindTrack(d.sidechainSource)) {
             keyNode = nodeIndexOf(d.sidechainSource);

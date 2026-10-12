@@ -3,6 +3,8 @@
 #include "WavSource.h"
 #include "IAudioSink.h"
 #include "Resampler.h"
+#include "../dsp/SincResampler.h"
+#include "../dsp/LatencyProbe.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
 #include "../synth/IInstrument.h"
@@ -78,7 +80,12 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
     if (c.sourceOffset > 0)
         src.Seek(c.sourceOffset);
 
-    Resampler rs(src.FrameRate(), outRate);
+    // The OFFLINE resampler: a windowed-sinc (M4.5) rather than the linear one,
+    // because what comes out of here is the file that leaves the app, and the
+    // linear interpolator's images fold back at only -10..-20 dB while this one
+    // holds its stopband ~90 dB down. Same interface, so nothing else changes.
+    // The live monitor path keeps the linear one (Engine).
+    SincResampler rs(src.FrameRate(), outRate);
     const float* chunk = nullptr;
     size_t frames = 0;
     while (src.ReadChunk(&chunk, &frames)) {
@@ -253,7 +260,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // "source feeds its own detector" has no order in which it can be read.
     for (const Track& t : tracks)
         for (const EffectDesc& d : t.fx)
-            if (EffectSupportsSidechain(d.type)
+            if (EffectTakesSidechain(d)
                 && d.sidechainSource != kInvalidTrackId
                 && d.sidechainSource != t.id)
                 edges.push_back({d.sidechainSource, t.id});
@@ -280,7 +287,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
         int lat = 0;
         for (const EffectDesc& d : fxDescs) {
             auto e = MakeEffect(d, outRate);
-            if (e) { e->Prepare(outRate); lat += e->LatencySamples(); }
+            if (!e) continue;
+            e->Prepare(outRate);
+            // M4.6: the exporter's re-latch after its pre-roll. A plugin
+            // publishes its latency during run(), so the value readable
+            // straight after activation is not necessarily the one it works
+            // with; SettleLatency runs it briefly and adopts what it reports,
+            // and EVERY delay below -- the PDC solve, the pad that gets
+            // trimmed, the per-insert dry lines -- is sized from that number.
+            lat += SettleLatency(*e);
         }
         return lat;
     };
@@ -374,7 +389,9 @@ bool ExportWav(const Project& project, const std::string& outPath,
     const bool keysSolvable = routingOk && pdcOk;
     auto addKeyRoute = [&](const EffectDesc& d, TrackId consumer, int* out) {
         *out = -1;
-        if (!keysSolvable || !EffectSupportsSidechain(d.type)) return;
+        // The same predicate the engine routes with: a built-in dynamics
+        // insert, or an LV2 plugin whose topology has a sidechain pair.
+        if (!keysSolvable || !EffectTakesSidechain(d)) return;
         if (d.sidechainSource == kInvalidTrackId) return;          // none
         if (consumer != kRoutingMaster && d.sidechainSource == consumer)
             return;   // self-key: no order can read a node's own output first
@@ -475,7 +492,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
         std::vector<char>       bypassed(chain.size(), 0);
         for (size_t i = 0; i < chain.size(); i++) {
             if (!chain[i]) continue;   // unavailable plugin: nothing to run
-            const int lat = chain[i]->LatencySamples();
+            // The same settle chainLatency measured with, so the line this
+            // sizes agrees with the PDC solve that decided `pad` (M4.6). The
+            // pre-roll also primes the plugin's own delay line with silence,
+            // which is what makes the rendered signal come out delayed by
+            // exactly its latency -- and therefore aligned once `pad` is
+            // trimmed off.
+            const int lat = SettleLatency(*chain[i]);
             mixes[i]    = ClampFxMix(fxDescs[i].mix);
             bypassed[i] = fxDescs[i].bypassed ? 1 : 0;
             dryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);

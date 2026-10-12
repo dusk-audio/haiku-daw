@@ -251,7 +251,14 @@ static void TestKickDucksBass() {
     CHECK(std::fabs(RightAt(out, K + KDUR - 480) / L - g) < 0.005);
     const double coef = std::exp(-1.0 / (1.0 * 0.001 * SR));
     for (int64_t n : { ATT, 2 * ATT, 5 * ATT }) {
-        const double want = g + (1.0 - g) * std::pow(coef, (double)n);
+        // The envelope's first update lands ON the onset frame, so the frame
+        // K+n carries coef^(n+1) frames of smoothing. (These values used to be
+        // calibrated with coef^n because the linear Resampler's equal-rate
+        // path — which the exporter used for every clip at the project rate —
+        // delays every decoded sample by one frame, so the key reached the
+        // detector at K+1. M4.5's SincResampler passes equal rates through
+        // exactly, and the key now arrives at the frame it was authored on.)
+        const double want = g + (1.0 - g) * std::pow(coef, (double)n + 1.0);
         CHECK(std::fabs(RightAt(out, K + n) / L - want) < 2e-3);
     }
 }
@@ -739,6 +746,49 @@ static void TestPreFeatureDescriptor() {
     CHECK(SameSamples(a, Bounce(z.p, "prefeat_b")));
 }
 
+// --- Who takes a key (M7.1 tail): the one predicate the hosts and the editor
+// share. The built-in answers come from the model's type test; an LV2 insert's
+// comes from a probe the plugin layer installs, because whether a PLUGIN has a
+// sidechain pair is not something the kit-free layers can know. A null probe
+// must answer "no", which is the same degradation as an unavailable plugin.
+static bool ProbeOnly(unsigned long long which) {
+    return which == 1;
+}
+static bool TestProbe(const std::string& uri) {
+    (void)ProbeOnly;
+    return uri == "urn:test:keyed";
+}
+
+static void TestSidechainPredicate() {
+    std::printf("-- who takes a key\n");
+    EffectDesc comp; comp.type = EffectType::Compressor;
+    EffectDesc gate; gate.type = EffectType::Gate;
+    EffectDesc eq;   eq.type   = EffectType::Eq;
+    EffectDesc lv2;  lv2.type  = EffectType::Lv2;
+    lv2.pluginName = "urn:test:keyed";
+    EffectDesc other; other.type = EffectType::Lv2;
+    other.pluginName = "urn:test:plain";
+    EffectDesc noUri; noUri.type = EffectType::Lv2;
+
+    // Built-ins answer from the model, probe or not.
+    CHECK(EffectTakesSidechain(comp));
+    CHECK(EffectTakesSidechain(gate));
+    CHECK(!EffectTakesSidechain(eq));
+
+    // No plugin layer installed: no LV2 insert takes a key.
+    SetLv2SidechainProbe(nullptr);
+    CHECK(!EffectTakesSidechain(lv2));
+
+    // With the probe: the answer is the PLUGIN's, per URI.
+    SetLv2SidechainProbe(&TestProbe);
+    CHECK(EffectTakesSidechain(lv2));
+    CHECK(!EffectTakesSidechain(other));
+    CHECK(!EffectTakesSidechain(noUri));   // no URI to ask about
+    CHECK(EffectTakesSidechain(comp));     // built-ins unaffected
+
+    SetLv2SidechainProbe(nullptr);         // leave the process as it was found
+}
+
 int main() {
     TestKickDucksBass();
     TestNoSourceIsInternal();
@@ -751,6 +801,8 @@ int main() {
     TestBlockInvariance<Compressor>("Compressor");
     TestBlockInvariance<Gate>("Gate");
     TestPreFeatureDescriptor();
+
+    TestSidechainPredicate();
 
     std::printf("sidechain_tests: %d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

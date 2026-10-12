@@ -18,6 +18,16 @@
     lv2:binary <daw_test_plugins.so> ;
     rdfs:seeAlso <plugins.ttl> .
 
+<urn:haiku-daw:test:latency-step>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
+<urn:haiku-daw:test:sidechain-gain>
+    a lv2:Plugin ;
+    lv2:binary <daw_test_plugins.so> ;
+    rdfs:seeAlso <plugins.ttl> .
+
 # --- UIs, so the host's "may this editor write through the host?" question has
 # both answers in the same bundle. They point at the same binary; nothing loads
 # them, only the RDF is read (Lv2Host::UiRequiresInstanceAccess).

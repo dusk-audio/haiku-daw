@@ -138,6 +138,29 @@ same port.
 on a seek, and both the PDC solve and `RunInsertSlot`'s per-insert dry-delay line
 have already been sized from the latched value.
 
+**Superseded by M4.6 (2026-10-12).** This section described the v1 policy —
+latch once at activate and never re-read — and the open question below recorded
+that Marc had not yet chosen between four options. He chose option 3 on
+2026-10-09 (`docs/PLAN_1.0.md:26`), and M4.6 implements it:
+
+- `Lv2Effect::Process` publishes the validated port reading into an atomic each
+  block (a load, a guard, a store — RT-safe, and it never changes
+  `LatencySamples()`);
+- `IEffect::ObservedLatencySamples()` reads that atomic, off the RT thread;
+- `IEffect::RelatchLatency()` adopts it, called after a pre-roll — the engine
+  re-solves PDC on a rebuild, the exporter settles before it sizes anything;
+- the engine polls (off-RT, from the UI pulse) and reloads IN PLACE when the value
+  has moved, so `GraphSwap` swaps the new delay lines in at a block boundary.
+
+What that costs, stated plainly: a plugin that reports a latency it does not
+apply is now **believed**, so the misalignment that used to be masked by the
+latch becomes real (the fixture's own "reports 999 while delaying 64" plugin was
+the case for the old rule, and is no longer modelled — `latency-step`, which
+moves honestly, replaced it); and an insert is misaligned by the difference for
+the few milliseconds between the move and the rebuilt graph landing. Both are
+recorded in `46-dynamic-latency.md`. The amended contract is the doc comment on
+`IEffect::LatencySamples()` / `ObservedLatencySamples()` / `RelatchLatency()`.
+
 ## Build system
 
 `option(DAW_LV2 ... ON)`, detected via `pkg_check_modules(LILV lilv-0)`. When lilv
@@ -252,7 +275,7 @@ neither. The fixture asserts **values**, identically everywhere.
 | Stereo, one instance | stereo-latent | 9 plugins | Example Scope (Stereo) |
 | **MonoDual, two instances** | mono-gain, with per-channel routing asserted | *none installed* | 3 plugins |
 | **Non-zero latency** | 64 frames, reported AND applied | *none — all report 0* | *none — all report 0* |
-| **Latency must not move** | reports 999 from run 2 while delaying 64 | — | — |
+| **A latency that MOVES** | latency-step: 0 on run 1, then 128, reported AND applied | — | — |
 | Topology rejection | 3-in/1-out | 5 plugins | 3 plugins |
 | Feature rejection | worker:schedule | sfizz, sfizz-multi | — |
 | **Required CV port rejection** | cv-port | *no example* | *no example* |
@@ -266,11 +289,15 @@ Two assertions the fixture buys that nothing else could, both mutation-verified:
   both instances to channel 0 fails. Mutating `ConnectPorts` to do exactly that
   yields `got L=2.000 R=2.000 (want 2.000 / 1.000)` — and every invariant-style
   test still passes under that mutation.
-- **Latency latching.** The latent plugin reports 64 at activate then 999 from its
-  second run onward, while still delaying 64 — which is what real plugins do (4K
-  EQ 2 was measured going 0 → 27 → 0). Mutating `LatencySamples()` to re-read the
-  port live fails two checks. Against any plugin that always reports the same
-  number, that rule is simply untestable.
+- **Latency latching — and, since M4.6, re-latching.** `stereo-latent` reports 64
+  and really delays 64, so a host that reads the port without applying it is
+  caught; `latency-step` reports and applies 0 on its first run and 128 from its
+  second, so a host that keeps the activation-time reading (0) is caught too —
+  it renders 128 frames late, which `lv2_render_tests` asserts sample-exactly.
+  The old third plugin behaviour (report 999 while delaying 64, to prove the host
+  never re-read the port) is gone on purpose: under the decided policy the port
+  IS the truth, so a plugin that misreports it is simply lying, and the fixture
+  no longer models a contract violation as if it were the contract.
 
 A third thing the fixture surfaced: with `LV2_PATH` pointing at the fixture dir
 *alone*, lilv has no lv2core to resolve the plugin-class hierarchy against and
@@ -278,17 +305,18 @@ leaks a node inside `lilv_world_load_plugin_classes` — caught by ASan, gone as
 soon as the spec dir is on the path. `LV2_PATH` therefore includes the system spec
 bundles (located with `pkg_get_variable(... lv2 lv2dir)`, which resolves correctly
 on Haiku's packagefs too). That makes the machine's own plugins visible, so every
-count in the fixture test is scoped to its own five URIs rather than to the world
+count in the fixture test is scoped to its own URIs rather than to the world
 total.
 
 ## What is still NOT verified
 
-- **Dynamic-latency policy is an open decision, not a gap.** 4K EQ 2 genuinely
-  moves its reported latency at runtime (0 → 27 → 0). The host latches at activate
-  and so reports 0 for it, leaving playback ~27 samples out whenever that EQ is
-  doing work with oversampling on. No fixed value is correct for such a plugin;
-  the *mechanism* is now well tested — the *policy* needs a call, and it is
-  Marc's (do not pick one). The options, none of them chosen:
+- **Dynamic-latency policy: DECIDED and implemented — option 3, M4.6
+  (2026-10-12).** 4K EQ 2 genuinely moves its reported latency at runtime
+  (0 → 27 → 0). The decision is to follow the port: observe the move off the RT
+  thread, re-solve PDC on the builder, and swap the delay lines in at a block
+  boundary (see the Latency section above and `46-dynamic-latency.md`). Kept
+  below as written, because the four options are still the reasoning behind the
+  choice.
 
   1. **Leave it.** Latch at activate, and document that a plugin whose latency
      port moves at runtime is misaligned by that much (≈0.6 ms at 44.1 kHz for

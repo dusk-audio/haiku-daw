@@ -30,6 +30,22 @@ void SetPluginFactory(PluginFactoryFn fn);
 using Lv2FactoryFn = IEffect* (*)(const EffectDesc& desc, double sampleRate);
 void SetLv2Factory(Lv2FactoryFn fn);
 
+// Does an insert built from `desc` consume an external sidechain key? The
+// built-in types answer from model/Effect.h's EffectSupportsSidechain; an LV2
+// plugin's answer is a property of the PLUGIN (its topology has optional audio
+// inputs, i.e. a sidechain pair), which only the plugin layer can know — so it
+// installs a probe here, exactly as it installs the factory. A null probe (no
+// LV2 in this build, or nothing scanned yet) answers "no", which is the same
+// degradation an unavailable plugin type takes: no key is routed and the editor
+// offers no source.
+using Lv2SidechainProbeFn = bool (*)(const std::string& uri);
+void SetLv2SidechainProbe(Lv2SidechainProbeFn fn);
+
+// True when the engine/Exporter must resolve, tap and PDC-align a key for this
+// insert, and when the editor must offer the source picker. ONE predicate, so
+// routing and the UI can never disagree about who takes a key.
+bool EffectTakesSidechain(const EffectDesc& desc);
+
 // Returns nullptr for an unknown/unavailable type. The caller Prepare()s the
 // effect with the target sample rate before use. Plugin and LV2 effects also get
 // their stored params applied via SetParam. `sampleRate` is the rate the caller
