@@ -82,6 +82,20 @@
 
 namespace daw {
 
+// The tracks an insert's external-sidechain picker offers: every track except
+// the one the editor belongs to. A self-key is deliberately not offered —
+// "key this insert from the track it is on" has no order the hosts could read
+// (the source has to render before the consumer), and the model/hosts treat it
+// as unrouted, so offering it would be a click that silently does nothing.
+// kMasterFxTarget names no track, so the master chain's picker offers them all.
+static std::vector<std::pair<TrackId, std::string>>
+SidechainCandidates(const Project& p, TrackId except) {
+    std::vector<std::pair<TrackId, std::string>> v;
+    for (const Track& t : p.Tracks())
+        if (t.id != except) v.push_back({t.id, t.name});
+    return v;
+}
+
 enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
@@ -1015,7 +1029,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_MASTER_FX:
-            // One window (T2): the master chain, whole.
+            // One window (T2): the master chain, whole. (Its sidechain
+            // candidates are ShowFxWindow's business now.)
             ShowFxWindow(kMasterFxTarget, -1);
             break;
         case kMsgFxWinOpen: {   // an effects editor opened: meter its track
@@ -1150,9 +1165,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (slot >= 0 && OpenNativeEditor((TrackId)tid, (int)slot))
                 break;
 #endif
-            (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                               (TrackId)tid, BMessenger(this),
-                               (int)slot))->Show();
+            // The same single window the inspector's slot list opens (T2), so
+            // the two strips behave the same -- and with it the sidechain
+            // picker's candidates, which ShowFxWindow snapshots for the track.
+            ShowFxWindow((TrackId)tid, slot);
             break;
         }
         case kMsgMixFxBypass: {
@@ -2200,6 +2216,12 @@ void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
         return;
     }
 
+    // The sidechain picker's candidates for THIS track (the same list the
+    // window opened with): a retarget changes which source would be a self-key,
+    // so both paths carry the fresh snapshot.
+    const std::vector<std::pair<TrackId, std::string>> keySources =
+        SidechainCandidates(*fProject, track);
+
     const std::string title = EffectsWindow::WindowTitleFor(*chain, focusSlot,
                                                             trackName.c_str());
     if (fFxMsgr.IsValid()) {
@@ -2207,6 +2229,10 @@ void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
         retarget.AddInt64("track", (int64)track);
         retarget.AddInt32("focus", focusSlot);
         retarget.AddString("title", title.c_str());
+        for (const auto& ks : keySources) {
+            retarget.AddInt64("keysrc", (int64)ks.first);
+            retarget.AddString("keysrcname", ks.second.c_str());
+        }
         EncodeFxChain(retarget, *chain);
         // A window that closed between the check and here answers with an
         // error, and the fall-through opens a fresh one.
@@ -2218,7 +2244,7 @@ void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
 
     BRect wr(200, 150, 680, 770);
     (new EffectsWindow(wr, *chain, track, BMessenger(this), focusSlot,
-                       trackName.c_str()))->Show();
+                       trackName.c_str(), keySources))->Show();
 }
 
 // The inspector's track, and with it the chain the dock's plugin page adds to

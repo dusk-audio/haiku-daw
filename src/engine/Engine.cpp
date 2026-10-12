@@ -429,6 +429,11 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
             nb[i * 2 + 0] *= mgl;
             nb[i * 2 + 1] *= mgr;
         }
+        // No external keys here: monitor-only renders live input with no
+        // project playing, so there is no source material to tap, and a keyed
+        // insert detects internally for as long as it lasts (the documented
+        // no-key behavior). Nothing is delayed either — with no key there is no
+        // input timeline to align to.
         for (auto& fx : b.fx)
             if (fx) fx->Process(nb, static_cast<int>(frames));
         float npl = 0.0f, npr = 0.0f;                   // per-track meter
@@ -533,8 +538,17 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
                 s->SetGainPan(g, p);
         }
 
+        // A node that takes an external key has an INPUT, so its own material
+        // has to sit where that input lands — delayed by its PDC input latency
+        // (Bus::inDelay) — or the detector would compare this block's audio
+        // with a key from another timeline moment. Zero for every ordinary
+        // node, so this costs a pointer choice. Buses have no own material.
+        const bool delayOwn = !b.isBus && b.inDelay.d > 0;
+        float* mb = delayOwn ? fMaterial.data() : nb;
+        if (delayOwn) std::memset(mb, 0, nfloats * sizeof(float));
+
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
-            s->Mix(nb, frames, blockStart);
+            s->Mix(mb, frames, blockStart);
         const bool live = b.liveMonitor && !b.liveNotes.empty();
         if (!b.notes.empty() || live) {     // MIDI: render dry then fader
             if (!b.notes.empty()) {
@@ -555,7 +569,7 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
                     ExpressionAt(b.bend, b.events, blockStart,
                                  blockStart + (Frame)frames);
                 if (b.instrument)
-                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to,
+                    b.instrument->Render(b.notes, mb, frames, blockStart, from, to,
                                          expr);
                 b.chanL = cgl;
                 b.chanR = cgr;
@@ -566,16 +580,20 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
                 // from the event list.
                 const VoiceExpression liveExpr = LiveExpression();
                 if (b.instrument)
-                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f,
+                    b.instrument->Render(b.liveNotes, mb, frames, blockStart, 1.0f,
                                          liveExpr);
             }
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
-                nb[i * 2 + 0] *= mgl;
-                nb[i * 2 + 1] *= mgr;
+                mb[i * 2 + 0] *= mgl;
+                mb[i * 2 + 1] *= mgr;
             }
         }
+        // Now that the node's own material is complete, delay it to this node's
+        // input latency and SUM it into the node buffer: the incoming sends
+        // already sit at that position and must not be delayed a second time.
+        if (delayOwn) b.inDelay.ProcessAdd(mb, nb, frames, 1.0f);
         if (b.isBus) {                      // bus: fader on the summed upstream
             const float bgl = b.busGainL.load(std::memory_order_relaxed);
             const float bgr = b.busGainR.load(std::memory_order_relaxed);
@@ -592,12 +610,28 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
             b.fx[fa.fxIndex]->SetParam(fa.slot, fa.lane.ValueAt(blockStart, 0.0f));
         }
         // Insert chain. Each slot honours its own bypass / wet-dry mix; the
-        // plain fully-wet slot is a bare Process, as before.
-        for (size_t fi = 0; fi < b.fx.size(); fi++)
+        // plain fully-wet slot is a bare Process, as before. An insert with a
+        // routed external key is handed this block of it first: the source
+        // node's post-fader output (the same tap a post-fader send takes) run
+        // through the per-edge PDC delay, so the key sits on this node's input
+        // timeline and — in the block the insert processes — exactly where the
+        // exporter's key sits. fxKeyNode is a pre-resolved index: no id lookups
+        // and no allocation on the audio thread. A source whose node is not
+        // audible this block was skipped, and its buffer was zeroed with every
+        // other node's, so a muted key track keys with silence.
+        for (size_t fi = 0; fi < b.fx.size(); fi++) {
+            if (b.fx[fi] && fi < b.fxKeyNode.size() && b.fxKeyNode[fi] >= 0) {
+                std::memset(fKeyScratch.data(), 0, nfloats * sizeof(float));
+                b.fxKeyDelay[fi].ProcessAdd(
+                    fNodeBufs[(size_t)b.fxKeyNode[fi]].data(),
+                    fKeyScratch.data(), frames, 1.0f);
+                b.fx[fi]->SetSidechain(fKeyScratch.data(), (int)frames);
+            }
             RunInsertSlot(b.fx[fi].get(), b.fxDryDelay[fi],
                       b.fxBypass[fi].load(std::memory_order_relaxed),
                       b.fxMix[fi].load(std::memory_order_relaxed),
                       nb, frames, fScratch.data());
+        }
 
         // Effect metering: if this bus's track is the editor's focus, copy the
         // whole chain's meters into flat storage for the UI.
@@ -639,12 +673,24 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
         b.outDelay.ProcessAdd(nb, dst, frames, 1.0f);
     }
 
-    // Master bus FX on the summed output (before gain/metering).
-    for (size_t fi = 0; fi < fMasterFx.size(); fi++)
+    // Master bus FX on the summed output (before gain/metering). A master
+    // insert's sidechain key is aligned to the master sink (see Load), so it is
+    // staged exactly like a track insert's — every node has been rendered by
+    // now, so any track can be a key here.
+    for (size_t fi = 0; fi < fMasterFx.size(); fi++) {
+        if (fMasterFx[fi] && fi < fMasterFxKeyNode.size()
+            && fMasterFxKeyNode[fi] >= 0) {
+            std::memset(fKeyScratch.data(), 0, nfloats * sizeof(float));
+            fMasterFxKeyDelay[fi].ProcessAdd(
+                fNodeBufs[(size_t)fMasterFxKeyNode[fi]].data(),
+                fKeyScratch.data(), frames, 1.0f);
+            fMasterFx[fi]->SetSidechain(fKeyScratch.data(), (int)frames);
+        }
         RunInsertSlot(fMasterFx[fi].get(), fMasterFxDelay[fi],
                   fMasterFxBypass[fi].load(std::memory_order_relaxed),
                   fMasterFxMix[fi].load(std::memory_order_relaxed),
                   out, frames, fScratch.data());
+    }
     // Effect metering for the master chain (UI focus sentinel = ~0).
     if (e.fMeterTrack.load(std::memory_order_relaxed) == ~(TrackId)0)
         e.CaptureFxMeters(fMasterFx);
@@ -1133,6 +1179,7 @@ bool Engine::SyncFx(const Project& project) {
                     const std::vector<uint64_t>& identity,
                     const std::vector<uint64_t>& stateHash,
                     const std::vector<EffectDesc>& descs,
+                    const std::vector<TrackId>& keySrc,
                     std::atomic<bool>* bypass, std::atomic<float>* mix) {
         if (fx.size() != descs.size()) { allMatched = false; return; }
         for (size_t i = 0; i < fx.size(); i++) {
@@ -1155,6 +1202,17 @@ bool Engine::SyncFx(const Project& project) {
                 allMatched = false;
                 continue;
             }
+            // An external-sidechain SOURCE is structural, not pushable —
+            // unlike bypass and the wet/dry mix below. Changing it moves a
+            // graph edge: the source has to render before this node, the
+            // consumer's input latency changes, and the key's delay line is
+            // sized from that. Pushing the descriptor alone would leave the key
+            // delay pointing at the old source's timeline. So report a
+            // mismatch and let the caller rebuild, exactly like a type change.
+            if (i < keySrc.size() && keySrc[i] != descs[i].sidechainSource) {
+                allMatched = false;
+                continue;
+            }
             // Insert bypass / wet-dry are PUSHABLE, like params: they change
             // what the host does around the effect, not the chain's structure —
             // and, because bypass is soft, not its reported latency either. So
@@ -1173,10 +1231,10 @@ bool Engine::SyncFx(const Project& project) {
     for (Graph::Bus& b : g->fBuses) {
         const Track* t = project.FindTrack(b.id);
         if (t) sync(b.fx, b.fxTypes, b.fxIdentity, b.fxStateHash, t->fx,
-                    b.fxBypass.get(), b.fxMix.get());
+                    b.fxKeySrc, b.fxBypass.get(), b.fxMix.get());
     }
     sync(g->fMasterFx, g->fMasterFxTypes, g->fMasterFxIdentity,
-         g->fMasterFxStateHash, project.masterFx,
+         g->fMasterFxStateHash, project.masterFx, g->fMasterFxKeySrc,
          g->fMasterFxBypass.get(), g->fMasterFxMix.get());
     return allMatched;
 }
@@ -1408,6 +1466,54 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         g.fBuses.push_back(std::move(b));
     }
 
+    // --- External sidechain keys (package 05) -------------------------------
+    // One edge per keyed insert: source track -> the track whose chain it keys.
+    // "Render the source before the consumer" is the same dependency an aux
+    // send has, so the key joins the SAME edge set — which the topo order below
+    // and the PDC solve after it both read. A self-key is skipped (no order can
+    // read a node's own output before that node runs) and stays unrouted.
+    std::vector<std::pair<TrackId, TrackId>> keyEdges;
+    std::vector<TrackId>                     keySrcIds;   // deduped, for nodes
+    auto addKey = [&](const EffectDesc& d, TrackId consumer) {
+        if (!EffectSupportsSidechain(d.type)) return;
+        const TrackId src = d.sidechainSource;
+        if (src == kInvalidTrackId || src == consumer) return;
+        keyEdges.push_back({src, consumer});
+        for (TrackId id : keySrcIds)
+            if (id == src) return;
+        keySrcIds.push_back(src);
+    };
+    for (const Track& t : project.Tracks())
+        for (const EffectDesc& d : t.fx) addKey(d, t.id);
+    // A master-chain key is tapped from a track like any other (nothing keys
+    // the master); the edge into the master sink imposes no topo constraint —
+    // the master runs last anyway — but it is what the key's PDC delay is
+    // solved against, so it is collected here with the rest.
+    for (const EffectDesc& d : project.masterFx) addKey(d, kRoutingMaster);
+
+    auto nodeIndexOf = [&](TrackId id) -> long {
+        for (size_t i = 0; i < g.fBuses.size(); i++)
+            if (g.fBuses[i].id == id) return (long)i;
+        return -1;
+    };
+
+    // A key source with no node of its own: an audio track with no clips, a
+    // MIDI track with no notes, a track whose clips all failed to open. The key
+    // is tapped from the SOURCE node's output, so without a node the key would
+    // silently be unrouted here — while the offline Exporter, which has a node
+    // for every track, would still route that track's (silent) output through
+    // its chain and hand it over as a key. The two hosts must agree, so a
+    // referenced source gets an empty node.
+    for (TrackId id : keySrcIds) {
+        if (nodeIndexOf(id) >= 0) continue;
+        const Track* t = project.FindTrack(id);
+        if (!t) continue;   // names no track: unrouted, fail soft
+        Graph::Bus b;
+        b.id    = id;
+        b.isBus = (t->type == TrackType::Bus);
+        g.fBuses.push_back(std::move(b));
+    }
+
     // No content is fine only if the caller extends the range (metronome/loop).
     bool anyContent = false;
     for (const Graph::Bus& b : g.fBuses)
@@ -1449,7 +1555,13 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
             b.fxTypes.push_back(d.type);
             b.fxIdentity.push_back(FxIdentity(d));
             b.fxStateHash.push_back(FxStateHash(d.state));
+            // Sidechain key, per fx slot. The source id is recorded now (SyncFx
+            // compares against it); the node index and its PDC delay are
+            // resolved once the graph is solved, below.
+            b.fxKeySrc.push_back(d.sidechainSource);
         }
+        b.fxKeyNode.assign(b.fx.size(), -1);
+        b.fxKeyDelay.assign(b.fx.size(), FrameDelay{});
         // Per-insert slot state, sized once the chain is built (arrays of
         // atomics, so they are allocated rather than grown). The dry-delay line
         // is sized from the effect's OWN latency, read after Prepare() — the
@@ -1477,12 +1589,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
 
     // Resolve each node's aux-send destinations to node indices (RT does no id
     // lookups). Post-fader in the live engine; the offline Exporter honors the
-    // pre/post-fader flag exactly.
-    auto nodeIndexOf = [&](TrackId id) -> long {
-        for (size_t i = 0; i < g.fBuses.size(); i++)
-            if (g.fBuses[i].id == id) return (long)i;
-        return -1;
-    };
+    // pre/post-fader flag exactly. (nodeIndexOf is defined above, where the
+    // sidechain sources are resolved against it.)
     for (Graph::Bus& b : g.fBuses) {
         const Track* t = project.FindTrack(b.id);
         if (!t) continue;
@@ -1499,8 +1607,19 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     }
 
     // Topological processing order: a node before every node it feeds — its
-    // output AND every send destination. Sends add extra edges, so use the
-    // general edge topo (single-output ResolveRoutingOrder can't express them).
+    // output, every send destination, AND every insert that keys off it. Sends
+    // and keys add extra edges, so use the general edge topo (single-output
+    // ResolveRoutingOrder can't express them).
+    //
+    // Cycle policy (same as the sends': this is one all-or-nothing solve): an
+    // edge set that cannot be ordered — a key loop (A keys B keys A), or a key
+    // that disagrees with the routing (A keys B while B feeds A's bus) — fails
+    // the solve, the order falls back to flat, and `sidechainSolvable` below is
+    // false, so NO key is routed and every keyed insert detects internally.
+    // Partial routing would be worse than none: an effect that sometimes
+    // detects a key and sometimes its own signal, depending on track creation
+    // order, is not something a user could reason about.
+    bool sidechainSolvable = false;
     {
         std::vector<TrackId> nids;
         std::vector<std::pair<TrackId, TrackId>> edges;
@@ -1514,11 +1633,13 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                     if (s.dest != kInvalidTrackId && s.dest != b.id)
                         edges.push_back({b.id, s.dest});   // skip self-send edge
         }
+        for (const auto& e : keyEdges) edges.push_back(e);
         std::vector<TrackId> ord;
         if (ResolveOrderWithEdges(nids, edges, ord)) {
             for (TrackId id : ord)
                 for (size_t i = 0; i < g.fBuses.size(); i++)
                     if (g.fBuses[i].id == id) { g.fOrder.push_back(i); break; }
+            sidechainSolvable = true;
         } else {   // cycle / bad graph: flat order, all to master
             for (size_t i = 0; i < g.fBuses.size(); i++) g.fOrder.push_back(i);
         }
@@ -1531,6 +1652,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     // and playback is bit-identical to an uncompensated mix until a latent
     // effect appears. Off the RT thread: Prepare allocates the rings; the RT
     // callback only runs them.
+    // `pdc`/`pdcKnown` outlive the block: the master chain below needs the same
+    // solved graph for a master insert's sidechain key.
+    PdcGraph pdc{};
+    bool     pdcKnown = false;
     {
         std::vector<PdcNode> pnodes;
         std::vector<std::pair<TrackId, TrackId>> edges;
@@ -1547,8 +1672,16 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                     if (s.dest != kInvalidTrackId && s.dest != b.id)
                         edges.push_back({b.id, s.dest});
         }
-        PdcGraph pdc;
-        const bool ok = ComputePdc(pnodes, edges, pdc);
+        // The key edges join the PDC edge set for the same reason the sends do:
+        // the source must render first, AND its path latency has to be part of
+        // the solve. Adding them raises the consumer's input latency to at
+        // least the key source's output latency, which is what makes
+        // "consumer's own material delayed by its input latency" and "key
+        // delayed by EdgeDelay(source, consumer)" the same number of frames —
+        // i.e. what makes the detector see audio and key from one moment.
+        for (const auto& e : keyEdges) edges.push_back(e);
+        pdcKnown = ComputePdc(pnodes, edges, pdc);
+        const bool ok = pdcKnown;
         for (Graph::Bus& b : g.fBuses) {
             // A dangling output (routed to a deleted node) feeds the master sink
             // in both the topo and the mix, so align it to the master target.
@@ -1559,6 +1692,29 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
             for (Graph::Bus::SendTarget& st : b.sendTargets)
                 st.delay.Prepare(
                     ok ? (size_t)pdc.EdgeDelay(b.id, g.fBuses[st.dest].id) : 0);
+            // External sidechain keys: resolve each insert's source to a node
+            // and size the delay line that aligns it with THIS node's input —
+            // the same EdgeDelay a post-fader send from that source would get.
+            // `ok` (the solve) doubles as the key's gate: on a cycle, and on
+            // any build whose topo fell back to flat, no key is routed at all
+            // and the keyed inserts detect internally (fail soft).
+            for (size_t fi = 0; fi < b.fxKeyNode.size(); fi++) {
+                const TrackId src = fi < b.fxKeySrc.size() ? b.fxKeySrc[fi]
+                                                           : kInvalidTrackId;
+                long si = -1;
+                if (ok && sidechainSolvable && src != kInvalidTrackId
+                    && src != b.id && project.FindTrack(src)) {
+                    si = nodeIndexOf(src);
+                }
+                b.fxKeyNode[fi] = si;   // -1 = no key routed
+                if (si >= 0)
+                    b.fxKeyDelay[fi].Prepare(
+                        (size_t)pdc.EdgeDelay(src, b.id));
+            }
+            // This node's own material is delayed by its input latency (see
+            // Bus::inDelay). 0 for every node nothing feeds, which is every
+            // ordinary track — length 0 is a plain, free accumulate.
+            b.inDelay.Prepare(ok ? (size_t)pdc.InLat(b.id) : 0);
         }
     }
 
@@ -1578,6 +1734,23 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         g.fMasterFxDelay.back().Prepare(lat > 0 ? (size_t)lat : 0);
         masterBypass.push_back(d.bypassed ? 1 : 0);
         masterMix.push_back(ClampFxMix(d.mix));
+        // A master insert can take a track as its key too. Its consumer is the
+        // master sink, so the alignment delay is EdgeDelay(src, master) — the
+        // very delay the source's own path into the master uses, which is what
+        // puts the key on the same timeline as the mix it is ducking. (The key
+        // is a TRACK even here: nothing keys the master.)
+        long keyNode = -1;
+        if (pdcKnown && sidechainSolvable && EffectSupportsSidechain(d.type)
+            && d.sidechainSource != kInvalidTrackId
+            && project.FindTrack(d.sidechainSource)) {
+            keyNode = nodeIndexOf(d.sidechainSource);
+        }
+        g.fMasterFxKeySrc.push_back(d.sidechainSource);
+        g.fMasterFxKeyNode.push_back(keyNode);
+        g.fMasterFxKeyDelay.emplace_back();
+        if (keyNode >= 0)
+            g.fMasterFxKeyDelay.back().Prepare(
+                (size_t)pdc.EdgeDelay(d.sidechainSource, kRoutingMaster));
         g.fMasterFx.push_back(std::move(fx));
         g.fMasterFxTypes.push_back(d.type);
         g.fMasterFxIdentity.push_back(FxIdentity(d));
@@ -1622,6 +1795,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     size_t maxFrames = req.playerBufferBytes / (sizeof(float) * 2);
     if (maxFrames < 8192) maxFrames = 8192;
     g.fScratch.assign(maxFrames * 2, 0.0f);
+    g.fMaterial.assign(maxFrames * 2, 0.0f);   // node material held across inDelay
+    g.fKeyScratch.assign(maxFrames * 2, 0.0f); // one sidechain key while it is delayed
     g.fMonBuf.assign(maxFrames * 2, 0.0f);
     g.fMonSrc.assign(maxFrames * 2 * 8, 0.0f);   // source-rate scratch (<=8x down)
     g.fNodeBufs.assign(g.fBuses.size(), std::vector<float>(maxFrames * 2, 0.0f));

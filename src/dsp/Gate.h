@@ -15,10 +15,19 @@
 // compressor's. Coefficients are derived from the sample rate in Prepare();
 // Process() is pure arithmetic on preallocated state.
 //
+// External sidechain (package 05): param slot 5 (`extKey`, 0/1) makes the
+// detector run on the block's external key — the keyed gate, where a track
+// opens and closes on another track's level (a hi-hat gated by a
+// sixteenth-note pattern, a pad keyed by a kick) — while the gain is still
+// applied to the main signal. With extKey on and no key routed the gate
+// detects internally, so an unroutable source fails soft. The detector itself
+// is the same reduction both paths run (see dsp/SidechainKey.h).
+//
 // Kit-free (STL only), host-testable.
 #pragma once
 
 #include "IEffect.h"
+#include "SidechainKey.h"
 
 namespace daw {
 
@@ -40,6 +49,11 @@ public:
     void Process(float* stereo, int frames) override;
     void Reset() override;
     void SetParam(int slot, float value) override;
+    // This block's external key (see IEffect::SetSidechain). Only ONE block
+    // long: Process() consumes it.
+    void SetSidechain(const float* stereo, int frames) override {
+        fKey.Set(stereo, frames);
+    }
     const char* Name() const override { return "Gate"; }
 
 private:
@@ -61,6 +75,11 @@ private:
 
     // Stereo-linked smoothed GAIN envelope (linear, 1 = fully open).
     double fEnv = 1.0;
+
+    // External sidechain: the `extKey` toggle (param slot 5) and this block's
+    // key, both only consulted by Process().
+    bool         fExtKey = false;
+    SidechainKey fKey;
 };
 
 } // namespace daw

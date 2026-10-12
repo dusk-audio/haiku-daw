@@ -57,6 +57,7 @@ void Compressor::Reset() {
     // Envelope tracks the applied GAIN (1 = no reduction), as in the donor's
     // DigitalCompressor detector.
     fEnv = 1.0;
+    fKey.block = nullptr;   // a stale key must not survive a seek/reload
 }
 
 void Compressor::Process(float* stereo, int frames) {
@@ -64,14 +65,21 @@ void Compressor::Process(float* stereo, int frames) {
     const double slope    = 1.0 - 1.0 / ratio;   // dB reduction per dB over
     const double threshDb = fThresholdDb;
 
+    // External key: extKey on AND a key actually routed this block (fail soft
+    // to internal detection otherwise — never silence, never a stale key). The
+    // gain still lands on `stereo`; only the DETECTOR moves to the key, which
+    // is what lets one track duck another. The key reduction is the same one
+    // the internal path runs (SidechainKey.h), so the two cannot drift.
+    const bool   keyed = fExtKey && fKey.Active();
+    const float* det   = keyed ? fKey.block : stereo;
+
     double minEnv = 1.0;   // most reduction (smallest gain) over this block
 
     for (int i = 0; i < frames; i++) {
         const double l = stereo[i * 2 + 0];
         const double r = stereo[i * 2 + 1];
 
-        // Stereo-linked peak detection (max of the two channels' magnitudes).
-        const double peak = std::max(std::fabs(l), std::fabs(r));
+        const double peak  = DetectorLevel(det + i * 2, keyed);
         const double detDb = 20.0 * std::log10(std::max(peak, 1.0e-5));
 
         // Hard-knee gain computer (DigitalCompressor form): reduction in dB
@@ -106,9 +114,19 @@ void Compressor::Process(float* stereo, int frames) {
     float prev = fGrDb.load(std::memory_order_relaxed);
     prev *= 0.6f;                                   // decay toward 0
     fGrDb.store(blockGr < prev ? blockGr : prev, std::memory_order_relaxed);
+
+    // The key belonged to this one call (see SetSidechain's contract). Dropping
+    // it here means an insert whose host stops supplying one — a routing change
+    // that has not rebuilt the chain yet — falls back to internal detection
+    // rather than detecting on a buffer that may since have been rewritten.
+    fKey.block = nullptr;
 }
 
 void Compressor::SetParam(int slot, float v) {
+    if (slot == kExtKeySlot) {   // appended slot: the external-key toggle
+        fExtKey = v >= 0.5f;
+        return;
+    }
     double t = fThresholdDb, r = fRatio, a = fAttackMs, rl = fReleaseMs, m = fMakeupDb;
     switch (slot) { case 0: t = v; break; case 1: r = v; break; case 2: a = v; break;
                     case 3: rl = v; break; case 4: m = v; break; default: return; }

@@ -41,7 +41,13 @@
 #include "Version.h"                   // DAW_VERSION_STRING (generated)
 #include "../src/engine/DeviceLatency.h"   // R3: what the device costs
 #include "../src/model/RecordPlan.h"      // LatencyUsToFrames
+// Unconditional, though the LV2 test below is the reason the editor's header
+// was pulled in first: EffectsWindow.h has its own LV2 #ifdefs, and the
+// sidechain picker's test needs it (and MixerWindow's kMsgMixFx) in the
+// -DDAW_LV2=OFF build too.
 #include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
+#include "../src/ui/MixerWindow.h"      // kMsgMixFx (open the effects editor)
+#include "../src/dsp/SidechainKey.h"    // kExtKeySlot (the picker's appended slot)
 #ifdef DAW_HAVE_LV2
 #include "../src/plugin/Lv2Host.h"
 #include "../src/ui/Lv2UiWindow.h"
@@ -4309,6 +4315,108 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 
+// M7.1's sidechain picker (package 05). The picker is a BPopUpMenu, which is
+// modal and cannot be driven by a posted message, so what is driven here is
+// what its selection POSTS: the kMsgApplyFx snapshot, which must carry the
+// source through EncodeFxChain into the model (and therefore into the file and
+// the engine). The shot is what proves the row is on screen and readable.
+static void TestSidechainPicker(MainWindow* win, Project& project) {
+    std::printf("sidechain picker ...\n");
+    // The panel's codec carries BOTH descriptor fields M7.1 and M7.4 added: the
+    // key source and the plugin's own state. They were added on two branches,
+    // and a BMessage refuses a second type under one field name -- so a shared
+    // name would silently drop whichever was added second.
+    {
+        EffectDesc d = CompressorDesc();
+        d.sidechainSource = 42;
+        d.state = "a plugin's own state";
+        BMessage m(kMsgApplyFx);
+        EncodeFxChain(m, { d, CompressorDesc() });
+        const std::vector<EffectDesc> back = DecodeFxChain(m);
+        CHECK(back.size() == 2);
+        if (back.size() == 2) {
+            CHECK(back[0].sidechainSource == 42);
+            CHECK(back[0].state == "a plugin's own state");
+            CHECK(back[1].sidechainSource == kInvalidTrackId);
+            CHECK(back[1].state.empty());
+        }
+    }
+    Track kick = MakeMidiTrack(project, {}, "sc-kick");
+    Track bass = MakeMidiTrack(project, {}, "sc-bass");
+    const TrackId kid = kick.id, bid = bass.id;
+    bass.fx.push_back(CompressorDesc());
+    CHECK(LockedAddTrack(win, project, kick));
+    CHECK(LockedAddTrack(win, project, bass));
+
+    const int before = VisibleWindows();
+    BMessage open(kMsgMixFx);
+    open.AddInt64("track", (int64)bid);
+    open.AddInt32("slot", 0);              // the editor's single-insert view
+    win->PostMessage(&open);
+    CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+    Shot("fx-panel-sidechain");
+
+    // Exactly what the picker's mouse-up posts: the whole chain, with the
+    // source set and the appended extKey slot switched on.
+    std::vector<EffectDesc> chain;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (const Track* t = project.FindTrack(bid)) chain = t->fx;
+        win->Unlock();
+    }
+    CHECK(!chain.empty());
+    if (!chain.empty()) {
+        chain[0].sidechainSource = kid;
+        chain[0].params.resize((size_t)kExtKeySlot + 1, 0.0f);
+        chain[0].params[(size_t)kExtKeySlot] = 1.0f;
+        BMessage edit(kMsgApplyFx);
+        edit.AddInt64("track", (int64)bid);
+        EncodeFxChain(edit, chain);
+        win->PostMessage(&edit);
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const Track* t = project.FindTrack(bid);
+        const bool ok = t && !t->fx.empty()
+                     && t->fx[0].sidechainSource == kid
+                     && t->fx[0].p((size_t)kExtKeySlot) == 1.0f;
+        win->Unlock();
+        return ok;
+    }));
+
+    // ...and picking "None" again posts the same shape with the key off.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (const Track* t = project.FindTrack(bid)) chain = t->fx;
+        win->Unlock();
+    }
+    if (!chain.empty()) {
+        chain[0].sidechainSource = kInvalidTrackId;
+        chain[0].params[(size_t)kExtKeySlot] = 0.0f;
+        BMessage edit(kMsgApplyFx);
+        edit.AddInt64("track", (int64)bid);
+        EncodeFxChain(edit, chain);
+        win->PostMessage(&edit);
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const Track* t = project.FindTrack(bid);
+        const bool ok = t && !t->fx.empty()
+                     && t->fx[0].sidechainSource == kInvalidTrackId
+                     && t->fx[0].p((size_t)kExtKeySlot) == 0.0f;
+        win->Unlock();
+        return ok;
+    }));
+
+    // Close the editor, so the window count is where the next test expects it.
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w == nullptr || w == win || w->IsHidden()) continue;
+        if (w->LockWithTimeout(1000000) == B_OK) w->Quit();
+        break;
+    }
+    CHECK(WaitQuiet());
+    HideOtherWindows(win);
+}
+
 // M4.1: a rebuild during playback builds the graph on the engine's worker
 // thread and swaps it in — the transport must not stop, the device must not be
 // re-opened (no BSoundPlayer re-create) and the playhead must keep advancing
@@ -5984,6 +6092,7 @@ static int32 TestThread(void*) {
     TestMetering(win, project, stack);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
+    TestSidechainPicker(win, project);
     TestEngineGraphSwap(win, project, stack);
     TestBigProjectPlayback(win, project);
     // New leaves no path behind, so the unsaved-changes flow after it still

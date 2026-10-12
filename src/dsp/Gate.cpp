@@ -59,12 +59,21 @@ void Gate::Reset() {
     // Envelope tracks the applied GAIN (1 = fully open), as in the donor's
     // detector. Start open so a signal that begins above threshold passes.
     fEnv = 1.0;
+    fKey.block = nullptr;   // a stale key must not survive a seek/reload
 }
 
 void Gate::Process(float* stereo, int frames) {
     const double ratio    = fRatio < 1.0 ? 1.0 : fRatio;
     const double slope    = ratio - 1.0;         // dB attenuation per dB under
     const double threshDb = fThresholdDb;
+
+    // External key: extKey on AND a key actually routed this block (fail soft
+    // to internal detection otherwise — never a stale key). The gain still
+    // lands on `stereo`; only the DETECTOR moves to the key, which is what
+    // lets one track open or close another. The key reduction is the same one
+    // the internal path runs (SidechainKey.h), so the two cannot drift.
+    const bool   keyed = fExtKey && fKey.Active();
+    const float* det   = keyed ? fKey.block : stereo;
 
     for (int i = 0; i < frames; i++) {
         // Glide the range floor toward its target so an automated range step
@@ -75,8 +84,7 @@ void Gate::Process(float* stereo, int frames) {
         const double l = stereo[i * 2 + 0];
         const double r = stereo[i * 2 + 1];
 
-        // Stereo-linked peak detection (max of the two channels' magnitudes).
-        const double peak = std::max(std::fabs(l), std::fabs(r));
+        const double peak  = DetectorLevel(det + i * 2, keyed);
         const double detDb = 20.0 * std::log10(std::max(peak, 1.0e-9));
 
         // Downward-expander gain computer (mirror of the compressor's): when the
@@ -100,9 +108,18 @@ void Gate::Process(float* stereo, int frames) {
         stereo[i * 2 + 0] = static_cast<float>(l * fEnv);
         stereo[i * 2 + 1] = static_cast<float>(r * fEnv);
     }
+
+    // The key belonged to this one call (see SetSidechain's contract). Dropping
+    // it here means an insert whose host stops supplying one falls back to
+    // internal detection rather than detecting on a rewritten buffer.
+    fKey.block = nullptr;
 }
 
 void Gate::SetParam(int slot, float v) {
+    if (slot == kExtKeySlot) {   // appended slot: the external-key toggle
+        fExtKey = v >= 0.5f;
+        return;
+    }
     double t = fThresholdDb, r = fRatio, a = fAttackMs, rl = fReleaseMs, rg = fRangeDb;
     switch (slot) { case 0: t = v; break; case 1: r = v; break; case 2: a = v; break;
                     case 3: rl = v; break; case 4: rg = v; break; default: return; }
