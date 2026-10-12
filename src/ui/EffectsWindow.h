@@ -7,6 +7,8 @@
 // sliders.
 #pragma once
 
+
+#include "Theme.h"   // ThemeAware (T1)
 #include "../model/Effect.h"
 #include "../model/types.h"
 
@@ -39,8 +41,11 @@ EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId);
 
 // Fields: int64 "track"; per effect int32 "et" (type), int32 "ec" (param count),
 // string "en" (plugin id/URI), int32 "eb" (bypassed), float "em" (wet/dry mix),
-// int64 "es" (external sidechain source track, 0 = none), float[] "ep" (all
-// params concatenated).
+// string "es" (the plugin's own saved state), int64 "esrc" (external sidechain
+// source track, 0 = none), float[] "ep" (all params concatenated).
+// ("esrc", not "es": the state field already used that name when the two
+// features were merged; both must travel on every chain commit or the next
+// knob move silently drops one of them.)
 constexpr uint32 kMsgApplyFx = 'fxap';
 
 // Live single-param preview during a knob/handle drag (int64 "track",
@@ -57,6 +62,12 @@ constexpr uint32 kMsgFxLive = 'fxlv';
 // is applied asynchronously and the editor's insert may be gone (or replaced by
 // a different plugin at the same index) by the time it arrives.
 constexpr uint32 kMsgFxParamCommit = 'fxpc';
+// Point the (single-instance) window at a different chain: the whole chain,
+// the track it belongs to, which insert to focus (-1 = the whole chain) and the
+// title to show. Fields are those of kMsgFxChain plus int64 "track", int32
+// "focus" and string "title".
+constexpr uint32 kMsgFxRetarget = 'fxrt';
+
 // Right-click a knob to toggle automation of that param. Fields: int64 "track",
 // int32 "fx" (effect index), int32 "slot", float "val" (current value).
 constexpr uint32 kMsgToggleFxAuto = 'fxat';
@@ -109,13 +120,27 @@ constexpr uint32 kMsgFxWatch     = 'fxpw';
 // actually moved.
 constexpr uint32 kMsgFxParams    = 'fxpv';
 
+// EffectsView -> MainWindow: "ask for a preset name for this insert". Fields:
+// int64 "track", int64 "aux" (the insert index). The view asks rather than
+// opening the prompt itself for the same reason it asks for a native editor:
+// windows belong to the main window's thread here, and only MainWindow can
+// resolve the index against the model when the answer comes back.
+constexpr uint32 kMsgFxPresetPrompt = 'fxpp';
+// The prompt's answer, posted to MainWindow (the prompt knows nothing about
+// inserts): int64 "track", int64 "aux" (the insert index), string "name".
+// MainWindow applies it because only it can reach the live instance whose patch
+// is being saved.
+constexpr uint32 kMsgSaveFxPreset = 'fxps';
+
 // Serialize / parse a chain of insert descriptors into a message: the same
 // layout kMsgApplyFx and kMsgFxChain carry, in ONE place so the two ends of
 // that conversation cannot drift apart.
 void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain);
 std::vector<EffectDesc> DecodeFxChain(const BMessage& m);
 
-class EffectsView : public BView {
+class EffectsView : public BView, public ThemeAware {
+public:
+    void ApplyTheme() override;   // T1: the cached panel colour
 public:
     // `focusSlot` >= 0 shows ONLY that insert (the channel strip opens the
     // editor on the slot that was clicked). The view still holds the WHOLE
@@ -147,6 +172,16 @@ public:
     // current one. Ignored while a drag is in flight: the indices the drag holds
     // would move under it, and its own mouse-up commit is the edit in progress.
     void SetChain(std::vector<EffectDesc> chain);
+    // Point the view at another chain (T2, the single-instance window). Unlike
+    // SetChain this is a deliberate retarget, so an in-flight drag and a pending
+    // wheel commit are SETTLED first: they belong to the chain that is going
+    // away, and the engine has already heard them (kMsgFxLive), so dropping
+    // them would leave the model -- and the file -- behind the audio.
+    // `keySources` re-snapshots the tracks the sidechain picker offers for the
+    // NEW track: a retarget changes which source would be a self-key, so the
+    // list the window opened with is stale here (see the constructor).
+    void Retarget(std::vector<EffectDesc> chain, TrackId track, int focusSlot,
+                  std::vector<std::pair<TrackId, std::string>> keySources = {});
 
     // Commit a wheel edit whose debounce timer has not fired yet. The window
     // calls this on close: the engine already heard the change (kMsgFxLive), so
@@ -175,7 +210,7 @@ private:
     //   9 plugin parameter slider (vertical generic list)
     //  10 open the plugin's own (native) editor
     //  11 per-insert bypass toggle  12 per-insert wet/dry slider
-    //  13 external sidechain source picker
+    //  13 preset dropdown (LV2 inserts)  14 external sidechain source picker
     struct Hit { int effect; int kind; int slot; BRect rect;
                  float min; float max; };
     // Name of the insert's current key source, for the picker row.
@@ -238,10 +273,18 @@ private:
 
 class EffectsWindow : public BWindow {
 public:
+    // The title for a chain (the insert it opened on, plus the track it belongs
+    // to) and the fit-to-content height: both are needed again on a retarget.
+    static std::string WindowTitleFor(const std::vector<EffectDesc>& chain,
+                                      int focusSlot, const char* trackName);
+    void FitToContent();
     // focusSlot >= 0 opens on one insert alone; -1 shows the whole chain.
+    // `trackName` goes into the title ("<insert> — <track>"), which is how two
+    // chains are told apart when there is only ever one window (T2).
     // `keySources`: see EffectsView's constructor.
     EffectsWindow(BRect frame, std::vector<EffectDesc> chain, TrackId track,
                   BMessenger apply, int focusSlot = -1,
+                  const char* trackName = nullptr,
                   std::vector<std::pair<TrackId, std::string>> keySources = {});
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport

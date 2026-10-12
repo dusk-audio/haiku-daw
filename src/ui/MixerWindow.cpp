@@ -93,8 +93,12 @@ MixerStripsView::MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips
                                  float masterGain, BMessenger apply)
     : BView(frame, "strips", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
       fStrips(std::move(strips)), fMasterGain(masterGain), fApply(apply) {
-    SetViewColor(ColBackground());
+    ApplyTheme();
     RecomputeFxRows();
+}
+
+void MixerStripsView::ApplyTheme() {
+    SetViewColor(ColBackground());
 }
 
 float MixerStripsView::StripX(int i) const {
@@ -227,15 +231,16 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
         DrawString(pv, BPoint(L.val.left + 3, L.val.bottom - 3));
     }
 
-    // Fader + VU meter.
+    // Fader + meter. The meter is the shared dB-scaled bar (M3.3); the ticks
+    // beside it are the same dB scale (MeterMath's list), so the strip reads
+    // as a dB meter rather than as a filled rectangle.
     DrawFader(this, L.fader, GainToFrac(gain), 1.0f / kMaxGain);
-    DrawVUMeter(this, L.meter, std::max(peakL, peakR));
-    // dB scale between fader and meter.
+    DrawMeterBar(this, L.meter, std::max(peakL, peakR), false);
     SetHighColor(ColTextDim());
-    for (float gm : { 1.5f, 1.0f, 0.5f, 0.25f, 0.12f }) {
-        const float yy = L.fader.bottom - L.fader.Height() * (gm / kMaxGain);
-        if (yy < L.fader.top || yy > L.fader.bottom) continue;
-        StrokeLine(BPoint(L.fader.right + 2, yy), BPoint(L.fader.right + 5, yy));
+    for (int i = 0; i < kMeterTickCount; i++) {
+        const float yy = L.meter.bottom - L.meter.Height() * DbToFrac(kMeterTicksDb[i]);
+        if (yy < L.meter.top || yy > L.meter.bottom) continue;
+        StrokeLine(BPoint(L.meter.right + 2, yy), BPoint(L.meter.right + 5, yy));
     }
 
     // Input-monitor / Record / Mute / Solo (track strips only).
@@ -255,8 +260,7 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
     // Colored name label along the bottom (Logic channel-strip signature).
     SetHighColor(tc);
     FillRect(L.name);
-    const int lum = (tc.red * 30 + tc.green * 59 + tc.blue * 11) / 100;
-    SetHighColor(lum > 140 ? Rgb(20, 20, 22) : Rgb(245, 246, 248));
+    SetHighColor(LabelOn(tc));   // the theme's rule: whichever of the two reads
     DrawString(info ? info->name.c_str() : "Master",
                BPoint(L.name.left + 5, L.name.bottom - 6));
 
@@ -464,6 +468,7 @@ MixerWindow::MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
 }
 
 void MixerWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardUndoRedo(m, fApply)) return;          // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fApply)) return;
     BWindow::DispatchMessage(m, h);
 }

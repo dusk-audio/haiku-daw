@@ -13,6 +13,7 @@
 #include "../Theme.h"
 
 #include <Control.h>
+#include <ControlLook.h>
 #include <Window.h>
 
 namespace daw {
@@ -23,17 +24,51 @@ namespace daw {
 // same shade, and a mismatched tile behind every control is what that looked
 // like. A parent that paints itself (transparent) gets the bar colour.
 inline void AdoptPanelColors(BView* v) {
-    rgb_color c = ColChrome();
     if (BView* p = v->Parent()) {
         const rgb_color pc = p->ViewColor();
-        if (pc != B_TRANSPARENT_COLOR) c = pc;
+        if (pc != B_TRANSPARENT_COLOR) {
+            v->SetViewColor(pc);
+            v->SetLowColor(pc);
+            return;
+        }
     }
+    const rgb_color c = ColChrome();
     v->SetViewColor(c);
     v->SetLowColor(c);
 }
 
-class DawControl : public BControl {
+// The colour a control draws itself against, in the control look's terms (its
+// `base` argument). Free functions, not members: the kit's stock-derived
+// controls (BCheckBox, BSlider, BTextControl, BMenuField) need the same rules
+// and are not DawControls.
+inline rgb_color PanelColorOf(const BView* view) {
+    if (view != nullptr) {
+        if (BView* p = const_cast<BView*>(view)->Parent()) {
+            const rgb_color pc = p->ViewColor();
+            if (pc != B_TRANSPARENT_COLOR) return pc;
+        }
+    }
+    return ColChrome();
+}
+
+// Free function, not a member: BMenuField is a BView, not a BControl, and the
+// stock and kit controls all need the same state -> flags translation.
+inline uint32 LookFlagsOf(bool enabled, bool hover, bool focus, bool pressed) {
+    uint32 flags = 0;
+    if (!enabled) flags |= BControlLook::B_DISABLED;
+    if (hover)    flags |= BControlLook::B_HOVER;
+    if (focus)    flags |= BControlLook::B_FOCUSED;
+    if (pressed)  flags |= BControlLook::B_CLICKED;
+    return flags;
+}
+
+class DawControl : public BControl, public ThemeAware {
 public:
+    // The panel colour this control adopted is cached (a view colour), so a
+    // theme change has to re-take it; everything else the kit draws is read
+    // from the tokens at draw time.
+    void ApplyTheme() override { AdoptPanelColors(this); }
+
     // Positioning by rectangle, the way today's windows build their controls;
     // the Layout Kit form (below) is what M1.4 uses.
     DawControl(BRect frame, const char* name, const char* label,
@@ -92,6 +127,30 @@ public:
 protected:
     bool IsHover() const   { return fHover; }
     bool IsPressed() const { return fPressed; }
+
+    // The panel colour this control sits on, and the look's state flags for
+    // it — the same rules the free functions above apply, with this control's
+    // own hover/press state.
+    rgb_color PanelColor() const { return PanelColorOf(this); }
+    uint32 LookFlags() const {
+        return LookFlagsOf(IsEnabled(), IsHover(), IsFocus(), IsPressed());
+    }
+
+    // A stock-looking button: the look's frame, its background, its label
+    // placement. In System mode that is the Haiku button; in Dark mode,
+    // DawControlLook's.
+    void DrawButtonThroughLook(uint32 extraFlags = 0, const char* label = nullptr) {
+        BRect r = Bounds();
+        const rgb_color base = PanelColor();
+        const uint32 flags = LookFlags() | extraFlags;
+        be_control_look->DrawButtonFrame(this, r, r, base, base, flags,
+                                         BControlLook::B_ALL_BORDERS);
+        be_control_look->DrawButtonBackground(this, r, r, base, flags,
+                                              BControlLook::B_ALL_BORDERS, B_HORIZONTAL);
+        be_control_look->DrawLabel(this, label != nullptr ? label : Label(), r, r,
+                                   base, flags, be_control_look->DefaultLabelAlignment(),
+                                   nullptr);
+    }
 
     // A value control: double-click returns to this, the wheel/keys move it by
     // one step, Shift is a tenth of a step.

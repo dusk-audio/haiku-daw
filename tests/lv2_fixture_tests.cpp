@@ -94,10 +94,9 @@ int main() {
         return 1;
     }
 
-    // Exactly two of our five are hostable; the other three are refused.
-    // Six fixtures: three hostable now that the two-UI one is here, three
-    // deliberately refused.
-    CHECK(mineHosted == 3);
+    // Seven fixtures: four hostable (mono gain, stereo latent, the two-UI one,
+    // and the stateful one), three deliberately refused.
+    CHECK(mineHosted == 4);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);

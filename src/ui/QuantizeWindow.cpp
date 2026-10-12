@@ -48,8 +48,7 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
-    BView* root = new BView("root", B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView("root", B_WILL_DRAW);
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // Grid. The items carry NO message: a popup menu is radio by default, so
@@ -59,7 +58,7 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
     // strength and swing the user had not set yet.
     BPopUpMenu* menu = new BPopUpMenu("grid");
     for (int i = 0; i < 7; i++) {
-        BMenuItem* it = new BMenuItem(GridName(kGrids[i]), nullptr);
+        BMenuItem* it = new ThemedMenuItem(GridName(kGrids[i]), nullptr);
         if (kGrids[i] == opts.grid) it->SetMarked(true);
         menu->AddItem(it);
     }

@@ -42,6 +42,7 @@ static constexpr float kTitleH   = 22.0f;
 // Per-insert header, under the title bar: bypass button + wet/dry slider.
 static constexpr float kHeaderH  = 22.0f;
 static constexpr float kBypassW  = 52.0f;
+static constexpr float kPresetW  = 76.0f;    // the "Preset v" box (LV2 inserts)
 static constexpr float kMixValW  = 40.0f;
 static constexpr float kKnobW    = 68.0f;
 static constexpr float kKnobH    = 86.0f;
@@ -238,6 +239,10 @@ EffectsView::EffectsView(BRect frame, std::vector<EffectDesc> chain,
       fChain(std::move(chain)), fTrack(track), fApply(apply),
       fKeySources(std::move(keySources)),
       fFocus(focusSlot >= 0 && focusSlot < (int)fChain.size() ? focusSlot : -1) {
+    ApplyTheme();
+}
+
+void EffectsView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
@@ -340,9 +345,16 @@ void EncodeFxChain(BMessage& m, const std::vector<EffectDesc>& chain) {
         // un-bypassed / fully wet on the next knob move.
         m.AddInt32("eb", d.bypassed ? 1 : 0);
         m.AddFloat("em", d.mix);
+        // The plugin's own state travels with the descriptor too. This panel
+        // commits the WHOLE chain: a codec that dropped the state would destroy
+        // every insert's patch on the next knob move -- which is precisely the
+        // data loss the state feature exists to end.
+        m.AddString("es", d.state.c_str());
         // The external sidechain source travels too: the picker commits it, and
         // flattening without it would drop the routing on the next knob move.
-        m.AddInt64("es", (int64)d.sidechainSource);
+        // Its field is "esrc" rather than "es": the state field above had that
+        // name when the two features were merged.
+        m.AddInt64("esrc", (int64)d.sidechainSource);
         for (float v : d.params) m.AddFloat("ep", v);
     }
 }
@@ -363,9 +375,11 @@ std::vector<EffectDesc> DecodeFxChain(const BMessage& m) {
         if (m.FindInt32("eb", i, &byp) == B_OK) d.bypassed = (byp != 0);
         float mix = 1.0f;
         if (m.FindFloat("em", i, &mix) == B_OK) d.mix = ClampFxMix(mix);
+        BString st;
+        if (m.FindString("es", i, &st) == B_OK) d.state = st.String();
         // Absent (an older sender) keeps the descriptor's default: no key.
         int64 src = 0;
-        if (m.FindInt64("es", i, &src) == B_OK && src > 0)
+        if (m.FindInt64("esrc", i, &src) == B_OK && src > 0)
             d.sidechainSource = (TrackId)src;
         int32 count = 0;
         m.FindInt32("ec", i, &count);
@@ -384,6 +398,33 @@ void EffectsView::Apply() {
     m.AddInt64("track", (int64)fTrack);
     EncodeFxChain(m, fChain);
     fApply.SendMessage(&m);
+}
+
+void EffectsView::Retarget(std::vector<EffectDesc> chain, TrackId track,
+                           int focusSlot,
+                           std::vector<std::pair<TrackId, std::string>>
+                               keySources) {
+    // A deliberate retarget: whatever was in flight belongs to the chain that is
+    // leaving -- but it is COMMITTED to that chain first, not dropped. The edit
+    // already reached the engine (kMsgFxLive during the drag, the wheel's live
+    // preview), so dropping the commit would leave the model, and the saved
+    // project, on the old value while the audio played the new one until the
+    // next rebuild reverted it -- the same reason QuitRequested flushes. Apply()
+    // still sees fTrack and fChain, so this lands on the chain being left.
+    const bool inFlight = fDragEffect >= 0 || fCommit != nullptr;
+    fDragEffect = fDragSlot = fDragKind = -1;
+    DropPendingEdit();
+    if (inFlight) Apply();
+    fChain = std::move(chain);
+    fTrack = track;
+    // The sidechain picker's candidates, re-snapshotted for the new track: on
+    // the OLD track's list the new track's own id would be an offered self-key.
+    // An empty list (an older sender) keeps the window's snapshot.
+    if (!keySources.empty()) fKeySources = std::move(keySources);
+    fFocus = (focusSlot >= 0 && focusSlot < (int)fChain.size()) ? focusSlot : -1;
+    fHits.clear();
+    UpdateScrollRange();
+    Invalidate();
 }
 
 void EffectsView::SetChain(std::vector<EffectDesc> chain) {
@@ -685,9 +726,29 @@ void EffectsView::Draw(BRect) {
         DrawString("Byp", BPoint(byp.left + 14, byp.bottom - 5));
         fHits.push_back({ (int)i, 11, 0, byp, 0, 0 });   // kind 11 = bypass
 
+        // Preset box, where there is a plugin to ask for presets. An LV2 insert
+        // whose URI resolves has a preset list (its bundles' plus the user's);
+        // a built-in does not -- "preset" for those is what the Add menu
+        // already offers, and a box that opened an empty menu would be a lie.
+        float afterByp = byp.right + 8;
+#ifdef DAW_HAVE_LV2
+        if (d.type == EffectType::Lv2 && !d.pluginName.empty()
+            && Lv2Host::Instance().Find(d.pluginName) != nullptr) {
+            BRect pb(afterByp, hdr.top + 3, afterByp + kPresetW, hdr.bottom - 3);
+            SetHighColor(ColHeaderHi()); FillRect(pb);
+            SetHighColor(ColGrid());     StrokeRect(pb);
+            SetHighColor(ColText());
+            DrawString("Preset", BPoint(pb.left + 6, pb.bottom - 5));
+            SetHighColor(ColTextDim());
+            DrawString("v", BPoint(pb.right - 10, pb.bottom - 5));
+            fHits.push_back({ (int)i, 13, 0, pb, 0, 0 });   // kind 13 = presets
+            afterByp = pb.right + 8;
+        }
+#endif
+
         SetHighColor(ColTextDim());
-        DrawString("Mix", BPoint(byp.right + 8, hdr.bottom - 6));
-        BRect mixR(byp.right + 8 + StringWidth("Mix") + 6, hdr.top + 5,
+        DrawString("Mix", BPoint(afterByp, hdr.bottom - 6));
+        BRect mixR(afterByp + StringWidth("Mix") + 6, hdr.top + 5,
                    panel.right - 8 - kMixValW, hdr.bottom - 5);
         if (mixR.Width() > 8) {
             SetHighColor(ColHeaderHi()); FillRect(mixR);
@@ -769,7 +830,7 @@ void EffectsView::Draw(BRect) {
             DrawString(keyLbl.String(), BPoint(sel.left + 52, sel.bottom - 6));
             SetHighColor(ColText());
             DrawString("v", BPoint(sel.right - 14, sel.bottom - 6));   // dropdown
-            fHits.push_back({ (int)i, 13, 0, sel, 0, 0 });   // kind 13 = key source
+            fHits.push_back({ (int)i, 14, 0, sel, 0, 0 });   // kind 14 = key source
             knobTop += kSelH;
         }
 
@@ -803,6 +864,21 @@ void EffectsView::Draw(BRect) {
                                tr.left + 1 + (tr.Width() - 2) * t, tr.bottom - 1);
                     if (fill.right > fill.left) {
                         SetHighColor(ColAccent()); FillRect(fill);
+                    }
+                    // The handle. Without it the row at its minimum -- which is
+                    // where most parameters of a fresh insert sit -- was an
+                    // empty trough that said nothing about where the value was
+                    // or that it could be dragged at all (M1.4 leftover).
+                    {
+                        const float hw = Themed(3.0f);
+                        float hx = tr.left + 1 + (tr.Width() - 2) * t;
+                        if (hx - hw < tr.left + 1) hx = tr.left + 1 + hw;
+                        if (hx + hw > tr.right - 1) hx = tr.right - 1 - hw;
+                        BRect handle(hx - hw, tr.top + 1, hx + hw, tr.bottom - 1);
+                        SetHighColor(ColText());
+                        FillRoundRect(handle, Themed(2.0f), Themed(2.0f));
+                        SetHighColor(ColBtnBorder());
+                        StrokeRoundRect(handle, Themed(2.0f), Themed(2.0f));
                     }
                     // kind 9: a horizontal drag across THIS rect, so the rect
                     // is what the drag has to map against (see MouseDown).
@@ -866,6 +942,22 @@ static EffectDesc MakeDefault(EffectType t) {
         default:                     return EqDesc();
     }
 }
+
+#ifdef DAW_HAVE_LV2
+// Write a preset onto a descriptor: its control-port values (grown to reach
+// every slot it names) and its state. One place, so the values and the state a
+// preset carries can never be applied half-way -- a preset whose knobs moved
+// but whose patch did not would be a wrong sound, not a partial one.
+static void ApplyPresetToDesc(EffectDesc& d, const Lv2PresetInfo& p) {
+    for (const std::pair<int, float>& sv : p.params) {
+        if (sv.first < 0) continue;
+        if ((int)d.params.size() <= sv.first)
+            d.params.resize((size_t)sv.first + 1, 0.0f);
+        d.params[(size_t)sv.first] = sv.second;
+    }
+    d.state = p.state;
+}
+#endif
 
 // Public: build a fresh insert for `type`. Shared by the effects editor and the
 // channel strip, because the defaults rule below is a trap worth encoding once.
@@ -1016,7 +1108,7 @@ void EffectsView::MouseDown(BPoint where) {
             fFftOn = !fFftOn;
             Invalidate();
             break;
-        case 13:  // external sidechain source
+        case 14:  // external sidechain source
             PickKeySource(h.effect, where);
             break;
         case 7: {   // reverb type dropdown
@@ -1027,7 +1119,7 @@ void EffectsView::MouseDown(BPoint where) {
             EffectDesc& d = fChain[h.effect];
             const int cur = (int)(d.p(2) + 0.5f);
             for (int a = 0; a < 4; a++) {
-                BMenuItem* it = new BMenuItem(names[a], nullptr);
+                BMenuItem* it = new ThemedMenuItem(names[a], nullptr);
                 if (a == cur) it->SetMarked(true);
                 menu->AddItem(it);
             }
@@ -1049,11 +1141,11 @@ void EffectsView::MouseDown(BPoint where) {
             const bool sync = d.p(3) >= 0.5f;
             const int  curDiv = (int)(d.p(4) + 0.5f);
             BPopUpMenu* menu = new BPopUpMenu("sync", false, false);
-            BMenuItem* free = new BMenuItem("Free", nullptr);
+            BMenuItem* free = new ThemedMenuItem("Free", nullptr);
             if (!sync) free->SetMarked(true);
             menu->AddItem(free);
             for (int a = 0; a < Delay::kDivisionCount; a++) {
-                BMenuItem* it = new BMenuItem(Delay::DivisionName(a), nullptr);
+                BMenuItem* it = new ThemedMenuItem(Delay::DivisionName(a), nullptr);
                 if (sync && a == curDiv) it->SetMarked(true);
                 menu->AddItem(it);
             }
@@ -1090,6 +1182,52 @@ void EffectsView::MouseDown(BPoint where) {
             OpenBrowser();
             break;
 #ifdef DAW_HAVE_LV2
+        case 13: {   // preset menu: list the plugin's presets, load one, save one
+            if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
+            EffectDesc& d = fChain[h.effect];
+            const std::vector<Lv2PresetInfo> presets =
+                Lv2Host::Instance().Presets(d.pluginName);
+
+            BPopUpMenu* menu = new BPopUpMenu("preset", false, false);
+            std::vector<BMenuItem*> presetItems;   // IndexOf counts separators
+            for (const Lv2PresetInfo& p : presets) {
+                BMenuItem* it = new ThemedMenuItem(p.name.c_str(), nullptr);
+                presetItems.push_back(it);
+                menu->AddItem(it);
+            }
+            if (presets.empty()) {
+                BMenuItem* none = new ThemedMenuItem("No presets yet", nullptr);
+                none->SetEnabled(false);
+                menu->AddItem(none);
+            }
+            menu->AddSeparatorItem();
+            BMenuItem* save = new ThemedMenuItem("Save Preset...", nullptr);
+            menu->AddItem(save);
+
+            BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+            if (sel == save) {
+                // The name prompt is MainWindow's to open (windows belong to
+                // its thread), and its answer names the insert by INDEX so
+                // MainWindow resolves it against the model.
+                BMessage ask(kMsgFxPresetPrompt);
+                ask.AddInt64("track", (int64)fTrack);
+                ask.AddInt64("aux", (int64)h.effect);
+                fApply.SendMessage(&ask);
+            } else if (sel) {
+                size_t which = presetItems.size();
+                for (size_t k = 0; k < presetItems.size(); k++)
+                    if (presetItems[k] == sel) { which = k; break; }
+                if (which < presets.size()) {
+                    // Through Apply() like every other edit here: the whole
+                    // chain, one undoable SetFxCommand.
+                    ApplyPresetToDesc(d, presets[which]);
+                    Apply();
+                    Invalidate();
+                }
+            }
+            delete menu;
+            break;
+        }
         case 10: {   // open the plugin's own editor
             if (h.effect < 0 || h.effect >= (int)fChain.size()) break;
             // Asked for by INDEX, and opened by MainWindow: this view's fChain
@@ -1287,17 +1425,44 @@ void EffectsView::MessageReceived(BMessage* msg) {
 
 // --- window ---------------------------------------------------------------
 
+// The window's title: the insert it opened on (when it opened on one) and the
+// track the chain belongs to, so one window can still say what it is editing.
+std::string EffectsWindow::WindowTitleFor(const std::vector<EffectDesc>& chain,
+                                          int focusSlot, const char* trackName) {
+    std::string title;
+    if (focusSlot >= 0 && focusSlot < (int)chain.size())
+        title = EffectDisplayName(chain[(size_t)focusSlot]);
+    else
+        title = "Effects";
+    if (trackName != nullptr && trackName[0] != '\0')
+        title += std::string(" \xE2\x80\x94 ") + trackName;   // em dash
+    return title;
+}
+
+void EffectsWindow::FitToContent() {
+    // As tall as the chain and no taller, and never off the bottom of the
+    // screen: the callers' frame is a guess, and a short chain left most of a
+    // screen-high window empty under a scroll bar with nothing to scroll.
+    const float ch = fView->ContentHeight();
+    const BRect sf = BScreen(this).Frame();
+    const float maxH = std::max(160.0f, sf.bottom - 12.0f - Frame().top);
+    const float h = std::min(std::max(ch, 160.0f), maxH);
+    ResizeTo(Bounds().Width(), h);
+    fView->UpdateScrollRange();
+}
+
 EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
                              TrackId track, BMessenger apply, int focusSlot,
+                             const char* trackName,
                              std::vector<std::pair<TrackId, std::string>>
                                  keySources)
     : BWindow(frame, "Effects", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fTrack(track), fApply(apply) {
-    // Name the window after the insert when it opens on one, so several open
-    // editors are told apart by their title bars.
-    if (focusSlot >= 0 && focusSlot < (int)chain.size())
-        SetTitle(EffectDisplayName(chain[(size_t)focusSlot]).c_str());
+    // Name the window after the insert AND the track it belongs to: there is
+    // one effects window now (T2), so the title is what says which chain is in
+    // it, and an LV2 editor's title names the track for the same reason.
+    SetTitle(WindowTitleFor(chain, focusSlot, trackName).c_str());
 
     BRect b = Bounds();
     BRect vr(b.left, b.top, b.right - B_V_SCROLL_BAR_WIDTH, b.bottom);
@@ -1306,17 +1471,7 @@ EffectsWindow::EffectsWindow(BRect frame, std::vector<EffectDesc> chain,
     BScrollView* sv = new BScrollView("sv", fView, B_FOLLOW_ALL_SIDES, 0,
                                       false, true);
     AddChild(sv);
-    // As tall as the chain and no taller, and never off the bottom of the
-    // screen: the callers' frame is a guess, and a short chain left most of a
-    // screen-high window empty under a scroll bar with nothing to scroll.
-    {
-        const float ch = fView->ContentHeight();
-        const BRect sf = BScreen(this).Frame();
-        const float maxH = std::max(160.0f, sf.bottom - 12.0f - Frame().top);
-        const float h = std::min(std::max(ch, 160.0f), maxH);
-        ResizeTo(Bounds().Width(), h);
-    }
-    fView->UpdateScrollRange();
+    FitToContent();
     // Tell the main window to meter this track's effects while we're open.
     BMessage open(kMsgFxWinOpen);
     open.AddInt64("track", (int64)track);
@@ -1350,6 +1505,42 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
         if (pending) fView->DropPendingEdit();   // applied by the caller now
         return;
     }
+    if (msg->what == kMsgFxRetarget) {
+        // Single instance (T2): the window is pointed at another chain instead
+        // of a new one being opened. Retarget() settles anything in flight onto
+        // the OLD chain before the swap, so this is safe mid-drag as well --
+        // the drag belonged to the chain that is leaving, and the value the user
+        // already heard goes to the model with it.
+        int64 tid = 0; int32 focus = -1;
+        const char* title = nullptr;
+        msg->FindInt64("track", &tid);
+        msg->FindInt32("focus", &focus);
+        msg->FindString("title", &title);
+        std::vector<EffectDesc> chain = DecodeFxChain(*msg);
+        // The new track's sidechain candidates (int64 "keysrc" + string
+        // "keysrcname" per track), so the picker offers the right list for the
+        // chain it is being pointed at.
+        std::vector<std::pair<TrackId, std::string>> keySources;
+        for (int32 i = 0;; i++) {
+            int64 id = 0;
+            if (msg->FindInt64("keysrc", i, &id) != B_OK) break;
+            BString name;
+            msg->FindString("keysrcname", i, &name);
+            keySources.push_back({(TrackId)id, name.String()});
+        }
+        fTrack = (TrackId)tid;
+        if (title != nullptr && title[0] != '\0') SetTitle(title);
+        fView->Retarget(std::move(chain), fTrack, focus, std::move(keySources));
+        FitToContent();               // the new chain is a different height
+        if (IsHidden()) Show();
+        Activate(true);               // "show and activate the existing one"
+        // Re-announce: the main window meters whichever track is in here now.
+        BMessage open(kMsgFxWinOpen);
+        open.AddInt64("track", (int64)fTrack);
+        open.AddMessenger("msgr", BMessenger(this));
+        fApply.SendMessage(&open);
+        return;
+    }
     if (msg->what == kMsgFxChain) {
         // The model's chain, which this panel's copy was taken before: without
         // this its next commit would rewrite every insert from a stale
@@ -1361,6 +1552,7 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
 }
 
 void EffectsWindow::DispatchMessage(BMessage* m, BHandler* h) {
+    if (ForwardUndoRedo(m, fApply)) return;          // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fApply)) return;
     BWindow::DispatchMessage(m, h);
 }

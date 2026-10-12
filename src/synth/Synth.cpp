@@ -70,7 +70,8 @@ static double Envelope(double rel, double noteLen,
 
 void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
                    float* out, size_t frames, Frame blockStart,
-                   StereoGain from, StereoGain to) const {
+                   StereoGain from, StereoGain to,
+                   const VoiceExpression& expr) const {
     const double sr = fSampleRate;
 
     // Linear per-sample glide from `from` to `to`, reaching `to` exactly on the
@@ -85,6 +86,14 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
     const double s = std::clamp(inst.sustain, 0.0f, 1.0f);
     const double r = std::max(0.0f, inst.release) * sr;
 
+    // Expression is constant across the block (the caller evaluates it once per
+    // block, like every other controller). Both terms default to "nothing to do"
+    // so a track with no bend and no wheel runs exactly the loop it ran before
+    // expression existed — bit for bit.
+    const bool   bending  = (expr.bendRatio != 1.0f) || (expr.bendPhase != 0.0);
+    const double bendStep = (double)expr.bendRatio - 1.0;
+    const double vibDepth = (double)expr.modWheel;
+
     for (const MidiNote& n : notes) {
         // The note sounds from start through its release tail past note-off.
         const Frame noteEnd = n.startFrame + n.lengthFrames;
@@ -94,8 +103,16 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
 
         const double freq = NoteFreq(n.pitch);
         const double cyclesPerFrame = freq / sr;
+        // Band-limiting sees the bend's ratio (constant over the block, so
+        // exactly right); the vibrato's ±1 semitone wobble is small enough to
+        // leave out of the PolyBLEP residual.
+        const double dt = cyclesPerFrame * (double)expr.bendRatio;
         const float  amp = (n.velocity / 127.0f) * 0.2f;   // channel gain is per-side
         const double noteLen = (double)n.lengthFrames;
+        // The bend's phase advance up to this block, minus the part that belongs
+        // to the time before the note started: what is left is the offset the
+        // note's own phase owes to bend, and it advances at the block's ratio.
+        const double bendRel0 = expr.bendPhase - n.bendPhaseFrames;
 
         for (size_t i = 0; i < frames; i++) {
             const Frame g = blockStart + (Frame)i;
@@ -104,8 +121,16 @@ void Synth::Render(const std::vector<MidiNote>& notes, const Instrument& inst,
             const double rel = (double)(g - n.startFrame);
             const double env = Envelope(rel, noteLen, a, d, s, r);
             if (env <= 0.0) continue;
-            const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * rel,
-                                          cyclesPerFrame) * env) * amp;
+            // Elapsed frames with the bend INTEGRATED (never a frequency
+            // re-derived from the note, which would jump the phase the moment
+            // the ratio stepped and click) plus the vibrato's integral. The
+            // LFO's own phase runs on the note's real age, not the bent one.
+            double elapsed = rel;
+            if (bending) elapsed += bendRel0 + bendStep * (double)(g - blockStart);
+            if (vibDepth > 0.0)
+                elapsed += VibratoPhaseFrames(rel, sr, vibDepth);
+            const float smp = (float)(Osc(inst.waveform, cyclesPerFrame * elapsed,
+                                          dt) * env) * amp;
             const float gl = ramping ? (from.l + dL * (float)(i + 1)) : to.l;
             const float gr = ramping ? (from.r + dR * (float)(i + 1)) : to.r;
             out[i * 2 + 0] += smp * gl;

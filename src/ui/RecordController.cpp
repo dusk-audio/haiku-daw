@@ -8,6 +8,7 @@
 #include "TransportBar.h"
 #include "MeterView.h"
 #include "../engine/DeviceLatency.h"
+#include "../engine/WavSource.h"   // reading a finished take back (a WAV we wrote)
 #include "../model/RecordPlan.h"   // CountInFrames / CompensateRoundTrip
 #include "../model/TakeNames.h"     // NextFreeWavPath (the take name)
 
@@ -99,7 +100,9 @@ void RecordController::StopRecording() {
     fWin->fTimeline->SetRecording(false, 0, 0);
     fRecTracks.clear();
     fWin->UpdatePulse();
-    fWin->fMeter->SetLevels(0.0f, 0.0f);
+    // Bars to zero; the meter's clip latch and peak hold are its own state
+    // (M3.3) and are deliberately kept (see TransportController).
+    fWin->fMeter->SetReadings(MeterReadings{});
 
     // Finalize the MIDI take independently of the audio take (a MIDI-only
     // record has no audio recorder / targets, so this must run before the

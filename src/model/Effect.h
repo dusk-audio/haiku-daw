@@ -75,6 +75,19 @@ struct EffectDesc {
     bool               bypassed = false;
     float              mix      = 1.0f;
 
+    // The plugin's OWN state, opaque to the model: what IEffect::SaveState()
+    // produced (for an LV2 plugin, a lilv state document covering everything its
+    // state:interface saves — a synth's patch, an amp sim's cabinet — which is
+    // NOT reachable through the control ports `params` stores, and used to be
+    // lost on save). Empty for anything but a plugin-backed type, and empty for
+    // a plugin that has no state to save. `params` stays the source of truth for
+    // control ports; this carries only what they cannot.
+    //
+    // `state` participates in serialization (`fxstate` / `masterfxstate`,
+    // ProjectIO) and in EncodeFxChain/DecodeFxChain — a path that copies
+    // descriptors without it silently destroys it on the next chain edit.
+    std::string        state;
+
     // External sidechain key source, for the effect types that consume one
     // (EffectSupportsSidechain): the id of the track whose post-fader output
     // drives this insert's detector. kInvalidTrackId (0) = none, i.e. the
@@ -83,8 +96,8 @@ struct EffectDesc {
     // -- a value the hosts have to resolve against the graph before an effect
     // can see anything (the engine/Exporter turn it into a node + a PDC delay;
     // the effect itself only ever gets the resolved audio via
-    // IEffect::SetSidechain). Declared last for the same reason as the two
-    // fields above: existing brace-inits keep compiling.
+    // IEffect::SetSidechain). Declared last for the same reason as the fields
+    // above: existing brace-inits keep compiling.
     TrackId            sidechainSource = kInvalidTrackId;
 
     // Read a param with a safe default for missing slots.

@@ -3,6 +3,7 @@
 #include "UiMetrics.h"
 #include "Widgets.h"
 #include "EffectsWindow.h"
+#include "MixerWindow.h"   // kMsgMixFxAdd (the docked plugin page, T2)
 #include "PluginBrowser.h"
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
@@ -12,7 +13,7 @@
 #include "InstrumentWindow.h"
 #include "../model/Commands.h"
 #include "../plugin/PluginHost.h"   // "is this insert loadable?" for the badge
-#include "../midi/MidiPort.h"
+#include "TrackInputs.h"   // the shared input-choice list (header + inspector)
 
 #include <PopUpMenu.h>
 #include <MenuItem.h>
@@ -32,6 +33,10 @@ InspectorView::InspectorView(BRect frame, Project* project, CommandStack* stack)
             // knob, not just the strip it exposes.
             B_WILL_DRAW | B_SUPPORTS_LAYOUT | B_FULL_UPDATE_ON_RESIZE),
       fProject(project), fStack(stack) {
+    ApplyTheme();
+}
+
+void InspectorView::ApplyTheme() {
     SetViewColor(ColHeader());
 }
 
@@ -192,20 +197,17 @@ void InspectorView::Draw(BRect) {
     DrawButton(this, fMuteR, "Mute", t->muted,  ColMute());
     DrawButton(this, fSoloR, "Solo", t->soloed, ColSolo());
 
-    // Input source.
-    char ib[64];
+    // Input source. The label comes from TrackInputs.h, the same place the
+    // arrangement header's In field gets its own -- the two cannot drift.
+    std::string inLabel = "In: ";
     if (t->input.kind == InputSource::kMidi) {
-        std::string n = t->input.name;
-        const std::string pfx = "/dev/midi/";
-        if (n.compare(0, pfx.size(), pfx) == 0) n = n.substr(pfx.size());
-        std::snprintf(ib, sizeof(ib), "In: %s", n.empty() ? "set" : n.c_str());
-    } else if (t->input.kind == InputSource::kAudioDefault) {
-        std::snprintf(ib, sizeof(ib), "In: Default");
+        std::string n = InputShortLabel(t->input);
+        inLabel += n.empty() ? std::string("set") : n;
     } else {
-        std::snprintf(ib, sizeof(ib), "In: \xE2\x80\x94");
+        inLabel += InputShortLabel(t->input);
     }
-    DrawButton(this, fInputR, ib, t->input.kind != InputSource::kNone,
-               Rgb(52, 104, 74));
+    DrawButton(this, fInputR, inLabel.c_str(),
+               t->input.kind != InputSource::kNone, Rgb(52, 104, 74));
 
     // Sends, output routing, group.
     char sb[16];
@@ -308,9 +310,11 @@ void InspectorView::Draw(BRect) {
                              fPanR.top - 7));
     DrawKnob(this, fPanR, t->pan, accent);
 
-    // Channel fader + VU meter (peak-fed) side by side.
+    // Channel fader + VU meter (peak-fed) side by side. The meter is the
+    // shared dB-scaled bar since M3.3 (same maths, same thresholds as the
+    // master meter).
     DrawFader(this, fFaderR, GainToFrac(t->gain), kUnityFrac);
-    DrawVUMeter(this, fMeterR, std::max(fPeakL, fPeakR));
+    DrawMeterBar(this, fMeterR, std::max(fPeakL, fPeakR), false);
 
     char db[16];
     const float d = GainToDb(t->gain);
@@ -350,46 +354,33 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fInputR.Contains(where)) {
+        // The choices, their labels and their order are TrackInputs.h's -- one
+        // definition, shared with the arrangement header's In field.
+        const std::vector<InputSource> choices = TrackInputChoices(*t);
         BPopUpMenu* menu = new BPopUpMenu("input", false, false);
-        BMenuItem* none = new BMenuItem("None", NULL);
-        if (t->input.kind == InputSource::kNone) none->SetMarked(true);
-        menu->AddItem(none);
-        std::vector<InputSource> choices;
-        if (t->type == TrackType::Midi) {
-            for (const MidiEndpointInfo& e : EnumerateMidiEndpoints()) {
-                if (!e.isProducer || e.name.find("HaikuDAW") != std::string::npos)
-                    continue;
-                BMenuItem* it = new BMenuItem(e.name.c_str(), NULL);
-                if (t->input.kind == InputSource::kMidi && t->input.name == e.name)
-                    it->SetMarked(true);
-                menu->AddItem(it);
-                choices.push_back(InputSource{ InputSource::kMidi, e.name, 0 });
-            }
-        } else if (t->type == TrackType::Audio) {
-            BMenuItem* def = new BMenuItem("Default Input", NULL);
-            if (t->input.kind == InputSource::kAudioDefault) def->SetMarked(true);
-            menu->AddItem(def);
-            choices.push_back(InputSource{ InputSource::kAudioDefault, "", 0 });
+        for (const InputSource& c : choices) {
+            BMenuItem* it = new ThemedMenuItem(InputChoiceLabel(c).c_str(), NULL);
+            if (c.kind == t->input.kind && c.name == t->input.name)
+                it->SetMarked(true);
+            menu->AddItem(it);
         }
         BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
         const int32 pick = sel ? menu->IndexOf(sel) : -1;
         delete menu;
-        if (pick == 0)
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(id, InputSource{}), *fProject);
-        else if (pick > 0 && (size_t)(pick - 1) < choices.size())
+        if (pick >= 0 && (size_t)pick < choices.size())
             fStack->Execute(std::make_unique<SetTrackInputCommand>(
-                id, choices[(size_t)(pick - 1)]), *fProject);
+                id, choices[(size_t)pick]), *fProject);
         Refresh();
         if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
         return;
     }
     if (fOutR.Contains(where)) {
         BPopUpMenu* menu = new BPopUpMenu("out", false, false);
-        menu->AddItem(new BMenuItem("Master", NULL));
+        menu->AddItem(new ThemedMenuItem("Master", NULL));
         std::vector<TrackId> targets;
         for (const Track& bt : fProject->Tracks()) {
             if (bt.type != TrackType::Bus || bt.id == id) continue;
-            menu->AddItem(new BMenuItem(bt.name.c_str(), NULL));
+            menu->AddItem(new ThemedMenuItem(bt.name.c_str(), NULL));
             targets.push_back(bt.id);
         }
         BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
@@ -404,13 +395,13 @@ void InspectorView::MouseDown(BPoint where) {
     }
     if (fGroupR.Contains(where)) {
         BPopUpMenu* menu = new BPopUpMenu("group", false, false);
-        BMenuItem* none = new BMenuItem("None", NULL);
+        BMenuItem* none = new ThemedMenuItem("None", NULL);
         none->SetMarked(t->muteGroup == 0);
         menu->AddItem(none);
         for (int g = 1; g <= 4; g++) {       // same four the timeline offers
             char lb[16];
             std::snprintf(lb, sizeof(lb), "Group %d", g);
-            BMenuItem* gi = new BMenuItem(lb, NULL);
+            BMenuItem* gi = new ThemedMenuItem(lb, NULL);
             gi->SetMarked(t->muteGroup == g);
             menu->AddItem(gi);
         }
@@ -447,16 +438,20 @@ void InspectorView::MouseDown(BPoint where) {
             const bool empty    = !overflow && (size_t)i >= nfx;
 
             if (overflow) {              // the rest of the chain: open the editor
-                BPoint p = ConvertToScreen(where);
-                BRect wr(p.x, p.y, p.x + 480, p.y + 620);
-                (new EffectsWindow(wr, t->fx, id, BMessenger(Window())))->Show();
+                BMessage show(kMsgShowFx);
+                show.AddInt64("track", (int64)id);
+                show.AddInt32("focus", -1);
+                Window()->PostMessage(&show);
                 return;
             }
             if (empty) {                 // add into the free slot
-                BPoint p = ConvertToScreen(where);
-                BRect wr(p.x, p.y, p.x + 460, p.y + 400);
-                (new PluginBrowser(wr, id, BMessenger(this),
-                                   BMessenger(Window())))->Show();
+                // The browser lives in the dock's Plugins page now (T2); the
+                // window is still there behind Pop out. The window owns the
+                // choice handler, so ask it -- the docked page posts to this
+                // view exactly as the window does.
+                BMessage add(kMsgMixFxAdd);
+                add.AddInt64("track", (int64)id);
+                Window()->PostMessage(&add);
                 return;
             }
 
@@ -606,10 +601,12 @@ void InspectorView::MouseUp(BPoint) {
             }
 #endif
             // The generic panel: built-ins, add-ons, and plugins with no
-            // embeddable editor. Shows only the insert that was clicked.
-            BRect wr(120, 120, 600, 740);
-            (new EffectsWindow(wr, t->fx, t->id, BMessenger(Window()),
-                               from))->Show();
+            // embeddable editor. Shows only the insert that was clicked -- and
+            // it is the SAME window every time (T2), retargeted.
+            BMessage show(kMsgShowFx);
+            show.AddInt64("track", (int64)t->id);
+            show.AddInt32("focus", from);
+            Window()->PostMessage(&show);
             Refresh();
             return;
         }

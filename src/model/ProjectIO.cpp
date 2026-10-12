@@ -1,5 +1,7 @@
 #include "ProjectIO.h"
 
+#include "Base64.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
@@ -95,6 +97,35 @@ void ApplyFxInsert(std::vector<EffectDesc>& chain, int index, int bypassed,
     chain[(size_t)index].mix      = ClampFxMix(mix);
 }
 
+// Apply one parsed `fxstate` / `masterfxstate` record (a plugin's own state,
+// base64) to `chain`. Same malformed-input policy as ApplyFxInsert: an index
+// that addresses no slot is skipped, and so is a token that is not valid base64
+// — a plugin's blob is opaque to us, so a damaged one can only be dropped, and
+// dropping it leaves the insert at its factory defaults instead of failing a
+// whole project over one plugin's unreadable patch.
+void ApplyFxState(std::vector<EffectDesc>& chain, int index,
+                  const std::string& b64) {
+    if (index < 0 || index >= (int)chain.size())
+        return;
+    std::string decoded;
+    if (!Base64Decode(b64, &decoded) || decoded.empty())
+        return;
+    chain[(size_t)index].state = std::move(decoded);
+}
+
+// The base64 token that follows the index on a `fxstate` line, or "" when the
+// line has none. Taken as ONE whitespace-free token so nothing a plugin writes
+// (a quote, a brace, a newline) can shift the record.
+std::string StateToken(const std::string& line) {
+    std::istringstream iss(line);
+    std::string kw;
+    int index = -1;
+    iss >> kw >> index;
+    std::string b64;
+    iss >> b64;
+    return b64;
+}
+
 // Apply one parsed `fxsc`/`masterfxsc` record (insert -> external sidechain
 // source track) to `chain`. Same policy as ApplyFxInsert's INDEX for the same
 // reason: a record that cannot address a slot has nothing to attach to, and
@@ -162,6 +193,13 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         f << "masterfxin " << i << " " << (e.bypassed ? 1 : 0) << " "
           << e.mix << "\n";
     }
+    // The master chain's plugin states, one optional line per insert that has
+    // one — the same append-only rule as `masterfxin` above, and written after
+    // it so the index already addresses a loaded slot.
+    for (size_t i = 0; i < p.masterFx.size(); i++)
+        if (!p.masterFx[i].state.empty())
+            f << "masterfxstate " << i << " "
+              << Base64Encode(p.masterFx[i].state) << "\n";
     // External-sidechain source per master insert (the key is a TRACK either
     // way: the master chain can be ducked by a track, nothing keys the master).
     // One optional line per insert that HAS one, so a project that never uses a
@@ -196,8 +234,14 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
           << t.colorIndex << " " << t.height << " "
           << (t.soloSafe ? 1 : 0) << " " << t.muteGroup << " "
           << (t.inputMonitor ? 1 : 0) << "\n";
+        // Track depth (M2.6): a folded lane. Its OWN optional line, like every
+        // other post-M2.5 field -- the track line's tail is positional, so a
+        // newer build appending there would still be read by an older one only
+        // by luck. A project that folds nothing writes the legacy bytes.
+        if (t.collapsed)
+            f << "trackfold " << t.id << " 1\n";
 
-        for (const Clip& c : t.clips)
+        for (const Clip& c : t.clips) {
             f << "clip " << c.id << " "
               << (long long)c.startFrame << " " << (long long)c.lengthFrames << " "
               << (long long)c.sourceOffset << " "
@@ -205,6 +249,19 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << " " << Quote(Relativize(c.sourcePath, baseDir)) << " "
               << c.gain << " " << c.takeGroup << " " << (c.takeActive ? 1 : 0)
               << "\n";
+            // Clip depth (M2.5) rides on its OWN lines, never as extra tail
+            // fields: the clip line's optional tail is parsed from its last
+            // quote, so a quoted name appended there would silently drop
+            // gain/takeGroup/takeActive for every reader. A project that never
+            // touches the new fields writes nothing here and stays
+            // byte-identical to the old format.
+            if (!c.name.empty() || c.colorIndex != 0
+                || c.fadeShape != FadeShape::Linear)
+                f << "clipinfo " << c.id << " " << c.colorIndex << " "
+                  << FadeShapeToInt(c.fadeShape) << " " << Quote(c.name) << "\n";
+            if (c.muted)
+                f << "clipmute " << c.id << " 1\n";
+        }
 
         for (const MidiClip& mc : t.midiClips) {
             f << "midiclip " << mc.id << " " << (long long)mc.startFrame << " "
@@ -212,6 +269,8 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
               << (long long)mc.fadeInFrames << " "
               << (long long)mc.fadeOutFrames << " "
               << mc.takeGroup << " " << (mc.takeActive ? 1 : 0) << "\n";
+            if (mc.muted)   // ids are project-unique, so one mute line fits both
+                f << "clipmute " << mc.id << " 1\n";
             for (const MidiNote& n : mc.notes)   // frames are clip-relative
                 f << "note " << n.pitch << " " << n.velocity << " "
                   << (long long)n.startFrame << " "
@@ -235,6 +294,13 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
             f << "fxin " << i << " " << (e.bypassed ? 1 : 0) << " "
               << e.mix << "\n";
         }
+        // Plugin state (see the master chain above). One line per insert that
+        // has one; an insert without state writes nothing at all, so a project
+        // of built-ins stays byte-identical to a pre-state save.
+        for (size_t i = 0; i < t.fx.size(); i++)
+            if (!t.fx[i].state.empty())
+                f << "fxstate " << i << " " << Base64Encode(t.fx[i].state)
+                  << "\n";
         // External-sidechain source per insert (see the master chain above),
         // written after this track's `fx`/`fxin` lines so the index it names
         // already addresses a loaded slot.
@@ -358,6 +424,8 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     std::vector<TempoChange> tempoChanges;
     std::vector<MeterChange> meterChanges;
     bool tempo0Ramp = false;   // ramp flag for the frame-0 tempo
+    // Track folds, applied once every track exists (see the `trackfold` case).
+    std::vector<std::pair<TrackId, bool>> folded;
 
     auto commit = [&]() {
         if (!haveTrack) return;
@@ -408,6 +476,14 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(p.masterFx, index, byp, mix);
+        }
+        else if (kw == "masterfxstate") {
+            // Optional; absent in files from before plugin state was saved, in
+            // which case the insert keeps an empty state and the plugin comes
+            // up on its own defaults — the pre-feature behaviour, no worse.
+            int index = -1;
+            iss >> index;
+            ApplyFxState(p.masterFx, index, StateToken(line));
         }
         else if (kw == "masterfxsc") {
             // Optional; absent in files from before sidechains existed, in
@@ -481,6 +557,17 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             if (cur.id > maxTrack) maxTrack = cur.id;
             haveTrack = true;
         }
+        else if (kw == "trackfold") {
+            // Track depth (M2.6): the lane is folded. Optional -- absent in
+            // every older file, where the track keeps the expanded default --
+            // and addressed BY ID and applied after the whole file is read, so
+            // the position of the line relative to its track record cannot
+            // decide whether it survives (the writer puts it right after the
+            // track; a hand-edit or a merge need not).
+            long long id = -1; int fold = 0;
+            if (!(iss >> id >> fold)) continue;
+            folded.emplace_back((TrackId)id, fold != 0);
+        }
         else if (kw == "clip" && haveTrack) {
             Clip c;
             long long start, len, off, fi, fo;
@@ -500,6 +587,36 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             }
             if (c.id > maxClip) maxClip = c.id;
             cur.clips.push_back(c);
+        }
+        else if (kw == "clipinfo" && haveTrack) {
+            // Clip depth (M2.5): colour, fade shape and display name for an
+            // audio clip. Optional; absent in older files, in which case the
+            // clip keeps its defaults (inherit the track's colour, a linear
+            // fade, the file's base name). A truncated record is skipped
+            // rather than applied half-way — these fields are cosmetic, and a
+            // half-applied line would clobber what the clip line set.
+            int id = -1, color = 0, shape = 0;
+            if (!(iss >> id >> color >> shape)) continue;
+            for (Clip& c : cur.clips)
+                if (c.id == (ClipId)id) {
+                    if (color < 0) color = 0;
+                    c.colorIndex = color;
+                    c.fadeShape  = FadeShapeFromInt(shape);
+                    c.name       = Unquote(line, escaped);
+                    break;
+                }
+        }
+        else if (kw == "clipmute" && haveTrack) {
+            // Per-clip / per-region mute (M2.5). Optional, and one keyword for
+            // both: clip ids are unique across the two lists.
+            int id = -1, muted = 0;
+            if (!(iss >> id >> muted)) continue;
+            bool done = false;
+            for (Clip& c : cur.clips)
+                if (c.id == (ClipId)id) { c.muted = (muted != 0); done = true; break; }
+            if (!done)
+                for (MidiClip& c : cur.midiClips)
+                    if (c.id == (ClipId)id) { c.muted = (muted != 0); break; }
         }
         else if (kw == "midiclip" && haveTrack) {
             MidiClip mc;
@@ -587,6 +704,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             int index = -1, byp = 0; float mix = 1.0f;
             iss >> index >> byp >> mix;
             ApplyFxInsert(cur.fx, index, byp, mix);
+        }
+        else if (kw == "fxstate" && haveTrack) {
+            int index = -1;
+            iss >> index;
+            ApplyFxState(cur.fx, index, StateToken(line));
         }
         else if (kw == "fxsc" && haveTrack) {
             int index = -1; long long src = 0;
@@ -680,6 +802,9 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     for (Track& t : p.Tracks())
         for (MidiClip& mc : t.midiClips)
             if (mc.id == kInvalidClipId) mc.id = p.NextClipId();
+    // Track folds, now that every track record has been committed.
+    for (const auto& f : folded)
+        if (Track* t = p.FindTrack(f.first)) t->collapsed = f.second;
 
     out = std::move(p);   // clean parse -> commit; live session was untouched
     return true;

@@ -20,6 +20,10 @@ TransportBar::TransportBar(BRect frame, BMessenger target,
             B_WILL_DRAW | B_SUPPORTS_LAYOUT),
       fTarget(target), fPlay(playWhat), fStop(stopWhat), fRec(recWhat),
       fZoomOut(zoomOutWhat), fZoomIn(zoomInWhat) {
+    ApplyTheme();
+}
+
+void TransportBar::ApplyTheme() {
     SetViewColor(ColChrome());
 }
 
@@ -96,6 +100,16 @@ void TransportBar::Draw(BRect) {
     };
     zoomBtn(ZoomOutRect(), '-');
     zoomBtn(ZoomInRect(),  '+');
+}
+
+void TransportBar::FrameResized(float width, float height) {
+    BView::FrameResized(width, height);
+    // The window re-places the pinned children (LayoutTransportBar). It is not
+    // a formality: a pane re-layout can widen the bar without the window
+    // resizing, and without this the master meter -- pinned to the bar's right
+    // edge -- was left outside the window, invisible, until the next window
+    // resize. Found by the M3.3 screenshot pass.
+    fTarget.SendMessage(kMsgTransportLayout);
 }
 
 void TransportBar::MouseDown(BPoint where) {
