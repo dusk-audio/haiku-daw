@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 
 #if defined(__x86_64__) || defined(__i386__)
 #include <pmmintrin.h>   // DAZ (denormals-are-zero)
@@ -33,6 +34,25 @@ static inline void EnableDenormalFlush() {
 static constexpr size_t kRingFramesPerStream = 48000 * 2;   // frames
 static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
 
+// Cheap identities compared by SyncFx and CaptureFxStates (see
+// Bus::fxIdentity / Bus::fxStateHash). Zero for "no state" in the hash, which
+// is what every built-in and every stateless plugin has.
+static uint64_t FxStateHash(const std::string& state) {
+    return state.empty() ? 0u : (uint64_t)std::hash<std::string>{}(state);
+}
+
+// What an insert IS: its type plus the plugin it names. Two LV2 inserts at one
+// index share a type, so the type alone cannot tell a swapped-in plugin from
+// the one the chain was built from — for SyncFx that means pushing one plugin's
+// parameters into another, and for a state capture it means writing one
+// insert's patch onto another's descriptor.
+static uint64_t FxIdentity(const EffectDesc& d) {
+    const uint64_t h = (uint64_t)std::hash<std::string>{}(d.pluginName);
+    // FNV-style mixing: the two halves must not cancel for a swapped pair
+    // (type 3 + name X vs type 4 + name Y).
+    return ((uint64_t)(int)d.type * 1099511628211ull) ^ (h + 0x9e3779b97f4a7c15ull);
+}
+
 // Equal-power pan: pan -1 = hard left, 0 = center (-3 dB each), +1 = hard
 // right. Folds the track gain into the returned per-channel gains.
 static void EqualPowerGains(float gain, float pan, float* outL, float* outR) {
@@ -54,10 +74,12 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          Frame startFrame, Frame lengthFrames,
                          Frame sourceOffset, float gain, float pan,
                          bool audible, Frame seekProjectDelta, float outputRate,
-                         Frame fadeIn, Frame fadeOut, float clipGain)
+                         Frame fadeIn, Frame fadeOut, float clipGain,
+                         FadeShape fadeInShape, FadeShape fadeOutShape)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
+      fFadeInShape(fadeInShape), fFadeOutShape(fadeOutShape),
       fClipGain(clipGain), fRing(kRingFloats) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
@@ -90,10 +112,14 @@ TrackStream::~TrackStream() {
 }
 
 status_t TrackStream::Prepare() {
-    if (!fSource.Open(fPath))
+    // Whatever container the clip's file is, through the one factory: a WAV
+    // take, an imported FLAC, an AIFF. Each reader seeks by sample through its
+    // own API, which is what makes a seeked playhead land correctly.
+    fSource = OpenAudioSource(fPath);
+    if (!fSource)
         return B_ERROR;
 
-    const float srcRate = fSource.FrameRate();
+    const float srcRate = fSource->FrameRate();
     fResampler.reset(new Resampler(srcRate, fOutputRate));
 
     // Seek the source to match the start playhead. fSeekDelta is in output
@@ -101,9 +127,9 @@ status_t TrackStream::Prepare() {
     if (fSeekDelta > 0 && fOutputRate > 0) {
         const Frame srcSkip = static_cast<Frame>(
             fSeekDelta * (double)srcRate / fOutputRate + 0.5);
-        fSource.Seek(fSourceOffset + srcSkip);
+        fSource->Seek(fSourceOffset + srcSkip);
     } else if (fSourceOffset > 0) {
-        fSource.Seek(fSourceOffset);
+        fSource->Seek(fSourceOffset);
     }
 
     fRunning.store(true);
@@ -134,7 +160,7 @@ void TrackStream::DiskLoop() {
         if (chunkFloats == 0) {
             const float* src = nullptr;
             size_t frames = 0;
-            if (!fSource.ReadChunk(&src, &frames)) {
+            if (!fSource->ReadChunk(&src, &frames)) {
                 // End of file: nothing more to push. Idle until stopped.
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
@@ -214,15 +240,12 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart) {
         // Always consume the ring above; only sum when audible so an unmute
         // resumes in sample-sync rather than replaying buffered audio.
         if (aud) {
-            // Linear fade-in/out envelope (combined as a min).
-            float fade = 1.0f;
+            // Fade-in/out envelope with the shape this fade renders with
+            // (M2.5) — the same helper the exporter and the drawn waveform use.
             const Frame rel = ph - fStart;
-            if (fFadeIn > 0 && rel < fFadeIn)
-                fade = (float)rel / (float)fFadeIn;
-            if (fFadeOut > 0 && rel >= fLength - fFadeOut) {
-                float fo = (float)(fLength - rel) / (float)fFadeOut;
-                if (fo < fade) fade = fo;
-            }
+            const float fade = ClipFadeEnvelope(rel, fLength, fFadeIn,
+                                                fFadeInShape, fFadeOut,
+                                                fFadeOutShape);
             out[i * 2 + 0] += lr[0] * gl * fade * fClipGain;
             out[i * 2 + 1] += lr[1] * gr * fade * fClipGain;
         }
@@ -239,9 +262,34 @@ void Engine::Graph::ApplyRoutes(const std::vector<MidiInputRoute>& routes) {
     }
 }
 
-void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
+void Engine::Graph::ReleaseSustained(Frame at) {
+    for (LiveVoice& v : fVoices)
+        if (v.active && v.sustained && !v.releasing) {
+            v.sustained = false;
+            v.releasing = true;
+            v.off       = at;
+        }
+}
+
+VoiceExpression Engine::Graph::LiveExpression() const {
+    VoiceExpression x;
+    x.bendRatio = fLiveBendRatio;
+    x.bendPhase = fLiveBendPhase;
+    x.modWheel  = (float)fLiveCc[1] / 127.0f;
+    return x;
+}
+
+void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames) {
     fLiveNotes.clear();
     for (Bus& b : fBuses) b.liveNotes.clear();
+
+    // Advance the live bend phase by the block just elapsed, at the ratio it was
+    // rendered with. A note-on below is then stamped with this value and the
+    // render is handed the same one: the phase of a sounding voice moves by
+    // whatever ratio each block carries, and a wheel move never jumps it — the
+    // live twin of the recorded path's integrated bend (MidiExpression.h).
+    fLiveBendPhase += ((double)fLiveBendRatio - 1.0) * (double)frames;
+
     IMidiInput* in = e.fLiveMidi.load(std::memory_order_relaxed);
     if (!in) {                       // monitoring off: release every voice
         for (LiveVoice& v : fVoices) v.active = false;
@@ -249,13 +297,41 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
     }
 
     // Drain events (RT-safe: stack buffer, lock-free ring). A note-on takes a
-    // free voice (or steals the oldest); a note-off starts that voice's release.
+    // free voice (or steals the oldest); a note-off starts that voice's release;
+    // CC64 defers that release instead, and the wheel/pedal reach the voices
+    // that are already sounding.
     MidiEvent ev[64];
     std::size_t n;
     while ((n = in->ReadEvents(ev, 64)) > 0) {
         for (std::size_t i = 0; i < n; i++) {
             const MidiEvent& evt = ev[i];
+
+            // Continuous controllers: kept in the graph's fixed arrays and
+            // handed to every voice this block through the VoiceExpression
+            // (below), so a wheel or pedal move is audible on notes already
+            // down instead of only on the next one.
+            if (evt.type == MidiEvent::kControlChange) {
+                fLiveCc[evt.data1 & 0x7f] = evt.data2;
+                if ((evt.data1 & 0x7f) == 64 && fSustain.SetValue((int)evt.data2))
+                    ReleaseSustained(blockStart);   // pedal up: let go of what it held
+                continue;
+            }
+            if (evt.type == MidiEvent::kPitchBend) {
+                fLiveBendRatio = BendRatio((int)evt.bend + 8192);
+                continue;
+            }
+
             if (evt.IsNoteOn()) {
+                // A re-strike of a key the pedal is holding: release what it took
+                // (so the strike is a fresh voice, not a doubling) and retrigger.
+                if (fSustain.Retrigger(VoiceKey(evt.channel, evt.data1)))
+                    for (LiveVoice& v : fVoices)
+                        if (v.active && v.sustained && !v.releasing
+                            && v.pitch == evt.data1 && v.channel == evt.channel) {
+                            v.sustained = false;
+                            v.releasing = true;
+                            v.off       = blockStart;
+                        }
                 int slot = -1;
                 for (int k = 0; k < kMaxLiveVoices; k++)
                     if (!fVoices[k].active) { slot = k; break; }
@@ -264,8 +340,9 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
                     for (int k = 1; k < kMaxLiveVoices; k++)
                         if (fVoices[k].start < fVoices[slot].start) slot = k;
                 }
-                fVoices[slot] = LiveVoice{ true, false, evt.data1, evt.data2,
-                                           evt.channel, blockStart, 0, evt.source };
+                fVoices[slot] = LiveVoice{ true, false, false, evt.data1, evt.data2,
+                                           evt.channel, blockStart, 0, evt.source,
+                                           fLiveBendPhase };
             } else if (evt.IsNoteOff()) {
                 // Match the source too: the same key on a second keyboard is a
                 // different voice, and letting its note-off close this one would
@@ -275,8 +352,14 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
                         && fVoices[k].pitch == evt.data1
                         && fVoices[k].channel == evt.channel
                         && fVoices[k].source == evt.source) {
-                        fVoices[k].releasing = true;
-                        fVoices[k].off       = blockStart;
+                        // CC64 down takes the release instead of the key: the
+                        // pedal decides when this note stops (Sustain.h).
+                        if (fSustain.DeferNoteOff(VoiceKey(evt.channel, evt.data1)))
+                            fVoices[k].sustained = true;
+                        else {
+                            fVoices[k].releasing = true;
+                            fVoices[k].off       = blockStart;
+                        }
                         break;
                     }
             }
@@ -298,7 +381,10 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
         }
         Frame len = v.releasing ? (v.off - v.start) : kHeld;
         if (len < 1) len = 1;
-        const MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        // The bend phase this voice was born with: the render subtracts it from
+        // the block's, so the wheel moves the note from where it is.
+        note.bendPhaseFrames = v.bend;
         fLiveNotes.push_back(note);
         // Hand the voice to each monitored bus whose route accepts it, so two
         // keyboards drive two tracks instead of both tracks hearing everything.
@@ -322,7 +408,8 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart) {
 void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
     const Frame bs = fMonFrame;
     fMonFrame += (Frame)frames;
-    UpdateLiveVoices(e, bs);
+    UpdateLiveVoices(e, bs, frames);
+    const VoiceExpression liveExpr = LiveExpression();
     const size_t nfloats = frames * 2;
     for (size_t i = 0; i < fBuses.size(); i++) {        // reset track meters
         fNodePeakL[i].store(0.0f, std::memory_order_relaxed);
@@ -335,7 +422,7 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
         float* nb = fNodeBufs[idx].data();
         std::memset(nb, 0, nfloats * sizeof(float));
         if (b.instrument)
-            b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f);
+            b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f, liveExpr);
         const float mgl = b.midiGainL.load(std::memory_order_relaxed);
         const float mgr = b.midiGainR.load(std::memory_order_relaxed);
         for (size_t i = 0; i < frames; i++) {
@@ -394,7 +481,7 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
 
     // Live MIDI monitoring: drain incoming events and advance held voices, then
     // rebuild fLiveNotes for this block. Rendered per armed MIDI bus below.
-    UpdateLiveVoices(e, blockStart);
+    UpdateLiveVoices(e, blockStart, frames);
 
     // Tempo-synced effects (e.g. a delay) follow the tempo MAP: push the BPM at
     // this block to every effect when it changes (RT-safe: integer retune, no
@@ -462,14 +549,26 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
                 const StereoGain to{cgl, cgr};
                 const StereoGain from = (b.chanL < 0.0f) ? to
                                                          : StereoGain{b.chanL, b.chanR};
+                // Bend and the mod wheel for this block: the recorded lane's, so
+                // a stored controller is what a bounced file would render too.
+                const VoiceExpression expr =
+                    ExpressionAt(b.bend, b.events, blockStart,
+                                 blockStart + (Frame)frames);
                 if (b.instrument)
-                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to);
+                    b.instrument->Render(b.notes, nb, frames, blockStart, from, to,
+                                         expr);
                 b.chanL = cgl;
                 b.chanR = cgr;
             }
-            if (live)                        // live keyboard through this voice
+            if (live) {                      // live keyboard through this voice
+                // Live notes carry the expression from the keyboard: the same
+                // path a recorded lane takes, built from what arrived instead of
+                // from the event list.
+                const VoiceExpression liveExpr = LiveExpression();
                 if (b.instrument)
-                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f);
+                    b.instrument->Render(b.liveNotes, nb, frames, blockStart, 1.0f,
+                                         liveExpr);
+            }
             const float mgl = b.midiGainL.load(std::memory_order_relaxed);
             const float mgr = b.midiGainR.load(std::memory_order_relaxed);
             for (size_t i = 0; i < frames; i++) {
@@ -615,6 +714,19 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
     }
     e.fPeakL.store(pl);
     e.fPeakR.store(pr);
+    // ... and the clip flags for the same block (M3.3): a clip the 60 Hz poll
+    // never sees because a later block overwrote the peak is still latched.
+    if (ReachesClipLevel(pl))
+        e.fClipFlags.fetch_or(kMeterClipL, std::memory_order_relaxed);
+    if (ReachesClipLevel(pr))
+        e.fClipFlags.fetch_or(kMeterClipR, std::memory_order_relaxed);
+
+    // Master RMS + stereo correlation over the meter's window, from the same
+    // block (M3.3). Preallocated at build; arithmetic only.
+    fStereoMeter.Process(out, static_cast<int>(frames));
+    e.fRmsL.store(fStereoMeter.RmsL());
+    e.fRmsR.store(fStereoMeter.RmsR());
+    e.fCorr.store(fStereoMeter.Correlation());
 
     // Master loudness on the true mix (post master-gain + metronome, pre
     // monitor). RT-safe: integrated is disabled, so no allocation.
@@ -1018,12 +1130,29 @@ bool Engine::SyncFx(const Project& project) {
     bool allMatched = true;
     auto sync = [&](std::vector<std::unique_ptr<IEffect>>& fx,
                     const std::vector<EffectType>& types,
+                    const std::vector<uint64_t>& identity,
+                    const std::vector<uint64_t>& stateHash,
                     const std::vector<EffectDesc>& descs,
                     std::atomic<bool>* bypass, std::atomic<float>* mix) {
         if (fx.size() != descs.size()) { allMatched = false; return; }
         for (size_t i = 0; i < fx.size(); i++) {
-            if (i >= types.size() || types[i] != descs[i].type) {
+            // The insert's identity (type AND plugin), not the type alone: a
+            // different plugin of the same type at this index is a different
+            // effect, and pushing the new descriptor's params into the old
+            // instance would be a chain edit that silently did nothing.
+            if (i >= types.size() || types[i] != descs[i].type
+                || i >= identity.size()
+                || identity[i] != FxIdentity(descs[i])) {
                 allMatched = false;   // an effect was replaced at this slot
+                continue;
+            }
+            // A plugin's own state is applied at INSTANTIATION and nothing can
+            // push it into a running instance — so a changed state (a preset
+            // just loaded onto this insert, say) is structural, even though the
+            // type at the slot still matches, and the caller must rebuild.
+            if (i >= stateHash.size() ||
+                stateHash[i] != FxStateHash(descs[i].state)) {
+                allMatched = false;
                 continue;
             }
             // Insert bypass / wet-dry are PUSHABLE, like params: they change
@@ -1043,11 +1172,55 @@ bool Engine::SyncFx(const Project& project) {
     };
     for (Graph::Bus& b : g->fBuses) {
         const Track* t = project.FindTrack(b.id);
-        if (t) sync(b.fx, b.fxTypes, t->fx, b.fxBypass.get(), b.fxMix.get());
+        if (t) sync(b.fx, b.fxTypes, b.fxIdentity, b.fxStateHash, t->fx,
+                    b.fxBypass.get(), b.fxMix.get());
     }
-    sync(g->fMasterFx, g->fMasterFxTypes, project.masterFx,
+    sync(g->fMasterFx, g->fMasterFxTypes, g->fMasterFxIdentity,
+         g->fMasterFxStateHash, project.masterFx,
          g->fMasterFxBypass.get(), g->fMasterFxMix.get());
     return allMatched;
+}
+
+void Engine::CaptureFxStates(Project& project) {
+    // One insert: ask the live instance for its own state and store it on the
+    // descriptor it came from. An insert the engine could not build (no
+    // nullptr check needed -- fx[i] is null for an unavailable plugin) and a
+    // plugin with no state to give both leave the stored state alone: writing
+    // an empty string here would erase a patch the project still holds.
+    auto capture = [](IEffect* fx, EffectDesc& d) {
+        if (!fx) return;
+        std::string state;
+        if (fx->SaveState(&state) && !state.empty()) d.state = std::move(state);
+    };
+    // The graph is a swap slot the reclaimer frees, so an off-RT reader must
+    // pin it (see GraphPin) -- the model is edited on this thread while the RT
+    // callback keeps rendering, which is exactly the case the pin exists for.
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
+    if (!g) return;   // no graph yet: the model is the only source of truth
+    for (Graph::Bus& b : g->fBuses) {
+        Track* t = project.FindTrack(b.id);
+        if (!t) continue;
+        for (size_t i = 0; i < b.fx.size() && i < t->fx.size(); i++) {
+            // Only the descriptor this instance was BUILT from. The model can
+            // have been edited since the build (a chain replace that kept the
+            // chain's length does not rebuild the engine), and writing one
+            // plugin's patch onto whatever descriptor sits at the index now
+            // would be a wrong state saved to disk.
+            if (i < b.fxIdentity.size() &&
+                b.fxIdentity[i] == FxIdentity(t->fx[i]))
+                capture(b.fx[i].get(), t->fx[i]);
+        }
+    }
+    // The master chain DROPS inserts that fail to build, so fMasterFx is not
+    // index-aligned with project.masterFx; the identity check is the same
+    // alignment rule SyncFx uses for it. An insert whose effect is missing is
+    // skipped — its stored state is what an uninstalled plugin has, not
+    // something to overwrite.
+    for (size_t i = 0; i < g->fMasterFx.size() && i < project.masterFx.size(); i++)
+        if (i < g->fMasterFxIdentity.size() &&
+            g->fMasterFxIdentity[i] == FxIdentity(project.masterFx[i]))
+            capture(g->fMasterFx[i].get(), project.masterFx[i]);
 }
 
 void Engine::ApplyTempo(Graph& g, double bpm) {
@@ -1132,6 +1305,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                 continue;
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // inactive loop-record take: don't stream it
+            if (c.muted)
+                continue;   // per-clip mute (M2.5): no stream, no disk thread
             // Check between clips: a quit during a long build must not wait it
             // out. The partial graph dies here, on this thread.
             if (fShutdown.load(std::memory_order_acquire)) {
@@ -1144,7 +1319,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
             auto s = std::make_unique<TrackStream>(
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta,
-                g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain);
+                g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
+                fades[ci].inShape, fades[ci].outShape);
             if (s->Prepare() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
@@ -1182,7 +1358,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Midi)
             continue;
-        std::vector<MidiNote> notes = t.CollectNotes();   // absolute-timeline
+        // Playback notes, not the raw ones: the CC64 pedal is applied to each
+        // region here (a key-up under the pedal keeps the note sounding), so the
+        // voices need no sustain logic of their own. Absolute-timeline frames.
+        std::vector<MidiNote> notes = t.CollectPlaybackNotes();
         const bool monitor = t.armed || t.inputMonitor;   // live input synth
         const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if ((notes.empty() && !monitor) || (!audible && !monitor))
@@ -1192,8 +1371,14 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         for (const MidiNote& n : notes)
             if (n.startFrame + n.lengthFrames > g.fEndFrame)
                 g.fEndFrame = n.startFrame + n.lengthFrames;
-        b.notes = std::move(notes);
         b.events = t.CollectEvents();         // channel CC/PB (absolute frames)
+        // Bend is integrated, not per-note retuned: digest the track's bend
+        // events once here (off the RT thread) and stamp each note with the
+        // phase it starts at, so a voice can keep its phase continuous across a
+        // bend step by plain subtraction (see model/MidiExpression.h).
+        b.bend = BuildBendTimeline(b.events);
+        AnnotateBendPhase(notes, b.bend);
+        b.notes = std::move(notes);
         // The voice is built here, off the RT thread. A soundfont one resolves
         // against the SoundfontCache and never decodes — see InstrumentFactory.
         b.instrument = MakeInstrument(t.instrument, g.fOutputRate);
@@ -1262,6 +1447,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
             if (fx) { fx->Prepare(g.fOutputRate); fx->SetTempo(project.tempoBPM); }
             b.fx.push_back(std::move(fx));
             b.fxTypes.push_back(d.type);
+            b.fxIdentity.push_back(FxIdentity(d));
+            b.fxStateHash.push_back(FxStateHash(d.state));
         }
         // Per-insert slot state, sized once the chain is built (arrays of
         // atomics, so they are allocated rather than grown). The dry-delay line
@@ -1393,6 +1580,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         masterMix.push_back(ClampFxMix(d.mix));
         g.fMasterFx.push_back(std::move(fx));
         g.fMasterFxTypes.push_back(d.type);
+        g.fMasterFxIdentity.push_back(FxIdentity(d));
+        g.fMasterFxStateHash.push_back(FxStateHash(d.state));
     }
     if (!g.fMasterFx.empty()) {
         g.fMasterFxBypass.reset(new std::atomic<bool>[g.fMasterFx.size()]);
@@ -1420,6 +1609,14 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     g.fLoudness.Prepare(g.fOutputRate);
     g.fLoudness.SetIntegratedEnabled(false);
     g.fMonPhase = 0.0; g.fMonPrevL = g.fMonPrevR = 0.0f;
+
+    // The master meter's RMS/correlation window: allocated HERE (the build runs
+    // off the RT thread), so the callback only does arithmetic. The published
+    // readings are engine-owned and reset with the new graph, as the old
+    // synchronous Load reset them.
+    g.fStereoMeter.Prepare(g.fOutputRate, 0.3f);
+    fRmsL.store(0.0f); fRmsR.store(0.0f); fCorr.store(0.0f);
+    fClipFlags.store(0, std::memory_order_relaxed);
 
     // Per-node mix buffers, sized to the output buffer (generous floor).
     size_t maxFrames = req.playerBufferBytes / (sizeof(float) * 2);

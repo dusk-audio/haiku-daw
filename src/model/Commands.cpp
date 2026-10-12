@@ -1,4 +1,5 @@
 #include "Commands.h"
+#include "RangeEdit.h"   // RangeOverlap/TrimFade (the range commands' geometry)
 
 #include <algorithm>
 
@@ -448,6 +449,129 @@ void SplitMidiClipCommand::Undo(Project& p) {
     }
 }
 
+// --- JoinClipsCommand / JoinMidiClipsCommand / SlipClipCommand ----------
+
+// The clip that follows `left` on the same track, when it MEETS it. Both clip
+// vectors are kept sorted by startFrame (Project::AddClip), so "the next one"
+// is the following element -- and a video-editor's glue means exactly that, not
+// "the next clip somewhere later on the track".
+namespace {
+// Shared preconditions for both joins. Returns the index of the left clip's
+// successor on success, -1 when the two do not meet (or must not be joined).
+template <typename Vec>
+int JoinableSuccessor(const Vec& v, ClipId left) {
+    if (v.size() < 2) return -1;
+    std::size_t i = 0;
+    for (; i < v.size(); i++)
+        if (v[i].id == left) break;
+    if (i + 1 >= v.size()) return -1;         // last clip: nothing to its right
+    const auto& a = v[i];
+    const auto& b = v[i + 1];
+    // Comp takes are alternatives, not halves; gluing one into another would
+    // leave a group member that is both. Refuse, as does an inactive take
+    // (the user acted on what is on screen, and that one is not).
+    if (a.takeGroup > 0 || b.takeGroup > 0) return -1;
+    if (!a.takeActive || !b.takeActive) return -1;
+    if (b.startFrame > a.startFrame + a.lengthFrames) return -1;   // a gap
+    return (int)i;
+}
+} // namespace
+
+bool JoinClipsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    const int i = JoinableSuccessor(t->clips, fLeft);
+    if (i < 0) return false;
+    Clip* c = &t->clips[(std::size_t)i];
+    const Clip right = t->clips[(std::size_t)i + 1];
+
+    fOldLen     = c->lengthFrames;
+    fOldFadeOut = c->fadeOutFrames;
+    fRight      = right;
+    fHaveRight  = true;
+    // The left clip already plays its source continuously, so growing it over
+    // the right one's span renders the two halves as the one clip they were
+    // before a split. The interior fade was a seam; drop it.
+    c->lengthFrames  = right.startFrame + right.lengthFrames - c->startFrame;
+    c->fadeOutFrames = 0;
+    return p.RemoveClip(fTrack, right.id);
+}
+
+void JoinClipsCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fLeft)) {
+        c->lengthFrames  = fOldLen;
+        c->fadeOutFrames = fOldFadeOut;
+    }
+    if (fHaveRight)
+        p.AddClip(fTrack, fRight);   // the id it had before, so references hold
+}
+
+bool JoinMidiClipsCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    const int i = JoinableSuccessor(t->midiClips, fLeft);
+    if (i < 0) return false;
+    MidiClip* c = &t->midiClips[(std::size_t)i];
+    const MidiClip right = t->midiClips[(std::size_t)i + 1];
+
+    fOldLen     = c->lengthFrames;
+    fOldFadeOut = c->fadeOutFrames;
+    fOldNotes   = c->notes;
+    fOldEvents  = c->events;
+    fRight      = right;
+    fHaveRight  = true;
+
+    // The right region's content moves left by the start delta, so a note that
+    // sat 100 frames into it sits exactly the same distance after the joined
+    // region's start -- glue preserves what sounds, it does not move music.
+    const Frame delta = right.startFrame - c->startFrame;
+    for (const MidiNote& n : right.notes) {
+        MidiNote m = n;
+        m.startFrame += delta;
+        c->notes.push_back(m);
+    }
+    for (const MidiClipEvent& e : right.events) {
+        MidiClipEvent m = e;
+        m.startFrame += delta;
+        c->events.push_back(m);
+    }
+    c->lengthFrames  = right.startFrame + right.lengthFrames - c->startFrame;
+    c->fadeOutFrames = 0;
+    return p.RemoveMidiClip(fTrack, right.id);
+}
+
+void JoinMidiClipsCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (MidiClip* c = t->FindMidiClip(fLeft)) {
+        c->lengthFrames  = fOldLen;
+        c->fadeOutFrames = fOldFadeOut;
+        c->notes         = fOldNotes;
+        c->events        = fOldEvents;
+    }
+    if (fHaveRight)
+        p.AddMidiClip(fTrack, fRight);
+}
+
+bool SlipClipCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOldOffset = c->sourceOffset;
+    c->sourceOffset = fNewOffset < 0 ? 0 : fNewOffset;
+    return true;
+}
+
+void SlipClipCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (Clip* c = t->FindClip(fClip))
+        c->sourceOffset = fOldOffset;
+}
+
 // --- MoveClipCommand --------------------------------------------------
 
 // Moving changes startFrame, which is the sort key. To preserve the
@@ -614,6 +738,316 @@ void SetClipGainCommand::Undo(Project& p) {
     if (t)
         if (Clip* c = t->FindClip(fClip))
             c->gain = fOld;
+}
+
+// --- Clip depth commands (M2.5) ----------------------------------------
+
+bool SetClipNameCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOld = c->name;
+    c->name = fNew;
+    return true;
+}
+
+void SetClipNameCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t)
+        if (Clip* c = t->FindClip(fClip))
+            c->name = fOld;
+}
+
+bool SetClipColorCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOld = c->colorIndex;
+    c->colorIndex = fNew;
+    return true;
+}
+
+void SetClipColorCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t)
+        if (Clip* c = t->FindClip(fClip))
+            c->colorIndex = fOld;
+}
+
+bool SetClipMuteCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    if (fMidi) {
+        MidiClip* c = t->FindMidiClip(fClip);
+        if (!c) return false;
+        fOld = c->muted;
+        c->muted = fNew;
+        return true;
+    }
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOld = c->muted;
+    c->muted = fNew;
+    return true;
+}
+
+void SetClipMuteCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return;
+    if (fMidi) {
+        if (MidiClip* c = t->FindMidiClip(fClip)) c->muted = fOld;
+    } else if (Clip* c = t->FindClip(fClip)) {
+        c->muted = fOld;
+    }
+}
+
+bool SetClipFadeShapeCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    Clip* c = t->FindClip(fClip);
+    if (!c) return false;
+    fOld = c->fadeShape;
+    c->fadeShape = fNew;
+    return true;
+}
+
+void SetClipFadeShapeCommand::Undo(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (t)
+        if (Clip* c = t->FindClip(fClip))
+            c->fadeShape = fOld;
+}
+
+// --- RangeDeleteCommand / RangeInsertSilenceCommand (M2.4) -------------
+//
+// Both rewrite whole clip lists per track, so their exact inverse is the list
+// as it was — that is what they snapshot. `trimFade` and the split geometry
+// (left keeps the id, the right piece gets a fresh one and the source offset
+// advanced) match what Scissors/Trim already produce, so a range edit leaves
+// the same shapes a manual edit would.
+
+bool RangeDeleteCommand::Do(Project& p) {
+    fSaved.clear();
+    if (fB <= fA) return false;
+    bool any = false;
+    for (Track& t : p.Tracks()) {
+        bool changed = false;
+        std::vector<Clip> clips;
+        std::vector<MidiClip> midi;
+        clips.reserve(t.clips.size());
+        midi.reserve(t.midiClips.size());
+
+        for (const Clip& c : t.clips) {
+            const Frame cs = c.startFrame;
+            const Frame ce = cs + c.lengthFrames;
+            if (c.lengthFrames <= 0
+                || RangeOverlap(cs, c.lengthFrames, fA, fB) <= 0) {
+                clips.push_back(c);
+                continue;
+            }
+            changed = true;
+            if (cs >= fA && ce <= fB)
+                continue;                       // wholly inside: gone
+            if (cs < fA && ce > fB) {           // covers the range: split
+                Clip left = c;
+                left.lengthFrames = fA - cs;
+                left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                              left.lengthFrames);
+                clips.push_back(left);
+
+                Clip right = c;
+                right.id = p.NextClipId();      // never reused; safe across undo
+                right.startFrame   = fB;
+                right.lengthFrames = ce - fB;
+                right.sourceOffset = c.sourceOffset + (fB - cs);
+                right.fadeInFrames  = TrimFade(c.fadeInFrames, fB - cs,
+                                               right.lengthFrames);
+                right.fadeOutFrames = TrimFade(c.fadeOutFrames, 0,
+                                               right.lengthFrames);
+                clips.push_back(right);
+                continue;
+            }
+            if (cs < fA) {                      // straddles the start: trim
+                Clip left = c;
+                left.lengthFrames = fA - cs;
+                left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                              left.lengthFrames);
+                clips.push_back(left);
+                continue;
+            }
+            // Straddles the end: keep the part after the range.
+            Clip right = c;
+            right.startFrame   = fB;
+            right.lengthFrames = ce - fB;
+            right.sourceOffset = c.sourceOffset + (fB - cs);
+            right.fadeInFrames = TrimFade(c.fadeInFrames, fB - cs,
+                                          right.lengthFrames);
+            clips.push_back(right);
+        }
+
+        for (const MidiClip& c : t.midiClips) {
+            const Frame cs = c.startFrame;
+            const Frame ce = cs + c.lengthFrames;
+            if (c.lengthFrames <= 0
+                || RangeOverlap(cs, c.lengthFrames, fA, fB) <= 0) {
+                midi.push_back(c);
+                continue;
+            }
+            changed = true;
+            if (cs >= fA && ce <= fB)
+                continue;
+            if (cs < fA && ce > fB) {
+                // The region is a non-destructive window: the left half keeps
+                // its content and just narrows, and the right half's content is
+                // rebased so the music keeps its absolute timeline position.
+                MidiClip left = c;
+                left.lengthFrames = fA - cs;
+                left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                              left.lengthFrames);
+                midi.push_back(left);
+
+                MidiClip right = c;
+                right.id = p.NextClipId();
+                right.startFrame   = fB;
+                right.lengthFrames = ce - fB;
+                RebaseMidiContent(right, fB - cs);
+                right.fadeInFrames  = TrimFade(c.fadeInFrames, fB - cs,
+                                               right.lengthFrames);
+                right.fadeOutFrames = TrimFade(c.fadeOutFrames, 0,
+                                               right.lengthFrames);
+                midi.push_back(right);
+                continue;
+            }
+            if (cs < fA) {
+                MidiClip left = c;
+                left.lengthFrames = fA - cs;
+                left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                              left.lengthFrames);
+                midi.push_back(left);
+                continue;
+            }
+            MidiClip right = c;
+            right.startFrame   = fB;
+            right.lengthFrames = ce - fB;
+            RebaseMidiContent(right, fB - cs);
+            right.fadeInFrames = TrimFade(c.fadeInFrames, fB - cs,
+                                          right.lengthFrames);
+            midi.push_back(right);
+        }
+
+        if (changed) {
+            fSaved.push_back({ t.id, t.clips, t.midiClips });
+            t.clips     = std::move(clips);
+            t.midiClips = std::move(midi);
+            any = true;
+        }
+    }
+    return any;
+}
+
+void RangeDeleteCommand::Undo(Project& p) {
+    for (const Saved& s : fSaved)
+        if (Track* t = p.FindTrack(s.track)) {
+            t->clips     = s.clips;
+            t->midiClips = s.midi;
+        }
+}
+
+bool RangeInsertSilenceCommand::Do(Project& p) {
+    fSaved.clear();
+    const Frame len = fB - fA;
+    if (len <= 0) return false;
+    bool any = false;
+    for (Track& t : p.Tracks()) {
+        bool changed = false;
+        std::vector<Clip> clips;
+        std::vector<MidiClip> midi;
+        clips.reserve(t.clips.size() + 1);
+        midi.reserve(t.midiClips.size() + 1);
+
+        for (const Clip& c : t.clips) {
+            const Frame cs = c.startFrame;
+            const Frame ce = cs + c.lengthFrames;
+            if (ce <= fA) {                 // wholly before the insert point
+                clips.push_back(c);
+                continue;
+            }
+            changed = true;
+            if (cs >= fA) {                 // at/after it: shift right
+                Clip n = c;
+                n.startFrame = cs + len;
+                clips.push_back(n);
+                continue;
+            }
+            // Straddles the point: split there, shift the right half.
+            Clip left = c;
+            left.lengthFrames = fA - cs;
+            left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                                 left.lengthFrames);
+            clips.push_back(left);
+
+            Clip right = c;
+            right.id = p.NextClipId();
+            right.startFrame   = fA + len;
+            right.lengthFrames = ce - fA;
+            right.sourceOffset = c.sourceOffset + (fA - cs);
+            right.fadeInFrames = TrimFade(c.fadeInFrames, fA - cs,
+                                          right.lengthFrames);
+            right.fadeOutFrames = TrimFade(c.fadeOutFrames, 0,
+                                           right.lengthFrames);
+            clips.push_back(right);
+        }
+
+        for (const MidiClip& c : t.midiClips) {
+            const Frame cs = c.startFrame;
+            const Frame ce = cs + c.lengthFrames;
+            if (ce <= fA) {
+                midi.push_back(c);
+                continue;
+            }
+            changed = true;
+            if (cs >= fA) {
+                MidiClip n = c;
+                n.startFrame = cs + len;
+                midi.push_back(n);
+                continue;
+            }
+            MidiClip left = c;
+            left.lengthFrames = fA - cs;
+            left.fadeOutFrames = TrimFade(c.fadeOutFrames, ce - fA,
+                                                 left.lengthFrames);
+            midi.push_back(left);
+
+            MidiClip right = c;
+            right.id = p.NextClipId();
+            right.startFrame   = fA + len;
+            right.lengthFrames = ce - fA;
+            RebaseMidiContent(right, fA - cs);
+            right.fadeInFrames = TrimFade(c.fadeInFrames, fA - cs,
+                                          right.lengthFrames);
+            right.fadeOutFrames = TrimFade(c.fadeOutFrames, 0,
+                                           right.lengthFrames);
+            midi.push_back(right);
+        }
+
+        if (changed) {
+            fSaved.push_back({ t.id, t.clips, t.midiClips });
+            t.clips     = std::move(clips);
+            t.midiClips = std::move(midi);
+            any = true;
+        }
+    }
+    return any;
+}
+
+void RangeInsertSilenceCommand::Undo(Project& p) {
+    for (const Saved& s : fSaved)
+        if (Track* t = p.FindTrack(s.track)) {
+            t->clips     = s.clips;
+            t->midiClips = s.midi;
+        }
 }
 
 // --- SetTempoCommand / SetMasterGainCommand / SetSoloSafeCommand -------
@@ -1042,6 +1476,51 @@ bool SetTrackHeightCommand::Do(Project& p) {
 }
 void SetTrackHeightCommand::Undo(Project& p) {
     if (Track* t = p.FindTrack(fTrack)) t->height = fOld;
+}
+
+// --- SetTrackCollapsed / DuplicateTrack (M2.6) ------------------------
+
+bool SetTrackCollapsedCommand::Do(Project& p) {
+    Track* t = p.FindTrack(fTrack);
+    if (!t) return false;
+    fOld = t->collapsed;
+    t->collapsed = fNew;
+    return true;
+}
+void SetTrackCollapsedCommand::Undo(Project& p) {
+    if (Track* t = p.FindTrack(fTrack)) t->collapsed = fOld;
+}
+
+// Every clip and region gets a fresh id, including the ones stashed by Freeze
+// (they become live clips again on Unfreeze, so they must be unique too).
+void DuplicateTrackCommand::FreshenClipIds(Project& p, Track& t) {
+    for (Clip& c : t.clips)         c.id = p.NextClipId();
+    for (MidiClip& c : t.midiClips) c.id = p.NextClipId();
+    for (Clip& c : t.freezeClips)   c.id = p.NextClipId();
+    for (MidiClip& c : t.freezeMidi) c.id = p.NextClipId();
+}
+
+bool DuplicateTrackCommand::Do(Project& p) {
+    const Track* src = p.FindTrack(fTrack);
+    if (!src) return false;
+    if (!fBuilt) {
+        // Built ONCE and reused on redo: the clip ids are allocated here, and a
+        // redo that re-allocated them would leave every id-addressed selection
+        // and clipboard item pointing at nothing.
+        fBuilt = true;
+        fCreatedId = p.NextTrackId();
+        fCopy = *src;
+        fCopy.id   = fCreatedId;
+        fCopy.name = src->name + " copy";
+        FreshenClipIds(p, fCopy);
+    }
+    const int at = p.IndexOfTrack(fTrack);
+    if (at < 0) return false;
+    fIndex = at + 1;                        // directly after the source
+    return p.InsertTrack((size_t)fIndex, fCopy);
+}
+void DuplicateTrackCommand::Undo(Project& p) {
+    p.RemoveTrack(fCreatedId);
 }
 
 bool FreezeTrackCommand::Do(Project& p) {

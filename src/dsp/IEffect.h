@@ -12,6 +12,8 @@
 // Kit-free (STL only) so effects build and unit-test on any host.
 #pragma once
 
+#include <string>
+
 namespace daw {
 
 class IEffect {
@@ -77,6 +79,25 @@ public:
     // Engine::WatchedFxParams); a UI must never call this on a playing
     // instance, which is the whole reason the engine publishes a copy.
     virtual int ControlValues(float* /*out*/, int /*maxSlots*/) const { return 0; }
+
+    // The effect's OWN state — what its control ports do not describe (a synth's
+    // patch, an amp sim's cabinet). Serialize it into an opaque string the host
+    // stores in EffectDesc.state and hands back to LoadState, or return false
+    // for "this effect has no such notion" (every built-in, and a plugin with no
+    // state:interface).
+    //
+    // Off the RT thread by construction: both calls may allocate, and a caller
+    // must never make them from the audio path. SaveState may run while
+    // Process() is running (it is called from the UI thread while the transport
+    // rolls) — LV2's state save threading class allows exactly that, which is
+    // what keeps a save from stopping the audio.
+    virtual bool SaveState(std::string* /*out*/) const { return false; }
+
+    // Restore a string SaveState produced. Called off the RT thread BEFORE the
+    // effect is first Process()ed (LV2's instantiation threading class forbids
+    // doing it on a running instance); a failure leaves the effect at its
+    // defaults, which is the same thing an unreadable project does for params.
+    virtual bool LoadState(const std::string& /*state*/) { return false; }
 
     virtual const char* Name() const = 0;
 };

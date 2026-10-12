@@ -10,8 +10,9 @@ INCS="-idirafter $H -idirafter $H/posix"
 for g in build/generated build-off/generated build-host/generated; do
   [ -d "$g" ] && INCS="$INCS -I$g"
 done
-# os/add-ons/*/ as well: Screen.h pulls in Accelerant.h from there, and without
-# it every file that includes <Screen.h> (EffectsWindow.cpp) failed to check.
+# Two levels under os/: the kit headers, and the add-on headers a kit header can
+# pull in (<Screen.h> includes <Accelerant.h> from os/add-ons/graphics, which is
+# why EffectsWindow.cpp used to "fail" this check on a healthy tree).
 for d in "$H"/os "$H"/os/*/ "$H"/os/add-ons/*/; do INCS="$INCS -I$d"; done
 # LV2 sources need lilv's headers; take them from pkg-config when it is there
 # (the VM build has them, so a syntax break in plugin/ or Lv2UiWindow.cpp is
@@ -41,10 +42,14 @@ if command -v pkg-config >/dev/null 2>&1; then
   fi
 fi
 FILES="$*"
-[ -z "$FILES" ] && FILES="src/main.cpp src/ui/TimelineView.cpp src/ui/MainWindow.cpp \
-  src/ui/MeterView.cpp src/ui/EffectsWindow.cpp src/ui/SendsWindow.cpp \
-  src/ui/MixerWindow.cpp src/ui/RenameWindow.cpp src/engine/Engine.cpp \
-  src/engine/Recorder.cpp"
+if [ -z "$FILES" ]; then
+  # Everything that is compiled for Haiku: the app, the UI, the engine, the
+  # plugins and the functional suite. The kit-free sources are in here too --
+  # they compile either way, and a check that covers "all of it" is the only
+  # one worth reporting as 0 FAIL.
+  FILES=$(ls src/*.cpp src/*/*.cpp src/ui/widgets/*.cpp \
+             tests/ui_functional_tests.cpp 2>/dev/null)
+fi
 rc=0
 for f in $FILES; do
   if $XG -fsyntax-only -std=c++17 -Isrc $INCS "$f" 2>/tmp/hsc.err; then

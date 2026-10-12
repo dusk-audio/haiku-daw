@@ -7,10 +7,16 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"   // kMsgSampleDrag / kMsgBrowserImport
 #include "RenameWindow.h"
+#include "../engine/AudioFormats.h"  // SniffAudioFileFormat (the drop filter)
+#include "TrackInputs.h"     // the ONE input-choice list (header + inspector)
+#include "widgets/DawIcons.h"   // the shared glyphs (arrange tools, slip)
 #include "../engine/Recorder.h" // live capture waveform envelope
 #include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
+#include "../model/RangeEdit.h" // ExtractRange (the M2.4 range operations)
 #include "Widgets.h"            // shared pan knob draw
 
+#include <Bitmap.h>
+#include <Cursor.h>
 #include <Entry.h>
 #include <MenuItem.h>
 #include <Path.h>
@@ -28,6 +34,20 @@
 
 namespace daw {
 
+// --- the scrollbars -------------------------------------------------------
+// A BScrollBar with no target view only updates itself and calls
+// ValueChanged() -- which is exactly the hook a view that scrolls by offset
+// needs (the default behaviour, ScrollBy on a target, moves bounds instead).
+TimelineScrollBar::TimelineScrollBar(const char* name, orientation dir,
+                                     float min, float max,
+                                     std::function<void(float)> onValue)
+    : BScrollBar(name, nullptr, min, max, dir), fOnValue(std::move(onValue)) {}
+
+void TimelineScrollBar::ValueChanged(float newValue) {
+    BScrollBar::ValueChanged(newValue);
+    if (fOnValue) fOnValue(newValue);
+}
+
 TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
     : BView(frame, "timeline", B_FOLLOW_ALL_SIDES,
             B_WILL_DRAW | B_FRAME_EVENTS | B_FULL_UPDATE_ON_RESIZE | B_NAVIGABLE
@@ -36,6 +56,30 @@ TimelineView::TimelineView(BRect frame, Project* project, CommandStack* stack)
       fStack(stack),
       fFramesPerPixel(kDefaultFramesPerPixel),
       fScrollFrame(0) {
+    ApplyTheme();
+    // Real scrollbars (M2.2). Children rather than a BScrollView: the view
+    // scrolls by frame offset, not by moving its bounds, so the scrollbars must
+    // drive it rather than scroll it. A B_SUPPORTS_LAYOUT view does not
+    // reposition children by follow modes (BView::_ResizeBy), so FrameResized
+    // places them.
+    fHBar = new TimelineScrollBar("tlhscroll", B_HORIZONTAL, 0.0f, 1.0f,
+                                  [this](float v) { ScrollToFrame((Frame)v); });
+    fVBar = new TimelineScrollBar("tlvscroll", B_VERTICAL, 0.0f, 1.0f,
+                                  [this](float v) { ScrollToY(v); });
+    for (BScrollBar* b : { (BScrollBar*)fHBar, (BScrollBar*)fVBar }) {
+        float w = 0.0f, h = 0.0f;
+        b->GetPreferredSize(&w, &h);
+        fBarThickness = std::max(b->Orientation() == B_HORIZONTAL ? h : w,
+                                 Themed(10.0f));
+        b->SetSteps(12.0f, 120.0f);
+        AddChild(b);
+    }
+    LayoutScrollBars();
+}
+
+// A mode switch: the lane colour is cached, everything else this view draws is
+// read from the tokens at draw time.
+void TimelineView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
@@ -55,8 +99,8 @@ static constexpr int kMidiRange = 48;
 static constexpr float kEdgeGrab = 9.0f;   // design px; use EdgeGrab()
 static float EdgeGrab() { return Themed(kEdgeGrab); }
 
-// Edits snap to this grid resolution (16th notes) unless Shift is held.
-static constexpr int kSnapDivision = 4;
+// Edits snap to the grid the snap menu selects (M2.3, model/SnapGrid.h). That
+// header's default keeps the editor's historical 16th-note behaviour.
 
 // Defined below; used by TrackIndexAt/LaneRect above its definition.
 static float LaneHeightOf(const Track& t);
@@ -87,8 +131,49 @@ static BRect PanKnobRect(BRect lane) {
                  Themed(128), lane.top + Themed(43));
 }
 static BRect GainRect(BRect lane) {
-    return BRect(Themed(6),   lane.top + Themed(50),
-                 Themed(128), lane.top + Themed(62));
+    return BRect(Themed(6),   lane.top + Themed(60),
+                 Themed(128), lane.top + Themed(72));
+}
+
+// --- track depth (M2.6): the header's new controls ------------------------
+
+// The fold triangle, the colour swatch and the input field. HeaderControlAt,
+// the drawing and HeaderRectFor all come through these, so a control cannot be
+// drawn somewhere and clicked somewhere else.
+static BRect FoldRect(BRect lane) {
+    return BRect(Themed(5),  lane.top + Themed(3),
+                 Themed(15), lane.top + Themed(15));
+}
+static BRect ColourSwatchRect(BRect lane) {
+    return BRect(Themed(116), lane.top + Themed(2),
+                 Themed(132), lane.top + Themed(16));
+}
+static BRect InputRect(BRect lane) {
+    return BRect(Themed(6),  lane.top + Themed(44),
+                 Themed(96), lane.top + Themed(58));
+}
+// The name field: what the in-place rename edits and where it is drawn.
+static BRect NameRect(BRect lane) {
+    return BRect(Themed(18), lane.top + Themed(1),
+                 Themed(112), lane.top + Themed(17));
+}
+// The collapsed lane's compact row (M2.6): triangle, swatch, name, M, S. The
+// meter stays on the right edge.
+static BRect FoldRectCompact(BRect lane) {
+    return BRect(Themed(5),  lane.top + Themed(3),
+                 Themed(15), lane.top + Themed(17));
+}
+static BRect ColourSwatchRectCompact(BRect lane) {
+    return BRect(Themed(20), lane.top + Themed(4),
+                 Themed(34), lane.top + Themed(18));
+}
+static BRect MuteRectCompact(BRect lane) {
+    return BRect(Themed(96),  lane.top + Themed(3),
+                 Themed(112), lane.top + Themed(19));
+}
+static BRect SoloRectCompact(BRect lane) {
+    return BRect(Themed(116), lane.top + Themed(3),
+                 Themed(132), lane.top + Themed(19));
 }
 
 float TimelineView::FrameToX(Frame f) const {
@@ -101,39 +186,95 @@ Frame TimelineView::XToFrame(float x) const {
          + static_cast<Frame>((x - HeaderWidth()) * fFramesPerPixel);
 }
 
-void TimelineView::AttachedToWindow() {
-    MakeFocus(true);   // receive arrow/zoom keys
+void TimelineView::ZoomBy(double factor) {
+    // The keyboard's zoom (and the menu's) anchors on the playhead, so the bar
+    // the user is working on stays where it is. An off-screen playhead would
+    // drag the view with it, so the view's centre is the fallback.
+    float anchorX = Bounds().right;
+    const float px = FrameToX(fPlayhead);
+    if (px >= HeaderWidth() && px <= Bounds().right)
+        anchorX = px;
+    else
+        anchorX = (HeaderWidth() + Bounds().right) * 0.5f;
+    ZoomAnchoredAt(factor, anchorX);
 }
 
-void TimelineView::ZoomBy(double factor) {
+void TimelineView::ZoomAnchoredAt(double factor, float x) {
+    const Frame anchor  = XToFrame(x);
+    const Frame wasScroll = fScrollFrame;
     double fpp = fFramesPerPixel * factor;
     if (fpp < 16.0)    fpp = 16.0;      // most zoomed-in
     if (fpp > 65536.0) fpp = 65536.0;   // most zoomed-out
     fFramesPerPixel = fpp;
+    // Put the anchor frame back under x: the same pixel maps to it again.
+    fScrollFrame = anchor - (Frame)((x - HeaderWidth()) * fFramesPerPixel);
+    if (fScrollFrame < 0) fScrollFrame = 0;
+    // Never pull the view backwards: zooming into empty space past the content
+    // is legitimate (the user pointed at it), but a zoom must not scroll a
+    // view back to the content on its own.
+    const Frame ceiling = std::max(ContentEndFrame(), wasScroll);
+    if (fScrollFrame > ceiling) fScrollFrame = ceiling;
     Invalidate();
 }
 
-void TimelineView::PanBy(Frame deltaFrames) {
-    fScrollFrame += deltaFrames;
-    if (fScrollFrame < 0) fScrollFrame = 0;
-    // Don't scroll past the content (last clip/note end).
+// Where the project's content ends: the last clip/region, the playhead, the
+// loop and punch ranges, and the markers. The horizontal scroll goes this far
+// (M2.2 "you can scroll past the end of the last clip"), so a project whose
+// last clip is short can still be scrolled off the left edge.
+Frame TimelineView::ContentEndFrame() const {
     Frame end = 0;
-    for (const Track& t : fProject->Tracks()) {
-        for (const Clip& c : t.clips)
-            if (c.startFrame + c.lengthFrames > end) end = c.startFrame + c.lengthFrames;
-        for (const MidiClip& mc : t.midiClips)
-            if (mc.startFrame + mc.lengthFrames > end) end = mc.startFrame + mc.lengthFrames;
+    auto bump = [&end](Frame f) { if (f > end) end = f; };
+    if (fProject) {
+        for (const Track& t : fProject->Tracks()) {
+            for (const Clip& c : t.clips)
+                bump(c.startFrame + c.lengthFrames);
+            for (const MidiClip& mc : t.midiClips)
+                bump(mc.startFrame + mc.lengthFrames);
+        }
+        const Transport& tr = fProject->transport;
+        bump(tr.playhead);
+        if (tr.loopEnabled)  bump(tr.loopEnd);
+        if (tr.punchEnabled) bump(tr.punchOut);
+        for (const Marker& m : fProject->markers) bump(m.frame);
     }
-    if (fScrollFrame > end) fScrollFrame = end;
+    return end;
+}
+
+float TimelineView::VisibleFrames() const {
+    const float w = Bounds().Width() - HeaderWidth() - fBarThickness;
+    if (w < 1.0f) return 0.0f;
+    return (float)(w * fFramesPerPixel);
+}
+
+void TimelineView::PanBy(Frame deltaFrames) {
+    ScrollToFrame(fScrollFrame + deltaFrames);
+}
+
+void TimelineView::ScrollToFrame(Frame f) {
+    if (f < 0) f = 0;
+    // Past the end of the last clip, up to the content end: the whole
+    // arrangement can be scrolled off the left edge (M2.2).
+    const Frame end = ContentEndFrame();
+    if (f > end) f = end;
+    if (f == fScrollFrame) return;
+    fScrollFrame = f;
     Invalidate();
 }
 
 void TimelineView::ScrollVerticalBy(float dy) {
-    const float viewH = Bounds().Height() - RulerHeight();
+    ScrollToY(fScrollY + dy);
+}
+
+void TimelineView::ScrollToY(float y) {
+    // The visible height is what the lanes get: the horizontal scrollbar sits
+    // over the view's bottom strip, so a scroll that ignored it left the last
+    // lane's bottom row UNDER the bar (the collapsed-lane shot showed it).
+    const float viewH = Bounds().Height() - ContentTop() - fBarThickness;
     const float maxScroll = ContentHeight() - viewH;
-    fScrollY += dy;
-    if (fScrollY > maxScroll) fScrollY = maxScroll;
-    if (fScrollY < 0.0f)      fScrollY = 0.0f;   // (also clamps when all fits)
+    if (y > maxScroll) y = maxScroll;
+    if (y < 0.0f)      y = 0.0f;   // (also clamps when all fits)
+    if (y == fScrollY) return;
+    fScrollY = y;
     Invalidate();
 }
 
@@ -172,9 +313,47 @@ static bool DroppedExtIs(const char* path, const char* ext) {
 }
 
 void TimelineView::MessageReceived(BMessage* msg) {
+    // RenameWindow's answer for a clip (M2.5): the clip id rides in its
+    // echoed "aux" field, the track in "track".
+    if (msg->what == kMsgRenameClip) {
+        int64 tid = 0, cid = 0;
+        const char* name = nullptr;
+        msg->FindInt64("track", &tid);
+        msg->FindInt64("aux", &cid);
+        if (msg->FindString("name", &name) == B_OK && name) {
+            if (fStack->Execute(std::make_unique<SetClipNameCommand>(
+                                    (TrackId)tid, (ClipId)cid, name), *fProject)) {
+                Invalidate();
+                if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+            }
+        }
+        return;
+    }
     if (msg->what == B_MOUSE_WHEEL_CHANGED) {
-        float dy = 0.0f;
-        if (msg->FindFloat("be:wheel_delta_y", &dy) == B_OK && dy != 0.0f) {
+        // Navigation (M2.2): Ctrl zooms anchored on the pointer, Shift (or a
+        // horizontal wheel) scrolls sideways, a plain wheel scrolls the tracks.
+        float dx = 0.0f, dy = 0.0f;
+        msg->FindFloat("be:wheel_delta_x", &dx);
+        msg->FindFloat("be:wheel_delta_y", &dy);
+        const uint32 mods = EventModifiers(msg);
+        // A wheel message carries no pointer position, so the anchor is the
+        // last hover point (a synthetic wheel from a test moves it first).
+        BPoint where = fHoverPos;
+        if (!fHoverValid) where = BPoint(Bounds().right, ContentTop());
+        if (mods & B_CONTROL_KEY) {
+            const float delta = dy != 0.0f ? dy : dx;
+            if (delta != 0.0f) {
+                float x = where.x;
+                if (x < HeaderWidth()) x = HeaderWidth();
+                if (x > Bounds().right) x = Bounds().right;
+                ZoomAnchoredAt(delta > 0.0f ? 1.25 : 1.0 / 1.25, x);
+                return;
+            }
+        } else if ((mods & B_SHIFT_KEY) != 0 || (dy == 0.0f && dx != 0.0f)) {
+            const float delta = dy != 0.0f ? dy : dx;
+            PanBy((Frame)(delta * 8.0f * fFramesPerPixel));   // a wheel notch
+            return;
+        } else if (dy != 0.0f) {
             ScrollVerticalBy(dy * 40.0f);   // ~40 px per notch
             return;
         }
@@ -220,7 +399,12 @@ void TimelineView::MessageReceived(BMessage* msg) {
             const char* p = path.Path();
 
             BMessage imp;
-            if (DroppedExtIs(p, "wav")) {
+            // Audio is decided by the file's leading bytes, not its name, so
+            // every format the build can read lands here -- including a WAV
+            // someone renamed and a FLAC named ".wav". MIDI has no magic of
+            // its own ("MThd" does, but the reader is the authority), so the
+            // extension test stays for it.
+            if (SniffAudioFileFormat(p) != AudioFileFormat::Unknown) {
                 TrackId tid = kInvalidTrackId;
                 const int idx = dropIdx >= 0 ? dropIdx + audioPlaced : -1;
                 if (idx >= 0 && idx < (int)fProject->Tracks().size())
@@ -236,8 +420,8 @@ void TimelineView::MessageReceived(BMessage* msg) {
                 imp.AddInt64("start", (int64)start);
             } else {
                 std::fprintf(stderr,
-                             "TimelineView: ignoring dropped '%s' (want .wav/.mid)\n",
-                             p);
+                             "TimelineView: ignoring dropped '%s' "
+                             "(not an audio file or MIDI)\n", p);
                 continue;
             }
             if (Window()) BMessenger(Window()).SendMessage(&imp);
@@ -247,52 +431,987 @@ void TimelineView::MessageReceived(BMessage* msg) {
     BView::MessageReceived(msg);
 }
 
+// The two ends of the one keyboard map (src/model/KeyMap.h): the codes in the
+// kit-free table must be the Interface Kit's, or a binding would sit on a key
+// nobody can press. These assert it at compile time.
+static_assert(kKeyHome == B_HOME,          "key table: Home");
+static_assert(kKeyEnd == B_END,            "key table: End (Ctrl-D's byte)");
+static_assert(kKeyBackspace == B_BACKSPACE,"key table: Backspace");
+static_assert(kKeyEnter == B_RETURN,       "key table: Return/Enter");
+static_assert(kKeyPageUp == B_PAGE_UP,     "key table: Page Up");
+static_assert(kKeyPageDown == B_PAGE_DOWN, "key table: Page Down");
+static_assert(kKeyEscape == B_ESCAPE,      "key table: Escape");
+static_assert(kKeyLeft == B_LEFT_ARROW,    "key table: Left arrow");
+static_assert(kKeyRight == B_RIGHT_ARROW,  "key table: Right arrow");
+static_assert(kKeySpace == B_SPACE,        "key table: Space");
+static_assert(kKeyDelete == B_DELETE,      "key table: Delete");
+static_assert(kModShift == B_SHIFT_KEY     && kModCommand == B_COMMAND_KEY
+           && kModControl == B_CONTROL_KEY && kModOption == B_OPTION_KEY,
+              "key table: modifier masks");
+
 void TimelineView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
+    // An open in-place rename owns the keyboard: the on-screen name field is a
+    // text field, and a bare key reaching the arrangement behind it is how a
+    // rename edits the wrong thing (M2.6).
+    if (fRenameTrack != kInvalidTrackId && HandleRenameKey(bytes, numBytes))
+        return;
+    // ONE keyboard map (M3.2): the byte is resolved through the kit-free table
+    // that the Keyboard Shortcuts window is also generated from, and the switch
+    // is on the ACTION — no key literal is compared here any more, so the help
+    // and the behaviour cannot drift.
+    // The event's own modifiers (live state as the fallback), as the view's
+    // other handlers read them -- a key's Shift/Cmd is the one it was pressed with.
+    const KeyBinding* kb = FindKeyBinding(bytes[0], (uint32_t)EventModifiers(
+        Window() ? Window()->CurrentMessage() : nullptr));
+    if (kb == nullptr || kb->route != KeyRoute::Dispatch) {
+        BView::KeyDown(bytes, numBytes);
+        return;
+    }
     // One page = the visible content width in frames.
     const Frame page = (Frame)((Bounds().right - HeaderWidth()) * fFramesPerPixel);
-    switch (bytes[0]) {
-        case B_LEFT_ARROW:
-            if (modifiers() & B_COMMAND_KEY) JumpToMarker(-1);
-            else PanBy(-page / 4);
-            break;
-        case B_RIGHT_ARROW:
-            if (modifiers() & B_COMMAND_KEY) JumpToMarker(+1);
-            else PanBy(page / 4);
-            break;
-        case 'l': case 'L': LoopBetweenMarkers(); break;   // cycle marker-to-marker
-        case B_HOME:        fScrollFrame = 0; Invalidate(); break;
-        case '+': case '=': ZoomBy(0.5); break;   // zoom in
-        case '-': case '_': ZoomBy(2.0); break;   // zoom out
-        case 'f': case 'F': ZoomToFit(); break;   // fit project to view width
-        case B_SPACE:   // toggle transport (play/stop)
+    switch (kb->action) {
+        case KeyAction::PlayStop:
             if (BWindow* w = Window()) w->PostMessage(kMsgTransportToggle);
             break;
-        case 'm': case 'M': {   // drop a marker at the playhead
-            Frame at = fProject->transport.playhead; if (at < 0) at = 0;
-            char nm[24];
-            std::snprintf(nm, sizeof(nm), "Marker %d",
-                          (int)fProject->markers.size() + 1);
-            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
-            Invalidate();
+        case KeyAction::RecordToggle:
+            if (BWindow* w = Window()) w->PostMessage(kMsgTransportRecord);
+            break;
+        case KeyAction::LoopToggle:          ToggleLoop(); break;
+        case KeyAction::LoopBetweenMarkers:  LoopBetweenMarkers(); break;
+        case KeyAction::ClickToggle:
+            if (BWindow* w = Window()) w->PostMessage(kMsgClickToggle);
+            break;
+        case KeyAction::ReturnToZero:        ReturnToZero(); break;
+        case KeyAction::PanLeft:             PanBy(-page / 4); break;
+        case KeyAction::PanRight:            PanBy( page / 4); break;
+        case KeyAction::MarkerPrev:          JumpToMarker(-1); break;
+        case KeyAction::MarkerNext:          JumpToMarker(+1); break;
+        case KeyAction::ZoomIn:              ZoomBy(0.5); break;
+        case KeyAction::ZoomOut:             ZoomBy(2.0); break;
+        case KeyAction::ZoomToFit:           ZoomToFit(); break;
+        case KeyAction::MarkerLaneToggle:    SetMarkerLane(!fMarkerLane); break;
+        case KeyAction::PageUp:
+            ScrollVerticalBy(-(Bounds().Height() - ContentTop()) * 0.8f); break;
+        case KeyAction::PageDown:
+            ScrollVerticalBy( (Bounds().Height() - ContentTop()) * 0.8f); break;
+        // The arrange tool palette's keys, one per tool (M2.3) -- the same
+        // 1..N mapping the piano roll uses for its own palette.
+        case KeyAction::ToolPointer:         SetTool(Tool::Pointer);  break;
+        case KeyAction::ToolPencil:          SetTool(Tool::Pencil);   break;
+        case KeyAction::ToolScissors:        SetTool(Tool::Scissors); break;
+        case KeyAction::ToolGlue:            SetTool(Tool::Glue);     break;
+        case KeyAction::ToolMute:            SetTool(Tool::Mute);     break;
+        case KeyAction::ToolFade:            SetTool(Tool::Fade);     break;
+        case KeyAction::GridMenu:            OpenGridMenu(); break;
+        case KeyAction::SplitAtPlayhead:     SplitAtPlayhead(); break;
+        // Nudge the selection one grid step (M2.5).
+        case KeyAction::NudgeLeft:           NudgeSelection(-1); break;
+        case KeyAction::NudgeRight:          NudgeSelection(+1); break;
+        case KeyAction::DeleteSelection:
+            // The range, the selected clips, or both (M2.4's Edit > Delete).
+            if (HasTimeRange() || !fSelClips.empty()) RangeDelete();
+            else BView::KeyDown(bytes, numBytes);
+            break;
+        case KeyAction::DuplicateSelection:  DuplicateSelection(); break;
+        case KeyAction::ClearSelection:
+            // Esc drops the clip selection first, then the range (two things
+            // can be selected; one press should not silently drop both).
+            if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(); }
+            else if (HasTimeRange()) ClearTimeRange();
+            else BView::KeyDown(bytes, numBytes);
+            break;
+        case KeyAction::DropMarker:          DropMarker(); break;
+        case KeyAction::None:
+        default:
+            BView::KeyDown(bytes, numBytes);
+            break;
+    }
+}
+
+// Home / Enter (M3.2): the playhead goes to the start and the view with it.
+// Home used to only scroll, which is what the plan called out.
+void TimelineView::ReturnToZero() {
+    fProject->transport.playhead = 0;
+    fScrollFrame = 0;
+    Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+}
+
+// L (M3.2): loop on/off. Turning it on with no range adopts the last one the
+// ruler set; with no range at all it takes the markers around the playhead
+// (the marker-to-marker loop, which keeps its own Shift-L binding).
+void TimelineView::ToggleLoop() {
+    Transport& tr = fProject->transport;
+    if (tr.loopEnabled) { tr.loopEnabled = false; Invalidate(); return; }
+    if (tr.loopEnd <= tr.loopStart) LoopBetweenMarkers();   // may set nothing
+    tr.loopEnabled = true;
+    Invalidate();
+}
+
+// M: a marker at the playhead -- the same path the marker lane's click takes
+// (undoable, and the markers window follows).
+void TimelineView::DropMarker() {
+    AddMarkerAt(fProject->transport.playhead);
+}
+
+// --- the arrange tool palette (M2.3) --------------------------------------
+//
+// The strip across the top of the view: the six tools at the piano roll's
+// button pitch, then the snap field and the zoom pair. Drawn with the shared
+// DrawButton + icons::DrawArrangeTool, exactly as the roll's strip is, so the
+// two palettes read as one control.
+
+const char* TimelineView::ToolName(Tool t) {
+    switch (t) {
+        case Tool::Pointer:  return "Pointer";
+        case Tool::Pencil:   return "Pencil";
+        case Tool::Scissors: return "Scissors";
+        case Tool::Glue:     return "Glue";
+        case Tool::Mute:     return "Mute";
+        default:             return "Fade";
+    }
+}
+
+void TimelineView::SetTool(Tool t) {
+    if (fTool == t) return;
+    fTool = t;
+    // The tool decides what the pointer means now: recompute the cursor and the
+    // tooltip for wherever the pointer was last seen, so the change is visible
+    // without moving the mouse.
+    if (fHoverValid) UpdateHover(fHoverPos, 0, B_INSIDE_VIEW);
+    Invalidate();
+}
+
+// Button geometry, in design pixels through Themed() so the hit targets scale
+// with the font (mouse and drawing both come through here).
+static constexpr float kToolBtnW = 22.0f;
+static constexpr float kToolPitch = 24.0f;
+
+BRect TimelineView::ToolRect(int i) const {
+    const float x = Themed(4.0f) + i * Themed(kToolPitch);
+    return BRect(x, Themed(5.0f), x + Themed(kToolBtnW), Themed(23.0f));
+}
+BRect TimelineView::GridRect() const {
+    return BRect(Themed(158.0f), Themed(5.0f), Themed(218.0f), Themed(23.0f));
+}
+BRect TimelineView::ZoomOutRect() const {
+    return BRect(Themed(228.0f), Themed(5.0f), Themed(250.0f), Themed(23.0f));
+}
+BRect TimelineView::ZoomInRect() const {
+    return BRect(Themed(254.0f), Themed(5.0f), Themed(276.0f), Themed(23.0f));
+}
+
+int TimelineView::ToolButtonAt(BPoint where) const {
+    for (int i = 0; i < 6; i++)
+        if (ToolRect(i).Contains(where)) return i;
+    return -1;
+}
+
+void TimelineView::SetSnapGrid(SnapGrid g) {
+    fSnap = g;
+    Invalidate(BRect(0, 0, Bounds().right, ToolbarHeight()));
+    SyncScrollBars();
+}
+
+void TimelineView::HandleToolbarClick(BPoint where) {
+    const int btn = ToolButtonAt(where);
+    if (btn >= 0) { SetTool((Tool)btn); return; }
+    if (GridRect().Contains(where)) { OpenGridMenu(); return; }
+    if (ZoomOutRect().Contains(where)) { ZoomBy(2.0); return; }
+    if (ZoomInRect().Contains(where))  { ZoomBy(0.5); return; }
+}
+
+// The snap popup: the plan's values (bar, 1/2 … 1/32), the triplet modifier and
+// Off. Every entry comes from the kit-free SnapGrid header, so the label the
+// field shows and the menu entry that set it cannot disagree.
+void TimelineView::OpenGridMenu() {
+    BPopUpMenu* menu = new BPopUpMenu("snap", false, false);
+    int n = 0;
+    const SnapDivision* div = SnapDivisions(&n);
+    BMenuItem* active = nullptr;
+    for (int i = 0; i < n; i++) {
+        BMenuItem* it = new ThemedMenuItem(div[i].label, NULL);
+        const bool on = (fSnap.kind == div[i].kind);
+        it->SetMarked(on);
+        if (on) active = it;
+        menu->AddItem(it);
+    }
+    menu->AddSeparatorItem();
+    BMenuItem* trip = new ThemedMenuItem("Triplets", NULL);
+    trip->SetMarked(fSnap.triplet);
+    menu->AddItem(trip);
+    BMenuItem* off = new ThemedMenuItem("Off", NULL);
+    off->SetMarked(!fSnap.On());
+    if (!fSnap.On()) active = off;
+    menu->AddItem(off);
+
+    BMenuItem* sel = menu->Go(ConvertToScreen(BPoint(GridRect().left,
+                                                      GridRect().bottom)), false,
+                              true);
+    if (sel) {
+        int idx = menu->IndexOf(sel);
+        if (sel == trip)          fSnap.triplet = !fSnap.triplet;
+        else if (sel == off)      fSnap.kind = SnapKind::Off;
+        else if (idx >= 0 && idx < n) fSnap.kind = div[idx].kind;
+        SetSnapGrid(fSnap);
+    }
+    delete menu;
+    (void)active;
+}
+
+// --- the tools' gestures ---------------------------------------------------
+
+// Which clip/region is under `where`, and which part of it. This is the ONE
+// answer the click path, the hover highlight and the cursor all use.
+TimelineView::Hit TimelineView::HitTest(BPoint where) const {
+    return HitTest(where, EventModifiers(Window() ? Window()->CurrentMessage()
+                                                  : nullptr));
+}
+
+TimelineView::Hit TimelineView::HitTest(BPoint where, uint32 mods) const {
+    Hit h;
+    if (!fProject || where.x < HeaderWidth() || where.y < ContentTop())
+        return h;
+    const int idx = TrackIndexAt(where);
+    if (idx < 0 || idx >= (int)fProject->Tracks().size()) return h;
+    const Track& t = fProject->Tracks()[(size_t)idx];
+    h.lane  = idx;
+    h.track = t.id;
+
+    const BRect lane = LaneRect(idx);
+    const Frame at = XToFrame(where.x);
+    // Audio clips and MIDI regions share the geometry; a MIDI region's is the
+    // same block DrawMidiNotes paints.
+    auto zoneFor = [&](Frame start, Frame len, bool midi,
+                       float topBandH, float cornerW, bool withGain) -> Zone {
+        const float x0 = FrameToX(start);
+        const float x1 = FrameToX(start + len);
+        if (where.x < x0 || where.x > x1) return Zone::None;
+        const bool wide = (x1 - x0) > 2 * EdgeGrab();
+        const bool topBand = where.y <= lane.top + Themed(topBandH);
+        if (withGain && (mods & B_CONTROL_KEY)) return Zone::Gain;
+        if (withGain && !midi && (mods & B_OPTION_KEY)) return Zone::Slip;
+        if (topBand && where.x <= x0 + Themed(cornerW)) return Zone::FadeIn;
+        if (topBand && where.x >= x1 - Themed(cornerW)) return Zone::FadeOut;
+        if (wide && where.x >= x1 - EdgeGrab()) return Zone::TrimRight;
+        if (wide && where.x <= x0 + EdgeGrab()) return Zone::TrimLeft;
+        return Zone::Body;
+    };
+
+    if (t.type == TrackType::Midi) {
+        for (const MidiClip& c : t.midiClips) {
+            if (c.takeGroup > 0 && !c.takeActive) continue;
+            const Zone z = zoneFor(c.startFrame, c.lengthFrames, true, 16.0f,
+                                   14.0f, false);
+            if (z != Zone::None) { h.clip = c.id; h.midi = true; h.zone = z; return h; }
+        }
+    } else {
+        for (const Clip& c : t.clips) {
+            if (c.takeGroup > 0 && !c.takeActive) continue;
+            const Zone z = zoneFor(c.startFrame, c.lengthFrames, false, 14.0f,
+                                   12.0f, true);
+            if (z != Zone::None) { h.clip = c.id; h.midi = false; h.zone = z; return h; }
+        }
+    }
+    // An empty spot in the lane: still a real target (band select, pencil).
+    h.zone = Zone::Body;
+    h.clip = kInvalidClipId;
+    return h;
+}
+
+TimelineView::Pointer TimelineView::CursorFor(BPoint where, uint32 mods) const {
+    if (where.y < ToolbarHeight()) return Pointer::Default;
+    // The lane's resize edge (M2.6) outranks the tools: the grab is in the
+    // header gutter, where no tool acts.
+    if (where.x < HeaderWidth() && where.y >= ContentTop()) {
+        const int edge = LaneEdgeAt(where);
+        if (edge >= 0 && HeaderControlAt(TrackIndexAt(where), where)
+                             == HeaderControl::None)
+            return Pointer::LaneSize;
+    }
+    switch (fTool) {
+        case Tool::Scissors:
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Split
+                                                               : Pointer::Default;
+        case Tool::Glue:
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Glue
+                                                               : Pointer::Default;
+        case Tool::Mute:
+            return (where.y >= ContentTop() && where.x >= HeaderWidth())
+                 ? Pointer::Mute : Pointer::Default;
+        case Tool::Pencil: {
+            const Hit h = HitTest(where, mods);
+            const Track* t = fProject ? fProject->FindTrack(h.track) : nullptr;
+            if (t && t->type == TrackType::Midi) return Pointer::Pencil;
+            return Pointer::Default;
+        }
+        case Tool::Fade:
+            return HitTest(where, mods).clip != kInvalidClipId ? Pointer::Fade
+                                                               : Pointer::Default;
+        default: break;
+    }
+    const Hit h = HitTest(where, mods);
+    if (h.clip == kInvalidClipId) return Pointer::Default;
+    switch (h.zone) {
+        case Zone::TrimLeft: case Zone::TrimRight: return Pointer::Trim;
+        case Zone::FadeIn:   case Zone::FadeOut:   return Pointer::Fade;
+        case Zone::Gain:                            return Pointer::Gain;
+        case Zone::Slip:                            return Pointer::Slip;
+        case Zone::Body:
+            return (mods & B_OPTION_KEY) && !h.midi ? Pointer::Slip
+                                                    : Pointer::Move;
+        default: return Pointer::Default;
+    }
+}
+
+// Scissors: cut the clicked clip at the (snapped) click. One command, the same
+// Split the context menu uses.
+void TimelineView::ScissorsAt(const Hit& hit, BPoint where) {
+    if (hit.clip == kInvalidClipId) return;
+    Frame at = Snapped(XToFrame(where.x));
+    if (at < 0) at = 0;
+    std::unique_ptr<Command> cmd;
+    if (hit.midi) cmd = std::make_unique<SplitMidiClipCommand>(hit.track, hit.clip, at);
+    else          cmd = std::make_unique<SplitClipCommand>(hit.track, hit.clip, at);
+    if (fStack->Execute(std::move(cmd), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// Glue: join the clicked clip with the next one that meets it. Clicking the
+// right half of a pair glues backwards -- the user pointed at the seam, not at
+// a direction, and the command refuses anything that is not a real join.
+void TimelineView::GlueAt(const Hit& hit) {
+    if (hit.clip == kInvalidClipId) return;
+    auto join = [&](ClipId left) -> std::unique_ptr<Command> {
+        if (hit.midi) return std::make_unique<JoinMidiClipsCommand>(hit.track, left);
+        return std::make_unique<JoinClipsCommand>(hit.track, left);
+    };
+    if (fStack->Execute(join(hit.clip), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+        return;
+    }
+    // Backwards: the previous clip/region ends where this one starts.
+    const Track* t = fProject->FindTrack(hit.track);
+    if (!t) return;
+    ClipId prev = kInvalidClipId;
+    Frame  prevEnd = 0;
+    if (hit.midi) {
+        for (const MidiClip& c : t->midiClips) {
+            if (c.id == hit.clip) break;
+            prev = c.id; prevEnd = c.startFrame + c.lengthFrames;
+        }
+        if (prev == kInvalidClipId) return;
+        const MidiClip* cur = t->FindMidiClip(hit.clip);
+        if (!cur || prevEnd < cur->startFrame) return;
+    } else {
+        for (const Clip& c : t->clips) {
+            if (c.id == hit.clip) break;
+            prev = c.id; prevEnd = c.startFrame + c.lengthFrames;
+        }
+        if (prev == kInvalidClipId) return;
+        const Clip* cur = t->FindClip(hit.clip);
+        if (!cur || prevEnd < cur->startFrame) return;
+    }
+    if (fStack->Execute(join(prev), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// Mute: the mute of the BLOCK the tool is pointed at (M2.5). Before clip
+// depth existed the only mute the model had was the track's, which made the
+// tool mean one thing over a block and another over the header; a clip and a
+// region both carry `muted` now, so the tool says what it does. Clicking the
+// empty lane still has no block to mute and does nothing.
+void TimelineView::MuteAt(const Hit& hit) {
+    if (hit.track == kInvalidTrackId || hit.clip == kInvalidClipId)
+        return;                               // nothing under the cursor
+    ToggleClipMute(hit.track, hit.clip, hit.midi);
+}
+
+// Pencil: draw a MIDI region by dragging, or one bar by clicking. Only a MIDI
+// track can take one -- an audio clip needs a source, and creating one is
+// M2.5/2.4 territory.
+bool TimelineView::PencilAt(const Hit& hit, BPoint where) {
+    if (hit.clip != kInvalidClipId) return false;   // on a region: pointer acts
+    if (hit.track == kInvalidTrackId) return false;
+    const Track* t = fProject->FindTrack(hit.track);
+    if (!t || t->type != TrackType::Midi) return false;
+    Frame start = Snapped(XToFrame(where.x));
+    if (start < 0) start = 0;
+    fPencilStart  = start;
+    fPencilLen    = 0;         // a click makes one bar on release
+    fHoverPos     = where;     // the ghost follows this until a move arrives
+    fDrag         = Drag::Pencil;
+    fDragTrack    = hit.track;
+    fDragLane     = hit.lane;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    Invalidate(LaneRect(hit.lane));
+    return true;
+}
+
+void TimelineView::CommitPencil(BPoint where) {
+    Track* t = fProject->FindTrack(fDragTrack);
+    if (!t) return;
+    Frame start = fPencilStart;
+    Frame len   = fPencilLen;
+    if (len <= 0) {   // a bare click: one bar, the double-click default
+        const Frame one = fProject->tempoMap.FrameAt(
+                              fProject->tempoMap.BeatAt(start) + 4) - start;
+        len = one > 0 ? one : (Frame)(fProject->tempoMap.FramesPerBeatAt(start) * 4);
+    }
+    if (len < 1) len = 1;
+    MidiClip nc;
+    nc.startFrame   = start;
+    nc.lengthFrames = len;
+    auto add = std::make_unique<AddMidiClipCommand>(t->id, nc);
+    AddMidiClipCommand* ap = add.get();
+    if (fStack->Execute(std::move(add), *fProject)) {
+        fSelClips.clear();
+        fSelClips.insert(ap->CreatedId());
+    }
+    Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    (void)where;
+}
+
+// Fade: drag the nearer edge's fade. The top-corner grips do the same for the
+// pointer tool; this makes it work anywhere in the clip, which is what a tool
+// is for on a narrow region.
+void TimelineView::FadeStart(const Hit& hit, BPoint where) {
+    if (hit.clip == kInvalidClipId) return;
+    const Track* t = fProject->FindTrack(hit.track);
+    if (!t) return;
+    Frame start = 0, len = 0;
+    if (hit.midi) {
+        const MidiClip* c = t->FindMidiClip(hit.clip);
+        if (!c) return;
+        start = c->startFrame; len = c->lengthFrames;
+        fDragFadeInOrig  = c->fadeInFrames;
+        fDragFadeOutOrig = c->fadeOutFrames;
+    } else {
+        const Clip* c = t->FindClip(hit.clip);
+        if (!c) return;
+        start = c->startFrame; len = c->lengthFrames;
+        fDragFadeInOrig  = c->fadeInFrames;
+        fDragFadeOutOrig = c->fadeOutFrames;
+    }
+    const float x0 = FrameToX(start), x1 = FrameToX(start + len);
+    fDrag = (where.x - x0) <= (x1 - where.x) ? Drag::ClipFadeIn
+                                             : Drag::ClipFadeOut;
+    fDragTrack       = hit.track;
+    fDragLane        = hit.lane;
+    fDragClip        = hit.clip;
+    fDragIsMidiClip  = hit.midi;
+    fDragClipOrig    = start;
+    fDragClipOrigLen = len;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+    PreviewDrag(where);
+}
+
+// Split every clip/region the playhead falls strictly inside, as ONE undo step.
+void TimelineView::SplitAtPlayhead() {
+    if (!fProject || !fStack) return;
+    const Frame at = fProject->transport.playhead;
+    if (at < 0) return;
+    // Collect first: the commands mutate the model when the macro runs, and
+    // walking it while it changes would be a different set every time.
+    struct Target { TrackId track; ClipId clip; bool midi; };
+    std::vector<Target> targets;
+    for (const Track& t : fProject->Tracks()) {
+        for (const Clip& c : t.clips) {
+            if (c.takeGroup > 0 && !c.takeActive) continue;
+            if (at > c.startFrame && at < c.startFrame + c.lengthFrames
+                && (fSelClips.empty() || ClipSelected(c.id)))
+                targets.push_back({ t.id, c.id, false });
+        }
+        for (const MidiClip& c : t.midiClips) {
+            if (c.takeGroup > 0 && !c.takeActive) continue;
+            if (at > c.startFrame && at < c.startFrame + c.lengthFrames
+                && (fSelClips.empty() || ClipSelected(c.id)))
+                targets.push_back({ t.id, c.id, true });
+        }
+    }
+    if (targets.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Split at Playhead");
+    for (const Target& tg : targets) {
+        if (tg.midi) macro->Add(std::make_unique<SplitMidiClipCommand>(tg.track, tg.clip, at));
+        else         macro->Add(std::make_unique<SplitClipCommand>(tg.track, tg.clip, at));
+    }
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// --- hover, cursors and tooltips (M2.1) ------------------------------------
+
+// The header's controls, in the order the drawing and the click path agree on
+// (M2.6). A folded lane draws the compact set, so which rects apply depends on
+// the track's state -- one function answers for both.
+TimelineView::HeaderControl TimelineView::HeaderControlAt(int idx,
+                                                          BPoint where) const {
+    if (idx < 0 || !fProject || idx >= (int)fProject->Tracks().size())
+        return HeaderControl::None;
+    const Track& t = fProject->Tracks()[(size_t)idx];
+    const BRect lane = LaneRect(idx);
+    if (t.collapsed) {
+        if (FoldRectCompact(lane).Contains(where))          return HeaderControl::Fold;
+        if (ColourSwatchRectCompact(lane).Contains(where))  return HeaderControl::Colour;
+        if (MuteRectCompact(lane).Contains(where))          return HeaderControl::Mute;
+        if (SoloRectCompact(lane).Contains(where))          return HeaderControl::Solo;
+        return HeaderControl::None;
+    }
+    if (FoldRect(lane).Contains(where))          return HeaderControl::Fold;
+    if (MuteRect(lane).Contains(where))          return HeaderControl::Mute;
+    if (SoloRect(lane).Contains(where))          return HeaderControl::Solo;
+    if (ArmRect(lane).Contains(where))           return HeaderControl::Arm;
+    if (MonRect(lane).Contains(where))           return HeaderControl::Monitor;
+    if (PanKnobRect(lane).Contains(where))       return HeaderControl::Pan;
+    if (GainRect(lane).Contains(where))          return HeaderControl::Gain;
+    if (ColourSwatchRect(lane).Contains(where))  return HeaderControl::Colour;
+    if (InputRect(lane).Contains(where))         return HeaderControl::Input;
+    return HeaderControl::None;
+}
+
+BRect TimelineView::HeaderRectFor(int lane, HeaderControl which) const {
+    if (!fProject || lane < 0 || lane >= (int)fProject->Tracks().size())
+        return BRect();
+    const Track& t = fProject->Tracks()[(size_t)lane];
+    const BRect l = LaneRect(lane);
+    const bool compact = t.collapsed;
+    switch (which) {
+        case HeaderControl::Fold: return compact ? FoldRectCompact(l)
+                                                 : FoldRect(l);
+        case HeaderControl::Colour: return compact ? ColourSwatchRectCompact(l)
+                                                   : ColourSwatchRect(l);
+        case HeaderControl::Mute: return compact ? MuteRectCompact(l) : MuteRect(l);
+        case HeaderControl::Solo: return compact ? SoloRectCompact(l) : SoloRect(l);
+        case HeaderControl::Arm:  return ArmRect(l);
+        case HeaderControl::Monitor: return MonRect(l);
+        case HeaderControl::Pan:  return PanKnobRect(l);
+        case HeaderControl::Gain: return GainRect(l);
+        case HeaderControl::Input: return InputRect(l);
+        default: return BRect();
+    }
+}
+
+// The lane whose bottom edge is in the grab band, in the header gutter only:
+// the lane content's own bottom pixels belong to clips and ranges, and the
+// header is where every other per-lane control already lives.
+int TimelineView::LaneEdgeAt(BPoint where) const {
+    if (!fProject || where.x >= HeaderWidth()) return -1;
+    const float grab = Themed(3.0f);
+    const int n = (int)fProject->Tracks().size();
+    for (int i = 0; i < n; i++) {
+        const float bottom = LaneRect(i).bottom;
+        if (where.y >= bottom - grab && where.y <= bottom + TrackGap())
+            return i;
+    }
+    return -1;
+}
+
+// The tooltip for a header control.
+static const char* HeaderTip(TimelineView::HeaderControl which) {
+    switch (which) {
+        case TimelineView::HeaderControl::Mute: return "Mute";
+        case TimelineView::HeaderControl::Solo:
+            return "Solo (Alt-click: solo this track only)";
+        case TimelineView::HeaderControl::Arm:  return "Record arm";
+        case TimelineView::HeaderControl::Monitor: return "Input monitor";
+        case TimelineView::HeaderControl::Pan:  return "Pan (drag up/down)";
+        case TimelineView::HeaderControl::Gain: return "Volume";
+        case TimelineView::HeaderControl::Colour: return "Track colour";
+        case TimelineView::HeaderControl::Input:  return "Record input";
+        case TimelineView::HeaderControl::Fold:
+            return "Collapse / expand the lane";
+        default: return "";
+    }
+}
+
+// A short label for whatever the pointer is over: the palette buttons, the
+// header controls, the clip edges and the ruler.
+void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
+    if (mods == 0 && Window() && Window()->CurrentMessage())
+        mods = EventModifiers(Window()->CurrentMessage());
+    if (transit == B_EXITED_VIEW) {
+        fHoverValid = false;
+        fHover = Hit();
+        fHoverToolBtn = -1;
+        fHoverHeader = HeaderControl::None;
+        fHoverLaneEdge = false;
+        fSplitHoverX = -1.0f;
+        SetTip("");
+        ApplyCursor(Pointer::Default);
+        Invalidate();
+        return;
+    }
+
+    const Hit prevHit = fHover;
+    const int prevBtn  = fHoverToolBtn;
+    const HeaderControl prevHdr = fHoverHeader;
+    const bool prevEdge = fHoverLaneEdge;
+    const float prevSplit = fSplitHoverX;
+
+    fHoverPos = where;
+    fHoverValid = true;
+    fHoverToolBtn = (where.y < ToolbarHeight()) ? ToolButtonAt(where) : -1;
+    fHoverHeader = HeaderControl::None;
+    fHoverLaneEdge = false;
+    fHover = Hit();
+    fSplitHoverX = -1.0f;
+
+    const char* tip = "";
+    if (where.y < ToolbarHeight()) {
+        if (fHoverToolBtn >= 0)       tip = ToolName((Tool)fHoverToolBtn);
+        else if (GridRect().Contains(where))
+            tip = fSnap.On() ? "Snap: click to change the grid"
+                             : "Snap is off: click to choose a grid";
+        else if (ZoomOutRect().Contains(where)) tip = "Zoom out";
+        else if (ZoomInRect().Contains(where))  tip = "Zoom in";
+    } else if (fMarkerLane && where.y >= RulerBottom() && where.y < ContentTop()) {
+        // The marker lane (M2.7): flag = seek, empty = add on double-click,
+        // right-click on a flag = remove.
+        tip = MarkerInLane(where)
+            ? "Marker: click to jump, right-click to remove"
+            : "Markers: double-click to add one here";
+    } else if (where.y < RulerBottom()) {
+        // The ruler (RulerBottom, not ContentTop: the marker lane sits below).
+        tip = MarkerAt(where) ? "Marker: click to jump"
+                              : "Ruler: click to seek, drag for a loop, "
+                                "Ctrl-drag for punch, Alt-drag for a time range";
+    } else if (where.x < HeaderWidth()) {
+        // The header: a control highlight, and the track it belongs to (the
+        // drawing compares ids).
+        const int hidx = TrackIndexAt(where);
+        fHover.lane = hidx;
+        if (hidx >= 0 && hidx < (int)fProject->Tracks().size())
+            fHover.track = fProject->Tracks()[(size_t)hidx].id;
+        fHoverHeader = HeaderControlAt(hidx, where);
+        if (fHoverHeader != HeaderControl::None) {
+            tip = HeaderTip(fHoverHeader);
+        } else {
+            // The lane's bottom edge: the resize grab (M2.6).
+            const int edge = LaneEdgeAt(where);
+            if (edge >= 0) {
+                fHoverLaneEdge = true;
+                if (fHover.lane < 0) fHover.lane = edge;
+                tip = "Drag to resize the lane";
+            }
+        }
+    } else {
+        fHover = HitTest(where);
+        if (fHover.clip != kInvalidClipId) {
+            fSplitHoverX = FrameToX(Snapped(XToFrame(where.x)));
+            switch (fTool) {
+                case Tool::Scissors: tip = "Split here"; break;
+                case Tool::Glue:     tip = "Glue with the next clip"; break;
+                // The tool mutes the BLOCK under the pointer (M2.5's Clip.muted
+                // / MidiClip.muted) -- not the whole track, which is what the
+                // header's M button is for.
+                case Tool::Mute:     tip = "Mute this clip"; break;
+                case Tool::Pencil:   tip = "Drag to draw a region"; break;
+                case Tool::Fade:     tip = "Drag to set the fade"; break;
+                default:
+                    switch (fHover.zone) {
+                        case Zone::TrimLeft:  tip = "Trim the clip start"; break;
+                        case Zone::TrimRight: tip = "Trim the clip end"; break;
+                        case Zone::FadeIn:    tip = "Fade in"; break;
+                        case Zone::FadeOut:   tip = "Fade out"; break;
+                        case Zone::Gain:      tip = "Clip gain (drag up/down)"; break;
+                        case Zone::Slip:      tip = "Slip the audio inside the clip"; break;
+                        default:
+                            tip = fHover.midi ? "Region: drag to move, "
+                                                "double-click to edit"
+                                              : "Clip: drag to move";
+                            break;
+                    }
+            }
+        } else if (fTool == Tool::Pencil) {
+            const Track* t = fProject ? fProject->FindTrack(fHover.track) : nullptr;
+            if (t && t->type == TrackType::Midi) tip = "Drag to draw a region";
+        } else if (fTool == Tool::Pointer) {
+            tip = "Drag to select a time range (Shift: band-select clips)";
+        }
+    }
+    SetTip(tip);
+    ApplyCursor(CursorFor(where, mods));
+
+    // Repaint only what the feedback covers: the lanes whose highlight changed,
+    // plus the two columns the scissors' cut line moved between.
+    const bool hitChanged = prevHit.clip != fHover.clip
+                            || prevHit.lane != fHover.lane
+                            || prevHit.zone != fHover.zone;
+    if (hitChanged || prevBtn != fHoverToolBtn || prevHdr != fHoverHeader
+        || prevEdge != fHoverLaneEdge) {
+        if (prevHit.lane >= 0) Invalidate(LaneRect(prevHit.lane));
+        if (fHover.lane  >= 0) Invalidate(LaneRect(fHover.lane));
+        if (prevHdr != fHoverHeader && fHoverHeader == HeaderControl::None
+            && fHover.lane >= 0)
+            Invalidate(LaneRect(fHover.lane));
+        if (where.y < ToolbarHeight() || prevBtn >= 0)
+            Invalidate(BRect(0, 0, Bounds().right, ToolbarHeight()));
+    } else if (fTool == Tool::Scissors && fSplitHoverX >= 0.0f
+               && fSplitHoverX != prevSplit && fHover.lane >= 0) {
+        const BRect lane = LaneRect(fHover.lane);
+        Invalidate(BRect(prevSplit - Themed(2.0f), lane.top,
+                         prevSplit + Themed(2.0f), lane.bottom));
+        Invalidate(BRect(fSplitHoverX - Themed(2.0f), lane.top,
+                         fSplitHoverX + Themed(2.0f), lane.bottom));
+    }
+}
+
+void TimelineView::SetTip(const char* text) {
+    if (fTip == text) return;
+    fTip = text;
+    if (fTip.empty()) { HideToolTip(); return; }
+    SetToolTip(fTip.c_str());
+    ShowToolTip();
+}
+
+// The cursor objects are built once, on first use: a BCursor needs the app
+// server, so they cannot be static, and the glyph cursors need a bitmap draw.
+const BCursor* TimelineView::CursorObject(Pointer p) {
+    auto it = fCursors.find((int)p);
+    if (it != fCursors.end()) return it->second.get();
+    std::unique_ptr<BCursor> c;
+    switch (p) {
+        case Pointer::Move:  c.reset(new BCursor(B_CURSOR_ID_GRAB)); break;
+        case Pointer::Trim:  c.reset(new BCursor(B_CURSOR_ID_RESIZE_EAST_WEST)); break;
+        case Pointer::Gain:  c.reset(new BCursor(B_CURSOR_ID_RESIZE_NORTH_SOUTH)); break;
+        case Pointer::LaneSize:
+            c.reset(new BCursor(B_CURSOR_ID_RESIZE_NORTH_SOUTH));
+            break;
+        case Pointer::Split: c.reset(new BCursor(B_CURSOR_ID_CROSS_HAIR)); break;
+        case Pointer::Default:
+            c.reset(new BCursor(B_CURSOR_ID_SYSTEM_DEFAULT));
+            break;
+        default: {
+            // A tool's own glyph, drawn with the same code its button uses.
+            int glyph = -1;
+            switch (p) {
+                case Pointer::Fade:   glyph = 5; break;
+                case Pointer::Pencil: glyph = 1; break;
+                case Pointer::Glue:   glyph = 3; break;
+                case Pointer::Mute:   glyph = 4; break;
+                default: break;
+            }
+            if (glyph < 0 && p != Pointer::Slip) return nullptr;
+            // B_BITMAP_ACCEPTS_VIEWS is what gives the drawing view an owner:
+            // a bitmap without an off-screen window has no fWindow, so AddChild
+            // silently does nothing and EVERY BView call the glyph makes then
+            // hits "View method requires owner and doesn't have one" -- a crash
+            // dialog on the target, not a failed check. The bitmap's window must
+            // be locked before the child is added.
+            BBitmap* bm = new BBitmap(BRect(0, 0, 15, 15), B_RGBA32, true);
+            if (!bm->IsValid() || !bm->Lock()) { delete bm; return nullptr; }
+            memset(bm->Bits(), 0, (size_t)bm->BitsLength());
+            BView* v = new BView(bm->Bounds(), "cur", 0, 0);
+            bm->AddChild(v);
+            v->SetDrawingMode(B_OP_COPY);
+            auto paint = [&](rgb_color c) {
+                if (p == Pointer::Slip) icons::DrawSlipGlyph(v, bm->Bounds(), c);
+                else icons::DrawArrangeTool(v, bm->Bounds(), glyph, c);
+            };
+            // A one-pixel black halo first, so the glyph reads on any
+            // background, then the glyph itself in white.
+            const BPoint ring[4] = { BPoint(1, 0), BPoint(-1, 0), BPoint(0, 1),
+                                     BPoint(0, -1) };
+            for (const BPoint& o : ring) {
+                v->SetOrigin(o);
+                v->SetHighColor(0, 0, 0, 255);
+                paint(Rgb(0, 0, 0));
+            }
+            v->SetOrigin(BPoint(0, 0));
+            v->SetHighColor(255, 255, 255, 255);
+            paint(Rgb(255, 255, 255));
+            bm->Unlock();
+            c.reset(new BCursor(bm, BPoint(2, 2)));
+            delete bm;
             break;
         }
-        case B_PAGE_UP:   ScrollVerticalBy(-(Bounds().Height() - RulerHeight()) * 0.8f); break;
-        case B_PAGE_DOWN: ScrollVerticalBy( (Bounds().Height() - RulerHeight()) * 0.8f); break;
-        case B_DELETE: case B_BACKSPACE:
-            if (!fSelClips.empty()) DeleteSelection();
-            else BView::KeyDown(bytes, numBytes);
-            break;
-        case 'd': case 'D':
-            if (modifiers() & B_CONTROL_KEY) DuplicateSelection();
-            else BView::KeyDown(bytes, numBytes);
-            break;
-        case B_ESCAPE:
-            if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(); }
-            else BView::KeyDown(bytes, numBytes);
-            break;
-        default: BView::KeyDown(bytes, numBytes);
     }
+    if (!c || c->InitCheck() != B_OK) return nullptr;
+    const BCursor* out = c.get();
+    fCursors[(int)p] = std::move(c);
+    return out;
+}
+
+void TimelineView::ApplyCursor(Pointer p) {
+    if (p == fCursor) return;
+    const BCursor* c = CursorObject(p);
+    if (!c) return;
+    fCursor = p;
+    SetViewCursor(c, true);
+}
+
+void TimelineView::DrawHoverEdge(const BRect& block, Zone zone) {
+    if (zone == Zone::None || zone == Zone::Body) return;
+    SetHighColor(ColAccent());
+    const float w = Themed(3.0f);
+    switch (zone) {
+        case Zone::TrimLeft:
+            FillRect(BRect(block.left, block.top, block.left + w, block.bottom));
+            break;
+        case Zone::TrimRight:
+            FillRect(BRect(block.right - w, block.top, block.right, block.bottom));
+            break;
+        case Zone::FadeIn: {
+            BPoint p[3] = { BPoint(block.left + Themed(1), block.top + Themed(1)),
+                            BPoint(block.left + Themed(2) + w * 3, block.top + Themed(1)),
+                            BPoint(block.left + Themed(1), block.top + Themed(2) + w * 3) };
+            FillPolygon(p, 3);
+            break;
+        }
+        case Zone::FadeOut: {
+            BPoint p[3] = { BPoint(block.right - Themed(1), block.top + Themed(1)),
+                            BPoint(block.right - Themed(2) - w * 3, block.top + Themed(1)),
+                            BPoint(block.right - Themed(1), block.top + Themed(2) + w * 3) };
+            FillPolygon(p, 3);
+            break;
+        }
+        case Zone::Gain:
+            StrokeRect(block);
+            break;
+        case Zone::Slip:
+            StrokeRoundRect(block.InsetByCopy(Themed(1), Themed(1)), Themed(5),
+                            Themed(5));
+            break;
+        default:
+            break;
+    }
+}
+
+// With the scissors selected, the clip under the pointer shows where the cut
+// would land -- the pointer's intent, drawn before the click.
+void TimelineView::DrawScissorsHover(const BRect& block) {
+    if (fTool != Tool::Scissors) return;
+    if (fHover.clip == kInvalidClipId || fSplitHoverX < block.left
+        || fSplitHoverX > block.right)
+        return;
+    SetHighColor(ColAccent());
+    const float dash = Themed(4.0f);
+    for (float y = block.top; y < block.bottom; y += dash * 2.0f)
+        StrokeLine(BPoint(fSplitHoverX, y),
+                   BPoint(fSplitHoverX, std::min(y + dash, block.bottom)));
+}
+
+// --- the scrollbars (M2.2) --------------------------------------------------
+
+void TimelineView::LayoutScrollBars() {
+    if (!fHBar || !fVBar) return;
+    const float w = Bounds().Width(), h = Bounds().Height();
+    const float b = fBarThickness;
+    fHBar->MoveTo(0.0f, h - b);
+    fHBar->ResizeTo(std::max(1.0f, w - b), b);
+    fVBar->MoveTo(w - b, 0.0f);
+    fVBar->ResizeTo(b, std::max(1.0f, h - b));
+}
+
+void TimelineView::FrameResized(float, float) {
+    // A B_SUPPORTS_LAYOUT view does not reposition children by their follow
+    // modes (BView::_ResizeBy), so this is where the scrollbars land.
+    LayoutScrollBars();
+    SyncScrollBars();
+    if (fHoverValid) UpdateHover(fHoverPos, 0, B_INSIDE_VIEW);
+}
+
+void TimelineView::AttachedToWindow() {
+    MakeFocus(true);   // receive arrow/zoom keys
+    LayoutScrollBars();
+    SyncScrollBars();
+}
+
+// Ranges, proportions and values, only when they actually changed: this runs on
+// every repaint, and BScrollBar::SetValue would otherwise push thumb updates to
+// the server for nothing.
+void TimelineView::SyncScrollBars() {
+    if (!fHBar || !fVBar || fSyncingBars) return;
+    fSyncingBars = true;
+
+    const float visibleW = std::max(1.0f, Bounds().Width() - HeaderWidth()
+                                           - fBarThickness);
+    const Frame endFrame = ContentEndFrame();
+    const float visibleFrames = (float)(visibleW * fFramesPerPixel);
+    const float totalFrames   = (float)endFrame + visibleFrames;   // > 0
+    const float maxScroll     = (float)endFrame;
+    const float propX = totalFrames > 0.0f ? visibleFrames / totalFrames : 1.0f;
+    if (maxScroll != fBarLastRangeX) {
+        fHBar->SetRange(0.0f, maxScroll);
+        fBarLastRangeX = maxScroll;
+    }
+    if (propX != fBarLastPropX) {
+        fHBar->SetProportion(std::min(1.0f, propX));
+        fBarLastPropX = propX;
+    }
+    if ((float)fScrollFrame != fBarLastX) {
+        fHBar->SetValue((float)fScrollFrame);
+        fBarLastX = (float)fScrollFrame;
+    }
+
+    // Same visible height ScrollToY clamps with (the horizontal scrollbar's
+    // strip is not lane space), so the thumb cannot run past where the view
+    // can actually scroll.
+    const float viewH = std::max(1.0f,
+        Bounds().Height() - ContentTop() - fBarThickness);
+    const float contentH = ContentHeight();
+    const float maxY = std::max(0.0f, contentH - viewH);
+    const float propY = contentH > 0.0f ? std::min(1.0f, viewH / contentH) : 1.0f;
+    if (maxY != fBarLastRangeY) {
+        fVBar->SetRange(0.0f, maxY);
+        fBarLastRangeY = maxY;
+    }
+    if (propY != fBarLastPropY) {
+        fVBar->SetProportion(propY);
+        fBarLastPropY = propY;
+    }
+    if (fScrollY != fBarLastY) {
+        fVBar->SetValue(fScrollY);
+        fBarLastY = fScrollY;
+    }
+    fSyncingBars = false;
+}
+
+// --- the tool strip's drawing ----------------------------------------------
+
+void TimelineView::DrawToolButton(int i) {
+    const BRect r = ToolRect(i);
+    const bool active = (i == (int)fTool);
+    DrawButton(this, r, "", active, ColAccent());
+    icons::DrawArrangeTool(this, r.InsetByCopy(Themed(4.0f), Themed(3.0f)), i,
+                           active ? Rgb(16, 18, 22) : ColText());
+    if (!active && i == fHoverToolBtn) {   // hover: the palette's own highlight
+        SetHighColor(ColAccent());
+        StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
+    }
+}
+
+void TimelineView::DrawToolbar() {
+    const float h = ToolbarHeight();
+    SetHighColor(ColHeader());
+    FillRect(BRect(0, 0, Bounds().right, h - 1));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(0, h - 1), BPoint(Bounds().right, h - 1));
+
+    for (int i = 0; i < 6; i++)
+        DrawToolButton(i);
+
+    // Group separators, then the snap field and the zoom pair.
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(Themed(150.0f), Themed(6.0f)),
+               BPoint(Themed(150.0f), Themed(22.0f)));
+    StrokeLine(BPoint(Themed(222.0f), Themed(6.0f)),
+               BPoint(Themed(222.0f), Themed(22.0f)));
+
+    // The snap indicator: the field's LABEL is the grid that is active, and the
+    // button is lit only while snapping is on -- so "off" reads at a glance.
+    DrawButton(this, GridRect(), SnapGridLabel(fSnap), fSnap.On(), ColAccent());
+    DrawButton(this, ZoomOutRect(), "\xE2\x88\x92", false);   // minus
+    DrawButton(this, ZoomInRect(),  "+", false);
 }
 
 Grid TimelineView::GridOf() const {
@@ -304,25 +1423,24 @@ Grid TimelineView::GridOf() const {
 }
 
 Frame TimelineView::Snapped(Frame f) const {
-    if (modifiers() & B_SHIFT_KEY)   // hold Shift for free placement
+    if (EventModifiers(Window() ? Window()->CurrentMessage() : nullptr)
+        & B_SHIFT_KEY)   // hold Shift for free placement
         return f;
-    // Snap to the nearest beat subdivision using the tempo map (variable tempo).
-    const TempoMap& tm = fProject->tempoMap;
-    const double beat = tm.BeatAt(f < 0 ? 0 : f);
-    const double snapped = std::llround(beat * kSnapDivision) / (double)kSnapDivision;
-    const Frame out = tm.FrameAt(snapped);
-    return out < 0 ? 0 : out;
+    if (!fProject) return f < 0 ? 0 : f;
+    // The grid the snap menu selected, through the tempo map (M2.3). It used to
+    // be a hard-coded 16th; Shift is still the free-placement override.
+    return SnapFrame(fProject->tempoMap, f, fSnap);
 }
 
 // A tiny Copy/Delete popup for a right-clicked clip or note.
 int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const {
     BPopUpMenu* m = new BPopUpMenu("ctx", false, false);
-    m->AddItem(new BMenuItem("Copy", NULL));      // 0
-    m->AddItem(new BMenuItem("Delete", NULL));    // 1
+    m->AddItem(new ThemedMenuItem("Copy", NULL));      // 0
+    m->AddItem(new ThemedMenuItem("Delete", NULL));    // 1
     if (withSplit)
-        m->AddItem(new BMenuItem("Split here", NULL));  // 2
+        m->AddItem(new ThemedMenuItem("Split here", NULL));  // 2
     if (withTake)
-        m->AddItem(new BMenuItem("Next Take", NULL));   // 3 (2 if no split)
+        m->AddItem(new ThemedMenuItem("Next Take", NULL));   // 3 (2 if no split)
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const int idx = sel ? m->IndexOf(sel) : -1;
@@ -332,16 +1450,43 @@ int TimelineView::ContextMenu(BPoint where, bool withSplit, bool withTake) const
 
 std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
     BPopUpMenu* m = new BPopUpMenu("clip", false, false);
-    m->AddItem(new BMenuItem("Copy", NULL));
-    m->AddItem(new BMenuItem("Delete", NULL));
-    m->AddItem(new BMenuItem("Split here", NULL));
+    m->AddItem(new ThemedMenuItem("Copy", NULL));
+    m->AddItem(new ThemedMenuItem("Delete", NULL));
+    m->AddItem(new ThemedMenuItem("Split here", NULL));
     if (withTake)
-        m->AddItem(new BMenuItem("Next Take", NULL));
+        m->AddItem(new ThemedMenuItem("Next Take", NULL));
     m->AddSeparatorItem();
-    m->AddItem(new BMenuItem("Normalize", NULL));
-    m->AddItem(new BMenuItem("Reverse", NULL));
-    m->AddItem(new BMenuItem("Strip Silence", NULL));
-    m->AddItem(new BMenuItem("Clear Fades", NULL));
+    // Clip depth (M2.5): the fields with no other gesture, plus the mute the
+    // Mute tool also toggles.
+    m->AddItem(new ThemedMenuItem("Rename Clip" B_UTF8_ELLIPSIS, NULL));
+    m->AddItem(new ThemedMenuItem("Next Colour", NULL));
+    // Find the clip under the cursor again for the state-dependent labels.
+    const Clip* cur = nullptr;
+    if (const int idx = TrackIndexAt(where);
+        idx >= 0 && idx < (int)fProject->Tracks().size()) {
+        const Track& t = fProject->Tracks()[(size_t)idx];
+        const Frame at = XToFrame(where.x);
+        for (const Clip& c : t.clips)
+            if (at >= c.startFrame && at < c.startFrame + c.lengthFrames) {
+                cur = &c;
+                break;
+            }
+    }
+    m->AddItem(new ThemedMenuItem(cur && cur->muted ? "Unmute Clip" : "Mute Clip",
+                                  NULL));
+    BMenu* fs = new BMenu("Fade Shape");
+    const char* shapes[] = { "Fade Linear", "Fade Equal Power", "Fade S-Curve" };
+    for (int i = 0; i < 3; i++) {
+        BMenuItem* it = new ThemedMenuItem(shapes[i], NULL);
+        it->SetMarked(cur && (int)cur->fadeShape == i);
+        fs->AddItem(it);
+    }
+    m->AddItem(fs);
+    m->AddSeparatorItem();
+    m->AddItem(new ThemedMenuItem("Normalize", NULL));
+    m->AddItem(new ThemedMenuItem("Reverse", NULL));
+    m->AddItem(new ThemedMenuItem("Strip Silence", NULL));
+    m->AddItem(new ThemedMenuItem("Clear Fades", NULL));
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     std::string label = sel ? std::string(sel->Label()) : std::string();
@@ -351,7 +1496,7 @@ std::string TimelineView::AudioClipMenu(BPoint where, bool withTake) const {
 
 bool TimelineView::PastePopup(BPoint where) const {
     BPopUpMenu* m = new BPopUpMenu("paste", false, false);
-    m->AddItem(new BMenuItem("Paste here", NULL));
+    m->AddItem(new ThemedMenuItem("Paste here", NULL));
     BMenuItem* sel = m->Go(const_cast<TimelineView*>(this)->ConvertToScreen(where),
                            false, true);
     const bool ok = (sel != NULL);
@@ -359,19 +1504,137 @@ bool TimelineView::PastePopup(BPoint where) const {
     return ok;
 }
 
+// --- the clipboard (M2.4) --------------------------------------------------
+//
+// Many clips, since a range copy brings a whole slice of the arrangement with
+// it. The order the items were collected in is preserved and every start is
+// relative to the earliest item, so a paste keeps the range's internal spacing.
+
+void TimelineView::SetClipboardToClip(const Clip& c) {
+    fClipboard.clear();
+    ClipItem it;
+    it.midi = false;
+    it.audio = c;
+    it.audio.startFrame = 0;
+    fClipboard.push_back(it);
+}
+
+void TimelineView::SetClipboardToRegion(const MidiClip& c) {
+    fClipboard.clear();
+    ClipItem it;
+    it.midi = true;
+    it.region = c;
+    it.region.startFrame = 0;
+    fClipboard.push_back(it);
+}
+
+// The clip selection as clipboard items: starts relative to the selection's
+// earliest clip, so a multi-clip copy pastes as a group.
+void TimelineView::SetClipboardToSelection() {
+    Frame minStart = 0;
+    bool have = false;
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id)) {
+            if (Clip* c = t->FindClip(id)) {
+                if (!have || c->startFrame < minStart) minStart = c->startFrame;
+                have = true;
+            } else if (MidiClip* m = t->FindMidiClip(id)) {
+                if (!have || m->startFrame < minStart) minStart = m->startFrame;
+                have = true;
+            }
+        }
+    if (!have) return;
+    fClipboard.clear();
+    for (ClipId id : fSelClips)
+        if (Track* t = TrackOfClip(id)) {
+            if (Clip* c = t->FindClip(id)) {
+                ClipItem it;
+                it.midi = false;
+                it.track = t->id;
+                it.audio = *c;
+                it.audio.startFrame = c->startFrame - minStart;
+                fClipboard.push_back(it);
+            } else if (MidiClip* m = t->FindMidiClip(id)) {
+                ClipItem it;
+                it.midi = true;
+                it.track = t->id;
+                it.region = *m;
+                it.region.startFrame = m->startFrame - minStart;
+                fClipboard.push_back(it);
+            }
+        }
+}
+
+// Where a paste lands on a track: the selected track when its kind matches,
+// else the first track that does (the rule PasteAtPlayhead always used, now
+// with "the selected track" first because the plan names it).
+TrackId TimelineView::PasteTargetFor(bool midi) const {
+    const TrackType want = midi ? TrackType::Midi : TrackType::Audio;
+    if (const Track* sel = fProject->FindTrack(fSelectedTrack))
+        if (sel->type == want) return sel->id;
+    for (const Track& t : fProject->Tracks())
+        if (t.type == want) return t.id;
+    return kInvalidTrackId;
+}
+
+// Drop the clipboard's items on their tracks, `at` frames after the position
+// each was copied from. One MacroCommand: a paste is one undo step.
+void TimelineView::PasteItems(const std::vector<ClipItem>& items, Frame at,
+                              bool toSourceTracks) {
+    if (items.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Paste");
+    for (const ClipItem& it : items) {
+        const TrackId track = (toSourceTracks && it.track != kInvalidTrackId
+                               && fProject->FindTrack(it.track))
+                              ? it.track : PasteTargetFor(it.midi);
+        if (track == kInvalidTrackId) continue;
+        if (it.midi) {
+            MidiClip c = it.region;
+            c.id = kInvalidClipId;      // AddMidiClipCommand assigns a fresh id
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddMidiClipCommand>(track, c));
+        } else {
+            Clip c = it.audio;
+            c.id = kInvalidClipId;      // AddClipCommand assigns a fresh id
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddClipCommand>(track, c));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// Right-click "Paste here": the same items, from `at`, but forced onto the
+// track that was clicked (the user pointed at it).
 void TimelineView::PasteToTrack(TrackId track, Frame at, TrackType type) {
-    if (type == TrackType::Audio && fHasClipClip) {
-        Clip c = fClipClip;
-        c.id = kInvalidClipId;
-        c.startFrame = at;
-        fStack->Execute(std::make_unique<AddClipCommand>(track, c), *fProject);
+    if (track == kInvalidTrackId || fClipboard.empty()) return;
+    auto macro = std::make_unique<MacroCommand>("Paste");
+    for (const ClipItem& it : fClipboard) {
+        if (it.midi) {
+            if (type != TrackType::Midi) continue;
+            MidiClip c = it.region;
+            c.id = kInvalidClipId;
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddMidiClipCommand>(track, c));
+        } else {
+            if (type != TrackType::Audio) continue;
+            Clip c = it.audio;
+            c.id = kInvalidClipId;
+            c.startFrame += at;
+            if (c.startFrame < 0) c.startFrame = 0;
+            macro->Add(std::make_unique<AddClipCommand>(track, c));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
         Invalidate();
-    } else if (type == TrackType::Midi && fHasClipMidi) {
-        MidiClip c = fClipMidi;
-        c.id = kInvalidClipId;      // AddMidiClipCommand assigns a fresh id
-        c.startFrame = at;
-        fStack->Execute(std::make_unique<AddMidiClipCommand>(track, c), *fProject);
-        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
     }
 }
 
@@ -394,30 +1657,82 @@ void TimelineView::OpenPianoRollForClip(TrackId track, ClipId clip) {
 
 void TimelineView::PasteAtPlayhead() {
     const Frame at = fProject->transport.playhead;
-    if (fHasClipClip) {
-        // Prefer a track of the source type; fall back to the first such track.
-        TrackId target = kInvalidTrackId;
-        for (const Track& t : fProject->Tracks())
-            if (t.type == TrackType::Audio) { target = t.id; break; }
-        if (target != kInvalidTrackId) {
-            Clip c = fClipClip;
-            c.id = kInvalidClipId;      // AddClipCommand assigns a fresh id
-            c.startFrame = at;
-            fStack->Execute(std::make_unique<AddClipCommand>(target, c), *fProject);
-            Invalidate();
-        }
-    } else if (fHasClipMidi) {
-        TrackId target = kInvalidTrackId;
-        for (const Track& t : fProject->Tracks())
-            if (t.type == TrackType::Midi) { target = t.id; break; }
-        if (target != kInvalidTrackId) {
-            MidiClip c = fClipMidi;
-            c.id = kInvalidClipId;
-            c.startFrame = at;
-            fStack->Execute(std::make_unique<AddMidiClipCommand>(target, c), *fProject);
-            Invalidate();
-        }
+    PasteItems(fClipboard, at < 0 ? 0 : at);
+}
+
+// --- the time range (M2.4) -------------------------------------------------
+
+void TimelineView::SetTimeRange(Frame a, Frame b) {
+    if (a > b) std::swap(a, b);
+    if (a < 0) a = 0;
+    if (b < 0) b = 0;
+    if (fRangeValid && fRangeA == a && fRangeB == b) return;
+    ClearTimeRange();          // one invalidate, not two
+    if (b <= a) return;        // an empty span is no range at all
+    fRangeA = a;
+    fRangeB = b;
+    fRangeValid = true;
+    Invalidate();
+}
+
+void TimelineView::ClearTimeRange() {
+    if (!fRangeValid) return;
+    fRangeValid = false;
+    fRangeA = fRangeB = 0;
+    Invalidate();
+}
+
+// A press on empty lane content starts a range drag. Shift keeps the previous
+// rubber-band clip select (additive), which is where that gesture moved to
+// when this one took the plain drag.
+void TimelineView::BeginRangeDrag(BPoint where) {
+    fDrag = Drag::RangeSelect;
+    fRangeAnchor = Snapped(XToFrame(where.x));
+    if (fRangeAnchor < 0) fRangeAnchor = 0;
+    fRangeDragged = false;
+    SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+}
+
+// A click anywhere in a lane makes that track the selected one (the inspector's
+// target, and where a paste goes).
+void TimelineView::SetSelectedTrack(TrackId id) {
+    if (id == kInvalidTrackId || fSelectedTrack == id) return;
+    fSelectedTrack = id;
+    if (BWindow* w = Window()) {
+        BMessage sel(kMsgTrackSelected);
+        sel.AddInt64("track", (int64)id);
+        w->PostMessage(&sel);
     }
+    Invalidate();
+}
+
+// The name a clip shows: its own when it has one, else the source file's base
+// name. One definition, so the strip and any other reader cannot disagree.
+std::string TimelineView::ClipNameOf(const Clip& c) const {
+    if (!c.name.empty()) return c.name;
+    const std::string& p = c.sourcePath;
+    const size_t slash = p.find_last_of('/');
+    return slash == std::string::npos ? p : p.substr(slash + 1);
+}
+
+// The range over the lane area: a translucent blue band with solid edges, and
+// a matching bar on the ruler (drawn from DrawRuler). It is under the playhead
+// and over the loop/punch tints, so the one the user just dragged reads first.
+void TimelineView::DrawTimeRange() {
+    if (!fRangeValid || fRangeB <= fRangeA) return;
+    float x0 = FrameToX(fRangeA);
+    float x1 = FrameToX(fRangeB);
+    if (x1 < HeaderWidth() || x0 > Bounds().right) return;
+    if (x0 < HeaderWidth()) x0 = HeaderWidth();
+    const float botY = Bounds().bottom - fBarThickness;
+    SetDrawingMode(B_OP_ALPHA);
+    SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+    SetHighColor(90, 140, 230, 45);
+    FillRect(BRect(x0, ContentTop(), x1, botY));
+    SetDrawingMode(B_OP_COPY);
+    SetHighColor(PanelAccent(Rgb(120, 170, 255)));
+    StrokeLine(BPoint(x0, ContentTop()), BPoint(x0, botY));
+    StrokeLine(BPoint(x1, ContentTop()), BPoint(x1, botY));
 }
 
 Track* TimelineView::TrackOfClip(ClipId id) const {
@@ -443,7 +1758,170 @@ void TimelineView::DeleteSelection() {
     Invalidate();
 }
 
+// --- range operations (M2.4) ----------------------------------------------
+//
+// Cut/Copy/Delete/Insert Silence act on the time range; Delete/Copy also fall
+// back to the clip selection when no range is set, so the Edit menu's items
+// mean something in both selection modes. The model work lives in
+// RangeEdit.h + the two range commands; this is the wiring.
+
+void TimelineView::RangeCopy() {
+    if (HasTimeRange()) {
+        std::vector<RangeItem> got = ExtractRange(*fProject, fRangeA, fRangeB);
+        fClipboard.clear();
+        for (RangeItem& it : got) {
+            ClipItem ci;
+            ci.midi = it.midi;
+            ci.track = it.track;
+            ci.audio = it.audio;
+            ci.region = it.region;
+            fClipboard.push_back(ci);
+        }
+        if (!fClipboard.empty())
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    } else if (!fSelClips.empty()) {
+        SetClipboardToSelection();
+    }
+    Invalidate();
+}
+
+void TimelineView::RangeDelete() {
+    if (HasTimeRange()) {
+        if (fStack->Execute(std::make_unique<RangeDeleteCommand>(fRangeA, fRangeB),
+                            *fProject))
+            if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+        Invalidate();
+        return;
+    }
+    DeleteSelection();
+}
+
+void TimelineView::RangeCut() {
+    if (HasTimeRange()) {
+        RangeCopy();
+        RangeDelete();
+        return;
+    }
+    if (fSelClips.empty()) return;
+    SetClipboardToSelection();
+    DeleteSelection();
+}
+
+void TimelineView::RangeInsertSilence() {
+    if (!HasTimeRange()) return;
+    if (fStack->Execute(
+            std::make_unique<RangeInsertSilenceCommand>(fRangeA, fRangeB), *fProject))
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    Invalidate();
+}
+
+void TimelineView::SelectAllClips() {
+    fSelClips.clear();
+    for (const Track& t : fProject->Tracks()) {
+        for (const Clip& c : t.clips)
+            if (!(c.takeGroup > 0 && !c.takeActive)) fSelClips.insert(c.id);
+        for (const MidiClip& c : t.midiClips)
+            if (!(c.takeGroup > 0 && !c.takeActive)) fSelClips.insert(c.id);
+    }
+    Invalidate();
+}
+
+// Nudge the selection one grid step (`,` left, `.` right) as one undo step.
+// The step is the snap grid's, at each clip's own position (a tempo change
+// moves it), and Off nudges by the historical 1/16 so a nudge always moves by
+// something the user can see.
+void TimelineView::NudgeSelection(int dir) {
+    if (dir == 0 || fSelClips.empty()) return;
+    auto macro = std::make_unique<MacroCommand>(dir < 0 ? "Nudge Left"
+                                                        : "Nudge Right");
+    for (ClipId id : fSelClips) {
+        Track* t = TrackOfClip(id);
+        if (!t) continue;
+        if (Clip* c = t->FindClip(id)) {
+            Frame ns = c->startFrame
+                     + dir * SnapStep(fProject->tempoMap, c->startFrame, fSnap);
+            if (ns < 0) ns = 0;
+            if (ns != c->startFrame)
+                macro->Add(std::make_unique<MoveClipCommand>(t->id, id, ns));
+        } else if (MidiClip* m = t->FindMidiClip(id)) {
+            Frame ns = m->startFrame
+                     + dir * SnapStep(fProject->tempoMap, m->startFrame, fSnap);
+            if (ns < 0) ns = 0;
+            if (ns != m->startFrame)
+                macro->Add(std::make_unique<MoveMidiClipCommand>(t->id, id, ns));
+        }
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgReloadEngine);
+    }
+}
+
+// --- clip depth actions (M2.5), shared by the context menu and the tests ----
+
+void TimelineView::ToggleClipMute(TrackId track, ClipId clip, bool midi) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    bool nowMuted = true;
+    if (midi) {
+        MidiClip* c = t->FindMidiClip(clip);
+        if (!c) return;
+        nowMuted = !c->muted;
+    } else {
+        Clip* c = t->FindClip(clip);
+        if (!c) return;
+        nowMuted = !c->muted;
+    }
+    if (fStack->Execute(std::make_unique<SetClipMuteCommand>(
+                            track, clip, midi, nowMuted), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgUiRefresh);
+            w->PostMessage(kMsgReloadEngine);   // the clip's stream is baked
+        }
+    }
+}
+
+void TimelineView::NextClipColour(TrackId track, ClipId clip) {
+    Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    Clip* c = t->FindClip(clip);
+    if (!c) return;
+    if (fStack->Execute(std::make_unique<SetClipColorCommand>(
+                            track, clip, (c->colorIndex + 1) % kTrackColorCount),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetClipFadeShapeAt(TrackId track, ClipId clip, FadeShape shape) {
+    if (fStack->Execute(std::make_unique<SetClipFadeShapeCommand>(track, clip, shape),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
 void TimelineView::DuplicateSelection() {
+    // No clip selection but a range? Duplicate the range's content at its end,
+    // which is what the same command on a time selection means.
+    if (fSelClips.empty() && HasTimeRange()) {
+        std::vector<RangeItem> got = ExtractRange(*fProject, fRangeA, fRangeB);
+        if (got.empty()) return;
+        std::vector<ClipItem> items;
+        for (RangeItem& it : got) {
+            ClipItem ci;
+            ci.midi = it.midi;
+            ci.track = it.track;
+            ci.audio = it.audio;
+            ci.region = it.region;
+            items.push_back(ci);
+        }
+        PasteItems(items, fRangeB, /*toSourceTracks=*/true);
+        return;
+    }
     if (fSelClips.empty()) return;
     // Offset the copies by the selection's total span so they land just after.
     bool have = false; Frame minStart = 0, maxEnd = 0;
@@ -534,6 +2012,21 @@ void TimelineView::Draw(BRect updateRect) {
     DrawLanes(updateRect);
     if (fDrag == Drag::Clip && fDragCurLane >= 0)
         DrawDragGhost();     // clip-move preview
+    if (fDrag == Drag::Pencil && fDragLane >= 0) {   // the region being drawn
+        const BRect lane = LaneRect(fDragLane);
+        const Frame end  = Snapped(XToFrame(fHoverPos.x));
+        const Frame a    = std::min(fPencilStart, end);
+        const Frame b    = std::max(fPencilStart, end);
+        SetDrawingMode(B_OP_ALPHA);
+        SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
+        SetHighColor(120, 200, 160, 90);
+        FillRect(BRect(FrameToX(a), lane.top + Themed(3), FrameToX(b),
+                       lane.bottom - Themed(3)));
+        SetDrawingMode(B_OP_COPY);
+        SetHighColor(ColMidiAccent());
+        StrokeRect(BRect(FrameToX(a), lane.top + Themed(3), FrameToX(b),
+                         lane.bottom - Themed(3)));
+    }
     if (fBanding) {          // rubber-band selection rectangle
         BRect b(std::min(fBandA.x, fBandB.x), std::min(fBandA.y, fBandB.y),
                 std::max(fBandA.x, fBandB.x), std::max(fBandA.y, fBandB.y));
@@ -544,7 +2037,7 @@ void TimelineView::Draw(BRect updateRect) {
     // lines, so the cycle range and markers are visible in the arrangement, not
     // just on the ruler.
     const Transport& tr = fProject->transport;
-    const float botY = Bounds().bottom;
+    const float botY = Bounds().bottom - fBarThickness;
     SetDrawingMode(B_OP_ALPHA);
     SetBlendingMode(B_CONSTANT_ALPHA, B_ALPHA_OVERLAY);
     auto band = [&](Frame a, Frame b, uint8 r, uint8 g, uint8 bl, uint8 al) {
@@ -552,7 +2045,7 @@ void TimelineView::Draw(BRect updateRect) {
         if (x0 < HeaderWidth()) x0 = HeaderWidth();
         if (x1 <= x0) return;
         SetHighColor(r, g, bl, al);
-        FillRect(BRect(x0, RulerHeight(), x1, botY));
+        FillRect(BRect(x0, ContentTop(), x1, botY));
     };
     if (tr.loopEnabled && tr.loopEnd > tr.loopStart)
         band(tr.loopStart, tr.loopEnd, 70, 120, 95, 40);      // green
@@ -562,12 +2055,16 @@ void TimelineView::Draw(BRect updateRect) {
         const float x = FrameToX(mk.frame);
         if (x < HeaderWidth() || x > Bounds().right) continue;
         SetHighColor(52, 199, 89, 70);
-        StrokeLine(BPoint(x, RulerHeight()), BPoint(x, botY));
+        StrokeLine(BPoint(x, ContentTop()), BPoint(x, botY));
     }
     SetDrawingMode(B_OP_COPY);
 
+    DrawTimeRange();         // the M2.4 range, over the tints, under the playhead
     DrawPlayhead();          // over lanes, under the ruler
+    DrawMarkerLane();        // the M2.7 strip, between the ruler and the lanes
     DrawRuler(updateRect);   // ruler last so it sits above lane content
+    DrawToolbar();           // the tool strip sits above the ruler
+    SyncScrollBars();        // ranges follow the content, zoom and pane size
 }
 
 void TimelineView::DrawDragGhost() {
@@ -627,15 +2124,15 @@ void TimelineView::SetPlayhead(Frame f) {
     // Repaint the two 1-px columns (a hair wide for the AA'd line) from the
     // ruler bottom to the view bottom.
     BRect b = Bounds();
-    Invalidate(BRect(xOld - 1, RulerHeight(), xOld + 1, b.bottom));
-    Invalidate(BRect(xNew - 1, RulerHeight(), xNew + 1, b.bottom));
+    Invalidate(BRect(xOld - 1, ContentTop(), xOld + 1, b.bottom));
+    Invalidate(BRect(xNew - 1, ContentTop(), xNew + 1, b.bottom));
 }
 
 int TimelineView::TrackIndexAt(BPoint where) const {
-    if (!fProject || where.y < RulerHeight())
+    if (!fProject || where.y < ContentTop())
         return -1;
     // Walk cumulative lane heights (variable per track), scroll-offset.
-    float y = RulerHeight() - fScrollY;
+    float y = ContentTop() - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < (int)tracks.size(); i++) {
         const float h = LaneHeightOf(tracks[i]);
@@ -685,11 +2182,11 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     BMenu* tsub = new BMenu("Tempo change");
     const int bpms[] = { 60, 80, 90, 100, 110, 120, 130, 140, 160, 180 };
     for (int b : bpms) { char s[8]; std::snprintf(s, 8, "%d", b);
-                         tsub->AddItem(new BMenuItem(s, NULL)); }
+                         tsub->AddItem(new ThemedMenuItem(s, NULL)); }
     menu->AddItem(tsub);
     BMenu* msub = new BMenu("Meter change");
     const char* mets[] = { "4/4", "3/4", "2/4", "6/8", "5/4", "7/8" };
-    for (const char* mm : mets) msub->AddItem(new BMenuItem(mm, NULL));
+    for (const char* mm : mets) msub->AddItem(new ThemedMenuItem(mm, NULL));
     menu->AddItem(msub);
 
     // Ramp toggle for the tempo change governing the click's segment (needs a
@@ -705,23 +2202,23 @@ void TimelineView::HandleRulerMenu(BPoint where) {
     const bool segHasNext = segFrame != tm.Tempos().back().frame;
     BMenuItem* rampItem = nullptr;
     if (segHasNext) {
-        rampItem = new BMenuItem("Ramp to next tempo", NULL);
+        rampItem = new ThemedMenuItem("Ramp to next tempo", NULL);
         rampItem->SetMarked(segRamp);
         menu->AddItem(rampItem);
     }
 
     if (nearTempo >= 0 || nearMeter >= 0) {
         menu->AddSeparatorItem();
-        menu->AddItem(new BMenuItem("Remove change here", NULL));
+        menu->AddItem(new ThemedMenuItem("Remove change here", NULL));
     }
 
     // Markers.
     const Marker* nearMarker = MarkerAt(where);
     menu->AddSeparatorItem();
-    menu->AddItem(new BMenuItem("Add Marker", NULL));
+    menu->AddItem(new ThemedMenuItem("Add Marker", NULL));
     if (nearMarker) {
-        menu->AddItem(new BMenuItem("Rename Marker" B_UTF8_ELLIPSIS, NULL));
-        menu->AddItem(new BMenuItem("Delete Marker", NULL));
+        menu->AddItem(new ThemedMenuItem("Rename Marker" B_UTF8_ELLIPSIS, NULL));
+        menu->AddItem(new ThemedMenuItem("Delete Marker", NULL));
     }
 
     BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
@@ -742,14 +2239,10 @@ void TimelineView::HandleRulerMenu(BPoint where) {
             else if (nearMeter >= 0) tm.RemoveMeterAt(nearMeter);
         } else if (label && std::strcmp(label, "Add Marker") == 0) {
             Frame at = Snapped(XToFrame(where.x)); if (at < 0) at = 0;
-            char nm[24];
-            std::snprintf(nm, sizeof(nm), "Marker %d",
-                          (int)fProject->markers.size() + 1);
-            fStack->Execute(std::make_unique<AddMarkerCommand>(at, nm), *fProject);
+            AddMarkerAt(at);
         } else if (nearMarker && label
                    && std::strcmp(label, "Delete Marker") == 0) {
-            fStack->Execute(std::make_unique<RemoveMarkerCommand>(
-                                nearMarker->frame, nearMarker->name), *fProject);
+            RemoveMarkerAt(nearMarker->frame, nearMarker->name);
         } else if (nearMarker && label
                    && std::strncmp(label, "Rename Marker", 13) == 0) {
             // Reuse RenameWindow; the marker frame rides in the "track" id field.
@@ -775,35 +2268,90 @@ void TimelineView::MouseDown(BPoint where) {
 
     // Secondary (right) button = delete the thing under the cursor.
     int32 buttons = 0;
-    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
-        m->FindInt32("buttons", &buttons);
+    BMessage* cur = Window() ? Window()->CurrentMessage() : nullptr;
+    if (cur) cur->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
+    // The event's modifiers (not the live keyboard): a synthetic event from the
+    // functional test can set them, which is how the range drag is driven.
+    const uint32 mods = EventModifiers(cur);
+
+    // The tool strip (M2.3): tool buttons, the snap field, the zoom pair.
+    if (where.y < ToolbarHeight()) {
+        if (!rightClick) HandleToolbarClick(where);
+        return;
+    }
+
+    // An open in-place rename (M2.6) commits on a press outside its own field;
+    // the press then does whatever it would have done.
+    if (fRenameTrack != kInvalidTrackId) {
+        const int rIdx = fProject->IndexOfTrack(fRenameTrack);
+        const bool inside = rIdx >= 0 && NameRect(LaneRect(rIdx)).Contains(where);
+        if (!inside) CommitTrackRename();
+    }
+
+    // The marker lane (M2.7), between the ruler and the lanes when it is on.
+    if (fMarkerLane && where.y >= RulerBottom() && where.y < ContentTop()
+        && where.x >= HeaderWidth()) {
+        HandleMarkerLaneClick(where, rightClick);
+        return;
+    }
 
     // Right-click on the ruler: tempo / meter change menu.
-    if (rightClick && where.y < RulerHeight() && where.x >= HeaderWidth()) {
+    if (rightClick && where.y >= ToolbarHeight() && where.y < RulerBottom()
+        && where.x >= HeaderWidth()) {
         HandleRulerMenu(where);
         return;
     }
 
     // Ruler: click seeks, drag sets a loop region. Ctrl-drag sets the punch
-    // range instead. On release we decide seek-vs-drag by how far it moved.
-    if (where.y < RulerHeight() && where.x >= HeaderWidth()) {
+    // range, Alt-drag the time range (M2.4). On release we decide
+    // seek-vs-drag by how far it moved.
+    if (where.y >= ToolbarHeight() && where.y < RulerBottom()
+        && where.x >= HeaderWidth()) {
         // Left-click a marker flag: jump the playhead there.
         if (!rightClick) {
             if (const Marker* mk = MarkerAt(where)) {
-                fProject->transport.playhead = mk->frame;
-                if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+                SeekTo(mk->frame);
                 return;
             }
         }
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
-        fDrag        = (modifiers() & B_CONTROL_KEY) ? Drag::RulerPunch
-                                                     : Drag::RulerLoop;
-        fLoopAnchor  = f;
-        fLoopDragged = false;
+        // The time range's modifier: Alt. Accepting BOTH modifier bits is
+        // deliberate — Haiku maps the PC's Alt key to B_COMMAND_KEY and the
+        // Option/Windows key to B_OPTION_KEY, and this codebase's existing
+        // "Alt-drag" (the slip gesture) tests for B_OPTION_KEY; a user's Alt
+        // must make a range either way.
+        if ((mods & (B_OPTION_KEY | B_COMMAND_KEY)) != 0) {
+            fDrag = Drag::RangeSelect;
+            fRangeAnchor = f;
+            fRangeDragged = false;
+        } else {
+            fDrag        = (mods & B_CONTROL_KEY) ? Drag::RulerPunch
+                                                  : Drag::RulerLoop;
+            fLoopAnchor  = f;
+            fLoopDragged = false;
+        }
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;
+    }
+
+    // The lane's resize edge (M2.6) sits in the header gutter. Checked before
+    // the lane itself: the gain fader's last row of pixels is inside the grab
+    // band, and a press there must still mean "fader".
+    if (where.x < HeaderWidth() && !rightClick) {
+        const int edge = LaneEdgeAt(where);
+        if (edge >= 0 && HeaderControlAt(edge, where) == HeaderControl::None
+            && edge < (int)fProject->Tracks().size()) {
+            const Track& et = fProject->Tracks()[(size_t)edge];
+            fDrag       = Drag::LaneResize;
+            fDragTrack  = et.id;
+            fDragLane   = edge;
+            fDragOrig   = (float)et.height;    // the pre-drag value, for undo
+            fDragGrabY  = where.y;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+            return;
+        }
     }
 
     const int idx = TrackIndexAt(where);
@@ -814,44 +2362,43 @@ void TimelineView::MouseDown(BPoint where) {
 
     if (where.x < HeaderWidth()) {
         // Any header click selects the track (drives the left inspector).
-        if (fSelectedTrack != t.id) {
-            fSelectedTrack = t.id;
-            if (BWindow* w = Window()) {
-                BMessage sel(kMsgTrackSelected);
-                sel.AddInt64("track", (int64)t.id);
-                w->PostMessage(&sel);
-            }
-            Invalidate();
-        }
-        // Track name strip: right-click deletes the track, double-click renames.
-        if (where.y <= lane.top + 18 && where.x < 114) {
+        SetSelectedTrack(t.id);
+        // Track name strip: right-click deletes the track, double-click renames
+        // it IN PLACE (M2.6; "Rename…" in this menu still opens the window).
+        if (where.y <= lane.top + Themed(18) && where.x < 114
+            && HeaderControlAt(idx, where) == HeaderControl::None) {
             if (rightClick) {
                 BPopUpMenu* mm = new BPopUpMenu("trk", false, false);
-                mm->AddItem(new BMenuItem("Move Up", NULL));
-                mm->AddItem(new BMenuItem("Move Down", NULL));
-                mm->AddItem(new BMenuItem("Next Color", NULL));
-                mm->AddItem(new BMenuItem("Taller", NULL));
-                mm->AddItem(new BMenuItem("Shorter", NULL));
+                mm->AddItem(new ThemedMenuItem("Move Up", NULL));
+                mm->AddItem(new ThemedMenuItem("Move Down", NULL));
+                mm->AddItem(new ThemedMenuItem("Next Color", NULL));
+                mm->AddItem(new ThemedMenuItem("Taller", NULL));
+                mm->AddItem(new ThemedMenuItem("Shorter", NULL));
                 mm->AddSeparatorItem();
-                BMenuItem* ssItem = new BMenuItem("Solo Safe", NULL);
+                BMenuItem* ssItem = new ThemedMenuItem("Solo Safe", NULL);
                 ssItem->SetMarked(t.soloSafe);
                 mm->AddItem(ssItem);
                 // Mute-group submenu: muting any member mutes the whole group.
                 BMenu* mg = new BMenu("Mute Group");
-                BMenuItem* mgNone = new BMenuItem("None", NULL);
+                BMenuItem* mgNone = new ThemedMenuItem("None", NULL);
                 mgNone->SetMarked(t.muteGroup == 0);
                 mg->AddItem(mgNone);
                 for (int g = 1; g <= 4; g++) {
                     char lb[16];
                     std::snprintf(lb, sizeof(lb), "Group %d", g);
-                    BMenuItem* gi = new BMenuItem(lb, NULL);
+                    BMenuItem* gi = new ThemedMenuItem(lb, NULL);
                     gi->SetMarked(t.muteGroup == g);
                     mg->AddItem(gi);
                 }
                 mm->AddItem(mg);
-                mm->AddItem(new BMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
-                mm->AddItem(new BMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
-                mm->AddItem(new BMenuItem("Delete", NULL));
+                mm->AddSeparatorItem();
+                mm->AddItem(new ThemedMenuItem("Duplicate Track", NULL));
+                mm->AddItem(new ThemedMenuItem(t.collapsed ? "Expand Lane"
+                                                           : "Collapse Lane", NULL));
+                mm->AddSeparatorItem();
+                mm->AddItem(new ThemedMenuItem(t.frozen ? "Unfreeze" : "Freeze", NULL));
+                mm->AddItem(new ThemedMenuItem("Rename" B_UTF8_ELLIPSIS, NULL));
+                mm->AddItem(new ThemedMenuItem("Delete", NULL));
                 BMenuItem* sel = mm->Go(ConvertToScreen(where), false, true);
                 const std::string pick = sel ? std::string(sel->Label())
                                              : std::string();
@@ -878,6 +2425,10 @@ void TimelineView::MouseDown(BPoint where) {
                         fStack->Execute(std::make_unique<SetTrackHeightCommand>(
                             t.id, tr->height - 24 < 72 ? 72 : tr->height - 24),
                             *fProject);
+                } else if (pick == "Duplicate Track") {
+                    DuplicateTrack(t.id);
+                } else if (pick == "Collapse Lane" || pick == "Expand Lane") {
+                    SetTrackCollapsed(t.id, pick == "Collapse Lane");
                 } else if (pick == "Solo Safe") {
                     // Project state -- it serializes -- so through the stack like
                     // every other edit: it undoes now, and it marks the project
@@ -913,11 +2464,8 @@ void TimelineView::MouseDown(BPoint where) {
             int32 clicks = 1;
             if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
                 m->FindInt32("clicks", &clicks);
-            if (clicks >= 2) {   // double-click a track name: rename it
-                BPoint sp = ConvertToScreen(where);
-                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
-                (new RenameWindow(wr, t.id, t.name.c_str(),
-                                  BMessenger(Window())))->Show();
+            if (clicks >= 2) {   // double-click a track name: rename IN PLACE
+                BeginTrackRename(t.id);
                 return;
             }
         }
@@ -932,6 +2480,24 @@ void TimelineView::MouseDown(BPoint where) {
         if (am != fAutoMode.end() && am->second != 0) {
             HandleAutoMouseDown(t, lane, idx, where, rightClick);
             return;
+        }
+    }
+
+    // The non-pointer tools (M2.3): each owns its click in the content area.
+    // The pointer tool falls through to the behaviour below, which is the
+    // arrangement editor's original one. A right-click keeps doing what it
+    // always did (the delete/paste menus) whichever tool is selected.
+    if (!rightClick && fTool != Tool::Pointer) {
+        const Hit hit = HitTest(where);
+        switch (fTool) {
+            case Tool::Scissors: ScissorsAt(hit, where); return;
+            case Tool::Glue:     GlueAt(hit);            return;
+            case Tool::Mute:     MuteAt(hit);            return;
+            case Tool::Fade:     FadeStart(hit, where);   return;
+            case Tool::Pencil:
+                if (PencilAt(hit, where)) return;
+                break;    // on an existing region: the pointer's move/resize
+            default: break;
         }
     }
 
@@ -960,9 +2526,7 @@ void TimelineView::MouseDown(BPoint where) {
                 const int pick = ContextMenu(where, /*withSplit=*/true,
                                              /*withTake=*/c.takeGroup > 0);
                 if (pick == 0) {          // Copy
-                    fClipMidi = c; fHasClipMidi = true;
-                    fHasClipClip = false; fHasClipNote = false;
-                    fClipType = TrackType::Midi;
+                    SetClipboardToRegion(c);
                 } else if (pick == 1) {   // Delete
                     fStack->Execute(std::make_unique<RemoveMidiClipCommand>(
                         t.id, c.id), *fProject);
@@ -991,7 +2555,7 @@ void TimelineView::MouseDown(BPoint where) {
                         fStack->Execute(std::make_unique<SetActiveMidiTakeCommand>(
                             t.id, next), *fProject);
                 }
-            } else if (fHasClipMidi) {     // empty lane: offer paste
+            } else if (!fClipboard.empty()) {   // empty lane: offer paste
                 if (PastePopup(where))
                     PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Midi);
             }
@@ -1024,13 +2588,14 @@ void TimelineView::MouseDown(BPoint where) {
 
         if (hit >= 0) {   // select + begin move/resize
             const MidiClip& c = t.midiClips[(size_t)hit];
-            if (modifiers() & B_SHIFT_KEY) {
+            if (mods & B_SHIFT_KEY) {
                 if (ClipSelected(c.id)) fSelClips.erase(c.id);
                 else                    fSelClips.insert(c.id);
                 Invalidate(lane);
                 return;
             }
             if (!ClipSelected(c.id)) { fSelClips.clear(); fSelClips.insert(c.id); }
+            SetSelectedTrack(t.id);
             fDragTrack       = t.id;
             fDragLane        = idx;
             fDragClip        = c.id;
@@ -1040,19 +2605,16 @@ void TimelineView::MouseDown(BPoint where) {
             fDragFadeInOrig  = c.fadeInFrames;
             fDragFadeOutOrig = c.fadeOutFrames;
             fDragIsMidiClip  = true;
-            const float xStart = FrameToX(c.startFrame);
-            const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
-            const bool  wide   = (xEnd - xStart) > 2 * EdgeGrab();
-            // Fade grips: the top name-strip band within 14px of either edge
-            // (checked before move/resize so the corner always grabs the fade).
-            const bool  topBand = where.y <= lane.top + Themed(16);
-            if (topBand && where.x <= xStart + Themed(14)) {
+            // Which part of the region was grabbed comes from the same
+            // hit-test the hover highlight and the cursor use.
+            const Zone zone = HitTest(where).zone;
+            if (zone == Zone::FadeIn) {
                 fDrag = Drag::ClipFadeIn;    // top-left grip = fade in
-            } else if (topBand && where.x >= xEnd - Themed(14)) {
+            } else if (zone == Zone::FadeOut) {
                 fDrag = Drag::ClipFadeOut;   // top-right grip = fade out
-            } else if (wide && where.x >= xEnd - EdgeGrab()) {
+            } else if (zone == Zone::TrimRight) {
                 fDrag = Drag::ClipResize;
-            } else if (wide && where.x <= xStart + EdgeGrab()) {
+            } else if (zone == Zone::TrimLeft) {
                 fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
@@ -1070,8 +2632,19 @@ void TimelineView::MouseDown(BPoint where) {
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
-        // Empty single click: clear the selection.
-        if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(lane); }
+        // Empty lane: a plain click clears the selection (and a drag makes a
+        // time range, M2.4); Shift keeps the additive rubber-band select.
+        SetSelectedTrack(t.id);
+        if (!rightClick) {
+            if (mods & B_SHIFT_KEY) {
+                fBanding = true;
+                fBandA = fBandB = where;
+                Invalidate(lane);
+            } else {
+                if (!fSelClips.empty()) { fSelClips.clear(); Invalidate(lane); }
+                BeginRangeDrag(where);
+            }
+        }
         return;
     }
 
@@ -1086,10 +2659,25 @@ void TimelineView::MouseDown(BPoint where) {
                 const std::string pick =
                     AudioClipMenu(where, /*withTake=*/c.takeGroup > 0);
                 if (pick == "Copy") {
-                    fClipClip = c;
-                    fHasClipClip = true; fHasClipNote = false;
-                    fHasClipMidi = false;   // audio copy invalidates MIDI clipboard
-                    fClipType = TrackType::Audio;
+                    SetClipboardToClip(c);
+                } else if (pick == "Rename Clip" B_UTF8_ELLIPSIS) {
+                    BPoint sp = ConvertToScreen(where);
+                    BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                    // The clip id rides in the aux field RenameWindow echoes
+                    // back (its "track" field is the TrackId it acts on).
+                    (new RenameWindow(wr, t.id, ClipNameOf(c).c_str(),
+                                      BMessenger(this), kMsgRenameClip,
+                                      (int64)c.id, "Rename Clip"))->Show();
+                } else if (pick == "Next Colour") {
+                    NextClipColour(t.id, c.id);
+                } else if (pick == "Mute Clip" || pick == "Unmute Clip") {
+                    ToggleClipMute(t.id, c.id, /*midi=*/false);
+                } else if (pick.rfind("Fade ", 0) == 0) {
+                    FadeShape shape = pick == "Fade Equal Power"
+                                          ? FadeShape::EqualPower
+                                      : pick == "Fade S-Curve" ? FadeShape::SCurve
+                                                               : FadeShape::Linear;
+                    SetClipFadeShapeAt(t.id, c.id, shape);
                 } else if (pick == "Delete") {
                     fStack->Execute(std::make_unique<RemoveClipCommand>(t.id, c.id),
                                     *fProject);
@@ -1134,10 +2722,24 @@ void TimelineView::MouseDown(BPoint where) {
                 Invalidate(lane);
                 return;
             }
+            // Double-click an audio clip: rename it (M2.5). The MIDI path's
+            // double-click opens the piano roll instead — a region's content
+            // is what you edit there, a clip's name is what you edit here.
+            int32 clicks = 1;
+            if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+                m->FindInt32("clicks", &clicks);
+            if (clicks >= 2) {
+                BPoint sp = ConvertToScreen(where);
+                BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
+                (new RenameWindow(wr, t.id, ClipNameOf(c).c_str(),
+                                  BMessenger(this), kMsgRenameClip,
+                                  (int64)c.id, "Rename Clip"))->Show();
+                return;
+            }
             // Selection: Shift-click toggles; a plain click on an unselected
             // clip selects only it (a click on an already-selected clip keeps
             // the whole selection so it can be dragged as a group).
-            if (modifiers() & B_SHIFT_KEY) {
+            if (mods & B_SHIFT_KEY) {
                 if (ClipSelected(c.id)) fSelClips.erase(c.id);
                 else                    fSelClips.insert(c.id);
                 Invalidate(lane);
@@ -1147,6 +2749,7 @@ void TimelineView::MouseDown(BPoint where) {
                 fSelClips.clear();
                 fSelClips.insert(c.id);
             }
+            SetSelectedTrack(t.id);
             fMultiMove       = false;
             fDragTrack       = t.id;
             fDragLane        = idx;
@@ -1156,20 +2759,22 @@ void TimelineView::MouseDown(BPoint where) {
             fDragClipSrcOrig = c.sourceOffset;
             fDragFadeInOrig  = c.fadeInFrames;
             fDragFadeOutOrig = c.fadeOutFrames;
-            const float xStart = FrameToX(c.startFrame);
-            const float xEnd   = FrameToX(c.startFrame + c.lengthFrames);
-            const bool  wide   = (xEnd - xStart) > 2 * EdgeGrab();
-            const bool  topBand = where.y <= lane.top + Themed(14);
-            if (modifiers() & B_CONTROL_KEY) {
+            // The grabbed part, from the one hit-test everything shares.
+            const Zone zone = HitTest(where).zone;
+            if (zone == Zone::Gain) {
                 fDrag = Drag::ClipGain;        // Ctrl-drag vertical = clip gain
                 fDragOrig = c.gain;
-            } else if (topBand && where.x <= xStart + Themed(12)) {
+            } else if (zone == Zone::Slip) {
+                fDrag = Drag::Slip;            // Alt-drag = slip the audio
+                fDragSlipOrig  = c.sourceOffset;
+                fDragSlipGrabX = where.x;
+            } else if (zone == Zone::FadeIn) {
                 fDrag = Drag::ClipFadeIn;      // top-left corner = fade in
-            } else if (topBand && where.x >= xEnd - Themed(12)) {
+            } else if (zone == Zone::FadeOut) {
                 fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
-            } else if (wide && where.x >= xEnd - EdgeGrab()) {
+            } else if (zone == Zone::TrimRight) {
                 fDrag = Drag::ClipResize;
-            } else if (wide && where.x <= xStart + EdgeGrab()) {
+            } else if (zone == Zone::TrimLeft) {
                 fDrag = Drag::ClipResizeLeft;
             } else {
                 fDrag = Drag::Clip;
@@ -1185,42 +2790,71 @@ void TimelineView::MouseDown(BPoint where) {
     }
 
     // Right-click on an empty part of an audio lane: offer paste here.
-    if (fDrag == Drag::None && rightClick && fHasClipClip) {
+    if (fDrag == Drag::None && rightClick && !fClipboard.empty()) {
         if (PastePopup(where))
             PasteToTrack(t.id, Snapped(XToFrame(where.x)), TrackType::Audio);
         return;
     }
 
-    // Left-click on empty audio content: clear selection (unless Shift) and
-    // begin a rubber-band box select.
+    // Left-click on empty audio content: the track becomes selected, and a
+    // drag makes a time range (M2.4). Shift keeps the additive rubber-band
+    // clip select -- the gesture the plain drag used to be.
     if (fDrag == Drag::None && !rightClick && where.x >= HeaderWidth()) {
-        if (!(modifiers() & B_SHIFT_KEY)) fSelClips.clear();
-        fBanding = true;
-        fBandA = fBandB = where;
-        SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        SetSelectedTrack(t.id);
+        if (mods & B_SHIFT_KEY) {
+            fBanding = true;
+            fBandA = fBandB = where;
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        } else {
+            if (!fSelClips.empty()) fSelClips.clear();
+            BeginRangeDrag(where);
+        }
         Invalidate();
     }
 }
 
 void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     const TrackId id = t.id;
+    const HeaderControl ctl = HeaderControlAt(fProject->IndexOfTrack(id), where);
+    // The modifier the event carried: Alt-clicking Solo is exclusive solo
+    // (M2.6). Both Alt bits are accepted, like the range drag (Haiku maps the
+    // PC's Alt to B_COMMAND_KEY and Option to B_OPTION_KEY).
+    const uint32 mods = EventModifiers(Window() ? Window()->CurrentMessage()
+                                                : nullptr);
+
+    if (ctl == HeaderControl::Fold) {   // fold the lane to its title strip
+        ToggleTrackCollapsed(id);
+        return;
+    }
+    if (ctl == HeaderControl::Colour) {
+        OpenColourPicker(id, where);
+        return;
+    }
+    if (ctl == HeaderControl::Input) {
+        OpenInputPicker(id, where);
+        return;
+    }
 
     // Mute / solo: immediate toggle commands.
-    if (MuteRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Mute) {
         fStack->Execute(std::make_unique<SetTrackMuteCommand>(id, !t.muted),
                         *fProject);
         Invalidate(lane);
         if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
-    if (SoloRect(lane).Contains(where)) {
-        fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
-                        *fProject);
+    if (ctl == HeaderControl::Solo) {
+        if ((mods & (B_OPTION_KEY | B_COMMAND_KEY)) != 0) {
+            ExclusiveSolo(id);   // Alt-click: this track alone
+        } else {
+            fStack->Execute(std::make_unique<SetTrackSoloCommand>(id, !t.soloed),
+                            *fProject);
+        }
         Invalidate(lane);
         if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
         return;
     }
-    if (MonRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Monitor) {
         // Per-track input monitor: hear this track's input live without arming.
         if (Track* tr = fProject->FindTrack(id)) tr->inputMonitor = !tr->inputMonitor;
         Invalidate(lane);
@@ -1230,7 +2864,7 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
         }
         return;
     }
-    if (ArmRect(lane).Contains(where)) {
+    if (ctl == HeaderControl::Arm) {
         // Arm is transient transport state, not an undoable document edit:
         // toggle it directly. Multiple tracks may be armed; recording writes
         // one take from the single input and drops it on every armed track.
@@ -1248,8 +2882,8 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     // Gain / pan: begin a drag. Grab the pointer so we keep getting move/up
     // events even if the cursor leaves the fader.
     Drag mode = Drag::None;
-    if (GainRect(lane).Contains(where))         mode = Drag::Gain;
-    else if (PanKnobRect(lane).Contains(where)) mode = Drag::Pan;
+    if (ctl == HeaderControl::Gain)     mode = Drag::Gain;
+    else if (ctl == HeaderControl::Pan) mode = Drag::Pan;
     if (mode == Drag::None)
         return;
 
@@ -1262,10 +2896,304 @@ void TimelineView::HandleHeaderClick(const Track& t, BRect lane, BPoint where) {
     PreviewDrag(where);
 }
 
+// --- track depth actions (M2.6) --------------------------------------------
+//
+// The header buttons, the context menu and the Track menu all run these, and
+// so does the functional test: a popup menu Go()s synchronously, so the suite
+// drives the method the menu entry calls (the pattern M2.3/M2.5 established)
+// and the drawn control is what the shots are for.
+
+void TimelineView::SetTrackColour(TrackId track, int colorIndex) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    if (colorIndex < 0) colorIndex = 0;
+    if (fStack->Execute(std::make_unique<SetTrackColorCommand>(track, colorIndex),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetTrackInput(TrackId track, InputSource input) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    if (fStack->Execute(std::make_unique<SetTrackInputCommand>(track,
+                                                              std::move(input)),
+                        *fProject)) {
+        Invalidate();
+        // A changed input re-evaluates idle monitoring (the same message the
+        // inspector's picker posts), and repaints the panes.
+        if (BWindow* w = Window()) {
+            w->PostMessage(kMsgMonitorRefresh);
+            w->PostMessage(kMsgUiRefresh);
+        }
+    }
+}
+
+void TimelineView::SetTrackCollapsed(TrackId track, bool collapsed) {
+    if (!fProject || !fStack) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t || t->collapsed == collapsed) return;
+    if (fStack->Execute(std::make_unique<SetTrackCollapsedCommand>(track,
+                                                                  collapsed),
+                        *fProject)) {
+        SyncScrollBars();   // the content height changed
+        // Keep the lane the user just folded or expanded in view: shrinking
+        // the content makes the vertical scrollbar clamp, which shifts every
+        // lane on screen, and the one that was clicked can end up under the
+        // bottom edge.
+        const int idx = fProject->IndexOfTrack(track);
+        if (idx >= 0) {
+            const BRect lane = LaneRect(idx);
+            const float limit = Bounds().bottom - fBarThickness;
+            if (lane.bottom > limit)
+                ScrollToY(fScrollY + (lane.bottom - limit));
+        }
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::ToggleTrackCollapsed(TrackId track) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (t) SetTrackCollapsed(track, !t->collapsed);
+}
+
+// Alt-click on a Solo button: this track alone. One MacroCommand over the
+// tracks that actually change, so it is a single "Exclusive Solo" undo step;
+// Alt-clicking the track that is already the only soloed one clears it (the
+// same toggle every other solo button has).
+void TimelineView::ExclusiveSolo(TrackId track) {
+    if (!fProject || !fStack) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    bool onlyThis = t->soloed;
+    for (const Track& o : fProject->Tracks())
+        if (o.id != track && o.soloed) { onlyThis = false; break; }
+    const bool want = !onlyThis;
+
+    auto macro = std::make_unique<MacroCommand>("Exclusive Solo");
+    for (const Track& o : fProject->Tracks()) {
+        const bool target = (o.id == track) ? want : false;
+        if (o.soloed != target)
+            macro->Add(std::make_unique<SetTrackSoloCommand>(o.id, target));
+    }
+    if (macro->Empty()) return;
+    if (fStack->Execute(std::move(macro), *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+// Duplicate a whole track. The copy is selected and scrolled into view: the
+// user asked for it, and a new lane somewhere below the fold would otherwise
+// look like nothing happened.
+void TimelineView::DuplicateTrack(TrackId track) {
+    if (!fProject || !fStack) return;
+    if (!fProject->FindTrack(track)) return;
+    auto cmd = std::make_unique<DuplicateTrackCommand>(track);
+    DuplicateTrackCommand* cp = cmd.get();
+    if (!fStack->Execute(std::move(cmd), *fProject)) return;
+
+    const TrackId newId = cp->CreatedId();
+    SetSelectedTrack(newId);          // posts kMsgTrackSelected (inspector)
+    const int idx = fProject->IndexOfTrack(newId);
+    if (idx >= 0) {
+        const BRect lane = LaneRect(idx);      // with the CURRENT scroll
+        const float limit = Bounds().bottom - fBarThickness;
+        if (lane.bottom > limit)
+            ScrollToY(fScrollY + (lane.bottom - limit));
+    }
+    Invalidate();
+    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+}
+
+void TimelineView::DuplicateSelectedTrack() {
+    if (fSelectedTrack != kInvalidTrackId) DuplicateTrack(fSelectedTrack);
+}
+
+// The colour picker: the palette is TrackColor (one definition), the labels
+// come from beside it, and the chip is drawn on the item itself.
+namespace {
+class ColourMenuItem : public ThemedMenuItem {
+public:
+    ColourMenuItem(int index, rgb_color chip)
+        : ThemedMenuItem(TrackColourName(index), nullptr), fChip(chip) {}
+    void DrawContent() override {
+        BMenu* m = Menu();
+        if (m == nullptr) return;
+        // ContentLocation() is where the stock item starts its label, and
+        // GetContentSize() its line height -- so the chip and the label land on
+        // the same line as every other menu entry without guessing.
+        const BPoint at = ContentLocation();
+        float w = 0.0f, h = 0.0f;
+        GetContentSize(&w, &h);
+        BFont font;
+        m->GetFont(&font);
+        font_height fh;
+        font.GetHeight(&fh);
+        const float side = std::min(h - Themed(2.0f), Themed(11.0f));
+        const float top = at.y + (h - side) * 0.5f;
+        BRect chip(at.x, top, at.x + side, top + side);
+        m->SetHighColor(fChip);
+        m->FillRoundRect(chip, Themed(2.0f), Themed(2.0f));
+        m->SetHighColor(ColBtnBorder());
+        m->StrokeRoundRect(chip, Themed(2.0f), Themed(2.0f));
+        m->SetHighColor(IsEnabled() ? ColText() : ColTextDim());
+        m->DrawString(Label(), BPoint(chip.right + Themed(6.0f),
+                                      at.y + fh.ascent));
+    }
+private:
+    rgb_color fChip;
+};
+} // namespace
+
+void TimelineView::OpenColourPicker(TrackId track, BPoint where) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    BPopUpMenu* menu = new BPopUpMenu("track colour", false, false);
+    for (int i = 0; i < kTrackColorCount; i++) {
+        BMenuItem* it = new ColourMenuItem(i, TrackColor(i));
+        if (i == t->colorIndex) it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    const int pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick >= 0) SetTrackColour(track, pick);
+}
+
+void TimelineView::OpenInputPicker(TrackId track, BPoint where) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    const std::vector<InputSource> choices = TrackInputChoices(*t);
+    BPopUpMenu* menu = new BPopUpMenu("record input", false, false);
+    for (size_t i = 0; i < choices.size(); i++) {
+        BMenuItem* it = new ThemedMenuItem(
+            InputChoiceLabel(choices[i]).c_str(), nullptr);
+        if (choices[i].kind == t->input.kind
+            && choices[i].name == t->input.name)
+            it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
+    const int pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick >= 0 && (size_t)pick < choices.size())
+        SetTrackInput(track, choices[(size_t)pick]);
+}
+
+// --- rename in place (M2.6) ------------------------------------------------
+
+void TimelineView::BeginTrackRename(TrackId track) {
+    const Track* t = fProject ? fProject->FindTrack(track) : nullptr;
+    if (!t) return;
+    fRenameTrack = track;
+    fRenameText  = t->name;
+    fRenameCaret = (int)fRenameText.size();
+    MakeFocus(true);              // the keys are this view's while it is open
+    Invalidate();
+}
+
+void TimelineView::CancelTrackRename() {
+    if (fRenameTrack == kInvalidTrackId && fRenameText.empty()) return;
+    fRenameTrack = kInvalidTrackId;
+    fRenameText.clear();
+    fRenameCaret = 0;
+    Invalidate();
+}
+
+void TimelineView::CommitTrackRename() {
+    const TrackId id = fRenameTrack;
+    const std::string text = fRenameText;
+    fRenameTrack = kInvalidTrackId;
+    fRenameText.clear();
+    fRenameCaret = 0;
+    Track* t = (fProject && id != kInvalidTrackId) ? fProject->FindTrack(id)
+                                                   : nullptr;
+    if (t && !text.empty() && text != t->name) {
+        if (fStack->Execute(std::make_unique<SetTrackNameCommand>(id, text),
+                            *fProject))
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+    Invalidate();
+}
+
+// The keys the open name field owns. While it is open EVERY key is consumed:
+// a bare `,` or `1` would otherwise nudge a clip or switch tools behind the
+// field, which is how a rename edits the wrong thing.
+bool TimelineView::HandleRenameKey(const char* bytes, int32 numBytes) {
+    if (fRenameTrack == kInvalidTrackId || numBytes < 1) return false;
+    const unsigned char c = (unsigned char)bytes[0];
+    switch (c) {
+        case B_RETURN:               // (== B_ENTER on this platform) commits
+            CommitTrackRename();
+            return true;
+        case B_ESCAPE:               CancelTrackRename();  return true;
+        case B_BACKSPACE:
+            if (fRenameCaret > 0) {
+                fRenameText.erase((size_t)fRenameCaret - 1, 1);
+                --fRenameCaret;
+            }
+            Invalidate();
+            return true;
+        case B_LEFT_ARROW:
+            if (fRenameCaret > 0) --fRenameCaret;
+            Invalidate();
+            return true;
+        case B_RIGHT_ARROW:
+            if (fRenameCaret < (int)fRenameText.size()) ++fRenameCaret;
+            Invalidate();
+            return true;
+        case B_DELETE:
+            if (fRenameCaret < (int)fRenameText.size())
+                fRenameText.erase((size_t)fRenameCaret, 1);
+            Invalidate();
+            return true;
+        default: break;
+    }
+    if (c >= 0x20 && c != 0x7f) {                 // a printable ASCII byte
+        fRenameText.insert((size_t)fRenameCaret, 1, (char)c);
+        ++fRenameCaret;
+        Invalidate();
+    }
+    return true;
+}
+
 // Compute the dragged value from the cursor x and write it straight into the
 // model for live feedback. This is a transient preview only; the undoable
 // command is pushed in MouseUp.
 void TimelineView::PreviewDrag(BPoint where) {
+    // A range drag (M2.4), from the ruler or from empty lane content. Same
+    // click-vs-drag threshold as the loop: a press that never moves is a
+    // click, and a click must not leave a sliver of a range behind.
+    if (fDrag == Drag::RangeSelect) {
+        Frame f = Snapped(XToFrame(where.x));
+        if (f < 0) f = 0;
+        const Frame lo = std::min(fRangeAnchor, f);
+        const Frame hi = std::max(fRangeAnchor, f);
+        const Frame minDrag = (Frame)(4.0 * fFramesPerPixel);   // ~4 px
+        if (hi - lo <= minDrag) return;   // not a real drag yet
+        fRangeDragged = true;
+        SetTimeRange(lo, hi);
+        return;
+    }
+
+    // A lane-edge drag (M2.6): the pointer's distance from the grab point is
+    // the height delta, previewed straight into the model (one command on
+    // release, like every other drag here). The clamp matches the drag's own
+    // floor and SetTrackHeightCommand's ceiling.
+    if (fDrag == Drag::LaneResize) {
+        Track* t = fProject->FindTrack(fDragTrack);
+        if (!t) return;
+        float h = fDragOrig + (where.y - fDragGrabY);
+        if (h < Themed(72.0f))  h = Themed(72.0f);
+        if (h > Themed(300.0f)) h = Themed(300.0f);
+        t->height = (int)(h + 0.5f);
+        Invalidate();
+        return;
+    }
+
     // Ruler loop / punch drags aren't tied to a track. Ignore sub-threshold
     // jitter so a plain click (which may wobble a frame during button-down)
     // still seeks on release instead of creating a 1-frame loop region.
@@ -1283,7 +3211,7 @@ void TimelineView::PreviewDrag(BPoint where) {
         } else {
             tr.loopStart = lo; tr.loopEnd = hi; tr.loopEnabled = true;
         }
-        Invalidate(BRect(0, 0, Bounds().right, RulerHeight()));
+        Invalidate(BRect(0, ToolbarHeight(), Bounds().right, ContentTop()));
         return;
     }
 
@@ -1291,16 +3219,27 @@ void TimelineView::PreviewDrag(BPoint where) {
     if (!t) return;
     BRect lane = LaneRect(fDragLane);
 
-    if (fDrag == Drag::Gain) {
-        BRect g = GainRect(lane);
-        float v = (where.x - g.left) / g.Width() * kMaxGain;
-        if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
-        t->gain = v;
-    } else if (fDrag == Drag::Pan) {
-        // Pan knob: vertical drag (up = right), relative to the grab point.
-        float v = fDragOrig + (fDragGrabY - where.y) / 100.0f;
-        if (v < -1) v = -1; if (v > 1) v = 1;
-        t->pan = v;
+    if (fDrag == Drag::Gain || fDrag == Drag::Pan) {
+        // The header fader and pan knob are the ONE preview whose value other
+        // panes also show: the inspector draws it and the mixer holds a
+        // snapshot of it, so each step has to reach them or they sit on the
+        // old value until the mouse comes up (the mixer/inspector -> timeline
+        // direction has always been live: InspectorView::Refresh() posts this
+        // same message on every move). Same message, same cadence, no second
+        // mechanism -- the undo discipline is untouched (still preview writes,
+        // one command on mouse-up).
+        if (fDrag == Drag::Gain) {
+            BRect g = GainRect(lane);
+            float v = (where.x - g.left) / g.Width() * kMaxGain;
+            if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
+            t->gain = v;
+        } else {
+            // Pan knob: vertical drag (up = right), relative to the grab point.
+            float v = fDragOrig + (fDragGrabY - where.y) / 100.0f;
+            if (v < -1) v = -1; if (v > 1) v = 1;
+            t->pan = v;
+        }
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
     } else if (fDrag == Drag::Clip && fDragIsMidiClip) {
         // MIDI region move: preview live (same track), commit on drop. When
         // multiple are selected, shift them all by the grabbed clip's delta
@@ -1415,11 +3354,27 @@ void TimelineView::PreviewDrag(BPoint where) {
             if (v < 0) v = 0; if (v > kMaxGain) v = kMaxGain;
             c->gain = v;
         }
+    } else if (fDrag == Drag::Slip) {
+        Clip* c = t->FindClip(fDragClip);
+        if (c) {
+            // Dragging right pulls LATER material under the clip's window (the
+            // audio is grabbed and moved, the clip stays). Not snapped: this is
+            // an offset into the file, not a musical position.
+            Frame off = fDragSlipOrig
+                      + (Frame)((where.x - fDragSlipGrabX) * fFramesPerPixel);
+            if (off < 0) off = 0;
+            c->sourceOffset = off;
+        }
     }
     Invalidate(lane);
 }
 
-void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
+void TimelineView::MouseMoved(BPoint where, uint32 transit, const BMessage* drag) {
+    (void)drag;
+    if (fDrag != Drag::None || fBanding || fAutoDragging)
+        fHoverValid = false;          // a gesture's preview owns the screen
+    else
+        UpdateHover(where, 0, transit);
     if (fBanding) {
         fBandB = where;
         Invalidate();
@@ -1446,6 +3401,11 @@ void TimelineView::MouseMoved(BPoint where, uint32, const BMessage*) {
         live->AddPoint(nf, nv);        // re-sorts; frame-key stays unique
         fAutoDragFrame = nf;
         Invalidate(lane);
+        return;
+    }
+    if (fDrag == Drag::Pencil) {   // the drawn region grows with the pointer
+        fHoverPos = where;
+        if (fDragLane >= 0) Invalidate(LaneRect(fDragLane));
         return;
     }
     if (fDrag != Drag::None)
@@ -1493,6 +3453,46 @@ void TimelineView::MouseUp(BPoint where) {
     }
     if (fDrag == Drag::None)
         return;
+
+    // Pencil: the drag ends by creating the region it previewed. A bare click
+    // (no drag) makes one bar, the same default a double-click uses.
+    if (fDrag == Drag::Pencil) {
+        fPencilLen = std::max(fPencilStart, Snapped(XToFrame(where.x)))
+                   - std::min(fPencilStart, Snapped(XToFrame(where.x)));
+        fPencilStart = std::min(fPencilStart, Snapped(XToFrame(where.x)));
+        CommitPencil(where);
+        fDrag = Drag::None;
+        fDragLane = -1;
+        fHoverPos = where;
+        return;
+    }
+
+    // Range drag: a real drag left a range behind; a bare click (no movement)
+    // clears the range, the way clicking empty lane content always cleared the
+    // clip selection.
+    if (fDrag == Drag::RangeSelect) {
+        if (!fRangeDragged) ClearTimeRange();
+        fDrag = Drag::None;
+        Invalidate();
+        return;
+    }
+
+    // A lane-edge drag (M2.6): restore the pre-drag height, then push ONE
+    // command carrying the dragged result.
+    if (fDrag == Drag::LaneResize) {
+        if (Track* t = fProject->FindTrack(fDragTrack)) {
+            const int v = t->height;
+            t->height = (int)(fDragOrig + 0.5f);
+            if (v != t->height)
+                fStack->Execute(std::make_unique<SetTrackHeightCommand>(
+                                    fDragTrack, v), *fProject);
+            SyncScrollBars();   // the content height changed
+            if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+        }
+        fDrag = Drag::None;
+        Invalidate();
+        return;
+    }
 
     // Ruler: a real drag leaves a loop region; a bare click (no movement)
     // seeks and clears any loop — regardless of prior loop state.
@@ -1629,6 +3629,15 @@ void TimelineView::MouseUp(BPoint where) {
                 if (v != fDragClipOrigLen)
                     cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
             }
+        } else if (fDrag == Drag::Slip) {
+            // Restore the pre-drag offset, then commit the whole gesture as one
+            // SlipClipCommand carrying the dragged value.
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame v = c->sourceOffset;
+                c->sourceOffset = fDragSlipOrig;
+                if (v != fDragSlipOrig)
+                    cmd = std::make_unique<SlipClipCommand>(fDragTrack, fDragClip, v);
+            }
         } else if (fDrag == Drag::ClipGain) {
             if (Clip* c = t->FindClip(fDragClip)) {
                 const float v = c->gain;
@@ -1748,12 +3757,13 @@ void TimelineView::DrawPlayhead() {
     if (x < HeaderWidth() || x > Bounds().right)
         return;
     SetHighColor(ColPlayhead());
-    StrokeLine(BPoint(x, RulerHeight()), BPoint(x, Bounds().bottom));
+    StrokeLine(BPoint(x, ContentTop()), BPoint(x, Bounds().bottom));
 }
 
 void TimelineView::DrawRuler(BRect update) {
     BRect r = Bounds();
-    r.bottom = RulerHeight();
+    r.top    = ToolbarHeight();
+    r.bottom = RulerBottom();   // the marker lane (when on) is below this
 
     SetHighColor(ColRuler());
     FillRect(r);
@@ -1769,7 +3779,7 @@ void TimelineView::DrawRuler(BRect update) {
         if (lx0 < HeaderWidth()) lx0 = HeaderWidth();
         if (lx1 > lx0) {
             SetHighColor(Rgb(70, 110, 90));
-            FillRect(BRect(lx0, 0, lx1, RulerHeight()));
+            FillRect(BRect(lx0, r.top, lx1, r.bottom));
         }
     }
     // Punch region (Ctrl-drag): a red band on the lower half of the ruler.
@@ -1779,19 +3789,32 @@ void TimelineView::DrawRuler(BRect update) {
         if (px0 < HeaderWidth()) px0 = HeaderWidth();
         if (px1 > px0) {
             SetHighColor(Rgb(150, 60, 60));
-            FillRect(BRect(px0, RulerHeight() - Themed(6), px1, RulerHeight()));
+            FillRect(BRect(px0, r.bottom - Themed(6), px1, r.bottom));
+        }
+    }
+
+    // The time range (M2.4): a band along the ruler's top and both edges, so
+    // the range reads even when every lane is scrolled out of the way.
+    if (fRangeValid && fRangeB > fRangeA) {
+        float x0 = FrameToX(fRangeA), x1 = FrameToX(fRangeB);
+        if (x0 < HeaderWidth()) x0 = HeaderWidth();
+        if (x1 > x0) {
+            SetHighColor(PanelAccent(Rgb(120, 170, 255)));
+            FillRect(BRect(x0, r.top, x1, r.top + Themed(3)));
+            StrokeLine(BPoint(x0, r.top), BPoint(x0, r.bottom));
+            StrokeLine(BPoint(x1, r.top), BPoint(x1, r.bottom));
         }
     }
 
     // Bar/beat ticks: bars full-height + numbered, beats short (when zoomed in).
     ForEachGridLine([&](float x, bool isBar, long bar) {
         SetHighColor(isBar ? ColText() : ColGrid());
-        StrokeLine(BPoint(x, isBar ? 0 : RulerHeight() - Themed(8)),
-                   BPoint(x, RulerHeight()));
+        StrokeLine(BPoint(x, isBar ? r.top : r.bottom - Themed(8)),
+                   BPoint(x, r.bottom));
         if (isBar) {
             char label[16];
             std::snprintf(label, sizeof(label), "%ld", bar);
-            DrawString(label, BPoint(x + Themed(3), RulerHeight() - Themed(9)));
+            DrawString(label, BPoint(x + Themed(3), r.bottom - Themed(9)));
         }
     });
 
@@ -1810,24 +3833,24 @@ void TimelineView::DrawRuler(BRect update) {
                 const float x0 = std::max(x, (float)HeaderWidth());
                 const float x1 = std::min(nx, r.right);
                 const bool  up = tempos[i + 1].bpm > t.bpm;
-                SetHighColor(Rgb(230, 170, 70));
-                StrokeLine(BPoint(x0, up ? RulerHeight() - Themed(3) : Themed(3)),
-                           BPoint(x1, up ? Themed(3) : RulerHeight() - Themed(3)));
+                SetHighColor(PanelAccent(Rgb(230, 170, 70)));
+                StrokeLine(BPoint(x0, up ? r.bottom - Themed(3) : r.top + Themed(3)),
+                           BPoint(x1, up ? r.top + Themed(3) : r.bottom - Themed(3)));
             }
         }
         if (!onScreen) continue;
-        SetHighColor(Rgb(230, 170, 70));
-        StrokeLine(BPoint(x, 0), BPoint(x, RulerHeight()));
+        SetHighColor(PanelAccent(Rgb(230, 170, 70)));
+        StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
         char s[16];
         std::snprintf(s, sizeof(s), t.ramp ? "%.0f~" : "%.0f", t.bpm);
-        DrawString(s, BPoint(x + Themed(2), Themed(9)));
+        DrawString(s, BPoint(x + Themed(2), r.top + Themed(9)));
     }
     for (const MeterChange& m : tm.Meters()) {
         const float x = FrameToX(m.frame);
         if (x < HeaderWidth() || x > r.right) continue;
-        SetHighColor(Rgb(120, 190, 230));
+        SetHighColor(PanelAccent(Rgb(120, 190, 230)));
         char s[16]; std::snprintf(s, sizeof(s), "%d/%d", m.num, m.denom);
-        DrawString(s, BPoint(x + Themed(2), Themed(19)));
+        DrawString(s, BPoint(x + Themed(2), r.top + Themed(19)));
     }
 
     // Position markers: a small flag + name at the top of the ruler.
@@ -1835,10 +3858,132 @@ void TimelineView::DrawRuler(BRect update) {
         const float x = FrameToX(mk.frame);
         if (x < HeaderWidth() || x > r.right) continue;
         SetHighColor(ColMidiAccent());   // green flag, distinct from tempo/meter
-        FillRect(BRect(x, 0, x + Themed(8), Themed(7)));
-        StrokeLine(BPoint(x, 0), BPoint(x, RulerHeight()));
+        FillRect(BRect(x, r.top, x + Themed(8), r.top + Themed(7)));
+        StrokeLine(BPoint(x, r.top), BPoint(x, r.bottom));
         SetHighColor(ColText());
-        DrawString(mk.name.c_str(), BPoint(x + Themed(10), Themed(8)));
+        DrawString(mk.name.c_str(), BPoint(x + Themed(10), r.top + Themed(8)));
+    }
+}
+
+// --- markers (M2.7) ---------------------------------------------------------
+
+// The one seek: the model's playhead, the DRAWN line (the ruler's flag click
+// used to move the model without moving the line, which left the screen
+// showing the old position while stopped), and the engine/intents a seek
+// posts.
+void TimelineView::SeekTo(Frame frame) {
+    if (!fProject) return;
+    if (frame < 0) frame = 0;
+    fProject->transport.playhead = frame;
+    SetPlayhead(frame);
+    if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
+}
+
+void TimelineView::AddMarkerAt(Frame frame) {
+    if (!fProject || !fStack) return;
+    if (frame < 0) frame = 0;
+    char nm[32];
+    std::snprintf(nm, sizeof(nm), "Marker %d",
+                  (int)fProject->markers.size() + 1);
+    if (fStack->Execute(std::make_unique<AddMarkerCommand>(frame, nm), *fProject)) {
+        Invalidate();
+        // The markers window (and the other panes) follow through this one
+        // message -- an open list that does not show a new marker is stale
+        // content.
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::RemoveMarkerAt(Frame frame, const std::string& name) {
+    if (!fProject || !fStack) return;
+    if (fStack->Execute(std::make_unique<RemoveMarkerCommand>(frame, name),
+                        *fProject)) {
+        Invalidate();
+        if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+    }
+}
+
+void TimelineView::SetMarkerLane(bool on) {
+    if (fMarkerLane == on) return;
+    fMarkerLane = on;
+    // The lanes start lower now: the scroll ranges and the vertical clamp both
+    // read ContentTop(), so both have to be recomputed.
+    SyncScrollBars();
+    Invalidate();
+}
+
+// The marker whose flag or drawn name is under a point in the marker lane.
+const Marker* TimelineView::MarkerInLane(BPoint where) const {
+    if (!fProject) return nullptr;
+    if (where.y < RulerBottom() || where.y >= ContentTop()) return nullptr;
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        // The hit zone is the flag PLUS the name to its right, so clicking the
+        // label works too (the ruler's flag-only 9 px zone is part of why this
+        // lane exists). Names that overlap: the first (leftmost) wins, which is
+        // the one whose flag the pointer is nearest.
+        BString nm(mk.name.c_str());
+        const float w = std::min(StringWidth(nm), Themed(96.0f));
+        if (where.x >= x - Themed(4.0f) && where.x <= x + Themed(11.0f) + w)
+            return &mk;
+    }
+    return nullptr;
+}
+
+void TimelineView::HandleMarkerLaneClick(BPoint where, bool rightClick) {
+    int32 clicks = 1;
+    if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
+        m->FindInt32("clicks", &clicks);
+    const Marker* mk = MarkerInLane(where);
+    if (rightClick) {
+        // No popup here (the ruler already has the full menu): right-clicking
+        // a flag removes it, right-clicking empty lane adds one -- both one
+        // undoable step, and both drivable by a synthetic click.
+        if (mk) RemoveMarkerAt(mk->frame, mk->name);
+        else    AddMarkerAt(Snapped(XToFrame(where.x)));
+        return;
+    }
+    if (mk) {                 // click-to-seek
+        SeekTo(mk->frame);
+        return;
+    }
+    if (clicks >= 2) AddMarkerAt(Snapped(XToFrame(where.x)));
+}
+
+// The lane itself: a header-coloured strip with the flags and their names.
+void TimelineView::DrawMarkerLane() {
+    if (!fMarkerLane || !fProject) return;
+    const float top = RulerBottom();
+    const float bot = ContentTop() - 1.0f;
+    if (bot <= top) return;
+    SetHighColor(ColHeader());
+    FillRect(BRect(0, top, Bounds().right, bot));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(0, bot), BPoint(Bounds().right, bot));
+    // The gutter names the strip (an unlabelled band is an "unexplained
+    // empty band", which the guidelines call a bug).
+    SetHighColor(ColTextDim());
+    DrawString("Markers", BPoint(Themed(10.0f), top + Themed(14.0f)));
+
+    for (const Marker& mk : fProject->markers) {
+        const float x = FrameToX(mk.frame);
+        if (x < HeaderWidth() - Themed(4.0f) || x > Bounds().right) continue;
+        SetHighColor(ColMidiAccent());
+        BPoint flag[3] = { BPoint(x, top + Themed(3.0f)),
+                           BPoint(x + Themed(9.0f), top + Themed(7.0f)),
+                           BPoint(x, top + Themed(11.0f)) };
+        FillPolygon(flag, 3);
+        StrokeLine(BPoint(x, top + Themed(3.0f)), BPoint(x, bot - Themed(2.0f)));
+        BString name(mk.name.c_str());
+        TruncateString(&name, B_TRUNCATE_END, Themed(96.0f));
+        SetHighColor(ColText());
+        DrawString(name.String(), BPoint(x + Themed(12.0f), top + Themed(14.0f)));
+    }
+    // The playhead crosses the strip, so a marker jump is visible here too.
+    const float px = FrameToX(fPlayhead);
+    if (px >= HeaderWidth() && px <= Bounds().right) {
+        SetHighColor(ColPlayhead());
+        StrokeLine(BPoint(px, top), BPoint(px, bot));
     }
 }
 
@@ -1852,10 +3997,7 @@ void TimelineView::JumpToMarker(int dir) {
         for (const Marker& m : fProject->markers)
             if (m.frame < ph) target = m.frame; else break;
     }
-    if (target >= 0) {
-        fProject->transport.playhead = target;
-        if (BWindow* w = Window()) w->PostMessage(kMsgSeek);
-    }
+    if (target >= 0) SeekTo(target);
 }
 
 void TimelineView::LoopBetweenMarkers() {
@@ -1873,7 +4015,8 @@ void TimelineView::LoopBetweenMarkers() {
 
 // The marker whose flag is under `where` on the ruler, or nullptr.
 const Marker* TimelineView::MarkerAt(BPoint where) const {
-    if (!fProject || where.y >= RulerHeight()) return nullptr;
+    if (!fProject || where.y < ToolbarHeight() || where.y >= RulerBottom())
+        return nullptr;
     const Marker* best = nullptr; float bestd = 9.0f;
     for (const Marker& mk : fProject->markers) {
         const float d = std::fabs(FrameToX(mk.frame) - where.x);
@@ -1915,6 +4058,8 @@ void TimelineView::ForEachGridLine(
 
 // Lane height for a track (clamped), falling back to the default.
 static float LaneHeightOf(const Track& t) {
+    // A folded lane is the title strip, whatever its unfolded height is (M2.6).
+    if (t.collapsed) return CollapsedTrackHeight();
     // Floor at the default so the header controls always fit; taller lanes just
     // add waveform room.
     float h = (float)t.height;
@@ -1933,7 +4078,7 @@ float TimelineView::ContentHeight() const {
 BRect TimelineView::LaneRect(int index) const {
     // Sum the heights of all lanes above `index` (variable per-track heights),
     // offset by the vertical scroll.
-    float top = RulerHeight() - fScrollY;
+    float top = ContentTop() - fScrollY;
     const auto& tracks = fProject->Tracks();
     for (int i = 0; i < index && i < (int)tracks.size(); i++)
         top += LaneHeightOf(tracks[i]) + TrackGap();
@@ -1958,6 +4103,14 @@ void TimelineView::DrawLanes(BRect update) {
         SetHighColor((idx & 1) ? ColLaneAlt() : ColLane());
         FillRect(lane);
 
+        // A folded lane (M2.6) is its title strip: no grid, no clips, no
+        // waveform -- the lane says what it is and nothing else.
+        if (t.collapsed) {
+            DrawTrackHeaderCompact(t, lane);
+            idx++;
+            continue;
+        }
+
         // Bar/beat grid lines through the lane content area (bars brighter).
         // Lines outside the update rect are skipped: on a long project the
         // loop covered every bar in the timeline, most of them invisible.
@@ -1977,8 +4130,11 @@ void TimelineView::DrawLanes(BRect update) {
             const ClipFades& ef = fades[ci++];
             if (c.takeGroup > 0 && !c.takeActive)
                 continue;   // only the active take of a group is drawn
-            DrawClip(c, lane, TrackColor(t.colorIndex), ef.fadeIn, ef.fadeOut,
-                     update);
+            // A clip's own colour when it has one (0 = the track's, the same
+            // rule MidiClip uses).
+            const rgb_color base = TrackColor(c.colorIndex ? c.colorIndex
+                                                           : t.colorIndex);
+            DrawClip(c, lane, base, ef, update);
             if (c.takeGroup > 0) {   // "T k/N" badge on the active take
                 int n = 0, k = 0;
                 for (const Clip& o : t.clips)
@@ -2054,8 +4210,45 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
         StrokeRect(BRect(Themed(1), lane.top + Themed(1), HeaderWidth() - Themed(2), lane.bottom - Themed(1)));
     }
 
-    SetHighColor(ColText());
-    DrawString(t.name.c_str(), BPoint(Themed(10), lane.top + Themed(14)));
+    // The fold triangle (M2.6): down = expanded, right = folded. Drawn before
+    // the name so the name field's own fill cannot bury it.
+    {
+        const BRect fr = FoldRect(lane);
+        SetHighColor(ColText());
+        const float m = Themed(3.0f);
+        if (t.collapsed) {
+            BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                            BPoint(fr.left + m + Themed(6.0f), (fr.top + fr.bottom) * 0.5f),
+                            BPoint(fr.left + m, fr.bottom - m) };
+            FillPolygon(p, 3);
+        } else {
+            BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                            BPoint(fr.right - m, fr.top + m),
+                            BPoint((fr.left + fr.right) * 0.5f, fr.top + m + Themed(6.0f)) };
+            FillPolygon(p, 3);
+        }
+    }
+
+    // Name (or the in-place rename field, M2.6), then the colour swatch.
+    if (t.id == fRenameTrack)
+        DrawNameField(t, lane);
+    else {
+        SetHighColor(ColText());
+        BString nm(t.name.c_str());
+        TruncateString(&nm, B_TRUNCATE_END,
+                       NameRect(lane).Width() - Themed(4.0f));
+        DrawString(nm.String(), BPoint(NameRect(lane).left + Themed(1.0f),
+                                       lane.top + Themed(14.0f)));
+    }
+    // The colour swatch: the track's palette colour, in the one place the
+    // picker opens from.
+    {
+        const BRect sw = ColourSwatchRect(lane);
+        SetHighColor(TrackColor(t.colorIndex));
+        FillRoundRect(sw, Themed(2.0f), Themed(2.0f));
+        SetHighColor(ColBtnBorder());
+        StrokeRoundRect(sw, Themed(2.0f), Themed(2.0f));
+    }
 
     // Mute / Solo / Record / Input-monitor: rounded state buttons.
     DrawButton(this, MuteRect(lane), "M", t.muted,        ColMute());
@@ -2072,6 +4265,26 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     DrawKnob(this, PanKnobRect(lane), t.pan,
              t.type == TrackType::Midi ? ColMidiAccent() : ColAudioAccent());
 
+    // The record-input selector (M2.6): a compact field showing the chosen
+    // source ("Default", an endpoint's tail, or an em dash for none), lit
+    // while a source is set. The full list is the popup -- one definition,
+    // shared with the inspector (TrackInputs.h).
+    {
+        const BRect ir = InputRect(lane);
+        SetHighColor(ColBtnOff());
+        FillRoundRect(ir, Themed(3.0f), Themed(3.0f));
+        SetHighColor(t.input.kind != InputSource::kNone ? ColMon()
+                                                        : ColBtnBorder());
+        StrokeRoundRect(ir, Themed(3.0f), Themed(3.0f));
+        BString lab("In: ");
+        lab << InputShortLabel(t.input).c_str();
+        TruncateString(&lab, B_TRUNCATE_END, ir.Width() - Themed(8.0f));
+        SetHighColor(t.input.kind != InputSource::kNone ? ColMon()
+                                                        : ColTextDim());
+        DrawString(lab.String(), BPoint(ir.left + Themed(4.0f),
+                                        ir.bottom - Themed(4.0f)));
+    }
+
     // Gain fader (horizontal): recessed trough + accent fill.
     BRect g = GainRect(lane);
     SetHighColor(ColGrid());  FillRect(g);
@@ -2083,7 +4296,96 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     // Per-track stereo meter at the header's right edge.
     const float mx0 = HeaderWidth() - HdrMeterW();
     BRect meterBox(mx0, lane.top + Themed(2), HeaderWidth() - Themed(2), lane.bottom - Themed(2));
-    SetHighColor(Rgb(16, 16, 20));
+    SetHighColor(ColLcd());
+    FillRect(meterBox);
+    float mPeakL = 0.0f, mPeakR = 0.0f;
+    if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
+        mPeakL = it->second.first; mPeakR = it->second.second;
+    }
+    // dB-scaled, through the shared bar (M3.3): the same maths and the same
+    // one threshold set as the master meter, so a level means the same thing
+    // in both places.
+    const float bw = (meterBox.Width() - Themed(3)) * 0.5f;
+    auto meterBar = [&](float x0, float level) {
+        DrawMeterBar(this, BRect(x0, meterBox.top, x0 + bw, meterBox.bottom),
+                     level, false);
+    };
+    meterBar(meterBox.left + Themed(1), mPeakL);
+    meterBar(meterBox.left + Themed(2) + bw, mPeakR);
+
+    // Hover highlight (M2.1): the header control the pointer is over -- or the
+    // lane's resize edge (M2.6). Drawn last so it is not buried under the
+    // control's own fill.
+    if (fHoverValid && fHover.track == t.id) {
+        if (fHoverLaneEdge) {
+            SetHighColor(ColAccent());
+            FillRect(BRect(0, lane.bottom - Themed(2.0f), HeaderWidth() - 1,
+                           lane.bottom));
+        } else if (fHoverHeader != HeaderControl::None) {
+            const BRect r = HeaderRectFor(fProject->IndexOfTrack(t.id),
+                                          fHoverHeader);
+            SetHighColor(ColAccent());
+            SetPenSize(Themed(2.0f));
+            if (fHoverHeader == HeaderControl::Pan) StrokeEllipse(r);
+            else StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
+            SetPenSize(1.0f);
+        }
+    }
+}
+
+// The compact row a folded lane shows (M2.6): fold triangle, colour swatch,
+// name, mute, solo -- and the meter, which stays on the right edge. No clips,
+// no pan/fader/input: a folded lane is a title strip.
+void TimelineView::DrawTrackHeaderCompact(const Track& t, BRect lane) {
+    BRect hdr(0, lane.top, HeaderWidth(), lane.bottom);
+    const bool selected = (t.id == fSelectedTrack);
+    SetHighColor(selected ? ColHeaderHi() : ColHeader());
+    FillRect(hdr);
+    SetHighColor(t.type == TrackType::Midi ? ColMidiAccent()
+               : t.type == TrackType::Bus  ? ColTextDim() : ColAudioAccent());
+    FillRect(BRect(0, lane.top, Themed(4), lane.bottom));
+    SetHighColor(ColGrid());
+    StrokeLine(BPoint(HeaderWidth() - 1, lane.top),
+               BPoint(HeaderWidth() - 1, lane.bottom));
+    if (selected) {
+        SetHighColor(ColAccent());
+        StrokeRect(BRect(Themed(1), lane.top + Themed(1),
+                         HeaderWidth() - Themed(2), lane.bottom - Themed(1)));
+    }
+
+    {   // the fold triangle, pointing right when folded
+        const BRect fr = FoldRectCompact(lane);
+        SetHighColor(ColText());
+        const float m = Themed(3.0f);
+        BPoint p[3] = { BPoint(fr.left + m, fr.top + m),
+                        BPoint(fr.left + m + Themed(6.0f),
+                               (fr.top + fr.bottom) * 0.5f),
+                        BPoint(fr.left + m, fr.bottom - m) };
+        FillPolygon(p, 3);
+    }
+    {   // the colour swatch stays: the colour is the track's identity
+        const BRect sw = ColourSwatchRectCompact(lane);
+        SetHighColor(TrackColor(t.colorIndex));
+        FillRoundRect(sw, Themed(2.0f), Themed(2.0f));
+        SetHighColor(ColBtnBorder());
+        StrokeRoundRect(sw, Themed(2.0f), Themed(2.0f));
+    }
+    if (t.id == fRenameTrack) {
+        DrawNameField(t, lane);
+    } else {
+        BString nm(t.name.c_str());
+        TruncateString(&nm, B_TRUNCATE_END, Themed(56.0f));
+        SetHighColor(ColText());
+        DrawString(nm.String(), BPoint(Themed(38.0f), lane.top + Themed(15.0f)));
+    }
+    DrawButton(this, MuteRectCompact(lane), "M", t.muted,  ColMute());
+    DrawButton(this, SoloRectCompact(lane), "S", t.soloed, ColSolo());
+
+    // The meter, exactly as the expanded header draws it.
+    const float mx0 = HeaderWidth() - HdrMeterW();
+    BRect meterBox(mx0, lane.top + Themed(2), HeaderWidth() - Themed(2),
+                   lane.bottom - Themed(2));
+    SetHighColor(ColLcd());
     FillRect(meterBox);
     float mPeakL = 0.0f, mPeakR = 0.0f;
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
@@ -2093,12 +4395,48 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     auto meterBar = [&](float x0, float level) {
         if (level < 0.0f) level = 0.0f; if (level > 1.0f) level = 1.0f;
         const float h = meterBox.Height() * level;
-        BRect b(x0, meterBox.bottom - h, x0 + bw, meterBox.bottom);
         SetHighColor(MeterColor(level));
-        FillRect(b);
+        FillRect(BRect(x0, meterBox.bottom - h, x0 + bw, meterBox.bottom));
     };
     meterBar(meterBox.left + Themed(1), mPeakL);
     meterBar(meterBox.left + Themed(2) + bw, mPeakR);
+
+    if (fHoverValid && fHover.track == t.id
+        && fHoverHeader != HeaderControl::None) {
+        const BRect r = HeaderRectFor(fProject->IndexOfTrack(t.id),
+                                      fHoverHeader);
+        SetHighColor(ColAccent());
+        SetPenSize(Themed(2.0f));
+        StrokeRoundRect(r, Themed(3.0f), Themed(3.0f));
+        SetPenSize(1.0f);
+    }
+}
+
+// The in-place rename's field: a sunken well over the name, with the edit
+// buffer and a caret. The caret scrolls the text so it stays visible in a
+// narrow field (a long name edited at the end must not draw the caret outside
+// the box).
+void TimelineView::DrawNameField(const Track& t, BRect lane) {
+    const BRect r = NameRect(lane);
+    SetHighColor(ColLcd());
+    FillRoundRect(r, Themed(2.0f), Themed(2.0f));
+    SetHighColor(ColAccent());
+    StrokeRoundRect(r, Themed(2.0f), Themed(2.0f));
+
+    const float pad = Themed(3.0f);
+    const char* full = fRenameText.c_str();
+    // The caret's pixel offset within the whole string, and the shift needed
+    // to keep it inside the field.
+    const float caretW = StringWidth(full, (int32)fRenameCaret);
+    float shift = 0.0f;
+    const float room = r.Width() - pad * 2.0f;
+    if (caretW > room) shift = caretW - room;
+
+    SetHighColor(ColText());
+    DrawString(full, BPoint(r.left + pad - shift, r.bottom - Themed(4.0f)));
+    const float cx = r.left + pad - shift + caretW;
+    SetHighColor(ColText());
+    StrokeLine(BPoint(cx, r.top + Themed(3.0f)), BPoint(cx, r.bottom - Themed(3.0f)));
 }
 
 // --- Automation editing --------------------------------------------------
@@ -2151,7 +4489,7 @@ void TimelineView::DrawAutomation(const Track& t, BRect lane, int mode) {
     const AutomationLane& al = *ref.lane;
     const float x0 = HeaderWidth(), x1 = lane.right;
 
-    SetHighColor(Rgb(230, 200, 90));
+    SetHighColor(PanelAccent(Rgb(230, 200, 90)));
     float px = x0, py = AutoValueToY(lane, ref.mn, ref.mx,
                                      al.ValueAt(XToFrame(x0), ref.def));
     for (float x = x0 + 2.0f; x <= x1; x += 2.0f) {
@@ -2263,7 +4601,7 @@ void TimelineView::DrawCrossfades(const Track& t, BRect lane) {
 }
 
 void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
-                            Frame fadeIn, Frame fadeOut, BRect update) {
+                            const ClipFades& ef, BRect update) {
     float x0 = FrameToX(c.startFrame);
     float x1 = FrameToX(c.startFrame + c.lengthFrames);
     if (x1 < HeaderWidth() || x0 > lane.right)
@@ -2273,27 +4611,49 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         return;
     if (x0 < HeaderWidth()) x0 = HeaderWidth();
 
+    const Frame fadeIn  = ef.fadeIn;
+    const Frame fadeOut = ef.fadeOut;
+
+    // A muted clip is drawn desaturated so it reads as silent at a glance; the
+    // waveform still shows (you can still edit it), just dimmer.
+    const rgb_color fill = c.muted ? TintColor(base, 0.45f) : base;
+
     BRect block(x0, lane.top + Themed(3), x1, lane.bottom - Themed(3));
-    SetHighColor(base);
+    SetHighColor(fill);
     FillRoundRect(block, Themed(5), Themed(5));        // Logic-style rounded region
 
-    DrawClipWave(c, block, update);
+    DrawClipWave(c, block, update, ef);
 
-    // Fade ramps: a diagonal from the block corner up to where the fade ends.
-    // These are the effective fades, so an auto-crossfade with a neighbour draws
-    // here too rather than only being audible.
+    // Fade ramps: the actual CURVE (M2.5) from the block corner up to where the
+    // fade ends, sampled. These are the effective fades and their shapes, so an
+    // auto-crossfade's equal-power ramp draws here as the sound has it.
     SetHighColor(ColClipBorder());
+    // `fromSilence`: the ramp starts silent at xFrom (a fade-in) and reaches
+    // full at xTo; otherwise it starts full and reaches silence at xTo.
+    auto drawRamp = [&](float xFrom, float xTo, FadeShape shape, bool fromSilence) {
+        if (xTo <= xFrom) return;
+        const int steps = 12;
+        float px = xFrom;
+        float py = block.bottom - (fromSilence ? 0.0f : 1.0f) * block.Height();
+        for (int i = 1; i <= steps; i++) {
+            const float s = (float)i / (float)steps;   // along the ramp
+            const float t = fromSilence ? s : 1.0f - s;
+            const float g = FadeGainAt(shape, t);
+            const float x = xFrom + (xTo - xFrom) * s;
+            const float y = block.bottom - g * block.Height();
+            StrokeLine(BPoint(px, py), BPoint(x, y));
+            px = x; py = y;
+        }
+    };
     if (fadeIn > 0) {
-        float fx = FrameToX(c.startFrame + fadeIn);
-        if (fx > block.left)
-            StrokeLine(BPoint(block.left, block.bottom),
-                       BPoint(fx < block.right ? fx : block.right, block.top));
+        const float xEnd = FrameToX(c.startFrame + fadeIn);
+        if (xEnd > block.left)
+            drawRamp(block.left, std::min(xEnd, block.right), ef.inShape, true);
     }
     if (fadeOut > 0) {
-        float fx = FrameToX(c.startFrame + c.lengthFrames - fadeOut);
-        if (fx < block.right)
-            StrokeLine(BPoint(fx > block.left ? fx : block.left, block.top),
-                       BPoint(block.right, block.bottom));
+        const float xStart = FrameToX(c.startFrame + c.lengthFrames - fadeOut);
+        if (xStart < block.right)
+            drawRamp(std::max(xStart, block.left), block.right, ef.outShape, false);
     }
 
     // Per-clip gain: a horizontal line across the block at the gain level
@@ -2312,25 +4672,32 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
         }
     }
 
-    // Name strip across the top (darker shade of the track color), like Logic.
+    // Name strip across the top (darker shade of the clip's colour), like
+    // Logic. The name is the clip's own (M2.5) or the file's base name, and a
+    // muted clip's strip goes grey so "muted" is readable from the strip alone.
     const float stripH = Themed(15.0f);
     if (block.Height() > stripH + Themed(2) && block.Width() > Themed(10)) {
         BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
                     block.top + stripH);
-        SetHighColor(Rgb((uint8)(base.red * 0.5f), (uint8)(base.green * 0.5f),
-                         (uint8)(base.blue * 0.5f)));
+        const float shade = c.muted ? 0.32f : 0.5f;
+        SetHighColor(Rgb((uint8)(base.red * shade), (uint8)(base.green * shade),
+                         (uint8)(base.blue * shade)));
         FillRect(strip);
-        const std::string& p = c.sourcePath;
-        size_t slash = p.find_last_of('/');
         // Truncated to the strip: a name runs into the next region otherwise.
-        BString name((slash == std::string::npos) ? p.c_str()
-                                                  : p.c_str() + slash + 1);
-        const float room = strip.Width() - Themed(14);
+        BString name(ClipNameOf(c).c_str());
+        const float room = strip.Width() - Themed(14)
+                         - (c.muted ? Themed(14) : 0.0f);
         if (room > Themed(8)) {
             TruncateString(&name, B_TRUNCATE_END, room);
-            SetHighColor(Rgb(245, 246, 248));
+            SetHighColor(c.muted ? Rgb(190, 194, 200) : Rgb(245, 246, 248));
             DrawString(name.String(), BPoint(strip.left + Themed(12),
                                              strip.top + Themed(11)));
+        }
+        // Muted badge on the strip's right corner.
+        if (c.muted && strip.Width() > Themed(30)) {
+            SetHighColor(Rgb(232, 120, 120));
+            DrawString("M", BPoint(strip.right - Themed(11),
+                                   strip.top + Themed(11)));
         }
     }
 
@@ -2359,6 +4726,14 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
                          (uint8)(base.blue * 0.7f)));
         StrokeRoundRect(block, Themed(5), Themed(5));
     }
+
+    // Pointer feedback (M2.1), drawn last so it sits over the border: the
+    // grabbed edge lights up, and the scissors show where the cut would land.
+    // Not while a drag owns the screen (the hover state is stale then).
+    if (fHoverValid && c.id == fHover.clip) {
+        if (fTool == Tool::Pointer) DrawHoverEdge(block, fHover.zone);
+        DrawScissorsHover(block);
+    }
 }
 
 // Draw a Midi track's regions: each MidiClip is a block (like an audio clip)
@@ -2376,23 +4751,34 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
                     std::min(x1, lane.right),         lane.bottom - Themed(3));
 
         rgb_color base = TrackColor(mc.colorIndex ? mc.colorIndex : t.colorIndex);
-        SetHighColor(Rgb((uint8)(base.red * 0.55f), (uint8)(base.green * 0.55f),
-                         (uint8)(base.blue * 0.55f)));
+        // A muted region (M2.5) draws desaturated, like a muted clip.
+        const float fillShade = mc.muted ? 0.30f : 0.55f;
+        SetHighColor(Rgb((uint8)(base.red * fillShade),
+                         (uint8)(base.green * fillShade),
+                         (uint8)(base.blue * fillShade)));
         FillRoundRect(block, Themed(5), Themed(5));
         // Name strip across the top.
         if (block.Height() > Themed(17) && block.Width() > Themed(10)) {
             BRect strip(block.left + Themed(1), block.top + Themed(1), block.right - Themed(1),
                         block.top + Themed(15));
-            SetHighColor(Rgb((uint8)(base.red * 0.32f), (uint8)(base.green * 0.32f),
-                             (uint8)(base.blue * 0.32f)));
+            const float stripShade = mc.muted ? 0.22f : 0.32f;
+            SetHighColor(Rgb((uint8)(base.red * stripShade),
+                             (uint8)(base.green * stripShade),
+                             (uint8)(base.blue * stripShade)));
             FillRect(strip);
             BString name(t.name.c_str());
-            const float room = strip.Width() - Themed(6);
+            const float room = strip.Width() - Themed(6)
+                             - (mc.muted ? Themed(14) : 0.0f);
             if (room > Themed(8)) {
                 TruncateString(&name, B_TRUNCATE_END, room);
-                SetHighColor(Rgb(240, 242, 245));
+                SetHighColor(mc.muted ? Rgb(186, 190, 196) : Rgb(240, 242, 245));
                 DrawString(name.String(), BPoint(strip.left + Themed(4),
                                                  strip.top + Themed(11)));
+            }
+            if (mc.muted && strip.Width() > Themed(30)) {   // mute badge
+                SetHighColor(Rgb(232, 120, 120));
+                DrawString("M", BPoint(strip.right - Themed(11),
+                                       strip.top + Themed(11)));
             }
         }
         // "T k/N" take badge on the active region of a loop-record group.
@@ -2466,6 +4852,11 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
                              (uint8)(base.blue * 0.75f)));
             StrokeRoundRect(block, Themed(5), Themed(5));
         }
+        // Pointer feedback, exactly as an audio clip gets it (M2.1).
+        if (fHoverValid && mc.id == fHover.clip) {
+            if (fTool == Tool::Pointer) DrawHoverEdge(block, fHover.zone);
+            DrawScissorsHover(block);
+        }
     }
 }
 
@@ -2473,7 +4864,8 @@ void TimelineView::DrawMidiNotes(const Track& t, BRect lane) {
 // column, from the column's min sample to its max. Reads a handful of peak
 // buckets per column (never scans the audio). No cache for this clip's source
 // -> just the flat filled block.
-void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
+void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update,
+                                const ClipFades& ef) {
     if (!fPeaks)
         return;
     auto it = fPeaks->find(c.sourcePath);
@@ -2517,8 +4909,16 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update) {
             continue;
 
         Peak pk = pc.Range(s0 < 0 ? 0 : s0, s1);
-        const float yMax = mid - pk.max * half;   // max amplitude -> up
-        const float yMin = mid - pk.min * half;   // min amplitude -> down
+        // The envelope this column sounds at (M2.5): clip gain and the
+        // effective fades with their shapes — the SAME helper the engine and
+        // the exporter apply, so the drawn waveform is the level that plays
+        // rather than the raw source. A muted clip draws its envelope too
+        // (editing it is still possible), just in the muted wave colour.
+        const float env = c.gain * ClipFadeEnvelope(
+            tf0 - c.startFrame, c.lengthFrames, ef.fadeIn, ef.inShape,
+            ef.fadeOut, ef.outShape);
+        const float yMax = mid - pk.max * half * env;   // max amplitude -> up
+        const float yMin = mid - pk.min * half * env;   // min amplitude -> down
         pts[n++] = BPoint(x, yMin);
         pts[n++] = BPoint(x, yMax);
         if (n == kChunk * 2) {

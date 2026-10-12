@@ -39,9 +39,11 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
     src/app/AppSettings.cpp     # kit-free app settings text serializer
+    src/app/ThemePalette.cpp    # kit-free theme palette derivation (T1)
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -71,9 +73,79 @@ add_library(daw_model
     src/synth/Sf2ToRegions.cpp  # kit-free SF2 preset -> regions + PCM
     src/synth/InstrumentFactory.cpp # InstrumentDesc -> IInstrument
     src/midi/MidiRecorder.cpp   # kit-free live-MIDI -> MidiClip note pairing
+    src/engine/AiffSource.cpp   # native AIFF/AIFF-C reader
+    src/engine/AudioFormats.cpp # sniff + the reader/sink choice tables
+    src/engine/AudioSinkFactory.cpp # MakeAudioSink (the WAV sink lives here)
 )
 target_include_directories(daw_model PUBLIC src)
 target_include_directories(daw_model PUBLIC ${CMAKE_BINARY_DIR}/generated)
+
+# --- compressed audio formats (libFLAC, libvorbis) ---------------------
+# Both on by default and both DEGRADE rather than fail, like DAW_LV2 above: with
+# the library missing (or the option forced OFF) that format's sources are not
+# compiled at all, DAW_HAVE_<FMT> is not defined, the factories refuse the
+# format with an explicit message ("this build has no FLAC support") and the
+# export dialog does not offer it. Nothing half-works: a format is either there
+# end to end or not there.
+#
+# Unlike LV2 these link INTO daw_model, because the Exporter -- which lives
+# there and must stay host-testable -- is what needs the encoders; the codec
+# cannot sit in a target the model layer never sees. The model layer stays
+# kit-free either way (no Haiku library, no Media Kit); it just gains a codec
+# dependency when one is found.
+option(DAW_FLAC "Read and write FLAC via libFLAC (auto-disabled when the library is missing)" ON)
+option(DAW_VORBIS "Read and write Ogg Vorbis via libvorbis (auto-disabled when the library is missing)" ON)
+
+set(DAW_FLAC_ENABLED OFF)
+if(DAW_FLAC)
+    find_path(DAW_FLAC_INCLUDE_DIR FLAC/stream_decoder.h)
+    find_library(DAW_FLAC_LIBRARY FLAC)
+    if(DAW_FLAC_INCLUDE_DIR AND DAW_FLAC_LIBRARY)
+        set(DAW_FLAC_ENABLED ON)
+        message(STATUS "FLAC support enabled (${DAW_FLAC_LIBRARY})")
+    else()
+        message(STATUS "libFLAC not found - building without FLAC support")
+    endif()
+endif()
+
+set(DAW_VORBIS_ENABLED OFF)
+if(DAW_VORBIS)
+    find_path(DAW_VORBIS_INCLUDE_DIR vorbis/vorbisfile.h)
+    find_library(DAW_VORBISFILE_LIBRARY vorbisfile)
+    find_library(DAW_VORBISENC_LIBRARY vorbisenc)
+    find_library(DAW_VORBIS_LIBRARY vorbis)
+    find_library(DAW_OGG_LIBRARY ogg)
+    if(DAW_VORBIS_INCLUDE_DIR AND DAW_VORBISFILE_LIBRARY
+       AND DAW_VORBISENC_LIBRARY AND DAW_VORBIS_LIBRARY AND DAW_OGG_LIBRARY)
+        set(DAW_VORBIS_ENABLED ON)
+        message(STATUS "Ogg Vorbis support enabled (${DAW_VORBISFILE_LIBRARY})")
+    else()
+        message(STATUS "libvorbis not found - building without Ogg Vorbis support")
+    endif()
+endif()
+
+if(DAW_FLAC_ENABLED)
+    target_sources(daw_model PRIVATE
+        src/engine/FlacSource.cpp    # libFLAC stream decoder -> IAudioSource
+        src/engine/FlacSink.cpp)     # libFLAC stream encoder -> IAudioSink
+    target_include_directories(daw_model PRIVATE ${DAW_FLAC_INCLUDE_DIR})
+    target_link_libraries(daw_model PUBLIC ${DAW_FLAC_LIBRARY})
+    # PUBLIC: DAW_HAVE_FLAC is what gates the concrete sinks behind
+    # MakeAudioSink and lets AudioFormats report the format as available, so
+    # everything linking the model layer must see the same answer.
+    target_compile_definitions(daw_model PUBLIC DAW_HAVE_FLAC=1)
+endif()
+
+if(DAW_VORBIS_ENABLED)
+    target_sources(daw_model PRIVATE
+        src/engine/VorbisSource.cpp  # libvorbisfile -> IAudioSource
+        src/engine/VorbisSink.cpp)   # vorbisenc + libogg -> IAudioSink
+    target_include_directories(daw_model PRIVATE ${DAW_VORBIS_INCLUDE_DIR})
+    target_link_libraries(daw_model PUBLIC
+        ${DAW_VORBISFILE_LIBRARY} ${DAW_VORBISENC_LIBRARY}
+        ${DAW_VORBIS_LIBRARY} ${DAW_OGG_LIBRARY})
+    target_compile_definitions(daw_model PUBLIC DAW_HAVE_VORBIS=1)
+endif()
 
 # --- LV2 plugin hosting (lilv) ----------------------------------------
 # On by default, but it DEGRADES rather than fails: with lilv absent no LV2 code
@@ -117,6 +189,12 @@ add_executable(model_tests tests/model_tests.cpp)
 target_link_libraries(model_tests PRIVATE daw_model)
 add_test(NAME model_tests COMMAND model_tests)
 
+# The palette derivation: the tokens of both modes, and the contrast the
+# System-mode rules have to keep on a light and a dark system panel.
+add_executable(theme_palette_tests tests/theme_palette_tests.cpp)
+target_link_libraries(theme_palette_tests PRIVATE daw_model)
+add_test(NAME theme_palette_tests COMMAND theme_palette_tests)
+
 add_executable(commandstack_tests tests/commandstack_tests.cpp)
 target_link_libraries(commandstack_tests PRIVATE daw_model)
 add_test(NAME commandstack_tests COMMAND commandstack_tests)
@@ -128,6 +206,13 @@ add_test(NAME takenames_tests COMMAND takenames_tests)
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)
+
+# The other file formats: AIFF/AIFC parsing, the by-content sniff, and the
+# FLAC / Ogg Vorbis round trips through the real sinks (each guarded by its own
+# DAW_HAVE_* define, so the binary is honest about what the build can do).
+add_executable(formats_tests tests/formats_tests.cpp)
+target_link_libraries(formats_tests PRIVATE daw_model)
+add_test(NAME formats_tests COMMAND formats_tests)
 
 add_executable(peak_tests tests/peak_tests.cpp)
 target_link_libraries(peak_tests PRIVATE daw_model)
@@ -270,6 +355,15 @@ if(DAW_LV2_ENABLED)
     add_dependencies(lv2_render_tests daw_test_plugins)
     add_test(NAME lv2_render_tests COMMAND lv2_render_tests)
 
+    # Plugin state and presets against the fixture's stateful plugin: save and
+    # restore asserted on the AUDIO it produces, the factory's load path, the
+    # bundled preset's discovery, and the user preset store. Shares the fixture
+    # and its LV2_PATH.
+    add_executable(lv2_state_tests tests/lv2_state_tests.cpp)
+    target_link_libraries(lv2_state_tests PRIVATE daw_lv2)
+    add_dependencies(lv2_state_tests daw_test_plugins)
+    add_test(NAME lv2_state_tests COMMAND lv2_state_tests)
+
     # LV2_PATH = our fixture + the system SPEC bundles.
     #
     # The spec bundles are not optional decoration. With the fixture dir alone,
@@ -292,17 +386,54 @@ if(DAW_LV2_ENABLED)
     endif()
     # The host's Haiku default path uses setenv(overwrite=0), so this wins there
     # too and the test sees the same world on both platforms.
-    set_tests_properties(lv2_fixture_tests lv2_render_tests PROPERTIES
-        ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
+    set_tests_properties(lv2_fixture_tests lv2_render_tests lv2_state_tests
+        PROPERTIES ENVIRONMENT "LV2_PATH=${DAW_LV2_TEST_PATH}")
 endif()
 
 add_executable(projectio_tests tests/projectio_tests.cpp)
 target_link_libraries(projectio_tests PRIVATE daw_model)
 add_test(NAME projectio_tests COMMAND projectio_tests)
 
+# Plugin state in the project: the base64 codec and the append-only `fxstate` /
+# `masterfxstate` lines, including the patched-file compat both directions. No
+# lilv here on purpose — the format is the model layer's, and this is where a
+# byte lost in it would show up.
+add_executable(fx_state_io_tests tests/fx_state_io_tests.cpp)
+target_link_libraries(fx_state_io_tests PRIVATE daw_model)
+add_test(NAME fx_state_io_tests COMMAND fx_state_io_tests)
+
+# The DAW's own preset files (kit-free header): format, directory-per-plugin
+# isolation, path-hostile names, and the torn/foreign-file policy.
+add_executable(preset_store_tests tests/preset_store_tests.cpp)
+target_link_libraries(preset_store_tests PRIVATE daw_model)
+add_test(NAME preset_store_tests COMMAND preset_store_tests)
+
 add_executable(grid_tests tests/grid_tests.cpp)
 target_link_libraries(grid_tests PRIVATE daw_model)
 add_test(NAME grid_tests COMMAND grid_tests)
+
+# The arrange window's snap values (M2.3): the grid the menu offers, its labels
+# and the beat-space snap through the tempo map.
+add_executable(snapgrid_tests tests/snapgrid_tests.cpp)
+target_link_libraries(snapgrid_tests PRIVATE daw_model)
+add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
+
+# The arrange editing commands M2.1-2.3 add: Glue's two joins, the slip edit.
+add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
+target_link_libraries(arrange_cmd_tests PRIVATE daw_model)
+add_test(NAME arrange_cmd_tests COMMAND arrange_cmd_tests)
+
+# The M2.4/M2.5 model work: fade shapes, the time-range slice/delete/insert
+# arithmetic and the clip-depth commands.
+add_executable(range_edit_tests tests/range_edit_tests.cpp)
+target_link_libraries(range_edit_tests PRIVATE daw_model)
+add_test(NAME range_edit_tests COMMAND range_edit_tests)
+
+# The M2.6 model work: duplicating a whole track (fresh clip ids) and folding
+# a lane.
+add_executable(track_depth_tests tests/track_depth_tests.cpp)
+target_link_libraries(track_depth_tests PRIVATE daw_model)
+add_test(NAME track_depth_tests COMMAND track_depth_tests)
 
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
@@ -355,6 +486,13 @@ add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)
 
+# MIDI expression (package 32): bend as an integrated ratio (verified against a
+# sample-by-sample reference, so a phase jump cannot pass), the mod wheel's
+# vibrato depth, and the CC64 sustain policy in both its live and offline forms.
+add_executable(midi_expression_tests tests/midi_expression_tests.cpp)
+target_link_libraries(midi_expression_tests PRIVATE daw_model)
+add_test(NAME midi_expression_tests COMMAND midi_expression_tests)
+
 # The MIDI transform math (package 04): quantize strength/swing/triplets and
 # tempo changes, humanize determinism, legato, and the region-window rules.
 add_executable(midiops_tests tests/midiops_tests.cpp)
@@ -380,6 +518,18 @@ add_test(NAME appsettings_tests COMMAND appsettings_tests)
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)
 add_test(NAME loudness_tests COMMAND loudness_tests)
+
+# The meter maths (M3.3): the dB scale, peak hold, the RMS/correlation window
+# and the clip latch — header-only and kit-free, so the UI and these tests read
+# the same code. And the one keyboard map (M3.2): its own consistency (nothing
+# bound twice, every row named) plus the text the help window shows.
+add_executable(meter_tests tests/meter_tests.cpp)
+target_link_libraries(meter_tests PRIVATE daw_model)
+add_test(NAME meter_tests COMMAND meter_tests)
+
+add_executable(keymap_tests tests/keymap_tests.cpp)
+target_link_libraries(keymap_tests PRIVATE daw_model)
+add_test(NAME keymap_tests COMMAND keymap_tests)
 
 add_executable(limiter_tests tests/limiter_tests.cpp)
 target_link_libraries(limiter_tests PRIVATE daw_model)
@@ -511,6 +661,7 @@ if(HAIKU)
         src/ui/RenderJobs.cpp
         src/ui/TransportBar.cpp
         src/ui/MeterView.cpp
+        src/ui/ShortcutsWindow.cpp   # the keyboard map, on screen (M3.2)
         src/ui/EffectsWindow.cpp
         src/ui/PluginBrowser.cpp
         src/ui/SendsWindow.cpp
@@ -520,9 +671,11 @@ if(HAIKU)
         src/ui/ExportProgressWindow.cpp
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
+        src/ui/MarkersWindow.cpp
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp
+        src/ui/widgets/DawSegments.cpp
         src/storage/BfsAttr.cpp
         src/plugin/PluginHost.cpp
     )

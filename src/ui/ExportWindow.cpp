@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <vector>
 #include <LayoutBuilder.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -22,9 +23,10 @@ enum { MSG_GO = 'exok' };
 
 namespace {
 
-// Menus are read by INDEX, so the tables below are also the wire values.
-const int kBitDepths[3] = { 16, 24, 32 };
-const char* const kBitLabels[3] = { "16-bit PCM", "24-bit PCM", "32-bit float" };
+// Menus are read by INDEX, so the tables below are also the wire values. The
+// format rows come from AudioFormats (kit-free, host-tested), which builds
+// them from what this build can actually write -- a build without libFLAC
+// never shows a FLAC row and can never be asked for one.
 const char* const kRangeLabels[2] = { "Whole project", "Loop range" };
 const int kRates[4] = { 0, 44100, 48000, 96000 };
 const char* const kRateLabels[4] = { "Project rate", "44 100 Hz", "48 000 Hz",
@@ -37,7 +39,7 @@ BPopUpMenu* PickMenu(const char* name, const char* const* labels, int count,
                      int marked) {
     BPopUpMenu* menu = new BPopUpMenu(name);
     for (int i = 0; i < count; i++) {
-        BMenuItem* it = new BMenuItem(labels[i], nullptr);
+        BMenuItem* it = new ThemedMenuItem(labels[i], nullptr);
         if (i == marked) it->SetMarked(true);
         menu->AddItem(it);
     }
@@ -70,8 +72,7 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
       fCur(current), fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
-    BView* root = new BView("root", B_WILL_DRAW);
-    root->SetViewColor(ColHeader());
+    BView* root = new ThemedView("root", B_WILL_DRAW);
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
 
     // What to render.
@@ -84,10 +85,22 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     for (int i = 0; i < 4; i++)
         if (kRates[i] == current.sampleRate) markedRate = i;
     fRate = PickMenu("rate", kRateLabels, 4, markedRate);
-    int markedBits = 0;
-    for (int i = 0; i < 3; i++)
-        if (kBitDepths[i] == current.bitDepth) markedBits = i;
-    fBits = PickMenu("bits", kBitLabels, 3, markedBits);
+
+    // The format row: what to write, at what depth. Rows are filtered by the
+    // build (see AudioFormats.h), and the remembered choice is matched back to
+    // its row so reopening the dialog shows what was last used.
+    std::vector<const char*> fmtLabels;
+    for (int i = 0; i < ExportFormatChoiceCount(); i++)
+        fmtLabels.push_back(ExportFormatChoiceAt(i).label);
+    int markedFmt = ExportFormatChoiceIndex(current.container, current.bitDepth);
+    if (markedFmt < 0) markedFmt = 0;
+    fFmt = PickMenu("fmt", fmtLabels.data(), (int)fmtLabels.size(), markedFmt);
+
+    std::vector<const char*> qualLabels;
+    for (int i = 0; i < VorbisQualityChoiceCount(); i++)
+        qualLabels.push_back(VorbisQualityChoiceAt(i).label);
+    fQual = PickMenu("vq", qualLabels.data(), (int)qualLabels.size(),
+                     VorbisQualityChoiceIndex(current.vorbisQuality));
 
     // What to do to it on the way out.
     fDither = new DawCheckBox("dt", "Dither (16-bit only)", nullptr);
@@ -118,9 +131,10 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
         .SetInsets(Themed(10.0f))
         .Add(fStems)
+        .Add(new DawMenuField("fm", "Format:", fFmt))
+        .Add(new DawMenuField("vq", "Vorbis quality:", fQual))
         .Add(new DawMenuField("rg", "Range:", fRange))
         .Add(new DawMenuField("sr", "Sample rate:", fRate))
-        .Add(new DawMenuField("bd", "Bit depth:", fBits))
         .Add(fDither)
         .Add(fNorm)
         .Add(fLufs)
@@ -142,7 +156,13 @@ void ExportWindow::MessageReceived(BMessage* msg) {
         return;
     }
     if (msg->what == MSG_GO) {
-        fCur.bitDepth   = kBitDepths[MarkedIndex(fBits)];
+        // The format row is container + depth in one, so both come from it.
+        const ExportFormatChoice& fc =
+            ExportFormatChoiceAt(MarkedIndex(fFmt));
+        fCur.container  = fc.container;
+        fCur.bitDepth   = fc.bitDepth;
+        fCur.vorbisQuality =
+            VorbisQualityChoiceAt(MarkedIndex(fQual)).quality;
         fCur.sampleRate = kRates[MarkedIndex(fRate)];
         fCur.range      = MarkedIndex(fRange);
         fCur.stems      = fStems && fStems->Value() == B_CONTROL_ON;
@@ -158,6 +178,8 @@ void ExportWindow::MessageReceived(BMessage* msg) {
 
         BMessage m(kMsgExportOptions);
         m.AddInt32("bits", fCur.bitDepth);
+        m.AddInt32("container", (int32)fCur.container);
+        m.AddFloat("vquality", fCur.vorbisQuality);
         m.AddBool("dither", fCur.dither);
         m.AddInt32("rate", fCur.sampleRate);
         m.AddBool("norm", fCur.normalize);

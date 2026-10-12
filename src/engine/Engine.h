@@ -1,6 +1,7 @@
 // Engine — the playback engine.
 //
-// Pulls decoded audio from disk (WavSource) through a lock-free RingBuffer
+// Pulls decoded audio from disk (any IAudioSource: WAV, AIFF, FLAC, Ogg
+// Vorbis) through a lock-free RingBuffer
 // filled by a per-track disk thread, and mixes it in the BSoundPlayer
 // real-time callback. One TrackStream per playing clip; the callback sums
 // them, so extending to true multitrack (milestone 3) is just more streams.
@@ -31,12 +32,12 @@
 //     graph playing and lets the new one join at the current playhead through
 //     the per-stream rebase (StreamRebase.h), so the edit is heard with no gap.
 //
-// Haiku-only: depends on the Media Kit (BSoundPlayer + WavSource).
+// Haiku-only: depends on the Media Kit (BSoundPlayer).
 #pragma once
 
 #include "GraphSwap.h"
 #include "RingBuffer.h"
-#include "WavSource.h"
+#include "AudioFormats.h"   // OpenAudioSource (WAV / AIFF / FLAC / Ogg)
 #include "Resampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
@@ -44,8 +45,11 @@
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
+#include "../model/MidiExpression.h"   // BendPoint / VoiceExpression
+#include "../model/Sustain.h"         // SustainLatch (CC64, live form)
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
+#include "../dsp/MeterMath.h"   // StereoMeter + the clip flag bits (M3.3)
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
 #include "../midi/IMidiInput.h"
@@ -75,7 +79,9 @@ public:
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
                 bool audible, Frame seekProjectDelta, float outputRate,
-                Frame fadeIn, Frame fadeOut, float clipGain = 1.0f);
+                Frame fadeIn, Frame fadeOut, float clipGain = 1.0f,
+                FadeShape fadeInShape = FadeShape::Linear,
+                FadeShape fadeOutShape = FadeShape::Linear);
     ~TrackStream();
 
     status_t Prepare();          // open file, seek, start disk thread, prime
@@ -106,8 +112,8 @@ public:
 
     TrackId Track() const { return fTrackId; }
     Frame EndFrame() const { return fStart + fLength; }
-    bool  Valid() const { return fSource.IsValid(); }
-    float SourceRate() const { return fSource.FrameRate(); }
+    bool  Valid() const { return fSource && fSource->IsValid(); }
+    float SourceRate() const { return fSource ? fSource->FrameRate() : 0.0f; }
 
     // Drop the frames this stream would have consumed since the graph was built
     // (the ring's origin is fStart + fSeekDelta) up to `timelineFrame`, so an
@@ -129,6 +135,8 @@ private:
     float       fOutputRate;    // engine output rate to resample to
     Frame       fFadeIn;        // fade-in length (timeline frames)
     Frame       fFadeOut;       // fade-out length (timeline frames)
+    FadeShape   fFadeInShape  = FadeShape::Linear;   // the curves they render
+    FadeShape   fFadeOutShape = FadeShape::Linear;   // with (M2.5)
     float       fClipGain = 1.0f;  // per-clip linear gain
     int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
     // One-shot: the first Mix after this stream's graph became active re-aligns
@@ -141,7 +149,10 @@ private:
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
 
-    WavSource   fSource;
+    // The factory's reader for whatever the clip's file is: WAV, AIFF, FLAC or
+    // Ogg Vorbis. Owned (the concrete readers are not copyable and their
+    // lifetime is per-clip-stream), and null until Prepare() opens it.
+    std::unique_ptr<IAudioSource> fSource;
     std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
     std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
@@ -177,6 +188,11 @@ public:
             std::vector<TrackStream*>             streams;   // audio, owned by fStreams
             std::vector<MidiNote>                 notes;     // MIDI (empty otherwise)
             std::vector<MidiClipEvent>            events;    // MIDI CC/PB (channel)
+            // The track's bend events, digested at build (sorted, phase-summed)
+            // so the RT thread evaluates the bend for a block with a binary
+            // search and never scans the event list. Empty for a track with no
+            // pitch bend.
+            std::vector<BendPoint>                bend;
             std::unique_ptr<IInstrument>          instrument;// voice (MIDI)
             // Live mix params: written by the UI thread (UpdateMix) and read by
             // the RT callback (FillBuffer). Atomic + relaxed so a concurrent
@@ -203,6 +219,19 @@ public:
             std::vector<MidiNote>                 liveNotes;
             std::vector<std::unique_ptr<IEffect>> fx;
             std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
+            // Parallel to fx, both hashes rather than the strings: they are
+            // compared on every SyncFx call, including during a knob drag.
+            //   fxIdentity — hash of (type, plugin id). Two LV2 inserts at one
+            //     index are the same EffectType, so the type alone cannot tell a
+            //     replaced plugin from the one the chain was built with; and
+            //     CaptureFxStates must not write one insert's patch into a
+            //     descriptor that now holds a different plugin.
+            //   fxStateHash — hash of the descriptor's stored state. A plugin's
+            //     own state is applied at INSTANTIATION and cannot be pushed, so
+            //     a changed state is structural (rebuild) even though the type
+            //     matches.
+            std::vector<uint64_t>                 fxIdentity;
+            std::vector<uint64_t>                 fxStateHash;
             // Per-insert slot state, parallel to fx (see model/Effect.h). Atomic
             // because the UI thread pushes them through SyncFx while the RT
             // callback reads them per block — like the fader gains above:
@@ -265,6 +294,7 @@ public:
                 : id(o.id), output(o.output),
                   streams(std::move(o.streams)), notes(std::move(o.notes)),
                   events(std::move(o.events)),
+                  bend(std::move(o.bend)),
                   instrument(std::move(o.instrument)),
                   midiGainL(o.midiGainL.load(std::memory_order_relaxed)),
                   midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
@@ -277,6 +307,8 @@ public:
                   inChannel(o.inChannel.load(std::memory_order_relaxed)),
                   liveNotes(std::move(o.liveNotes)),
                   fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
+                  fxIdentity(std::move(o.fxIdentity)),
+                  fxStateHash(std::move(o.fxStateHash)),
                   fxBypass(std::move(o.fxBypass)), fxMix(std::move(o.fxMix)),
                   fxDryDelay(std::move(o.fxDryDelay)),
                   sendTargets(std::move(o.sendTargets)),
@@ -290,6 +322,7 @@ public:
                 id = o.id; output = o.output;
                 streams = std::move(o.streams); notes = std::move(o.notes);
                 events = std::move(o.events);
+                bend = std::move(o.bend);
                 instrument = std::move(o.instrument);
                 midiGainL.store(o.midiGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -302,6 +335,8 @@ public:
                 inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 liveNotes = std::move(o.liveNotes);
                 fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
+                fxIdentity = std::move(o.fxIdentity);
+                fxStateHash = std::move(o.fxStateHash);
                 fxBypass = std::move(o.fxBypass); fxMix = std::move(o.fxMix);
                 fxDryDelay = std::move(o.fxDryDelay);
                 sendTargets = std::move(o.sendTargets);
@@ -318,14 +353,31 @@ public:
         struct LiveVoice {
             bool    active    = false;
             bool    releasing = false;   // note-off seen; ringing out the tail
+            // The pedal (CC64) took this voice's note-off instead of releasing
+            // it: it stays silent-free until the pedal lifts, or until the key
+            // is struck again. Never true for a voice already `releasing`.
+            // See model/Sustain.h.
+            bool    sustained = false;
             uint8_t pitch     = 0;
             uint8_t vel       = 0;
             uint8_t channel   = 0;
             Frame   start     = 0;       // engine frame the note-on landed on
             Frame   off       = 0;       // engine frame of note-off (if releasing)
             int32_t source    = 0;       // endpoint the note-on arrived from
+            // Bend phase the voice was born with (engine frames): the live
+            // accumulator at its note-on, so a wheel move bends it from where
+            // it started rather than jumping its phase.
+            double  bend      = 0.0;
         };
         static constexpr int kMaxLiveVoices = 64;
+
+        // The key a live voice is held under: channel * 128 + pitch, so the
+        // latch tracks two keyboards' channels apart. (Two endpoints on the
+        // same channel share a key; the note-off match in UpdateLiveVoices
+        // still tells those voices apart by source.)
+        static int VoiceKey(uint8_t channel, uint8_t pitch) {
+            return (int)channel * 128 + (int)pitch;
+        }
 
         // The RT body. `e` supplies the state that outlives this graph (the
         // transport, the live toggles, the UI-facing publishing storage).
@@ -333,10 +385,16 @@ public:
 
         // Drop every live voice, so a note held at Stop can't sustain (up to
         // kHeld) or re-sound if the same engine restarts. Safe once the player
-        // is stopped.
+        // is stopped. The live controllers are cleared with them: a bend or a
+        // pedal left "down" by a keyboard that is no longer sending would
+        // otherwise colour the next start.
         void ResetVoices() {
             for (LiveVoice& v : fVoices) v.active = false;
             fLiveNotes.clear();
+            for (int i = 0; i < 128; i++) fLiveCc[i] = 0;
+            fLiveBendRatio = 1.0f;
+            fLiveBendPhase = 0.0;
+            fSustain.Reset();
         }
 
         // Worker thread, just before the graph is published: write the current
@@ -359,6 +417,8 @@ public:
         std::unique_ptr<std::atomic<float>[]>     fNodePeakR;
         std::vector<std::unique_ptr<IEffect>>     fMasterFx;  // master bus chain
         std::vector<EffectType>                   fMasterFxTypes;  // parallel (SyncFx)
+        std::vector<uint64_t>                     fMasterFxIdentity;   // parallel
+        std::vector<uint64_t>                     fMasterFxStateHash;  // parallel
         // Master-chain insert state, same shape and rules as Bus::fxBypass/
         // fxMix/fxDryDelay above. Note fMasterFx DROPS effects that fail to
         // build, so these are parallel to fMasterFx, not to project.masterFx.
@@ -373,10 +433,32 @@ public:
         Frame                                     fMonFrame = 0;  // monitor clock
         LiveVoice                                 fVoices[kMaxLiveVoices];
         std::vector<MidiNote>                     fLiveNotes; // rebuilt each block (RT)
+        // Live channel controllers, kept from the incoming event stream so a
+        // bend, a wheel or the pedal reaches the voices that are already
+        // sounding. Fixed arrays written and read only on the RT thread — no
+        // allocation, no locks. They live with the voice pool they drive, so a
+        // graph carries the live state that belongs to its own voices.
+        //
+        // These are GRAPH-wide, not per endpoint: a second keyboard's wheel
+        // would move every monitored track (the note path demuxes by endpoint,
+        // this does not). Stated in the record as the known limit of live
+        // expression.
+        uint8_t                                   fLiveCc[128] = {};   // 0..127, CC64 = pedal
+        float                                     fLiveBendRatio = 1.0f;
+        // ∫(bendRatio − 1) dt over the graph's life, in frames: the live twin
+        // of MidiExpression's Δ, advanced once per block from fLiveBendRatio. A
+        // note-on stamps its value into the new voice, so a wheel move never
+        // jumps the phase of a note that is already sounding.
+        double                                    fLiveBendPhase = 0.0;
+        SustainLatch                              fSustain;            // live CC64 latch
         Metronome                                 fMetronome; // click generator
         TempoMap                                  fTempoMap;  // for tempo-synced fx
         double                                    fLastFxBpm = 0.0;  // last pushed bpm
         Loudness                                  fLoudness;  // master BS.1770 meter
+        // The master meter's RMS/correlation window. Prepared at build (off the
+        // RT thread), so the callback only does arithmetic. Per graph, because
+        // building it must never touch state a running callback is reading.
+        StereoMeter                               fStereoMeter;
         std::vector<float>                        fMonBuf;   // RT scratch for monitor reads
         // Resampled-monitor state (when the monitor rate != output rate): a
         // linear pull-resampler carried across blocks. RT-only.
@@ -386,7 +468,18 @@ public:
 
     private:
         // RT-only helpers, split out of Render for readability.
-        void UpdateLiveVoices(Engine& e, Frame blockStart);
+        void UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames);
+
+        // The pedal lifted at `at`: every voice it was holding stops ringing
+        // there. A voice the player is still holding down is untouched — the
+        // pedal only releases what it took (model/Sustain.h).
+        void ReleaseSustained(Frame at);
+
+        // The live channel expression for this block: the bend ratio and phase
+        // the accumulator has reached, plus CC1. Recorded notes get theirs from
+        // the track's events (MidiExpression.h); a live note uses this instead.
+        VoiceExpression LiveExpression() const;
+
         void RenderMonitorOnly(Engine& e, float* out, size_t frames);
     };
 
@@ -482,6 +575,18 @@ public:
     // Tell every effect the current tempo (for tempo-synced params, e.g. a
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
     void SetFxTempo(double bpm);
+
+    // Pull every live insert's own state (IEffect::SaveState) into the matching
+    // descriptor of `project` — what a save, an export snapshot or an autosave
+    // calls first, so the file (and the render) holds the patch the engine is
+    // playing. The model's params describe the control ports and nothing else; a
+    // synth's patch exists only in the running instance until this runs.
+    //
+    // Off the RT thread (lilv allocates), and safe to call while the transport
+    // rolls: LV2's state save threading class is exactly "may run alongside
+    // Process". An insert the engine has no instance for keeps whatever state
+    // the project already stores.
+    void CaptureFxStates(Project& project);
 
     // Push a single effect parameter into the running graph live (for smooth
     // knob-drag response during playback, before the edit is committed). RT-safe
@@ -616,6 +721,24 @@ public:
     // [0, 1+]. Written by the RT callback, read by the UI meter poll.
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
+
+    // Master meter readings for the M3.3 meter, from the same post-master-gain
+    // block the peaks come from: the stereo RMS over a sliding window, and the
+    // correlation coefficient between the channels (-1..+1, 0 with no signal).
+    // The window lives in a StereoMeter the graph was given at build, so this
+    // costs arithmetic only — no allocation, locks or I/O on the RT side.
+    float RmsL() const { return fRmsL.load(); }
+    float RmsR() const { return fRmsR.load(); }
+    float Correlation() const { return fCorr.load(); }
+
+    // Clip flags, one bit per channel (kMeterClipL/R in dsp/MeterMath.h): the
+    // RT callback latches a bit at digital full scale, the UI reads the word
+    // and clears it here. Reading and clearing are separate so a clip between
+    // the two is not lost (ClearClipFlags is a fetch_and).
+    uint32_t ClipFlags() const { return fClipFlags.load(std::memory_order_relaxed); }
+    void ClearClipFlags(uint32_t mask) {
+        fClipFlags.fetch_and(~mask, std::memory_order_relaxed);
+    }
 
     // Per-track output peak (post-FX node level) for track meters. 0 if the
     // track isn't a live node or nothing is playing.
@@ -810,6 +933,13 @@ private:
     std::atomic<bool>  fFinished{false};
     std::atomic<float> fPeakL{0.0f};
     std::atomic<float> fPeakR{0.0f};
+    // The M3.3 master meter: RMS per channel, the stereo correlation, and the
+    // latched clip bits (RT writes, UI reads/clears). Engine-owned, so a graph
+    // swap does not lose a clip the user has not acknowledged yet.
+    std::atomic<float>    fRmsL{0.0f};
+    std::atomic<float>    fRmsR{0.0f};
+    std::atomic<float>    fCorr{0.0f};
+    std::atomic<uint32_t> fClipFlags{0};
     std::atomic<float> fMasterGain{1.0f};
     std::atomic<bool>  fMetronomeOn{false};
     std::atomic<bool>  fMonitorDim{false};

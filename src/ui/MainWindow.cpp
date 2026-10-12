@@ -1,9 +1,14 @@
 #include "MainWindow.h"
 
+#include "widgets/DawControlLook.h"   // InstallControlLookForMode
+#include "widgets/DawSegments.h"
+#include "widgets/DawTextField.h"
+
 #include "TimelineView.h"
 #include "InspectorView.h"
 #include "TransportBar.h"
 #include "MeterView.h"
+#include "ShortcutsWindow.h"   // View > Keyboard Shortcuts (M3.2)
 #include "EffectsWindow.h"
 #include "SendsWindow.h"
 #include "InstrumentWindow.h"
@@ -11,12 +16,14 @@
 #include "PianoRoll.h"
 #include "SampleBrowser.h"
 #include "MixerWindow.h"
+#include "MarkersWindow.h"   // the markers/locations list (M2.7)
 #include "PluginBrowser.h"
 #include "ExportWindow.h"
 #include "ExportProgressWindow.h"
 #include "Version.h"   // DAW_VERSION_STRING (generated from CMake)
 #ifdef DAW_HAVE_LV2
 #include "Lv2UiWindow.h"
+#include "../plugin/Lv2Host.h"     // preset listing/saving for an insert panel
 #endif
 #include "../storage/BfsAttr.h"
 #include "../app/AppSettings.h"
@@ -28,6 +35,7 @@
 
 #include "../engine/DeviceLatency.h"
 #include "../engine/WavSource.h"
+#include "../engine/AudioFormats.h"   // the import factory + format availability
 #include "../engine/WavWriter.h"
 #include "../engine/Exporter.h"
 #include "../engine/Resampler.h"
@@ -56,12 +64,14 @@
 #include <Menu.h>
 #include <MenuBar.h>
 #include <MenuItem.h>
+#include <Screen.h>
 #include <MessageRunner.h>
 #include <Path.h>
 #include <Slider.h>
 #include <String.h>
 #include <StringView.h>
 #include <TextControl.h>
+#include <TextView.h>   // a text field's inner view can hold the focus too
 
 #include <sys/stat.h>
 
@@ -76,8 +86,6 @@ enum {
     MSG_PLAY  = 'play',
     MSG_STOP  = 'stop',
     MSG_REC   = 'rec ',
-    MSG_UNDO  = 'undo',
-    MSG_REDO  = 'redo',
     MSG_OPEN  = 'open',
     MSG_OPEN_RECENT = 'orpj',   // File > Open Recent (path in the message)
     MSG_CLOSE = 'clos',         // File > Close: the window's quit path
@@ -89,7 +97,6 @@ enum {
     MSG_METRONOME = 'metr',
     MSG_IMPORT    = 'impt',
     MSG_IMPORT_REF = 'imrf',
-    MSG_PASTE     = 'past',
     MSG_TEMPO     = 'tmpo',
     MSG_BUFFER    = 'bufs',
     MSG_MASTER_FX = 'mfx ',
@@ -120,11 +127,14 @@ static const TrackId kMasterFxTarget = ~(TrackId)0;
 // colour with a hairline under it, laid out by a horizontal group. BGroupView
 // would do the layout but never draws, and the line is what separates the
 // strip from the editor below it.
-class PaneHeader : public BView {
+class PaneHeader : public BView, public ThemeAware {
 public:
+    // The strip's colour is cached, so it is re-taken on a mode switch (T1).
+    void ApplyTheme() override { SetViewColor(ColHeader()); }
+
     explicit PaneHeader(const char* name)
         : BView(name, B_WILL_DRAW | B_FULL_UPDATE_ON_RESIZE) {
-        SetViewColor(ColHeader());
+        ApplyTheme();
         BGroupLayout* g = new BGroupLayout(B_HORIZONTAL, Themed(4.0f));
         SetLayout(g);
         g->SetInsets(Themed(10.0f), Themed(3.0f), Themed(4.0f), Themed(4.0f));
@@ -165,6 +175,14 @@ static void ShowPanel(BFilePanel* panel, const char* title,
     }
     if (!saveText.empty()) panel->SetSaveText(saveText.c_str());
     panel->Show();
+    // A file panel is a stock Haiku window: its background and its list read
+    // the system colours, which the app no longer rewrites (T1), so the DAW's
+    // colours go on explicitly (a no-op in System mode). Twice: the panel is
+    // still laying itself out when Show() returns, so the second pass runs a
+    // moment later on the main window's looper.
+    ThemeStockWindow(panel->Window());
+    BMessageRunner::StartSending(panel->Messenger(),
+                                 new BMessage(MSG_THEME_STOCK), 250000, 1);
 }
 
 // Snapshot the mixer strip state from the model (used to open the mixer and to
@@ -293,70 +311,123 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
     BMenu* fileMenu = new BMenu("File");
-    fileMenu->AddItem(new BMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
-    fileMenu->AddItem(new BMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
+    fileMenu->AddItem(new ThemedMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
+    fileMenu->AddItem(new ThemedMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fRecentMenu = new BMenu("Open Recent");
-    fileMenu->AddItem(fRecentMenu);
+    fileMenu->AddItem(new ThemedMenuItem(fRecentMenu));
     // Save has no ellipsis: once the project has a path it writes straight to
     // it (Save As is the way to move it). Both ask when there is no path yet.
-    fileMenu->AddItem(new BMenuItem("Save", new BMessage(MSG_SAVE), 'S'));
-    fileMenu->AddItem(new BMenuItem("Save As" B_UTF8_ELLIPSIS,
+    fileMenu->AddItem(new ThemedMenuItem("Save", new BMessage(MSG_SAVE), 'S'));
+    fileMenu->AddItem(new ThemedMenuItem("Save As" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SAVE_AS), 'S', B_SHIFT_KEY));
-    fileMenu->AddItem(new BMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
-    fileMenu->AddItem(new BMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
-    fileMenu->AddItem(new BMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
-    fileMenu->AddItem(new BMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
-    fileMenu->AddItem(new BMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
+    fileMenu->AddItem(new ThemedMenuItem("Import Audio" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT)));
+    fileMenu->AddItem(new ThemedMenuItem("Import MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_IMPORT_MIDI)));
+    fileMenu->AddItem(new ThemedMenuItem("Export WAV" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT)));
+    fileMenu->AddItem(new ThemedMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
+    fileMenu->AddItem(new ThemedMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
     // Close is the window's own quit request, so the unsaved-changes prompt
     // applies exactly as it does to the title-bar button and Cmd-Q.
-    fileMenu->AddItem(new BMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
-    fileMenu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
-    menuBar->AddItem(fileMenu);
+    fileMenu->AddItem(new ThemedMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
+    fileMenu->AddItem(new ThemedMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
+    menuBar->AddItem(new ThemedMenuItem(fileMenu));
+    // The full Edit menu (M2.4). Undo/Redo carry the stack's own names
+    // ("Undo Move Clip") and are disabled on an empty stack; the range
+    // operations act on the time range, falling back to the clip selection.
     BMenu* editMenu = new BMenu("Edit");
-    editMenu->AddItem(new BMenuItem("Undo", new BMessage(MSG_UNDO), 'Z'));
-    editMenu->AddItem(new BMenuItem("Redo", new BMessage(MSG_REDO), 'Z', B_SHIFT_KEY));
+    fUndoItem = new ThemedMenuItem("Undo", new BMessage(MSG_EDIT_UNDO), 'Z');
+    fRedoItem = new ThemedMenuItem("Redo", new BMessage(MSG_EDIT_REDO), 'Z',
+                                   B_SHIFT_KEY);
+    fUndoItem->SetEnabled(false);
+    fRedoItem->SetEnabled(false);
+    editMenu->AddItem(fUndoItem);
+    editMenu->AddItem(fRedoItem);
     editMenu->AddSeparatorItem();
-    editMenu->AddItem(new BMenuItem("Paste", new BMessage(MSG_PASTE), 'V'));
-    menuBar->AddItem(editMenu);
+    fCutItem = new ThemedMenuItem("Cut", new BMessage(MSG_EDIT_CUT), 'X');
+    fCopyItem = new ThemedMenuItem("Copy", new BMessage(MSG_EDIT_COPY), 'C');
+    fPasteItem = new ThemedMenuItem("Paste", new BMessage(MSG_EDIT_PASTE), 'V');
+    // No shortcut on the label: Del is handled by the timeline itself (a
+    // non-printable menu shortcut is not worth the portability risk), and the
+    // menu item is there to be seen and clicked.
+    fDeleteItem = new ThemedMenuItem("Delete", new BMessage(MSG_EDIT_DELETE));
+    fDeleteItem->SetEnabled(false);
+    fSelectAllItem = new ThemedMenuItem("Select All", new BMessage(MSG_EDIT_SELECT_ALL),
+                                        'A');
+    fDupItem = new ThemedMenuItem("Duplicate", new BMessage(MSG_EDIT_DUPLICATE), 'D');
+    fDupItem->SetEnabled(false);
+    editMenu->AddItem(fCutItem);
+    editMenu->AddItem(fCopyItem);
+    editMenu->AddItem(fPasteItem);
+    editMenu->AddItem(fDeleteItem);
+    editMenu->AddItem(fSelectAllItem);
+    editMenu->AddItem(fDupItem);
+    editMenu->AddSeparatorItem();
+    fSilenceItem = new ThemedMenuItem("Insert Silence",
+                                      new BMessage(MSG_EDIT_INSERT_SIL), 'I',
+                                      B_SHIFT_KEY);
+    fSilenceItem->SetEnabled(false);
+    editMenu->AddItem(fSilenceItem);
+    menuBar->AddItem(new ThemedMenuItem(editMenu));
     BMenu* trackMenu = new BMenu("Track");
-    trackMenu->AddItem(new BMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
-    trackMenu->AddItem(new BMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
-    trackMenu->AddItem(new BMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
-    menuBar->AddItem(trackMenu);
+    trackMenu->AddItem(new ThemedMenuItem("New Audio Track", new BMessage(MSG_NEW_AUDIO)));
+    trackMenu->AddItem(new ThemedMenuItem("New MIDI Track", new BMessage(MSG_NEW_MIDI)));
+    trackMenu->AddItem(new ThemedMenuItem("New Bus", new BMessage(MSG_NEW_BUS)));
+    trackMenu->AddSeparatorItem();
+    // Duplicate Track (M2.6): the whole track, clips and all, right below the
+    // source. Disabled until a track is selected (UpdateEditMenu keeps it).
+    fDupTrackItem = new ThemedMenuItem("Duplicate Track",
+                                       new BMessage(MSG_DUPLICATE_TRACK));
+    fDupTrackItem->SetEnabled(false);
+    trackMenu->AddItem(fDupTrackItem);
+    menuBar->AddItem(new ThemedMenuItem(trackMenu));
     BMenu* helpMenu = new BMenu("Help");
-    helpMenu->AddItem(new BMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
+    helpMenu->AddItem(new ThemedMenuItem("About Haiku DAW" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_ABOUT)));
-    menuBar->AddItem(helpMenu);
+    menuBar->AddItem(new ThemedMenuItem(helpMenu));
 
     BMenu* viewMenu = new BMenu("View");
-    viewMenu->AddItem(new BMenuItem("Mixer", new BMessage(MSG_MIXER)));
-    fMetItem = new BMenuItem("Metronome", new BMessage(MSG_METRONOME));
+    viewMenu->AddItem(new ThemedMenuItem("Mixer", new BMessage(MSG_MIXER)));
+    // The markers list (M2.7): a locations window of its own, single-instance
+    // like the mixer.
+    viewMenu->AddItem(new ThemedMenuItem("Markers", new BMessage(MSG_MARKERS),
+                                         'M'));
+    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
     viewMenu->AddItem(fMetItem);
-    viewMenu->AddItem(new BMenuItem("Master Effects" B_UTF8_ELLIPSIS,
+    viewMenu->AddItem(new ThemedMenuItem("Master Effects" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_MASTER_FX)));
     viewMenu->AddSeparatorItem();
-    fDimItem = new BMenuItem("Monitor: Dim", new BMessage(MSG_MON_DIM));
+    fDimItem = new ThemedMenuItem("Monitor: Dim", new BMessage(MSG_MON_DIM));
     viewMenu->AddItem(fDimItem);
-    fMonoItem = new BMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
+    fMonoItem = new ThemedMenuItem("Monitor: Mono", new BMessage(MSG_MON_MONO));
     viewMenu->AddItem(fMonoItem);
     viewMenu->AddSeparatorItem();
     // The panes (M1.4): the inspector toggles with I, the dock with J.
-    fInspectorItem = new BMenuItem("Inspector", new BMessage(MSG_TOGGLE_INSPECTOR), 'I');
+    fInspectorItem = new ThemedMenuItem("Inspector", new BMessage(MSG_TOGGLE_INSPECTOR), 'I');
     fInspectorItem->SetMarked(true);
     viewMenu->AddItem(fInspectorItem);
-    fDockItem = new BMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
+    fDockItem = new ThemedMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
     viewMenu->AddItem(fDockItem);
     viewMenu->AddSeparatorItem();
-    viewMenu->AddItem(new BMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
-    fFollowItem = new BMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
+    // The look (T1): the user's own colours and the stock Haiku controls, or
+    // the DAW's dark palette in the DAW's own windows. It moves into the
+    // Preferences window when M3.5 builds one.
+    fThemeItem = new ThemedMenuItem("Dark Mode", new BMessage(MSG_THEME_MODE));
+    fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
+    viewMenu->AddItem(fThemeItem);
+    viewMenu->AddSeparatorItem();
+    viewMenu->AddItem(new ThemedMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
+    fFollowItem = new ThemedMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
     fFollowItem->SetMarked(true);   // chase on by default
     viewMenu->AddItem(fFollowItem);
-    viewMenu->AddItem(new BMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
+    // The marker lane (M2.7): a flag strip between the ruler and the lanes.
+    fMarkerLaneItem = new ThemedMenuItem("Marker Lane",
+                                         new BMessage(MSG_MARKER_LANE));
+    viewMenu->AddItem(fMarkerLaneItem);
+    viewMenu->AddItem(new ThemedMenuItem("Keyboard Shortcuts" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_SHORTCUTS)));
-    viewMenu->AddItem(new BMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
+    viewMenu->AddItem(new ThemedMenuItem("Sample Browser" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_BROWSER)));
-    menuBar->AddItem(viewMenu);
+    menuBar->AddItem(new ThemedMenuItem(viewMenu));
 
     // Audio > Buffer Size (latency vs xrun; applies on the next Play).
     BMenu* audioMenu = new BMenu("Audio");
@@ -369,11 +440,11 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                       1000.0 * n / fProject->sampleRate);
         BMessage* m = new BMessage(MSG_BUFFER);
         m->AddInt32("frames", n);
-        BMenuItem* it = new BMenuItem(lbl, m);
+        BMenuItem* it = new ThemedMenuItem(lbl, m);
         if ((size_t)n == fTransportCtl.fBufferFrames) it->SetMarked(true);
         fBufMenu->AddItem(it);
     }
-    audioMenu->AddItem(fBufMenu);
+    audioMenu->AddItem(new ThemedMenuItem(fBufMenu));
     audioMenu->AddSeparatorItem();
     // Count-in: metronome bars before capture begins.
     fCountInMenu = new BMenu("Count-in");
@@ -385,14 +456,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         else        std::snprintf(lbl, sizeof(lbl), "%d bar%s", n, n > 1 ? "s" : "");
         BMessage* m = new BMessage(MSG_COUNTIN);
         m->AddInt32("bars", n);
-        BMenuItem* it = new BMenuItem(lbl, m);
+        BMenuItem* it = new ThemedMenuItem(lbl, m);
         if (n == fRecCtl.fCountInBars) it->SetMarked(true);
         fCountInMenu->AddItem(it);
     }
-    audioMenu->AddItem(fCountInMenu);
-    fMonInItem = new BMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
+    audioMenu->AddItem(new ThemedMenuItem(fCountInMenu));
+    fMonInItem = new ThemedMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
     audioMenu->AddItem(fMonInItem);
-    menuBar->AddItem(audioMenu);
+    menuBar->AddItem(new ThemedMenuItem(audioMenu));
 
     // --- Transport bar (below the menu) ---
     BRect barRect(0, 0, bounds.right, Themed(kTransportH));
@@ -406,8 +477,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fTimeView = new BStringView(BRect(Themed(218), Themed(6), Themed(354),
                                         Themed(kTransportH) - Themed(5)),
                                 "time", "1.1   0:00.000");
-    fTimeView->SetViewColor(ColLcd());
-    fTimeView->SetHighColor(ColLcdText());
     fTimeView->SetFont(&lcdFont);
     fTimeView->SetAlignment(B_ALIGN_CENTER);
     bar->AddChild(fTimeView);
@@ -417,8 +486,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fVolLbl = new BStringView(BRect(Themed(430), Themed(8), Themed(460),
                                     Themed(kTransportH) - Themed(6)),
                               "vollbl", "Vol");
-    fVolLbl->SetViewColor(ColChrome());
-    fVolLbl->SetHighColor(ColText());
     bar->AddChild(fVolLbl);
     fMaster = new BSlider(BRect(Themed(462), Themed(4), Themed(588),
                                 Themed(kTransportH) - Themed(4)),
@@ -426,24 +493,19 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
-    fMaster->SetViewColor(ColChrome());
-    fMaster->SetLowColor(ColChrome());
-    rgb_color fill = ColAccent();
-    fMaster->UseFillColor(true, &fill);
-    fMaster->SetBarColor(Rgb(20, 22, 26));
     bar->AddChild(fMaster);
 
-    // "BPM" label + tempo field (light field for legibility; affects grid/snap
-    // + metronome on the next Play).
+    // "BPM" label + tempo field (affects grid/snap + metronome on the next
+    // Play).
     fBpmLbl = new BStringView(BRect(Themed(602), Themed(8), Themed(636),
                                     Themed(kTransportH) - Themed(6)),
                                           "bpmlbl", "BPM");
-    fBpmLbl->SetViewColor(ColChrome());
-    fBpmLbl->SetHighColor(ColText());
     bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
-    fTempo = new BTextControl(BRect(Themed(638), Themed(6), Themed(704),
+    // A kit text field, so the well behind the digits is the theme's rather
+    // than a stock white box in the dark look (T1).
+    fTempo = new DawTextField(BRect(Themed(638), Themed(6), Themed(704),
                                     Themed(kTransportH) - Themed(6)),
                               "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
     fTempo->SetDivider(0.0f);
@@ -453,8 +515,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
                                       Themed(kTransportH) - Themed(6)),
                                 "loud", "M --  S --  TP --");
-    fLoudView->SetViewColor(ColChrome());
-    fLoudView->SetHighColor(ColText());
     {
         // A size down from the bar's labels: the readout has to hold three
         // signed figures in the room between the tempo field and the meter.
@@ -480,6 +540,19 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                    project, stack);
     fTimeline = new TimelineView(BRect(0, 0, 400, 100), project, stack);
     fTimeline->SetPeaks(peaks);
+    // Both panes can be made narrow (the timeline culls to its visible rect,
+    // the inspector stacks its rows), and SAYING so matters: a layout view
+    // without an explicit minimum reports its current frame as one, so the
+    // timeline's width became the window's floor -- the window could not be
+    // made narrower again once it had been wide, and on a small screen its
+    // right end (the dock's own Pop out and x) sat off the screen entirely.
+    fInspector->SetExplicitMinSize(BSize(Themed(120.0f), Themed(80.0f)));
+    // ...and the timeline's is the arrange tool strip (M2.3) plus a little: the
+    // strip is drawn inside the timeline, so a narrower pane would clip its own
+    // buttons. The height keeps the tool strip + ruler + one lane usable.
+    fTimeline->SetExplicitMinSize(
+        BSize(std::max(Themed(240.0f), ArrToolStripWidth() + Themed(8.0f)),
+              Themed(80.0f)));
     fPaneSplit->AddChild(fInspector, 0.0f);   // keeps its width...
     fPaneSplit->AddChild(fTimeline, 1.0f);    // ...the timeline takes the rest
     fPaneSplit->SetCollapsible(0, true);
@@ -490,11 +563,27 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // saying how to open one. No tab bar while there is only one thing to
     // show -- a lone unlabelled tab was all the old BTabView added.
     fDock = new BGroupView("dock", B_VERTICAL, 0.0f);
-    fDock->SetViewColor(ColBackground());
     {
         PaneHeader* head = new PaneHeader("dockhead");
+        // The page switch lives in the strip (UI_GUIDELINES §4: no tab bar for
+        // this) -- the pages are Editor, Samples and Plugins, and the title
+        // beside it names what the current one holds.
+        static const char* const kPages[] = { "Editor", "Samples", "Plugins" };
+        fDockSegments = new DawSegments("dockpages", kPages, 3,
+                                        new BMessage(MSG_DOCK_PAGE));
+        fDockSegments->SetSelected(fDockPage);
+        // Exactly as wide as its labels need: the strip's other controls (the
+        // title, Pop out, the x) come first in the layout's list of things that
+        // must fit, and a segmented control that stretched pushed them off the
+        // right edge entirely.
+        {
+            float sw = 0.0f, sh = 0.0f;
+            fDockSegments->GetPreferredSize(&sw, &sh);
+            fDockSegments->SetExplicitMinSize(BSize(sw, sh));
+            fDockSegments->SetExplicitMaxSize(BSize(sw, sh));
+        }
+        head->GetLayout()->AddView(fDockSegments);
         fDockTitle = new BStringView("edtitle", "Editor");
-        fDockTitle->SetHighColor(ColText());
         BFont bold(be_bold_font);
         bold.SetSize(Themed(11.5f));
         fDockTitle->SetFont(&bold);
@@ -509,20 +598,17 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         fDock->GetLayout()->AddView(head);
     }
     fEditorPane = new BGroupView(B_VERTICAL, 0.0f);
-    fEditorPane->SetViewColor(ColBackground());
     {
-        BStringView* hint = new BStringView("dockhint",
+        fDockHint = new BStringView("dockhint",
             "Double-click a MIDI region to edit it here");
-        hint->SetHighColor(ColTextDim());
-        hint->SetAlignment(B_ALIGN_CENTER);
-        hint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+        fDockHint->SetAlignment(B_ALIGN_CENTER);
+        fDockHint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
         // Glue either side centres it (a BStringView stretched to the body
         // draws its text at the bottom), and the group is what the roll swaps
         // with, so the glue goes when the hint does.
         BGroupView* empty = new BGroupView("dockempty", B_VERTICAL, 0.0f);
-        empty->SetViewColor(ColBackground());
         empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
-        empty->GroupLayout()->AddView(hint);
+        empty->GroupLayout()->AddView(fDockHint);
         empty->GroupLayout()->AddItem(BSpaceLayoutItem::CreateGlue());
         fDockEmpty = empty;
         fEditorPane->GroupLayout()->AddView(empty, 1.0f);
@@ -544,6 +630,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
         .Add(fRootSplit)
         .End();
 
+    // Every colour the bar and the dock keep is taken in one place, so a mode
+    // switch and the constructor cannot drift apart (T1).
+    ApplyTheme();
     // Restore persisted preferences + window layout (after the menus exist).
     LoadSettings();
     // A restored window frame resizes the bar before the user touches anything,
@@ -593,12 +682,24 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         // common cases this covers: nothing focused yet (a fresh window), or
         // the timeline itself after a click on it.
         BView* focus = CurrentFocus();
-        const bool held = focus != nullptr && focus != fTimeline;
         int32 mods = 0;
         message->FindInt32("modifiers", &mods);
         const char* bytes = nullptr;
-        const bool isTab = message->FindString("bytes", &bytes) == B_OK
-                        && bytes && bytes[0] == B_TAB;
+        const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
+                            && bytes != nullptr;
+        const bool isTab = haveBytes && bytes[0] == B_TAB;
+        // Space is the transport's WHATEVER control holds the focus, except a
+        // text field being typed into (the same rule the aux windows apply to
+        // their own spacebar passthrough). A focused BControl eats Space in the
+        // kit's own KeyDown -- the dock's page switch re-sent its page on every
+        // press and the transport never started: click a page, press Space,
+        // nothing happens at all (found by this suite once the dock's pages
+        // were driven for real).
+        const bool isSpace = haveBytes && bytes[0] == B_SPACE;
+        const bool textFocus = dynamic_cast<BTextControl*>(focus) != nullptr
+                            || dynamic_cast<BTextView*>(focus) != nullptr;
+        const bool held = focus != nullptr && focus != fTimeline
+                       && !(isSpace && !textFocus);
         if (!(mods & B_COMMAND_KEY) && !held && !isTab) {
             // Hand it straight to the timeline: a BMessage carries no
             // retarget verb (Haiku's BMessage has no SetTarget), and this is
@@ -618,6 +719,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fRecCtl.StopRecording();
             break;
         case MSG_REC:
+        case kMsgTransportRecord:   // the R key (M3.2), same as the Rec button
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
             if (fRecCtl.fRecMode) fRecCtl.StopRecording();
             else          fRecCtl.StartRecording();
@@ -628,7 +730,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgTrackSelected: {  // point the inspector at the clicked track
             int64 tid = 0;
             msg->FindInt64("track", &tid);
-            if (fInspector) fInspector->SetTrack((TrackId)tid);
+            SelectTrack((TrackId)tid);
             break;
         }
         case kMsgUiRefresh: {      // a track edit: keep the panes + mixer consistent
@@ -656,6 +758,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 m.AddFloat("mg", fProject->masterGain);
                 fMixerMsgr.SendMessage(&m);
             }
+            // ... and an open markers window, whose list is model data too. A
+            // marker edit posts this same message, so one funnel keeps the
+            // list honest (a list that misses an edit is stale content).
+            PushMarkers();
             break;
         }
         case kMsgCycleAuto:        // inspector Auto button -> cycle timeline mode
@@ -706,9 +812,22 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
             break;
         case MSG_METRONOME:
+        case kMsgClickToggle:   // the C key (M3.2), same as the menu item
             fTransportCtl.fMetronome = !fTransportCtl.fMetronome;
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
+            break;
+        case kMsgTransportLayout:   // the bar's width changed (see TransportBar)
+            LayoutTransportBar();
+            break;
+        case kMsgMeterClipReset:
+            // The master meter was clicked. Clear the latched flags where they
+            // live (the engine, or the recorder during a take); the fetch_and
+            // keeps a clip that happened since the last poll.
+            if (fTransportCtl.fEngine)
+                fTransportCtl.fEngine->ClearClipFlags(kMeterClipBoth);
+            if (fRecCtl.fRecorder)
+                fRecCtl.fRecorder->ClearClipFlags(kMeterClipBoth);
             break;
         case MSG_TOGGLE_INSPECTOR:
             SetInspectorShown(!fInspectorShown);
@@ -721,8 +840,43 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_POP_OUT_EDITOR:
-            PopOutEditor();
+            PopOutDockPage();
             break;
+        case B_COLORS_UPDATED:
+            // The user changed the Appearance while the app is running. Haiku
+            // sends this to the windows, so the main window is where the DAW
+            // follows it: new base colours, new tokens, every cached view
+            // colour re-taken — and only in System mode, which is the mode
+            // that is supposed to look like the user's system. Nothing is
+            // written back (T1).
+            if (ActiveThemeMode() == ThemeMode::System) {
+                ReadSystemBaseColors();
+                ApplyThemeToAllWindows();
+            }
+            break;
+
+        case MSG_DOCK_PAGE: {
+            // The segmented control names the segment it selected as int32
+            // "index" (DawSegments::Invoke). A message without it -- anything
+            // that is not that control -- leaves the page alone rather than
+            // silently meaning Editor (T2 review).
+            int32 index = 0;
+            if (msg->FindInt32("index", &index) != B_OK) break;
+            SetDockPage(index);
+            break;
+        }
+        case MSG_THEME_STOCK:
+            // A stock window (a file panel) finished building its views after
+            // Show() returned: one more pass over them.
+            ThemeStockWindows();
+            break;
+
+        case MSG_THEME_MODE:
+            // View > Dark Mode: a preference, applied live and saved.
+            SetThemeMode(ActiveThemeMode() == ThemeMode::Dark ? ThemeMode::System
+                                                              : ThemeMode::Dark);
+            break;
+
         case MSG_TOGGLE_DOCK:
             SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
             break;
@@ -748,6 +902,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // settled before a destination is asked for.
             int32 v = 0; bool b = false; float f = 0.0f;
             if (msg->FindInt32("bits", &v) == B_OK) fExportChoices.bitDepth = v;
+            if (msg->FindInt32("container", &v) == B_OK
+                && AudioFileFormatCanWrite((AudioFileFormat)v))
+                fExportChoices.container = (AudioFileFormat)v;
+            if (msg->FindFloat("vquality", &f) == B_OK)
+                fExportChoices.vorbisQuality = f;
             if (msg->FindBool("dither", &b) == B_OK) fExportChoices.dither = b;
             if (msg->FindInt32("rate", &v) == B_OK) fExportChoices.sampleRate = v;
             if (msg->FindBool("norm", &b) == B_OK) fExportChoices.normalize = b;
@@ -771,7 +930,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fExportPanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                                   new BMessage(MSG_EXPORT_REF));
                 }
-                ShowPanel(fExportPanel, "Export Mix", ProjectDocument::DisplayName(fDoc.Path()) + ".wav");
+                // The prefilled name carries the container's own extension, so
+                // a FLAC bounce is not offered as "mix.wav".
+                ShowPanel(fExportPanel, "Export Mix",
+                          ProjectDocument::DisplayName(fDoc.Path()) + "."
+                          + AudioFileFormatExtension(fExportChoices.container));
             }
             break;
         }
@@ -851,12 +1014,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             fTimeline->Invalidate();
             break;
         }
-        case MSG_MASTER_FX: {
-            BRect wr(120, 120, 600, 740);
-            (new EffectsWindow(wr, fProject->masterFx, kMasterFxTarget,
-                               BMessenger(this)))->Show();
+        case MSG_MASTER_FX:
+            // One window (T2): the master chain, whole.
+            ShowFxWindow(kMasterFxTarget, -1);
             break;
-        }
         case kMsgFxWinOpen: {   // an effects editor opened: meter its track
             int64 tid = 0; BMessenger m;
             msg->FindInt64("track", &tid);
@@ -915,6 +1076,35 @@ void MainWindow::MessageReceived(BMessage* msg) {
                                               BMessenger(this));
             fMixerMsgr = BMessenger(mx);
             mx->Show();
+            break;
+        }
+        case MSG_MARKERS:      // View > Markers (M2.7)
+            ShowMarkersWindow();
+            break;
+        case MSG_MARKER_LANE:  // View > Marker Lane: a view preference
+            fTimeline->SetMarkerLane(!fTimeline->MarkerLaneOn());
+            if (fMarkerLaneItem)
+                fMarkerLaneItem->SetMarked(fTimeline->MarkerLaneOn());
+            SaveSettings();    // it survives the quit, like the panes
+            break;
+        case MSG_DUPLICATE_TRACK:   // Track > Duplicate Track (M2.6)
+            fTimeline->DuplicateSelectedTrack();
+            break;
+        case kMsgMarkerJump: {      // the markers window: locate
+            int64 fr = 0;
+            msg->FindInt64("frame", &fr);
+            fTimeline->SeekTo((Frame)fr);
+            break;
+        }
+        case kMsgMarkerAdd:         // the markers window: add at the playhead
+            fTimeline->AddMarkerAt(fProject->transport.playhead);
+            break;
+        case kMsgMarkerDelete: {    // the markers window: remove one
+            int64 fr = 0;
+            const char* name = nullptr;
+            msg->FindInt64("frame", &fr);
+            if (msg->FindString("name", &name) == B_OK && name)
+                fTimeline->RemoveMarkerAt((Frame)fr, name);
             break;
         }
         case kMsgMixArm: {
@@ -1011,8 +1201,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // there beats a second copy of the same handler.
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (!fInspector || !fProject->FindTrack((TrackId)tid)) break;
-            (new PluginBrowser(BRect(240, 190, 700, 590), (TrackId)tid,
-                               BMessenger(fInspector), BMessenger(this)))->Show();
+            ShowDockBrowser(kDockPlugins, (TrackId)tid);
             break;
         }
         case kMsgMixSends: {
@@ -1035,8 +1224,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgMixSelect: {
+            // A strip click in the mixer selects the track: the inspector AND
+            // the dock's plugin page follow it, through the same call the
+            // timeline's own selection uses (T2 review: the page stayed on the
+            // old track, so "add to <name>" and the inspector disagreed).
             int64 tid = 0; msg->FindInt64("track", &tid);
-            if (fInspector) fInspector->SetTrack((TrackId)tid);
+            SelectTrack((TrackId)tid);
             break;
         }
         case kMsgApplyMaster:
@@ -1135,6 +1328,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fStack->Execute(std::make_unique<RenameMarkerCommand>(
                         (Frame)fr, name), *fProject);
                 fTimeline->Invalidate();
+                PostMessage(kMsgUiRefresh);   // an open markers window follows
             }
             break;
         }
@@ -1288,6 +1482,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             UpdatePulse();
             break;
         }
+        case kMsgShowFx: {
+            // A view asking for the chain editor (the inspector's slot list):
+            // the window owns the single effects window, so the view asks.
+            int64 tid = 0; int32 fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("focus", &fx);
+            ShowFxWindow((TrackId)tid, fx);
+            break;
+        }
         case kMsgOpenFxEditor: {
             // An editor view asking for the plugin's own GUI. It posts rather
             // than opening the window itself because the view's copy of the
@@ -1309,8 +1512,31 @@ void MainWindow::MessageReceived(BMessage* msg) {
             Track* t = fProject->FindTrack((TrackId)tid);
             if (!t) break;
             if (fx >= (int32)t->fx.size()) fx = -1;   // stale index: whole chain
-            (new EffectsWindow(BRect(200, 150, 680, 770), t->fx,
-                               (TrackId)tid, BMessenger(this), fx))->Show();
+            ShowFxWindow((TrackId)tid, fx);
+            break;
+        }
+        case kMsgFxPresetPrompt: {
+            // An insert panel asking for a preset name: the prompt for it is
+            // opened here (windows belong to this thread) and answers with
+            // kMsgSaveFxPreset below.
+            int64 tid = 0, fx = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("aux", &fx);
+            BMessenger self(this);
+            (new RenameWindow(BRect(120, 120, 420, 164), (TrackId)tid, "",
+                              self, kMsgSaveFxPreset, fx, "Save Preset"))->Show();
+            break;
+        }
+        case kMsgSaveFxPreset: {
+            // An insert panel's "Save Preset..." prompt answered. The prompt
+            // (RenameWindow) knows only the track and the insert index it was
+            // opened for; the model and the live instance are here.
+            int64 tid = 0, fx = -1;
+            msg->FindInt64("track", &tid);
+            msg->FindInt64("aux", &fx);   // RenameWindow echoes the insert index
+            BString name;
+            msg->FindString("name", &name);
+            SaveFxPreset((TrackId)tid, (int)fx, name.String());
             break;
         }
         case kMsgFxLive: {   // live knob-drag preview into the running engine
@@ -1432,7 +1658,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                           "for Haiku:\nmultitrack audio and MIDI, mixing, "
                           "automation,\nLV2 plugins, and offline export.",
                           DAW_VERSION_STRING);
-            BAlert* a = new BAlert("About Haiku DAW", text, "OK", nullptr,
+            BAlert* a = new ThemedAlertWindow("About Haiku DAW", text, "OK", nullptr,
                                    nullptr, B_WIDTH_AS_USUAL, B_INFO_ALERT);
             a->Go(nullptr);   // async, like the other alerts
             break;
@@ -1454,7 +1680,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             BPath p;
             BEntry e;
             if (fDoc.RecoveryPath(p) && (e.SetTo(p.Path()), e.Exists())) {
-                BAlert* a = new BAlert("Recover",
+                BAlert* a = new ThemedAlertWindow("Recover",
                     "Unsaved work from a previous session was found. Recover it?",
                     "Discard", "Recover");
                 if (a->Go() == 1) LoadFrom(p.Path(), /*asRecovery*/ true);
@@ -1465,13 +1691,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_TITLE:
             UpdateTitle();   // cheap; SetTitle only fires on an actual change
             break;
-        case MSG_BROWSER: {
-            BRect wr = BWindow::Frame();
-            wr.OffsetBy(40, 40);
-            wr.right = wr.left + 420; wr.bottom = wr.top + 380;
-            (new SampleBrowser(wr, BMessenger(this)))->Show();
+        case MSG_BROWSER:
+            // The docked page is the browser's home now (T2); Pop out in the
+            // dock's strip gives the window back.
+            ShowDockBrowser(kDockSamples);
             break;
-        }
         case kMsgBrowserImport: {
             const char* path = nullptr;
             if (msg->FindString("path", &path) == B_OK && path) {
@@ -1514,19 +1738,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_SHORTCUTS: {
-            BAlert* a = new BAlert("Keyboard Shortcuts",
-                "File:  Cmd-O open   Cmd-S save   Cmd-Q quit\n"
-                "Edit:  Cmd-Z undo   Cmd-Shift-Z redo   Cmd-V paste\n"
-                "       Ctrl-D duplicate   Del delete selection   Esc clear\n"
-                "View:  + / - zoom   F fit   arrows pan   wheel / PgUp-PgDn scroll   Home start\n"
-                "Clips: drag move   right edge resize   top corners fade\n"
-                "       Ctrl-drag gain   Shift free-snap   right-click menu\n"
-                "Select: click / Shift-click / drag rubber-band\n"
-                "Ruler: click seek   drag loop   Ctrl-drag punch   right-click tempo/meter\n"
-                "Track header: M mute  S solo  R arm  route/FX/sends/auto/inst boxes",
-                "OK");
-            a->SetShortcut(0, B_ESCAPE);
-            a->Go(NULL);   // async; non-blocking
+            // One window, and it shows what the one key table says (M3.2): the
+            // hand-written list that used to live here is gone, so the help
+            // cannot describe a binding the behaviour does not have.
+            if (fKeysMsgr.IsValid()) {
+                fKeysMsgr.SendMessage(kMsgShortcutsActivate);
+                break;
+            }
+            ShortcutsWindow* w = new ShortcutsWindow();
+            fKeysMsgr = BMessenger(w);
+            w->Show();
             break;
         }
         case MSG_MASTER:
@@ -1541,7 +1762,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         // instrument, an fx chain, a clip, the tempo. The forward paths reload
         // the engine for those; without the same call here the model and the
         // audio disagree until the next manual stop/play.
-        case MSG_UNDO:
+        case MSG_EDIT_UNDO:
             if (fStack->CanUndo()) {
                 fStack->Undo(*fProject);
                 // An undo can move or remove the insert an open native editor is
@@ -1554,10 +1775,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // chain under an open panel's copy.
                 PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
+                UpdateEditMenu();
                 UpdateTitle();
             }
             break;
-        case MSG_REDO:
+        case MSG_EDIT_REDO:
             if (fStack->CanRedo()) {
                 fStack->Redo(*fProject);
                 ValidateFxWatch();
@@ -1565,11 +1787,38 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 PublishFxParamsNow();   // ... and only then republish
                 PushChainToFxWindow(fFxTrack);
                 fTimeline->Invalidate();
+                UpdateEditMenu();
                 UpdateTitle();
             }
             break;
-        case MSG_PASTE:
+        // The Edit menu (M2.4): the timeline owns the range and the clipboard.
+        case MSG_EDIT_PASTE:
             fTimeline->PasteAtPlayhead();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_CUT:
+            fTimeline->RangeCut();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_COPY:
+            fTimeline->RangeCopy();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_DELETE:
+            fTimeline->RangeDelete();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_SELECT_ALL:
+            fTimeline->SelectAllClips();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_DUPLICATE:
+            fTimeline->DuplicateSelection();
+            UpdateEditMenu();
+            break;
+        case MSG_EDIT_INSERT_SIL:
+            fTimeline->RangeInsertSilence();
+            UpdateEditMenu();
             break;
         case MSG_BUFFER: {
             int32 frames = 512;
@@ -1716,7 +1965,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
                 fTransportCtl.fEngine->UpdateMix(*fProject);
-                fMeter->SetLevels(fTransportCtl.fEngine->PeakL(), fTransportCtl.fEngine->PeakR());
+                PushMeter(false);
                 PushTrackPeaks();
                 break;
             }
@@ -1788,8 +2037,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                             fTimeline->SetLiveMidiNotes(std::move(live));
                         }
                     }
-                    fMeter->SetLevels(capturing ? fRecCtl.fRecorder->PeakL() : fTransportCtl.fEngine->PeakL(),
-                                      capturing ? fRecCtl.fRecorder->PeakR() : fTransportCtl.fEngine->PeakR());
+                    PushMeter(capturing);
                     PushTrackPeaks();
                     PushFxMeters();
                     break;
@@ -1805,7 +2053,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTimeline->SetPlayhead(ph);
                 PushRollPlayhead(ph);
                 UpdateTimeReadout(ph);
-                fMeter->SetLevels(fTransportCtl.fEngine->PeakL(), fTransportCtl.fEngine->PeakR());
+                PushMeter(false);
                 UpdateLoudnessReadout(fTransportCtl.fEngine->LufsMomentary(),
                                       fTransportCtl.fEngine->LufsShort(),
                                       fTransportCtl.fEngine->TruePeakDb());
@@ -1839,7 +2087,14 @@ void MainWindow::MessageReceived(BMessage* msg) {
 // readout and the meter are never hidden.
 void MainWindow::LayoutTransportBar() {
     if (!fTransport) return;
-    const float W = fTransport->Bounds().right + 1.0f;
+    float W = fTransport->Bounds().right + 1.0f;
+    // The bar can be laid out wider than the window: the pane layout's own
+    // minimum is the sum of its children's current sizes (a plain BView
+    // reports exactly that), so fPaneSplit can demand more width than there is
+    // and the group hands it to every child. Everything this method pins to
+    // the bar's right edge would then sit outside the window -- the master
+    // meter was invisible for exactly that reason (M3.3). Clamp to the window.
+    if (W > Bounds().Width()) W = Bounds().Width();
 
     // Design offsets, from the original 1000-wide layout: meter 130 from the
     // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
@@ -1850,7 +2105,14 @@ void MainWindow::LayoutTransportBar() {
     const float kSliderR = Themed(588.0f);   // right edge of the master slider
     const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
 
-    if (fMeter) fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+    if (fMeter) {
+        // Placed AND sized: the meter is built before the theme scale is known
+        // on a HiDPI system (the tests override the scale after the window
+        // exists), so a pin that only moved it would leave it at its design
+        // size in a 150% bar.
+        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
+        fMeter->ResizeTo(kMeterW, Themed(26.0f));
+    }
 
     const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
 
@@ -1919,6 +2181,139 @@ void MainWindow::SetDockShown(bool shown) {
     if (fDockItem != nullptr) fDockItem->SetMarked(shown);
 }
 
+// Show the effects window on a track's chain (T2, single instance).
+//
+// The window survives being pointed at a different chain: it is told the new
+// chain, the track and the focus slot, shows itself and activates. Creating a
+// second one is what happened before -- four call sites, four windows, and no
+// way to tell which chain was in which.
+void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
+    const std::vector<EffectDesc>* chain = nullptr;
+    std::string trackName;
+    if (track == kMasterFxTarget) {
+        chain = &fProject->masterFx;
+        trackName = "Master";
+    } else if (Track* t = fProject->FindTrack(track)) {
+        chain = &t->fx;
+        trackName = t->name;
+    } else {
+        return;
+    }
+
+    const std::string title = EffectsWindow::WindowTitleFor(*chain, focusSlot,
+                                                            trackName.c_str());
+    if (fFxMsgr.IsValid()) {
+        BMessage retarget(kMsgFxRetarget);
+        retarget.AddInt64("track", (int64)track);
+        retarget.AddInt32("focus", focusSlot);
+        retarget.AddString("title", title.c_str());
+        EncodeFxChain(retarget, *chain);
+        // A window that closed between the check and here answers with an
+        // error, and the fall-through opens a fresh one.
+        if (fFxMsgr.SendMessage(&retarget) == B_OK)
+            return;
+        fFxMsgr = BMessenger();
+        fFxTrack = kInvalidTrackId;
+    }
+
+    BRect wr(200, 150, 680, 770);
+    (new EffectsWindow(wr, *chain, track, BMessenger(this), focusSlot,
+                       trackName.c_str()))->Show();
+}
+
+// The inspector's track, and with it the chain the dock's plugin page adds to
+// (T2). Both follow the same selection through this one call: the two used to
+// be updated separately, so the mixer's strip click moved the inspector but
+// left the page on the old track, and a new project left it on a track id that
+// belonged to the old one (T2 review).
+void MainWindow::SelectTrack(TrackId tid) {
+    if (fInspector) fInspector->SetTrack(tid);
+    fSelTrack = tid;
+    // Re-point (and re-name) the plugin page through the same code the page
+    // switch uses, so the two cannot disagree. Deliberately not a SHOW: the
+    // page follows the selection even while the dock is hidden -- switching to
+    // the page would be re-opening a dock the user just closed (T2 review).
+    if (fDockPage == kDockPlugins && fDockPlugins != nullptr)
+        SetDockPage(kDockPlugins);
+}
+
+// Show one of the dock's pages (T2). The body holds exactly one view: leaving
+// the old one in place would keep its size (the same lesson as the split
+// items), and a page that is not showing must not be metering or querying.
+//
+// Only the BODY: the dock itself is not shown here. A page can be (re)pointed
+// while the dock is hidden, and a call that also showed the dock would reopen
+// one the user closed every time the track selection moved (T2 review). The
+// callers that mean "show me this page" say so themselves.
+void MainWindow::SetDockPage(int page) {
+    if (page < kDockEditor || page > kDockPlugins) return;
+    fDockPage = page;
+
+    // Every page leaves the body first; each branch below adds its own back.
+    if (fDockRoll != nullptr)    fDockRoll->RemoveSelf();
+    if (fDockEmpty != nullptr)   fDockEmpty->RemoveSelf();
+    if (fDockSamples != nullptr) fDockSamples->RemoveSelf();
+    if (fDockPlugins != nullptr) fDockPlugins->RemoveSelf();
+
+    switch (page) {
+        case kDockSamples:
+            if (fDockSamples == nullptr)
+                fDockSamples = new SampleBrowserView(BMessenger(this));
+            fEditorPane->GroupLayout()->AddView(fDockSamples, 1.0f);
+            fDockTitle->SetText("Samples");
+            fDockPop->SetEnabled(true);     // into its own window
+            break;
+        case kDockPlugins:
+            if (fDockPlugins == nullptr)
+                fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
+            else
+                fDockPlugins->SetTrack(fSelTrack);
+            fEditorPane->GroupLayout()->AddView(fDockPlugins, 1.0f);
+            // Name the chain a pick will land in: the page adds to whichever
+            // track the inspector is pointed at, and that is not otherwise
+            // visible from the dock.
+            {
+                Track* t = fProject->FindTrack(fSelTrack);
+                BString title("Plugins \xE2\x80\x94 add to ");
+                title << (t != nullptr ? t->name.c_str() : "no track selected");
+                fDockTitle->SetText(title.String());
+            }
+            fDockPop->SetEnabled(true);
+            break;
+        default:
+            if (fDockRoll != nullptr) {
+                fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
+                fDockPop->SetEnabled(true);
+            } else {
+                fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
+                fDockPop->SetEnabled(false);
+            }
+            // Restore the title the editor page had before the switch.
+            if (fDockRoll != nullptr) {
+                Track* t = fProject->FindTrack(fDockTrack);
+                BString title("Piano Roll \xE2\x80\x94 ");
+                title << (t != nullptr ? t->name.c_str() : "region");
+                fDockTitle->SetText(title.String());
+            } else {
+                fDockTitle->SetText("Editor");
+            }
+            break;
+    }
+    if (fDockSegments != nullptr) fDockSegments->SetSelected(page);
+}
+
+// A browser page, asked for by name (View > Sample Browser, the mixer strip's
+// Add Effect): show the dock on it, pointed at the chain the caller meant.
+// Which chain is the page's business: SetDockPage creates the plugin view with
+// fSelTrack and re-points one that exists, so naming it here as well would be
+// the same retarget twice -- three places setting the page and the track is
+// how they drift (T2 review).
+void MainWindow::ShowDockBrowser(int page, TrackId track) {
+    if (page == kDockPlugins && track != kInvalidTrackId) fSelTrack = track;
+    SetDockPage(page);
+    SetDockShown(true);
+}
+
 // Open the MIDI editor in the docked bottom pane (M1.4). The pane is a plain
 // group: replacing its second item is all "open another region" takes, and the
 // old view goes away with it.
@@ -1928,7 +2323,7 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     const MidiClip* c = t->FindMidiClip(clip);
     if (c == nullptr) return;
 
-    ClearDockedEditor();
+    ClearDockedEditor();   // the previous roll goes
     // The roll fills the pane below the header row; the split gives it its
     // real size, so the frame here is only a hint.
     fDockRoll = new PianoRollView(BRect(0, 0, 600, Themed(200.0f)), track, clip,
@@ -1937,18 +2332,43 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
                                   fProject->sampleRate,
                                   fProject->transport.playhead,
                                   BMessenger(this));
-    fDockEmpty->RemoveSelf();
-    fEditorPane->GroupLayout()->AddView(fDockRoll, 1.0f);
     fDockTrack = track;
     fDockClip  = clip;
-    BString title("Piano Roll \xE2\x80\x94 ");   // em dash
-    title << t->name.c_str();
-    fDockTitle->SetText(title.String());
-    fDockPop->SetEnabled(true);
-
+    // Through the page switch, which takes the browsed page out of the body
+    // first: adding the roll here while Samples or Plugins was showing left
+    // TWO bodies (they split the pane) with the strip still naming the browser
+    // (T2 review).
+    SetDockPage(kDockEditor);
     SetDockShown(true);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
+}
+
+// Pop out: the page that is showing becomes its own window, and the dock goes
+// back to the editor page (its content stays alive, so switching back is free).
+void MainWindow::PopOutDockPage() {
+    if (fDockPage == kDockSamples) {
+        BRect wr = BWindow::Frame();
+        wr.OffsetBy(40, 40);
+        wr.right = wr.left + 420; wr.bottom = wr.top + 380;
+        (new SampleBrowser(wr, BMessenger(this)))->Show();
+        SetDockPage(kDockEditor);
+        SetDockShown(false);
+        return;
+    }
+    if (fDockPage == kDockPlugins) {
+        BRect wr = BWindow::Frame();
+        wr.OffsetBy(60, 60);
+        wr.right = wr.left + 460; wr.bottom = wr.top + 400;
+        // The window's choice still lands in the inspector, exactly as the
+        // docked page's does: one handler for "turn a pick into a command".
+        (new PluginBrowser(wr, fSelTrack, BMessenger(fInspector),
+                           BMessenger(this)))->Show();
+        SetDockPage(kDockEditor);
+        SetDockShown(false);
+        return;
+    }
+    PopOutEditor();
 }
 
 // The docked editor becomes its own window. The window is the same PianoRoll
@@ -1988,10 +2408,16 @@ void MainWindow::ClearDockedEditor() {
     }
     fDockTrack = kInvalidTrackId;
     fDockClip  = kInvalidClipId;
-    if (fDockEmpty->Parent() == nullptr)
-        fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
-    fDockTitle->SetText("Editor");
-    fDockPop->SetEnabled(false);
+    // The hint belongs to the editor page: emptying the roll while the SAMPLES
+    // page is showing must not put the hint on top of it.
+    if (fDockPage == kDockEditor) {
+        if (fDockSamples != nullptr) fDockSamples->RemoveSelf();
+        if (fDockPlugins != nullptr) fDockPlugins->RemoveSelf();
+        if (fDockEmpty->Parent() == nullptr)
+            fEditorPane->GroupLayout()->AddView(fDockEmpty, 1.0f);
+        fDockTitle->SetText("Editor");
+        fDockPop->SetEnabled(false);
+    }
 }
 
 void MainWindow::FrameResized(float newWidth, float newHeight) {
@@ -2173,6 +2599,13 @@ void MainWindow::ValidateFxWatch() {
 // milliseconds of UI stall (the editors answer from their own looper and the
 // timeout is short).
 void MainWindow::FlushFxEditors() {
+    // The running engine first: a plugin's own state lives in the instance the
+    // audio thread is driving, and this is the one point every save, render and
+    // autosave passes through. It goes in BEFORE the editors below, which
+    // overwrite it for the inserts they are actually showing — the editor is
+    // where the user's patch edits happen, so it wins where both exist.
+    if (fTransportCtl.fEngine) fTransportCtl.fEngine->CaptureFxStates(*fProject);
+
     for (size_t i = fFxWatches.size(); i > 0; --i) {
         const FxEntry& w = fFxWatches[i - 1];
         if (!w.editor || !w.editor->Alive()) continue;
@@ -2185,6 +2618,29 @@ void MainWindow::FlushFxEditors() {
         // than lose the last gesture.
         if (static_cast<EditorHandle*>(w.editor.get())->msgr.SendMessage(
                 &flush, &reply, 200000, 200000) != B_OK) continue;
+
+        // The editor's own state, if it has one. Deliberately NOT a command:
+        // this is the same kind of derived session data as the playhead — it is
+        // the plugin's patch, captured from the object that holds it, and it has
+        // no visible representation for a user to undo. Applied only to the
+        // insert the editor is still showing: the URI check is the same one
+        // kMsgFxParamCommit uses, and for the same reason (the commit is
+        // asynchronous, so the insert at that index may be another plugin by
+        // now — or another plugin may have been dropped in after it).
+        bool tookState = false;
+        BString state;
+        if (reply.FindString("state", &state) == B_OK && state.Length() > 0) {
+            const bool master = (w.track == kMasterFxTarget);
+            Track* t = master ? nullptr : fProject->FindTrack(w.track);
+            std::vector<EffectDesc>* chain =
+                master ? &fProject->masterFx : (t ? &t->fx : nullptr);
+            if (chain && w.fx >= 0 && w.fx < (int32)chain->size() &&
+                (*chain)[(size_t)w.fx].pluginName == w.uri) {
+                (*chain)[(size_t)w.fx].state = state.String();
+                tookState = true;
+            }
+        }
+
         std::vector<SetFxParamCommand::SlotValue> vals;
         for (int32 k = 0; ; k++) {
             int32 slot = 0;
@@ -2193,14 +2649,15 @@ void MainWindow::FlushFxEditors() {
             if (reply.FindFloat("val", k, &v) != B_OK) break;
             vals.push_back({ slot, v });
         }
-        if (vals.empty()) continue;
         const bool master = (w.track == kMasterFxTarget);
-        if (fStack->Execute(std::make_unique<SetFxParamCommand>(
-                w.track, master, w.fx, std::move(vals)), *fProject)) {
-            // A flush happens before a save/render; the panel's copy is stale
-            // from this moment on (same rule as the commit path).
-            PushChainToFxWindow(w.track);
-        }
+        const bool applied = !vals.empty() &&
+            fStack->Execute(std::make_unique<SetFxParamCommand>(
+                w.track, master, w.fx, std::move(vals)), *fProject);
+        // A flush happens before a save/render; the panel's copy is stale from
+        // this moment on (same rule as the commit path) — for the captured state
+        // as much as for the values: left alone, its next knob move would commit
+        // the chain from before this capture and drop the patch again.
+        if (applied || tookState) PushChainToFxWindow(w.track);
     }
 
     // ...and the GENERIC panel, which this loop does not reach: it folds wheel
@@ -2229,6 +2686,39 @@ void MainWindow::FlushFxEditors() {
             }
         }
     }
+}
+
+// The panel's "Save Preset...": the insert's current patch, named and written
+// to the preset store. The patch is captured first (the same flush a save
+// does), because it lives in the live instance — a preset saved from the model
+// alone would be the last project save's patch, not the one playing.
+void MainWindow::SaveFxPreset(TrackId tid, int fx, const char* name) {
+#ifdef DAW_HAVE_LV2
+    if (!name || !name[0]) return;
+    const bool master = (tid == kMasterFxTarget);
+    if (!master && !fProject->FindTrack(tid)) return;
+
+    // Pull the state into the model the way SaveTo does. This rewrites the
+    // chain vector the pointers below would come from, so they are taken after.
+    FlushFxEditors();
+
+    Track* t = master ? nullptr : fProject->FindTrack(tid);
+    std::vector<EffectDesc>* chain =
+        master ? &fProject->masterFx : (t ? &t->fx : nullptr);
+    if (!chain || fx < 0 || fx >= (int32)chain->size()) return;
+    const EffectDesc& d = (*chain)[(size_t)fx];
+    if (d.type != EffectType::Lv2 || d.pluginName.empty()) {
+        ReportError("Save Preset",
+                    "Presets are only supported for LV2 plugins.");
+        return;
+    }
+    if (!Lv2Host::Instance().SavePreset(d.pluginName, name, d.state, d.params))
+        ReportError("Save Preset",
+                    std::string("Could not write the preset \"") + name +
+                    "\".\n\nCheck that the settings folder is writable.");
+#else
+    (void)tid; (void)fx; (void)name;
+#endif
 }
 
 // Close every native editor and forget every watch: their insert addresses
@@ -2320,7 +2810,7 @@ void MainWindow::PrimeSoundfonts() {
         "Some instruments could not be loaded. Those tracks will play the "
         "built-in synth voice until the files are available again."
         + missing;
-    BAlert* a = new BAlert("Soundfonts", text.c_str(), "OK", nullptr, nullptr,
+    BAlert* a = new ThemedAlertWindow("Soundfonts", text.c_str(), "OK", nullptr, nullptr,
                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
     a->Go(nullptr);   // async: don't block the load
@@ -2374,7 +2864,10 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
 void MainWindow::ShowReplacedProject(Frame playhead) {
     fRecCtl.fRecTracks.clear();
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
-    if (fInspector) fInspector->SetTrack(kInvalidTrackId);
+    // The inspector AND the dock's plugin page (which adds to the track the
+    // inspector shows): a track id from the project that just went away means
+    // nothing here, and the new project may reuse it (T2 review).
+    SelectTrack(kInvalidTrackId);
     if (fDockRoll != nullptr) ClearDockedEditor();
     fTimeline->SetProject(fProject);   // same object, new content
     fTimeline->SetPlayhead(playhead);
@@ -2384,18 +2877,62 @@ void MainWindow::ShowReplacedProject(Frame playhead) {
 }
 
 void MainWindow::UpdateTitle() {
+    // The same 2 Hz poll keeps the Edit menu honest: the timeline executes
+    // commands straight from a gesture, with no message to this window, so
+    // "Undo Move Clip" and the range entries' enabled state would otherwise go
+    // stale until the next undo. Before the early return below -- the title is
+    // usually unchanged, which must not skip the menu.
+    UpdateEditMenu();
     const std::string title = fDoc.Title();
     if (title == fTitleShown) return;   // the poll runs often; only set on change
     fTitleShown = title;
     SetTitle(title.c_str());
 }
 
+// The Edit menu's labels and enabled states (M2.4). Undo/Redo read the stack's
+// own names -- "Undo Move Clip", "Redo Split at Playhead" -- so the menu says
+// what the shortcut will do rather than that something will happen. The range
+// entries dim when there is nothing to act on; the timeline's edits reach the
+// stack without a message to this window, which is why the 2 Hz title poll
+// calls this too.
+void MainWindow::UpdateEditMenu() {
+    if (!fUndoItem) return;   // not built yet (early startup)
+    const std::string u = fStack->UndoName();
+    const std::string r = fStack->RedoName();
+    const std::string ul = u.empty() ? std::string("Undo") : "Undo " + u;
+    const std::string rl = r.empty() ? std::string("Redo") : "Redo " + r;
+    if (fUndoItem->Label() == nullptr || ul != fUndoItem->Label()) {
+        fUndoItem->SetLabel(ul.c_str());
+        fUndoItem->SetEnabled(!u.empty());
+    }
+    if (fRedoItem->Label() == nullptr || rl != fRedoItem->Label()) {
+        fRedoItem->SetLabel(rl.c_str());
+        fRedoItem->SetEnabled(!r.empty());
+    }
+    const bool hasSel = fTimeline && fTimeline->SelectionCount() > 0;
+    const bool hasRange = fTimeline && fTimeline->HasTimeRange();
+    const bool hasClipboard = fTimeline && fTimeline->ClipboardCount() > 0;
+    fCutItem->SetEnabled(hasSel || hasRange);
+    fCopyItem->SetEnabled(hasSel || hasRange);
+    fDeleteItem->SetEnabled(hasSel || hasRange);
+    fDupItem->SetEnabled(hasSel || hasRange);
+    fPasteItem->SetEnabled(hasClipboard);
+    fSilenceItem->SetEnabled(hasRange);
+    // Duplicate Track needs a selected track to duplicate (M2.6). The menu is
+    // refreshed on the 2 Hz title poll as well as after edits, so a selection
+    // made by clicking a lane in the timeline enables it.
+    if (fDupTrackItem != nullptr)
+        fDupTrackItem->SetEnabled(fTimeline != nullptr
+                                  && fTimeline->SelectedTrack()
+                                         != kInvalidTrackId);
+}
+
 void MainWindow::ReportError(const char* title, const std::string& detail) {
     // Asynchronous (like the About box): a report must never block the looper,
     // and nothing here decides anything -- it is only ever a message. M1 gives
     // it the themed look; the stock alert is the honest placeholder.
-    BAlert* a = new BAlert(title, detail.c_str(), "OK", nullptr, nullptr,
-                           B_WIDTH_AS_USUAL, B_STOP_ALERT);
+    BAlert* a = new ThemedAlertWindow(title, detail.c_str(), "OK", nullptr,
+                                      nullptr, B_WIDTH_AS_USUAL, B_STOP_ALERT);
     a->SetShortcut(0, B_ESCAPE);
     a->Go(nullptr);
 }
@@ -2428,7 +2965,7 @@ void MainWindow::CollectMissingMedia() {
     }
     list += "\nLocate them, or skip and leave those clips silent.";
 
-    BAlert* a = new BAlert("Missing Media", list.c_str(), "Skip",
+    BAlert* a = new ThemedAlertWindow("Missing Media", list.c_str(), "Skip",
                            "Locate" B_UTF8_ELLIPSIS, nullptr,
                            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
@@ -2525,13 +3062,13 @@ void MainWindow::RebuildRecentMenu() {
     while (fRecentMenu->CountItems() > 0)
         delete fRecentMenu->RemoveItem((int32)0);
     if (fDoc.Recent().empty()) {
-        BMenuItem* none = new BMenuItem("(none)", nullptr);
+        BMenuItem* none = new ThemedMenuItem("(none)", nullptr);
         none->SetEnabled(false);   // an empty submenu is a dead end
         fRecentMenu->AddItem(none);
         return;
     }
     for (const std::string& path : fDoc.Recent()) {
-        BMenuItem* item = new BMenuItem(
+        BMenuItem* item = new ThemedMenuItem(
             ProjectDocument::DisplayName(path).c_str(),
                                         new BMessage(MSG_OPEN_RECENT));
         item->Message()->AddString("path", path.c_str());
@@ -2546,7 +3083,7 @@ void MainWindow::RebuildRecentMenu() {
 // gives Save a silent path; this is the smallest correct answer until then).
 bool MainWindow::ConfirmDiscardChanges() {
     if (!fStack->IsDirty()) return true;
-    BAlert* a = new BAlert("Unsaved Changes",
+    BAlert* a = new ThemedAlertWindow("Unsaved Changes",
         "This project has unsaved changes.", "Cancel", "Discard", "Save",
         B_WIDTH_AS_USUAL, B_WARNING_ALERT);
     a->SetShortcut(0, B_ESCAPE);
@@ -2571,9 +3108,17 @@ void MainWindow::ImportAudio(const char* path) {
 }
 
 void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
-    WavSource src;
-    if (!src.Open(path)) {
-        std::fprintf(stderr, "MainWindow: cannot import '%s'\n", path);
+    // One factory for every format (WAV, AIFF/AIFFC, FLAC, Ogg Vorbis), chosen
+    // by what the file's first bytes are rather than by its name. A format
+    // this build has no library for is reported as exactly that, not as a
+    // corrupt file.
+    std::string why;
+    std::unique_ptr<IAudioSource> src = OpenAudioSource(path, &why);
+    if (!src) {
+        std::fprintf(stderr, "MainWindow: cannot import '%s': %s\n", path,
+                     why.c_str());
+        ReportError("Import Audio", std::string("Cannot read \"")
+                    + path + "\": " + why + ".");
         return;
     }
     // Resolve the target track: the requested one if it's audio, else the first
@@ -2591,11 +3136,11 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
         tid = ap->CreatedId();
     }
 
-    const double srcRate = src.FrameRate();
+    const double srcRate = src->FrameRate();
     const double ratio = srcRate > 0 ? fProject->sampleRate / srcRate : 1.0;
     Clip clip;
     clip.startFrame   = start < 0 ? 0 : start;
-    clip.lengthFrames = (int64_t)llround(src.TotalFrames() * ratio);
+    clip.lengthFrames = (int64_t)llround(src->TotalFrames() * ratio);
     clip.sourceOffset = 0;
     clip.sourcePath   = path;
     fStack->Execute(std::make_unique<AddClipCommand>(tid, clip), *fProject);
@@ -2604,10 +3149,10 @@ void MainWindow::ImportAudioAt(const char* path, TrackId track, Frame start) {
     // BQuery can find/sort it. BPM/Key are user-set in the browser.
     if (srcRate > 0) {
         EnsureDawIndexes(path);
-        WriteAttrFloat(path, kAttrDuration, (float)(src.TotalFrames() / srcRate));
+        WriteAttrFloat(path, kAttrDuration, (float)(src->TotalFrames() / srcRate));
     }
 
-    (*fPeaks)[path].Build(src);   // waveform envelope (src cursor is at start)
+    (*fPeaks)[path].Build(*src);   // waveform envelope (src cursor is at start)
     fTimeline->Invalidate();
 }
 
@@ -2714,9 +3259,11 @@ void MainWindow::RebuildPeaks() {
         for (const Clip& c : t.clips) {
             if (c.sourcePath.empty() || fPeaks->count(c.sourcePath))
                 continue;
-            WavSource src;
-            if (src.Open(c.sourcePath))
-                (*fPeaks)[c.sourcePath].Build(src);
+            // The factory, so a clip pointing at a FLAC or an AIFF gets its
+            // waveform too and not just a flat line.
+            std::unique_ptr<IAudioSource> src = OpenAudioSource(c.sourcePath);
+            if (src)
+                (*fPeaks)[c.sourcePath].Build(*src);
         }
 }
 
@@ -2814,7 +3361,9 @@ void MainWindow::LoadSettings() {
     s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
+    s.exportContainer = (int)fExportChoices.container;
     s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportVorbisQuality = fExportChoices.vorbisQuality;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
     s.exportNormalize = fExportChoices.normalize;
@@ -2823,6 +3372,7 @@ void MainWindow::LoadSettings() {
     s.exportLimiter   = fExportChoices.limiter;
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
+    s.themeMode       = ActiveThemeMode();
     if (!s.Deserialize(text)) return;
 
     // The panes (M1.4). The width goes on as the inspector's preferred size
@@ -2838,6 +3388,13 @@ void MainWindow::LoadSettings() {
     if (fRootSplit != nullptr && fDock != nullptr) {
         const float h = s.bottomHeight > 80.0f ? s.bottomHeight : Themed(260.0f);
         fDock->SetExplicitPreferredSize(BSize(B_SIZE_UNSET, h));
+        // The page first (it decides what the body holds), then whether the dock
+        // is showing at all. Through SetDockPage, not by assigning fDockPage:
+        // the restore used to leave the body on the editor hint (and the
+        // highlighted segment inert, since a click on the current segment is a
+        // no-op) until the user switched pages twice (T2 review).
+        if (s.dockPage >= kDockEditor && s.dockPage <= kDockPlugins)
+            SetDockPage(s.dockPage);
         SetDockShown(s.bottomVisible);
     }
 
@@ -2849,8 +3406,15 @@ void MainWindow::LoadSettings() {
     fLastDir      = s.lastDir;
     fDoc.SetRecent(s.recentProjects);
     RebuildRecentMenu();
-    // The export dialog reopens on the last choices, not on its defaults.
+    // The export dialog reopens on the last choices, not on its defaults. A
+    // remembered container this build cannot write (a settings file carried
+    // over from a build with FLAC, say) falls back to WAV rather than to a
+    // bounce that could only fail.
+    const AudioFileFormat savedContainer = (AudioFileFormat)s.exportContainer;
+    fExportChoices.container  = AudioFileFormatCanWrite(savedContainer)
+                                ? savedContainer : AudioFileFormat::Wav;
     fExportChoices.bitDepth   = s.exportBitDepth;
+    fExportChoices.vorbisQuality = s.exportVorbisQuality;
     fExportChoices.dither     = s.exportDither;
     fExportChoices.sampleRate = s.exportSampleRate;
     fExportChoices.normalize  = s.exportNormalize;
@@ -2861,12 +3425,24 @@ void MainWindow::LoadSettings() {
     fExportChoices.stems      = s.exportStems != 0;
     MarkRadio(fBufMenu, "frames", (int32)fTransportCtl.fBufferFrames);
     MarkRadio(fCountInMenu, "bars", fRecCtl.fCountInBars);
+    if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
     if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
-    // Restore the window frame (clamped to something sane).
+    // The marker lane (M2.7): a view preference, restored with the panes.
+    if (fTimeline) fTimeline->SetMarkerLane(s.markerLaneVisible);
+    if (fMarkerLaneItem) fMarkerLaneItem->SetMarked(s.markerLaneVisible);
+    // Restore the window frame: sane in both directions, and no larger than
+    // the screen it is being restored on. A frame saved on a bigger display
+    // (or by a test run) otherwise puts the window's own controls -- the dock's
+    // Pop out and x, at the right end of its strip -- off the screen entirely.
     if (s.winR - s.winL > 320 && s.winB - s.winT > 240) {
-        MoveTo(s.winL, s.winT);
-        ResizeTo(s.winR - s.winL, s.winB - s.winT);
+        const BRect screen = BScreen(this).Frame();
+        float w = std::min(s.winR - s.winL, screen.Width() - 20.0f);
+        float h = std::min(s.winB - s.winT, screen.Height() - 40.0f);
+        float x = std::max(8.0f, std::min(s.winL, screen.right - w));
+        float y = std::max(8.0f, std::min(s.winT, screen.bottom - h));
+        MoveTo(x, y);
+        ResizeTo(w, h);
     }
 }
 
@@ -2878,7 +3454,9 @@ void MainWindow::SaveSettings() {
     s.monitorInput = fTransportCtl.fMonitorInput;
     s.lastDir      = fLastDir;
     s.recentProjects = fDoc.Recent();
+    s.exportContainer = (int)fExportChoices.container;
     s.exportBitDepth  = fExportChoices.bitDepth;
+    s.exportVorbisQuality = fExportChoices.vorbisQuality;
     s.exportDither    = fExportChoices.dither;
     s.exportSampleRate = fExportChoices.sampleRate;
     s.exportNormalize = fExportChoices.normalize;
@@ -2887,6 +3465,7 @@ void MainWindow::SaveSettings() {
     s.exportLimiter   = fExportChoices.limiter;
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
+    s.themeMode       = ActiveThemeMode();
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
     // The panes as the user left them (M1.4).
@@ -2894,10 +3473,12 @@ void MainWindow::SaveSettings() {
     if (fInspector != nullptr && fInspector->Bounds().Width() > 1.0f)
         s.inspectorWidth = fInspector->Bounds().Width();
     if (fRootSplit != nullptr && fDock != nullptr) {
+        s.dockPage = fDockPage;
         s.bottomVisible = fDock->Parent() != nullptr;
         if (fDock->Bounds().Height() > 1.0f)
             s.bottomHeight = fDock->Bounds().Height();
     }
+    if (fTimeline != nullptr) s.markerLaneVisible = fTimeline->MarkerLaneOn();
 
     BPath p;
     if (!ProjectDocument::SettingsPath(p)) return;
@@ -2905,6 +3486,73 @@ void MainWindow::SaveSettings() {
     if (f.InitCheck() != B_OK) return;
     const std::string t = s.Serialize();
     f.Write(t.data(), t.size());
+}
+
+void MainWindow::ApplyTheme() {
+    // What this window CACHED. Everything else it draws (the timeline, the
+    // inspector, the meter, the transport glyphs) reads the tokens at draw
+    // time and only needs the invalidate the walker does.
+    //
+    // The window's own top view is what shows where no pane covers it: a
+    // BWindow has no background colour of its own to set, and the app may not
+    // change the system panel colour it would otherwise use (T1) — the
+    // layout's owner view is the seam that is left.
+    if (BLayout* layout = GetLayout()) {
+        if (BView* top = layout->Owner()) {
+            top->SetViewColor(ColBackground());
+            // SetViewColor tells the server the colour but does not repaint the
+            // view, so the window's own background has to be asked for.
+            top->Invalidate();
+        }
+    }
+
+    const rgb_color chrome = ColChrome();
+    if (fTimeView != nullptr) {
+        fTimeView->SetViewColor(ColLcd());
+        fTimeView->SetHighColor(ColLcdText());
+    }
+    for (BStringView* label : { fVolLbl, fBpmLbl, fLoudView }) {
+        if (label == nullptr) continue;
+        label->SetViewColor(chrome);
+        label->SetHighColor(ColText());
+    }
+    if (fMaster != nullptr) {
+        fMaster->SetViewColor(chrome);
+        fMaster->SetLowColor(chrome);
+        fMaster->SetBarColor(ColLcd());
+        rgb_color fill = ColAccent();
+        fMaster->UseFillColor(true, &fill);
+    }
+    if (fDock != nullptr)       fDock->SetViewColor(ColBackground());
+    if (fEditorPane != nullptr) fEditorPane->SetViewColor(ColBackground());
+    if (fDockEmpty != nullptr)  fDockEmpty->SetViewColor(ColBackground());
+    // The dock's two BStringViews need their VIEW colour re-taken, not just
+    // their text colour: a BStringView copies its parent's view colour when it
+    // is attached (StringView.cpp), so a mode switch left the strip's title and
+    // the hint as boxes in the mode they were built in -- in the dark mode the
+    // title drew light text on its own light box, i.e. the page's name was
+    // unreadable. Colours match the parents set just above (the pane header and
+    // the empty-state group).
+    if (fDockTitle != nullptr) {
+        fDockTitle->SetViewColor(ColHeader());
+        fDockTitle->SetLowColor(ColHeader());
+        fDockTitle->SetHighColor(ColText());
+    }
+    if (fDockHint != nullptr) {
+        fDockHint->SetViewColor(ColBackground());
+        fDockHint->SetLowColor(ColBackground());
+        fDockHint->SetHighColor(ColTextDim());
+    }
+}
+
+void MainWindow::SetThemeMode(ThemeMode mode) {
+    SetActiveThemeMode(mode);
+    if (mode == ThemeMode::System)
+        ReadSystemBaseColors();
+    InstallControlLookForMode(mode);
+    ApplyThemeToAllWindows();
+    if (fThemeItem != nullptr) fThemeItem->SetMarked(mode == ThemeMode::Dark);
+    SaveSettings();   // it is a preference: it survives the quit
 }
 
 void MainWindow::UpdateTimeReadout(Frame playhead) {
@@ -2927,6 +3575,96 @@ void MainWindow::PushRollPlayhead(Frame ph) {
     BMessage m(kMsgRollPlayhead);
     m.AddInt64("ph", (int64)ph);
     fRollMsgr.SendMessage(&m);
+}
+
+// The master meter's readings for one poll (M3.3).
+//
+// Peaks, RMS and correlation all come from the engine's per-block meter —
+// except during a take, when the meter must show the INPUT: then the peaks are
+// the recorder's and there is no RMS/correlation for that signal (the engine
+// is mixing the project, not the input), so those read 0 and the RMS line and
+// correlation indicator stay at rest.
+void MainWindow::PushMeter(bool fromRecorder) {
+    if (fMeter == nullptr) return;
+    MeterReadings r;
+    if (fromRecorder && fRecCtl.fRecorder) {
+        r.peakL = fRecCtl.fRecorder->PeakL();
+        r.peakR = fRecCtl.fRecorder->PeakR();
+        const uint32_t bits = fRecCtl.fRecorder->ClipFlags();
+        r.clipL = (bits & kMeterClipL) != 0;
+        r.clipR = (bits & kMeterClipR) != 0;
+    } else if (fTransportCtl.fEngine) {
+        r.peakL = fTransportCtl.fEngine->PeakL();
+        r.peakR = fTransportCtl.fEngine->PeakR();
+        r.rmsL  = fTransportCtl.fEngine->RmsL();
+        r.rmsR  = fTransportCtl.fEngine->RmsR();
+        r.correlation = fTransportCtl.fEngine->Correlation();
+        const uint32_t bits = fTransportCtl.fEngine->ClipFlags();
+        r.clipL = (bits & kMeterClipL) != 0;
+        r.clipR = (bits & kMeterClipR) != 0;
+    }
+    fMeter->SetReadings(r);
+}
+
+// The markers window's list (M2.7): a pure snapshot -- frame, name and the
+// pre-formatted position (the transport's own bar:beat + min:sec readout), so
+// the window needs neither the model nor the tempo map.
+void MainWindow::PushMarkers() {
+    if (!fMarkersMsgr.IsValid() || !fProject) return;
+    BMessage m(kMsgMarkerList);
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    for (const Marker& mk : fProject->markers) {
+        const double sec  = fProject->sampleRate > 0
+                          ? (double)mk.frame / fProject->sampleRate : 0.0;
+        const int    mins = (int)(sec / 60.0);
+        const double rem  = sec - mins * 60.0;
+        int bar = 1, beat = 1;
+        fProject->tempoMap.BarBeat(mk.frame, &bar, &beat);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
+        m.AddInt64("frame", (int64)mk.frame);
+        m.AddString("name", mk.name.c_str());
+        m.AddString("time", buf);
+    }
+    m.AddInt64("playhead", (int64)fProject->transport.playhead);
+    fMarkersMsgr.SendMessage(&m);
+}
+
+// View > Markers: one window, like the mixer (M1.4's rule). Asking again
+// brings the open one forward with the current list.
+void MainWindow::ShowMarkersWindow() {
+    std::vector<MarkerInfo> list;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    for (const Marker& mk : fProject->markers) {
+        MarkerInfo info;
+        info.frame = mk.frame;
+        info.name  = mk.name;
+        const double sec  = fProject->sampleRate > 0
+                          ? (double)mk.frame / fProject->sampleRate : 0.0;
+        const int    mins = (int)(sec / 60.0);
+        const double rem  = sec - mins * 60.0;
+        int bar = 1, beat = 1;
+        fProject->tempoMap.BarBeat(mk.frame, &bar, &beat);
+        char buf[48];
+        std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
+        info.time = buf;
+        list.push_back(std::move(info));
+    }
+    if (fMarkersMsgr.IsValid()) {
+        PushMarkers();
+        BMessage act(kMsgMarkerActivate);
+        fMarkersMsgr.SendMessage(&act);
+        return;
+    }
+    BRect wr(140, 120, 140 + 330, 120 + 320);
+    MarkersWindow* win = new MarkersWindow(wr, std::move(list),
+                                           fProject->transport.playhead,
+                                           BMessenger(this));
+    fMarkersMsgr = BMessenger(win);
+    win->Show();
+    // A list you just asked for is in front and ready for the keyboard: the
+    // same thing the second ask does through kMsgMarkerActivate.
+    win->Activate();
 }
 
 void MainWindow::PushTrackPeaks() {
@@ -3086,7 +3824,7 @@ bool MainWindow::OpenNativeEditor(TrackId tid, int fx) {
     title += master ? " \xE2\x80\x94 Master" : (" \xE2\x80\x94 " + t->name);
 
     BRect uw(160, 160, 160 + 960, 160 + 680);
-    Lv2UiWindow::Open(uw, d.pluginName, title, d.params, tid, fx,
+    Lv2UiWindow::Open(uw, d.pluginName, title, d.params, d.state, tid, fx,
                       BMessenger(this));
     return true;
 #else

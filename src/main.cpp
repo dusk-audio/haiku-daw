@@ -21,8 +21,8 @@
 #include "model/PeakCache.h"
 #include "plugin/PluginHost.h"
 #include "ui/MainWindow.h"
-#include "ui/Theme.h"      // the kit's system colours (M1.3)
-#include "ui/widgets/DawControlLook.h"   // the dark look (M1.3)
+#include "ui/Theme.h"      // tokens, modes and the window refresh (T1)
+#include "ui/widgets/DawControlLook.h"   // the control looks (T1)
 #include "Version.h"   // DAW_VERSION_STRING, DAW_APP_SIGNATURE, DAW_PROJECT_MIME
 
 // Defined by the daw_lv2 target, which exists only when CMake found lilv. With
@@ -113,43 +113,13 @@ class DawApplication : public BApplication {
 public:
     DawApplication() : BApplication(DAW_APP_SIGNATURE) {}
 
-    // The kit's system colours (M1.3), set once before any window exists:
-    // stock pieces we have not replaced yet (text carets and selections, a
-    // menu, a scrollbar) read these, so the dark theme does not have light
-    // holes where a control was not converted. The BControlLook subclass that
-    // draws the stock controls themselves comes with the rest of the kit.
-    // The dark look for everything the kit has not replaced (M1.3): menus,
-    // scrollbars, tabs, alerts, and any stock button or text control left in a
-    // window. Installed before the first window exists.
-    static void InstallControlLook() {
-        BPrivate::BControlLook* look = new DawControlLook();
-        be_control_look = look;
-    }
-
-    static void ApplyThemeColors() {
-        using namespace daw;
-        set_ui_color(B_PANEL_BACKGROUND_COLOR,        ColChrome());
-        set_ui_color(B_PANEL_TEXT_COLOR,              ColText());
-        set_ui_color(B_DOCUMENT_BACKGROUND_COLOR,     ColLcd());
-        set_ui_color(B_DOCUMENT_TEXT_COLOR,           ColText());
-        set_ui_color(B_CONTROL_BACKGROUND_COLOR,      ColHeader());
-        set_ui_color(B_CONTROL_TEXT_COLOR,            ColText());
-        set_ui_color(B_CONTROL_BORDER_COLOR,          ColBtnBorder());
-        set_ui_color(B_MENU_BACKGROUND_COLOR,         ColHeader());
-        set_ui_color(B_MENU_ITEM_TEXT_COLOR,          ColText());
-        set_ui_color(B_MENU_SELECTED_BACKGROUND_COLOR, ColAccent());
-        set_ui_color(B_MENU_SELECTED_ITEM_TEXT_COLOR, Rgb(255, 255, 255));
-        set_ui_color(B_SCROLL_BAR_THUMB_COLOR,        ColHeaderHi());
-        set_ui_color(B_LIST_BACKGROUND_COLOR,         ColLane());
-        set_ui_color(B_LIST_SELECTED_BACKGROUND_COLOR, ColAccent());
-        set_ui_color(B_LIST_ITEM_TEXT_COLOR,          ColText());
-        set_ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR, Rgb(255, 255, 255));
-        set_ui_color(B_KEYBOARD_NAVIGATION_COLOR,     ColAccent());
-    }
-
     void ReadyToRun() override {
-        ApplyThemeColors();
-        InstallControlLook();
+        // The look and the palette BEFORE the first window exists: the mode is
+        // in the settings, the colours are the user's, and the app writes
+        // neither. Dark mode is the DAW's own palette in the DAW's own windows.
+        SetActiveThemeMode(ProjectDocument::ReadSettings().themeMode);
+        ReadSystemBaseColors();
+        InstallControlLookForMode(ActiveThemeMode());
         RegisterProjectMimeType();
         InstallPlugins();
         InstallLv2();

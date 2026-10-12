@@ -25,16 +25,51 @@ constexpr float kDesignHeaderWidth = 150.0f; // slim per-lane header
 constexpr float kDesignHdrMeterW   = 16.0f;  // per-track meter strip (right edge)
 constexpr float kDesignInspectorW  = 190.0f; // left inspector column
 constexpr float kDesignTransportH  = 36.0f;  // the transport strip
+// The arrange tool strip (M2.3), above the ruler: six tool buttons at the
+// piano roll's button pitch, then the snap field and the zoom pair.
+constexpr float kDesignToolbarHeight = 28.0f;
+// The strip's own width: what the timeline must be able to show without
+// clipping a button (MainWindow's minimum for the pane).
+constexpr float kDesignArrToolStripW = 288.0f;
+// The marker lane (M2.7): a flag strip between the ruler and the lanes,
+// toggled from the View menu / Shift-M. Its height is part of ContentTop()
+// whenever it is on, so the lanes and the ruler move down with it (and the
+// ruler keeps its own band: TimelineContentTop() is still where the ruler
+// ends).
+constexpr float kDesignMarkerLaneH = 20.0f;
+// A collapsed lane (M2.6): the header folds to a title strip.
+constexpr float kDesignCollapsedH = 22.0f;
 
 inline float RulerHeight()    { return Themed(kDesignRulerHeight); }
+inline float ToolbarHeight()  { return Themed(kDesignToolbarHeight); }
 inline float TrackHeight()    { return Themed(kDesignTrackHeight); }
 inline float TrackGap()       { return Themed(kDesignTrackGap); }
 inline float HeaderWidth()    { return Themed(kDesignHeaderWidth); }
 inline float HdrMeterW()      { return Themed(kDesignHdrMeterW); }
 inline float InspectorWidth() { return Themed(kDesignInspectorW); }
+inline float ArrToolStripWidth() { return Themed(kDesignArrToolStripW); }
+
+// Top of the arrange view's lane area: the tool strip, then the ruler. The
+// timeline's own ContentTop() and every test that computes a lane's y use this
+// one, so a click target and the drawn lane cannot disagree.
+inline float TimelineContentTop() { return ToolbarHeight() + RulerHeight(); }
+
+inline float MarkerLaneHeight()      { return Themed(kDesignMarkerLaneH); }
+inline float CollapsedTrackHeight()  { return Themed(kDesignCollapsedH); }
 
 // Horizontal zoom default: frames represented by one pixel. 48000/px ~= 1s/px.
 constexpr double kDefaultFramesPerPixel = 512.0;
+
+// The modifier state for the event being handled. Mouse and key messages carry
+// "modifiers" (the input server adds it); a mouse WHEEL message does not, so the
+// live keyboard state is the fallback -- and a synthetic event from the
+// functional test can set the field to drive either path.
+inline uint32 EventModifiers(const BMessage* msg) {
+    int32 mods = 0;
+    if (msg && msg->FindInt32("modifiers", &mods) == B_OK)
+        return (uint32)mods;
+    return modifiers();
+}
 
 // TimelineView -> MainWindow: user clicked the ruler to move the playhead.
 constexpr uint32 kMsgSeek = 'seek';
@@ -45,6 +80,20 @@ constexpr uint32 kMsgMonitorRefresh = 'mon?';
 
 // TimelineView -> MainWindow: spacebar pressed; toggle play/stop.
 constexpr uint32 kMsgTransportToggle = 'xptg';
+
+// TimelineView -> MainWindow: the keyboard map's transport keys (M3.2). The
+// timeline owns the view-local keys; these three change state the window
+// holds (the record controller, the click's menu mark + engine, the meter's
+// clip flags), so they are posted, exactly as the transport bar's own
+// controls post the same actions.
+constexpr uint32 kMsgTransportRecord = 'xprc';   // R
+constexpr uint32 kMsgClickToggle     = 'xpcl';   // C (metronome)
+// MeterView -> MainWindow: the master meter was clicked, so the engine's (and
+// the recorder's) latched clip flags can go back to clear.
+constexpr uint32 kMsgMeterClipReset  = 'xpcr';
+// TransportBar -> MainWindow: the bar's width changed (a pane re-layout can do
+// that without the window resizing), so re-place its pinned children.
+constexpr uint32 kMsgTransportLayout = 'xtly';
 
 // Forward a spacebar key-down to the main window as a transport toggle, so any
 // child window (FX, Mixer, piano roll, ...) can start/stop playback. Call from a
@@ -61,6 +110,31 @@ inline bool ForwardSpaceToTransport(BMessage* msg, const BMessenger& main) {
         return true;
     }
     return false;
+}
+
+// Child window -> MainWindow: Cmd-Z / Cmd-Shift-Z (the same fourccs as
+// MainWindow's own Edit menu messages, MSG_UNDO/MSG_REDO). ForwardUndoRedo
+// below sends them, so a focused child window's Cmd-Z reaches the one undo
+// stack instead of dying in that window.
+constexpr uint32 kMsgEditUndo = 'undo';
+constexpr uint32 kMsgEditRedo = 'redo';
+
+// Forward Cmd-Z / Cmd-Shift-Z to the main window (M2.4: "child windows
+// forward Cmd-Z"). Call from a window's DispatchMessage beside
+// ForwardSpaceToTransport; returns true if it consumed the event.
+inline bool ForwardUndoRedo(BMessage* msg, const BMessenger& main) {
+    if (!msg || msg->what != B_KEY_DOWN) return false;
+    int32 mods = 0;
+    if (msg->FindInt32("modifiers", &mods) != B_OK) return false;
+    if ((mods & B_COMMAND_KEY) == 0) return false;
+    const char* bytes = nullptr;
+    ssize_t len = 0;
+    if (msg->FindData("bytes", B_STRING_TYPE, (const void**)&bytes, &len) != B_OK
+        || len < 1)
+        return false;
+    if (bytes[0] != 'z' && bytes[0] != 'Z') return false;
+    main.SendMessage((mods & B_SHIFT_KEY) ? kMsgEditRedo : kMsgEditUndo);
+    return true;
 }
 
 // TimelineView -> MainWindow: a track was selected (int64 "track"); the main
@@ -95,6 +169,13 @@ constexpr uint32 kMsgCycleAuto = 'caut';
 // is docked or popped out into its own window.
 // int64 "track", int64 "clip".
 constexpr uint32 kMsgOpenEditor = 'oped';
+
+// Any view -> MainWindow: show the (single) effects window on a track's chain
+// (T2). Fields: int64 "track" (the master chain for the master sentinel),
+// int32 "focus" (insert index, or -1 for the whole chain). It lives here, with
+// the other cross-view messages, because the inspector and the channel strip
+// send it and neither includes MainWindow.h.
+constexpr uint32 kMsgShowFx = 'shfx';
 
 // TimelineView -> MainWindow: a clip/region edit (move/resize/fade/gain/split)
 // committed; rebuild the running engine at the playhead so it takes effect live
