@@ -27,7 +27,9 @@ size, count-in, monitor input), **Help** (About).
 ## Getting audio in
 
 **Import a file:** File ▸ Import Audio… — it lands on the first audio track at
-the playhead (or drag it in). WAV only: PCM 8/16/24/32-bit and 32-bit float.
+the playhead (or drag it in). WAV (PCM 8/16/24/32-bit and 32-bit float), AIFF,
+and — in a build made with the libraries — FLAC and Ogg Vorbis. The format
+comes from the file's header, not its extension, so a renamed file still opens.
 
 **Record:** click `R` on a track to arm it (and `I` to hear it while
 monitoring, if your input would otherwise be silent), then the Record button in
@@ -79,9 +81,10 @@ an SFZ/SF2 soundfont — is set in the instrument editor.
 
 ## Exporting
 
-File ▸ Export WAV… opens the export dialog: sample rate, bit depth (16/24-bit
-PCM or 32-bit float), dither, loudness normalization (target LUFS, true-peak
-ceiling, limiter), the range (whole project or the loop), and mixdown or stems.
+File ▸ Export WAV… opens the export dialog: the format (WAV at 16/24-bit PCM or
+32-bit float, FLAC, or Ogg Vorbis — whichever formats this build can write),
+sample rate, dither, loudness normalization (target LUFS, true-peak ceiling,
+limiter), the range (whole project or the loop), and mixdown or stems.
 The choices are remembered.
 
 The render runs on its own thread with a progress bar and a **Cancel** — the
