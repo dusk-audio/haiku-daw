@@ -9,13 +9,10 @@
 
 #include "TimelineView.h"
 #include "../model/Commands.h"
-#include "../model/RegionOps.h"
 #include "../model/TakeNames.h"
 #include "../engine/Exporter.h"
 #include "../engine/WavSource.h"
 #include "../engine/AudioFormats.h"   // OpenAudioSource: any format, one reader
-#include "../engine/WavWriter.h"
-#include "../engine/Resampler.h"
 
 #include <cstdio>
 #include <cmath>
@@ -166,7 +163,6 @@ void RenderJobs::StartRegionJob(RegionOp op, TrackId track, ClipId clip) {
     if (op == RegionOp::Freeze)
         fRegionSnapshot = std::make_unique<Project>(*fWin->fProject);
     fRegionClipCopy = c ? *c : Clip{};
-    fRegionHasClip = (c != nullptr);
     fRegionProjectRate = fWin->fProject->sampleRate;
     fRegionTrack = track;
     fRegionClipId = clip;

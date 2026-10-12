@@ -81,7 +81,6 @@ public:
     // the chain.
     std::unique_ptr<Project>  fRegionSnapshot;
     Clip                      fRegionClipCopy;      // the clip the worker reads
-    bool                      fRegionHasClip = false;
     double                    fRegionProjectRate = 48000.0;
     ClipId                    fRegionClipId = kInvalidClipId;   // re-found later
 
