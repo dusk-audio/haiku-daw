@@ -338,11 +338,14 @@ static void DrawGlyph(BView* v, TransportButton which, BRect r, bool lit,
 void TransportBar::Draw(BRect) {
     // Row B first: the status text under the buttons. It is drawn even when
     // the buttons' own row is busy, so a message is never hidden by a repaint
-    // of the transport alone.
+    // of the transport alone. Truncated to the BUTTON BLOCK's width, not the
+    // bar's: the LCD well starts at x 356 and a long message must stop there
+    // rather than run under it (nothing overlaps — UI_GUIDELINES §3).
     if (!fStatus.empty()) {
         SetHighColor(ColTextDim());
         BString s(fStatus.c_str());
-        TruncateString(&s, B_TRUNCATE_END, Bounds().Width() - Themed(12.0f));
+        TruncateString(&s, B_TRUNCATE_END, Themed(kLcdL) - Themed(kStatusX)
+                                           - Themed(8.0f));
         DrawString(s.String(), BPoint(Themed(kStatusX), Themed(kStatusBaseline)));
     }
 
