@@ -58,6 +58,8 @@
 #include "InsertSlot.h"
 #include "StreamRebase.h"
 #include "StreamLoop.h"
+#include "StreamOrder.h"
+#include "StreamPool.h"
 #include "../model/Project.h"
 #include "../model/RoutingGraph.h"
 #include "../model/Pdc.h"
@@ -101,8 +103,47 @@ public:
                 StreamLoopRange loop = StreamLoopRange{});
     ~TrackStream();
 
-    status_t Prepare();          // open file, seek, start disk thread, prime
-    void     StopThread();
+    // Open the clip's file, set up the pass cursor and seek the source. No
+    // thread yet, no waiting: MEASURED 2026-10-12, this is 0.09 ms per clip over
+    // 329 clips, so a build can afford to open every stream before any of them
+    // starts filling. False when the file cannot be read at all.
+    status_t Open();
+
+    // Producer side, called by a StreamPool worker (StreamPool.h): is there room
+    // for more audio? False when the ring is full, or when this stream has
+    // nothing left to produce — either way a worker should move on to its next
+    // stream rather than spin here.
+    bool NeedsFilling() const {
+        if (!fSource) return false;
+        if (fProducingDone()) return false;
+        // The source has ended: this pass's remaining frames will never be
+        // produced (they play as silence, exactly as they did before the pool),
+        // and a builder waiting on this stream must stop waiting rather than
+        // burn its budget on audio that does not exist.
+        if (fSourceEof.load(std::memory_order_relaxed)) return false;
+        // A meaningful amount: refilling in single floats would make a worker
+        // walk all its streams to move a handful of samples.
+        return fRing.WriteAvailable() >= kMinFillFloats;
+    }
+
+    // Push audio into the ring until it is full enough, the pass is done or the
+    // source ends (may block on the file read; never called from the RT thread).
+    // True when it moved something — the pool uses that to decide whether it has
+    // any work at all, so a stream whose source has ended cannot make a worker
+    // spin. Bounded per call (kFillChunksPerCall) so one stream cannot hold a
+    // worker while its other streams wait.
+    bool FillOnce();
+
+    // Does this stream still have less than `wantFrames` of audio ready AND
+    // more it could produce? That is the question a build's short wait asks
+    // between polls: false means "as primed as it can get" (the ring is full, or
+    // the source has ended, or the stream has nothing left to play), which is
+    // what stops a build waiting out its budget for audio that does not exist.
+    bool NeedsPriming(Frame wantFrames) const {
+        if (wantFrames < 0) wantFrames = 0;
+        return fRing.ReadAvailable() < wantFrames * 2 && NeedsFilling();
+    }
+
 
     // Called from the RT callback. Adds this stream's contribution for the
     // block [blockStart, blockStart+frames) into the interleaved stereo
@@ -133,6 +174,10 @@ public:
     void SetAudible(bool audible);
 
     TrackId Track() const { return fTrackId; }
+    Frame ClipStart() const { return fStart; }
+    // The source ran out of data (a clip longer than its file, which the model
+    // allows). Set by the fill worker, read by NeedsFilling()/the builder.
+    std::atomic<bool> fSourceEof{false};
     Frame EndFrame() const { return fStart + fLength; }
     bool  Valid() const { return fSource && fSource->IsValid(); }
     float SourceRate() const { return fSource ? fSource->FrameRate() : 0.0f; }
@@ -168,6 +213,24 @@ private:
     // The disk thread's pass walker (StreamLoop.h): which range of the clip it
     // is producing, and whether there is one left at all.
     ProduceCursor fCursor;
+    // ... and the same fact for the BUILD thread: the walker is producer state,
+    // and WaitPrimed must not wait out its whole timeout on a stream that has
+    // nothing left to produce (a clip behind the playhead, or one the loop has
+    // no pass left for). Set by the fill worker, read by the builder.
+    std::atomic<bool> fDone{false};
+    bool fProducingDone() const {
+        return fDone.load(std::memory_order_relaxed);
+    }
+    // The unpushed remainder of the last decoded chunk, carried between
+    // FillOnce calls (so a ring that filled mid-chunk resumes there) and the
+    // scratch it points into. Touched only by this stream's own fill worker.
+    const float* fChunk       = nullptr;   // points into fResampled
+    size_t       fChunkFloats = 0;         // remaining floats to push
+    size_t       fChunkOffset = 0;
+    static constexpr size_t kMinFillFloats = 4096;   // ~1 block of stereo frames
+    // Chunks one FillOnce call may push before returning to its worker.
+    static constexpr int    kFillChunksPerCall = 8;
+    bool FillStep();                 // one chunk's worth; FillOnce loops on it
     Frame       fPassWritten = 0;  // output frames of the current pass already
                                    // pushed into the ring (disk thread only)
     int64_t     fSkipDebt = 0;     // ring frames to drop to resync after xrun
@@ -188,8 +251,6 @@ private:
     std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
     std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
-    std::thread fDiskThread;
-    std::atomic<bool> fRunning{false};
 };
 
 class Engine {
@@ -502,6 +563,12 @@ public:
         uint64_t                                  fWrapsAtRequest = 0;
         bool                                      fInPlaceJoin = false;
         std::vector<std::unique_ptr<TrackStream>> fStreams;
+        // The workers that keep those streams filled (StreamPool.h). Declared
+        // AFTER fStreams on purpose: members are destroyed in reverse order, so
+        // the pool's threads are stopped and joined before any stream it is
+        // filling is destroyed — on this graph's reclaim thread, exactly where
+        // the per-stream threads used to be joined.
+        std::unique_ptr<StreamPool<TrackStream>>  fPool;
         std::vector<Bus>                          fBuses;
         std::vector<std::vector<float>>           fNodeBufs;  // one mix buffer per node
         std::vector<size_t>                       fOrder;     // node indices, topo order
@@ -665,6 +732,13 @@ public:
     // come round again.
     uint64_t Wraps() const {
         return fWraps.load(std::memory_order_relaxed);
+    }
+    // How long the most recent graph build took, in microseconds, measured on
+    // the builder thread around BuildGraph. This is the plan's audio-start
+    // budget measured where it belongs: the window's own message latency is not
+    // the engine's, and on a loaded VM it is larger than the build itself.
+    bigtime_t LastBuildUs() const {
+        return fLastBuildUs.load(std::memory_order_relaxed);
     }
     // Is a graph in place for the RT side to render?
     bool HasGraph() const { return fGraphs->Active() != nullptr; }
@@ -1110,6 +1184,7 @@ private:
     std::atomic<uint64_t>   fCompletedGen{0}; // requests whose build finished
     std::atomic<int>        fLoadStatus{(int)B_OK};
     std::atomic<uint64_t>   fGraphsPublished{0};
+    std::atomic<bigtime_t>  fLastBuildUs{0};   // the last BuildGraph's duration
     std::atomic<bool>       fShutdown{false};
     std::thread             fBuilder;
     // Live-input routes, kept so a rebuild re-applies them. Guarded by
