@@ -6,6 +6,7 @@
 
 #include <MediaDefs.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -31,7 +32,48 @@ static inline void EnableDenormalFlush() {
 
 // Ring holds ~2 seconds of stereo audio at 48k: plenty of slack so the
 // disk thread stays ahead of the RT callback without hoarding memory.
-static constexpr size_t kRingFramesPerStream = 48000 * 2;   // frames
+// How much audio one clip stream's ring holds. This is the slack between the
+// fill workers and the audio callback, and it is also — at 2 s — what a big
+// project pays BEFORE anything plays: MEASURED 2026-10-12, 329 clips at 2 s of
+// stereo float is 253 MB of ring, and allocating and zeroing it was 359 ms of a
+// 721 ms build (the file opens themselves were 0.5 ms). Half a second is what
+// the pool needs instead: with kStreamPoolWorkers workers over a big project,
+// one worker walks its share of the streams every few tens of milliseconds, so
+// the ring only has to cover that walk plus a disk hiccup — and a project so
+// large that a walk exceeded it degrades into the RT's under-run resync, which
+// is the same path an xrun takes, rather than into wrong audio.
+static constexpr size_t kRingFramesPerStream = 48000 / 2;   // frames
+static_assert(kRingFramesPerStream >= 8192, "a ring must cover several blocks");
+
+// DAW_BUILD_TIMING=1 prints where a graph build spends its time, one line per
+// build: how long every clip's stream took to OPEN (file, ring, seek, disk
+// thread — the cheap part) and how long the batch of streams took to PRIME
+// (waiting for their rings to hold a pre-roll — the part that used to be
+// serialized per clip). The measurement that shaped M4.3, kept because it is
+// the number the hardware box gets asked for (the M0.7 DAW_TIMELINE_TIMING
+// precedent).
+static bool BuildTimingOn() {
+    static const bool on = std::getenv("DAW_BUILD_TIMING") != nullptr;
+    return on;
+}
+
+// How much output audio a stream should hold before its graph is published.
+// A quarter of a second is a comfortable margin for the start — a local disk
+// delivers it in a millisecond or two — and it replaces "half of the 2 s ring",
+// which is a second of audio nobody needs before playback may begin.
+static constexpr double kPrimePreRollSeconds = 0.10;
+static Frame PrimePreRollFrames(float outputRate) {
+    const double f = kPrimePreRollSeconds * (double)outputRate;
+    return (Frame)(f + 0.5);
+}
+// The whole build's priming cap, inside the plan's 300 ms audio-start budget
+// with room for a cold cache. A stream that misses it is not a stall: its disk
+// thread keeps filling, and the RT's under-run resync plays whatever arrives
+// late.
+static constexpr bigtime_t kPrimeTimeoutUs = 200000;
+// The pool's worker count is StreamPool::kStreamPoolWorkers (StreamPool.h): it
+// is what replaced both the per-clip thread and the wave-batching that stood in
+// for it while this was being measured.
 static constexpr size_t kRingFloats = kRingFramesPerStream * 2;
 
 // Cheap identities compared by SyncFx and CaptureFxStates (see
@@ -108,11 +150,9 @@ void TrackStream::SetAudible(bool audible) {
     fAudible.store(audible, std::memory_order_relaxed);   // gain untouched
 }
 
-TrackStream::~TrackStream() {
-    StopThread();
-}
+TrackStream::~TrackStream() = default;
 
-status_t TrackStream::Prepare() {
+status_t TrackStream::Open() {
     // Whatever container the clip's file is, through the one factory: a WAV
     // take, an imported FLAC, an AIFF. Each reader seeks by sample through its
     // own API, which is what makes a seeked playhead — and a loop pass — land
@@ -139,21 +179,87 @@ status_t TrackStream::Prepare() {
     fPassWritten = 0;
     SeekToPass();
 
-    fRunning.store(true);
-    fDiskThread = std::thread(&TrackStream::DiskLoop, this);
-
-    // Prime: give the disk thread a moment to fill the ring before the RT
-    // callback starts draining, so playback doesn't underrun on frame 0.
-    for (int i = 0; i < 50 && fRing.ReadAvailable() < kRingFloats / 2; i++)
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-
     return B_OK;
 }
 
-void TrackStream::StopThread() {
-    fRunning.store(false);
-    if (fDiskThread.joinable())
-        fDiskThread.join();
+// One step of the producer: at most one decoded chunk's worth of audio into the
+// ring. Called by a StreamPool worker (never by the RT thread, and never by two
+// threads at once — a stream belongs to one worker, StreamPool.h), so it may
+// block on the file read.
+//
+// It must also be BOUNDED: the worker owns other streams and comes back to this
+// one later, so a call pushes what the ring has room for and returns. The
+// per-stream state (the unpushed remainder of a chunk, the pass cursor, the
+// resampler) is what makes that possible.
+bool TrackStream::FillOnce() {
+    // Fill until the ring is full enough for the pool to lose interest, the pass
+    // is done, or the source ends — a chunk at a time, but several chunks per
+    // call. ONE chunk per call was the first cut, and it made a worker's round
+    // trip cost a single chunk of progress: a build waiting on a stream whose
+    // source was already exhausted (its reader returned two frames and then
+    // nothing, which is a real thing a project can contain) waited for that
+    // worker to come all the way round again before the end was even discovered.
+    bool did = false;
+    for (int i = 0; i < kFillChunksPerCall; i++) {
+        if (!NeedsFilling()) break;
+        if (!FillStep()) break;
+        did = true;
+    }
+    return did;
+}
+
+// One chunk's worth of progress, or false when there is none to make right now
+// (the ring is full, the pass is done, the source has ended).
+bool TrackStream::FillStep() {
+    if (fCursor.done) {
+        // Every pass this stream has is in the ring: nothing it could produce
+        // is ever played.
+        fDone.store(true, std::memory_order_relaxed);
+        return false;
+    }
+    const Frame remaining = fCursor.Frames() - fPassWritten;
+    if (remaining <= 0) {
+        // The pass is in the ring: the next frames to produce are the next
+        // pass's, which start with a seek (the loop's jump).
+        fChunkFloats = fChunkOffset = 0;
+        if (!fCursor.Next()) {
+            fDone.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        fPassWritten = 0;
+        SeekToPass();
+        return true;                    // a new pass began
+    }
+    if (fChunkFloats == 0) {
+        const float* src = nullptr;
+        size_t frames = 0;
+        if (!fSource->ReadChunk(&src, &frames)) {
+            // End of this source: the rest of the pass is silence, and there is
+            // nothing left to ask it for.
+            fSourceEof.store(true, std::memory_order_relaxed);
+            return false;
+        }
+        // Resample source-rate audio up/down to the output rate so the RT
+        // callback drains at 1 ring frame == 1 timeline frame.
+        fResampled.clear();
+        fResampler->Process(src, frames, fResampled);
+        if (fResampled.empty()) return false;
+        // Never push past the pass end: what lies beyond it belongs to a
+        // timeline range this pass does not visit (the loop jumps over it), and
+        // the next pass re-seeks to its own start anyway.
+        size_t floats = fResampled.size();
+        const size_t limit = (size_t)remaining * 2;
+        if (floats > limit) floats = limit;
+        fChunk        = fResampled.data();
+        fChunkFloats  = floats;
+        fChunkOffset  = 0;
+    }
+
+    const size_t pushed = fRing.Write(fChunk + fChunkOffset, fChunkFloats);
+    fChunkOffset += pushed;
+    fChunkFloats -= pushed;
+    fPassWritten += (Frame)(pushed / 2);
+    return pushed > 0;
 }
 
 // Seek the source to the frame the cursor's current pass starts at, and drop
@@ -167,80 +273,6 @@ void TrackStream::SeekToPass() {
     if (fResampler) fResampler->Reset();
 }
 
-// Producer thread: decode chunks and push them into the ring, ONE PASS AT A
-// TIME. Playback order is the order the ring must hold, and under a loop that
-// order has a seam in it: the frames after the last one before the loop end are
-// the loop start's. The pass walker says where each pass begins, so the thread
-// seeks at every pass start and never writes past a pass end — the frames a
-// pass skips (a clip's tail past the loop end) would otherwise sit in the ring
-// in place of the ones the transport is about to ask for.
-void TrackStream::DiskLoop() {
-    const float* chunk = nullptr;   // points into fResampled
-    size_t chunkFloats = 0;         // remaining floats to push
-    size_t chunkOffset = 0;
-
-    while (fRunning.load()) {
-        if (fCursor.done) {
-            // Every pass this stream has is in the ring: nothing it could
-            // produce is ever played. Idle until stopped.
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
-        }
-        const Frame remaining = fCursor.Frames() - fPassWritten;
-        if (remaining <= 0) {
-            // The pass is in the ring: the next frames to produce are the next
-            // pass's, which start with a seek (the loop's jump).
-            chunkFloats = chunkOffset = 0;
-            if (!fCursor.Next()) continue;
-            fPassWritten = 0;
-            SeekToPass();
-            continue;
-        }
-        if (chunkFloats == 0) {
-            const float* src = nullptr;
-            size_t frames = 0;
-            if (!fSource->ReadChunk(&src, &frames)) {
-                // End of file: nothing more to push. Idle until stopped.
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
-            // Resample source-rate audio up/down to the output rate so the RT
-            // callback drains at 1 ring frame == 1 timeline frame.
-            fResampled.clear();
-            fResampler->Process(src, frames, fResampled);
-            if (fResampled.empty())
-                continue;   // produced nothing this pass (heavy downsample)
-            // Never push past the pass end: what lies beyond it belongs to a
-            // timeline range this pass does not visit (the loop jumps over it),
-            // and the next pass re-seeks to its own start anyway.
-            size_t floats = fResampled.size();
-            const size_t limit = (size_t)remaining * 2;
-            if (floats > limit) floats = limit;
-            chunk = fResampled.data();
-            chunkFloats = floats;
-            chunkOffset = 0;
-        }
-
-        size_t pushed = fRing.Write(chunk + chunkOffset, chunkFloats);
-        chunkOffset += pushed;
-        chunkFloats -= pushed;
-        fPassWritten += (Frame)(pushed / 2);
-
-        if (pushed == 0)   // ring full: wait for the RT thread to drain
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-    }
-}
-
-// Re-align the ring with a playhead that has moved on since this stream's graph
-// was built (an in-place rebuild published while the transport kept rolling).
-// The ring's origin — the timeline frame of its next unread frame — is
-// fStart + fSeekDelta (Prepare seeks the source by exactly that, and the
-// producer's pass walker starts there), and Mix consumes one ring frame per
-// timeline frame inside the clip's window.
-//
-// Under a loop the transport's path is not a straight line: it may have crossed
-// the loop end — possibly more than once — while this graph was being built, and
-// the producer's passes walked with it (LoopRebaseSkipFrames).
 void TrackStream::RebaseTo(Frame timelineFrame, uint64_t wraps) {
     const Frame skip = LoopRebaseSkipFrames(fStart + fSeekDelta, fStart,
                                            fStart + fLength, timelineFrame,
@@ -990,7 +1022,11 @@ void Engine::RequestLoad(const Project& project, Frame startFrame,
     fMasterGain.store(project.masterGain, std::memory_order_relaxed);
 
     auto req = std::unique_ptr<BuildRequest>(new BuildRequest());
+    const bigtime_t tSnap0 = BuildTimingOn() ? system_time() : 0;
     req->project       = project;          // the snapshot: see BuildRequest
+    if (BuildTimingOn())
+        std::fprintf(stderr, "Engine: build timing: snapshot %.1f ms\n",
+                     (double)(system_time() - tSnap0) / 1000.0);
     req->startFrame    = startFrame;
     req->minEndFrame   = minEndFrame;
     req->mode          = mode;
@@ -1044,7 +1080,9 @@ void Engine::BuilderLoop() {
         }
 
         status_t rc = B_OK;
+        const bigtime_t tBuild0 = system_time();
         std::unique_ptr<Graph> g = BuildGraph(*req, &rc);
+        fLastBuildUs.store(system_time() - tBuild0, std::memory_order_relaxed);
 
         // A newer request came in while this one built: publishing this graph
         // would hand the RT a stale snapshot (and, for a reposition, the wrong
@@ -1426,6 +1464,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                                                   status_t* rc) {
     const Project& project = req.project;
     *rc = B_OK;
+    const bigtime_t tBuild0 = BuildTimingOn() ? system_time() : 0;
     auto graph = std::unique_ptr<Graph>(new Graph());
     Graph& g = *graph;
     g.fBuildStart = req.startFrame;
@@ -1463,6 +1502,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     // non-soloed) so mute/solo can be toggled live; audibility is a per-stream
     // flag the RT mix honors, not a build-time filter.
     const bool monitorOnly = req.monitorOnly;
+    const bigtime_t tStreams0 = BuildTimingOn() ? system_time() : 0;
+    size_t nStreams = 0;
     for (const Track& t : project.Tracks()) {
         if (t.type != TrackType::Audio || monitorOnly)
             continue;   // monitor-only: no clip streams (no disk I/O)
@@ -1490,16 +1531,80 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta,
                 g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
                 fades[ci].inShape, fades[ci].outShape, streamLoop);
-            if (s->Prepare() != B_OK || !s->Valid()) {
+            if (s->Open() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
                 continue;
             }
+            nStreams++;
             // Sources are resampled to the output rate on their disk thread.
             if (s->EndFrame() > g.fEndFrame)
                 g.fEndFrame = s->EndFrame();
             g.fStreams.push_back(std::move(s));
         }
+    }
+    const bigtime_t tOpen1 = BuildTimingOn() ? system_time() : 0;
+
+    // Start the fills in bounded WAVES, nearest the playhead first, waiting
+    // inside each wave for its pre-roll. MEASURED 2026-10-12, 329 clips on the
+    // 2-vCPU VM: the per-stream wait this replaces serialized into 2515 ms, and
+    // starting all 329 fills at once (the obvious fix) cost 680 ms of pure
+    // contention — the builder starved by fillers — while the opens and thread
+    // starts themselves were 1 ms and 14 ms. A wave keeps the CPU available and
+    // still has the clips the transport needs first ready when the graph lands.
+    //
+    // The target is a PRE-ROLL (a quarter of a second of audio, enough to cover
+    // the start), not half the ring, and the cap bounds the WHOLE build — a
+    // per-stream cap would let a project with many slow clips add up to minutes.
+    // Missing the cap is not a failure: the disk thread keeps filling and the
+    // RT's under-run resync plays whatever arrives late, exactly as it does
+    // after an xrun. (A monitor-only graph has no streams at all.)
+    const Frame preRoll = PrimePreRollFrames(g.fOutputRate);
+    std::vector<size_t> order(g.fStreams.size());
+    for (size_t i = 0; i < order.size(); i++) order[i] = i;
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t a, size_t b) {
+                         const TrackStream* sa = g.fStreams[a].get();
+                         const TrackStream* sb = g.fStreams[b].get();
+                         const Frame ka = StreamDueKey(sa->ClipStart(), sa->EndFrame(),
+                                                       req.startFrame, g.fLooping,
+                                                       g.fLoopStart, g.fLoopEnd);
+                         const Frame kb = StreamDueKey(sb->ClipStart(), sb->EndFrame(),
+                                                       req.startFrame, g.fLooping,
+                                                       g.fLoopStart, g.fLoopEnd);
+                         return ka < kb;
+                     });
+    std::vector<TrackStream*> filling;
+    filling.reserve(order.size());
+    for (size_t i : order) filling.push_back(g.fStreams[i].get());
+    g.fPool.reset(new StreamPool<TrackStream>(filling));
+    // Wait, best effort, for the streams the transport needs inside the pre-roll
+    // window — the ones playing now and the ones starting within it — to be as
+    // primed as they can be. ONE poll per round for the whole batch: a per-stream
+    // poll costs 2 ms of granularity each, and 329 of those was 200 ms of pure
+    // waiting (MEASURED). Everything else keeps filling in the background; the
+    // pool does not stop, and a stream is only late if the transport reaches it
+    // before its worker does.
+    const bigtime_t primeDeadline = system_time() + kPrimeTimeoutUs;
+    for (;;) {
+        bool pending = false;
+        for (size_t i = 0; i < filling.size(); i++) {
+            if (StreamDueKey(filling[i]->ClipStart(), filling[i]->EndFrame(),
+                             req.startFrame, g.fLooping, g.fLoopStart,
+                             g.fLoopEnd) > preRoll)
+                break;                 // sorted by due: nothing left to wait for
+            if (filling[i]->NeedsPriming(preRoll)) { pending = true; break; }
+        }
+        if (!pending || system_time() >= primeDeadline) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+
+    if (BuildTimingOn()) {
+        const bigtime_t now = system_time();
+        std::fprintf(stderr, "Engine: build timing: %zu clip streams opened in "
+                             "%.1f ms, primed in %.1f ms\n",
+                     nStreams, (double)(tOpen1 - tStreams0) / 1000.0,
+                     (double)(now - tOpen1) / 1000.0);
     }
 
     // Group audio streams into per-track buses.
@@ -1624,6 +1729,11 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         b.isBus = (t->type == TrackType::Bus);
         g.fBuses.push_back(std::move(b));
     }
+
+    if (BuildTimingOn())
+        std::fprintf(stderr, "Engine: build timing: everything else to here "
+                             "%.1f ms, %zu buses\n",
+                     (double)(system_time() - tBuild0) / 1000.0, g.fBuses.size());
 
     // No content is fine only if the caller extends the range (metronome/loop).
     bool anyContent = false;

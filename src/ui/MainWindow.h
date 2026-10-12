@@ -167,6 +167,16 @@ public:
         return fTransportCtl.fEngine
                    ? fTransportCtl.fEngine->PlayerStarts() : 0;
     }
+    // The master output peak of the last rendered block (the audio-out guard).
+    float MasterPeakL() const {
+        return fTransportCtl.fEngine ? fTransportCtl.fEngine->PeakL() : 0.0f;
+    }
+    // The last graph build's own duration (M4.3): the plan's audio-start budget
+    // is about this, not about the window's message latency.
+    bigtime_t EngineBuildUs() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->LastBuildUs() : 0;
+    }
     // How many times the transport has crossed a loop end (M4.2). A seamless
     // loop is exactly this counter moving while the three above do not.
     uint64_t EngineWraps() const {
