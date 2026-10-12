@@ -173,6 +173,13 @@ public:
     // automated tracks, where automation owns the gain/pan).
     void SetAudible(bool audible);
 
+    // The engine's xrun counter (M3.1): Mix increments it once per block in
+    // which this clip's ring could not supply a frame. The ENGINE outlives
+    // every graph it publishes, so the pointer stays valid for the stream's
+    // whole life, and Mix only runs from the RT callback, which only runs
+    // while the engine is alive.
+    void SetXrunCounter(std::atomic<uint64_t>* counter) { fXruns = counter; }
+
     TrackId Track() const { return fTrackId; }
     Frame ClipStart() const { return fStart; }
     // The source ran out of data (a clip longer than its file, which the model
@@ -243,6 +250,7 @@ private:
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
+    std::atomic<uint64_t>* fXruns = nullptr;   // the engine's counter (M3.1)
 
     // The factory's reader for whatever the clip's file is: WAV, AIFF, FLAC or
     // Ogg Vorbis. Owned (the concrete readers are not copyable and their
@@ -740,6 +748,36 @@ public:
     bigtime_t LastBuildUs() const {
         return fLastBuildUs.load(std::memory_order_relaxed);
     }
+    // ---- the audio thread's own load, and its xruns (M3.1) ----------------
+    // How long the last content callback took, in microseconds. Measured in
+    // PlayTrampoline AROUND FillBuffer: the callback body itself stays
+    // clock-free (no syscall, allocation, lock or I/O in FillBuffer — the RT
+    // rule), and this is the one place the audio thread reads the clock.
+    bigtime_t LastCallbackUs() const {
+        return fLastCallbackUs.load(std::memory_order_relaxed);
+    }
+    // The worst callback since this was last called, and clears it. A load
+    // figure that matters is the PEAK: an average over a second hides exactly
+    // the block that overran and caused the click. The 60 Hz pulse reads it,
+    // so what it reports is the worst block in the last ~16 ms window.
+    bigtime_t TakePeakCallbackUs() {
+        return fPeakCallbackUs.exchange(0, std::memory_order_relaxed);
+    }
+    // A callback duration as a share of the buffer it had to fill, in percent
+    // (0..999). The budget is the buffer duration at the output rate, which is
+    // what an overrun would exceed.
+    float LoadPercentFor(bigtime_t callbackUs) const;
+    // ... for the callback that ran last.
+    float CallbackLoadPercent() const { return LoadPercentFor(LastCallbackUs()); }
+    // Frames the callback must fill, and the rate it fills them at.
+    size_t BufferFrames() const { return fBufferFrames; }
+    // Ring underruns the RT side has seen: one per block in which a clip's
+    // stream could not supply its frames (the `fSkipDebt` path in
+    // TrackStream::Mix). Counted on the audio thread, read here.
+    uint64_t Xruns() const {
+        return fXruns.load(std::memory_order_relaxed);
+    }
+
     // Is a graph in place for the RT side to render?
     bool HasGraph() const { return fGraphs->Active() != nullptr; }
     // Is a rebuild in flight?
@@ -1119,6 +1157,12 @@ private:
     size_t fPlayerBufferBytes   = 0;   // what the device actually negotiated
     std::atomic<uint64_t> fPlayersOpened{0};
     std::atomic<uint64_t> fPlayerStarts{0};
+    // ---- what the callback costs (M3.1) ----------------------------------
+    // Written by the RT thread around FillBuffer (one clock read per callback)
+    // and by TrackStream::Mix on an underrun; read by the window's pulse.
+    std::atomic<bigtime_t> fLastCallbackUs{0};
+    std::atomic<bigtime_t> fPeakCallbackUs{0};   // max since TakePeakCallbackUs
+    std::atomic<uint64_t>  fXruns{0};            // ring underruns (one per block)
 
     // ---- the swappable graph --------------------------------------------
     // Held by pointer so teardown can be explicit: the destructor stops the

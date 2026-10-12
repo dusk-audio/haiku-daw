@@ -302,6 +302,11 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart,
     const float gr  = fGainR.load(std::memory_order_relaxed);
     const bool  aud = fAudible.load(std::memory_order_relaxed);
 
+    // Whether this block found the ring starved at any point. Counted once for
+    // the block, not once per starved frame: an xrun is a moment the audio
+    // dropped out, and a block holds one such moment however long it lasted.
+    bool starved = false;
+
     for (size_t i = 0; i < frames; i++) {
         const Frame ph = blockStart + static_cast<Frame>(i);
         if (ph < fStart || ph >= clipEnd)
@@ -320,6 +325,7 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart,
         float lr[2];
         if (fRing.Read(lr, 2) < 2) {
             fSkipDebt++;   // underrun: owe a drop; output silence this frame
+            starved = true;
             continue;
         }
 
@@ -336,6 +342,11 @@ void TrackStream::Mix(float* out, size_t frames, Frame blockStart,
             out[i * 2 + 1] += lr[1] * gr * fade * fClipGain;
         }
     }
+    // Published for the transport's xrun readout (M3.1). A relaxed atomic
+    // increment: RT-safe (no lock, no allocation) and the exact count matters
+    // less than that a dropout is visible at all.
+    if (starved && fXruns != nullptr)
+        fXruns->fetch_add(1, std::memory_order_relaxed);
 }
 
 // --- Engine::Graph ----------------------------------------------------
@@ -1166,11 +1177,39 @@ void Engine::Stop() {
     if (Graph* g = pin.Active()) g->ResetVoices();
 }
 
+// A callback duration as a share of the buffer it had to fill, in percent.
+// Both numbers (the buffer size and the output rate) are set on the window
+// thread before a load, so reading them here is the same single-writer pattern
+// the rest of this class uses.
+float Engine::LoadPercentFor(bigtime_t callbackUs) const {
+    const double frames = (double)fBufferFrames;
+    const double rate   = (double)fOutputRate;
+    if (frames <= 0.0 || rate <= 0.0) return 0.0f;
+    const double budgetUs = frames / rate * 1e6;
+    if (budgetUs <= 0.0) return 0.0f;
+    double pct = (double)callbackUs / budgetUs * 100.0;
+    if (!(pct > 0.0)) pct = 0.0;     // NaN or negative -> 0
+    if (pct > 999.0)  pct = 999.0;   // a readout, not a measurement of infinity
+    return (float)pct;
+}
+
 void Engine::PlayTrampoline(void* cookie, void* buffer, size_t size,
                             const media_raw_audio_format& format) {
     Engine* self = static_cast<Engine*>(cookie);
     const size_t frames = size / (sizeof(float) * format.channel_count);
+    // The callback's own cost (M3.1): the clock is read HERE, around the
+    // render, and not inside FillBuffer — the RT rule forbids a syscall in the
+    // callback body, and everything this figure needs is the duration of the
+    // one call below. Two plain atomic stores, no lock, no allocation.
+    const bigtime_t t0 = system_time();
     self->FillBuffer(static_cast<float*>(buffer), frames);
+    const bigtime_t tookUs = system_time() - t0;
+    self->fLastCallbackUs.store(tookUs, std::memory_order_relaxed);
+    // Peak hold for the transport's readout: a plain compare-and-store. The
+    // pulse takes it with an exchange, so what it reports is the worst block
+    // since it last looked (an average would hide the overrun that clicks).
+    if (tookUs > self->fPeakCallbackUs.load(std::memory_order_relaxed))
+        self->fPeakCallbackUs.store(tookUs, std::memory_order_relaxed);
     // Mark this callback complete. QuiesceMonitorInput() waits on this so a
     // caller can safely destroy a monitor/live-MIDI source it just detached,
     // once any in-flight dereference of the old pointer has finished; the graph
@@ -1536,6 +1575,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                         c.sourcePath.c_str());
                 continue;
             }
+            // Underruns this stream sees are counted in the ENGINE's counter
+            // (M3.1): graphs come and go, the figure the transport shows does
+            // not reset with one.
+            s->SetXrunCounter(&fXruns);
             nStreams++;
             // Sources are resampled to the output rate on their disk thread.
             if (s->EndFrame() > g.fEndFrame)
