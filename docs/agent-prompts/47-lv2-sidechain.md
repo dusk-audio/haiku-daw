@@ -88,10 +88,15 @@ a sidechain, and stays away from one that does not).
 6. Tests:
    - `lv2_portmap_tests`: the key pair in port order, extras on the silence
      buffer, and a MonoDual plugin with one optional input;
-   - `lv2_render_tests`: the keyed bounce above, silence with no source, and an
-     LV2 insert with NO sidechain ports naming a source (must behave exactly
-     like one that names none — the probe is what stops a bogus key edge from
-     moving the PDC);
+   - `lv2_render_tests`: the keyed bounce above, the un-keyed insert
+     contributing exactly silence, a self-key naming no usable source, and an
+     LV2 insert with NO sidechain ports naming a source — the probe answers
+     false, and the render is byte-identical to the same project with no source
+     at all. (That equality is the honest form of the claim: a key edge the PDC
+     then compensates is NOT visible in a bounce — PDC exists precisely to make
+     the latency transparent — so the gate's observable value is the editor not
+     offering a key, plus the useless edges and buffers it does not create.);
+     the same block asserts the predicate itself both ways;
    - `lv2_fixture_tests`: the plugin is hostable and reports `sidechain`;
    - `sidechain_tests`: `EffectTakesSidechain` with and without a probe
      installed — kit-free, so this part is proven on any machine.
