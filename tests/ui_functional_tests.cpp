@@ -5553,6 +5553,99 @@ static void TestTransportBar(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
 }
 
+// --- 26b. M4.4: a region job runs off the window thread ---------------------
+
+// Reverse a real clip through the same message the timeline's clip menu posts:
+// the decode happens on a worker thread with the progress bar up (the window
+// keeps answering meanwhile), a cancel leaves the project EXACTLY as it was,
+// and a completed run swaps the clip onto the rendered file.
+static void TestRegionJob(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_region_job\n");
+
+    // Long enough that the decode is a real piece of work: the cancel has to
+    // land while the worker is still running for the check to mean anything.
+    const char* srcPath = "/tmp/haiku_daw_ui_region_src.wav";
+    std::remove(srcPath);
+    {
+        WavWriter w;
+        CHECK(w.Open(srcPath, 48000, 2));
+        // 20 s in 1 s blocks, so a failed write is visible rather than silent.
+        std::vector<int16_t> block(48000 * 2);
+        for (size_t i = 0; i < block.size(); i++)
+            block[i] = (int16_t)((int)(i % 8000) - 4000);
+        bool all = true;
+        for (int s = 0; s < 20; s++) all = all && w.WriteInt16(block.data(), block.size());
+        CHECK(all);
+        CHECK(w.Close());
+    }
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "region-job";
+    Clip c;
+    c.id = project.NextClipId();
+    c.startFrame = 0;
+    c.lengthFrames = 48000 * 20;
+    c.sourcePath = srcPath;
+    t.clips.push_back(c);
+    CHECK(LockedAddTrack(win, project, t));
+
+    auto clipPath = [&] {
+        std::string s;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id))
+                if (const Clip* cp = p->FindClip(c.id)) s = cp->sourcePath;
+            win->Unlock();
+        }
+        return s;
+    };
+    auto postReverse = [&] {
+        BMessage m(kMsgRegionReverse);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt64("clip", (int64)c.id);
+        win->PostMessage(&m);
+    };
+
+    // --- cancel: the bar goes up, and the project is untouched ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        const bool barUp = WaitFor([&] { return VisibleWindows() > before; },
+                                   10000000);
+        std::printf("  region job: the bar %s\n", barUp ? "came up" : "was missed");
+        // The window keeps answering while the worker decodes: this post has to
+        // be handled (the pulse runs, the looper is not blocked).
+        CHECK(barUp);
+        win->PostMessage(kMsgExportCancel);      // the bar's Cancel button
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 60000000));
+        // Nothing changed: same path, and no reversed file anywhere near it.
+        CHECK(clipPath() == srcPath);
+        CHECK(WaitQuiet());
+    }
+
+    // --- and to completion: the clip now points at the rendered file ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 120000000));
+        const std::string now = clipPath();
+        CHECK(!now.empty());
+        CHECK(now != srcPath);
+        CHECK(FileExists(now));
+        // Put the original clip back for whatever runs after this.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (Track* p = project.FindTrack(t.id))
+                if (Clip* cp = p->FindClip(c.id)) cp->sourcePath = srcPath;
+            win->Unlock();
+        }
+        std::remove(now.c_str());
+    }
+    std::remove(srcPath);
+    CHECK(WaitQuiet());
+}
+
 // --- 27. M3.4: the mixer strip's own edits ----------------------------------
 
 // The strip's new intents reach the model through the command stack and come
@@ -6760,6 +6853,7 @@ static int32 TestThread(void*) {
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
     TestTransportBar(win, project);
+    TestRegionJob(win, project);
     TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);

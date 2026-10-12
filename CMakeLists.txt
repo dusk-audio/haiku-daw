@@ -39,6 +39,7 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RegionJobs.cpp    # the region ops + freeze as worker-thread jobs (M4.4)
     src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)

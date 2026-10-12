@@ -1066,8 +1066,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgExportCancel:
             // The progress window's button. The worker polls this between
             // blocks; the completion path (on the pulse) closes the window, so
-            // the bar never disappears before the outcome is known.
+            // the bar never disappears before the outcome is known. The same
+            // bar serves the region jobs (M4.4), so both flags are raised --
+            // whichever job is running is the one that reads its own.
             fRender.fExportCancel.store(true);
+            fRender.fRegionCancel.store(true);
             break;
         case MSG_IMPORT_MIDI:
             if (!fMidiImportPanel) {
@@ -1866,22 +1869,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgRegionNormalize: case kMsgRegionReverse: case kMsgRegionStrip: {
+            // The decode runs on a worker thread now (M4.4): this only starts
+            // the job. Applying its result — and refusing to apply a cancelled
+            // one — happens in the pulse.
             int64 tid = 0, cid = 0;
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindInt64("clip", &cid);
-            if (msg->what == kMsgRegionNormalize)
-                fRender.RegionNormalize((TrackId)tid, (ClipId)cid);
-            else if (msg->what == kMsgRegionReverse)
-                fRender.RegionReverse((TrackId)tid, (ClipId)cid);
-            else
-                fRender.RegionStripSilence((TrackId)tid, (ClipId)cid);
+            const RenderJobs::RegionOp op =
+                  msg->what == kMsgRegionNormalize ? RenderJobs::RegionOp::Normalize
+                : msg->what == kMsgRegionReverse ? RenderJobs::RegionOp::Reverse
+                                                 : RenderJobs::RegionOp::StripSilence;
+            fRender.StartRegionJob(op, (TrackId)tid, (ClipId)cid);
             break;
         }
         case kMsgFreezeTrack: {
             int64 tid = 0; bool freeze = true;
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindBool("freeze", &freeze);
-            fRender.FreezeTrack((TrackId)tid, freeze);
+            if (freeze) fRender.StartRegionJob(RenderJobs::RegionOp::Freeze,
+                                               (TrackId)tid);
+            else        fRender.FreezeTrack((TrackId)tid, false);   // a restore
             break;
         }
         case MSG_SHORTCUTS: {
@@ -2116,6 +2123,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     }
                 } else {
                     fRender.FinishExport();
+                }
+            }
+            // A region job reports through the same pulse and the same bar
+            // (M4.4). Its model edits land in FinishRegionJob, on this thread.
+            if (!fRender.RegionJobHandled()) {
+                if (fRender.RegionJobRunning()) {
+                    const float f =
+                        fRender.fRegionProgress.load(std::memory_order_relaxed);
+                    if (f >= 0.0f && fRender.fRegionProgMsgr.IsValid()) {
+                        BMessage pm(kMsgExportProgress);
+                        pm.AddFloat("f", f);
+                        fRender.fRegionProgMsgr.SendMessage(&pm);
+                    }
+                } else {
+                    fRender.FinishRegionJob();
                 }
             }
             // Before any branch: an open native editor is fed on every pulse,
@@ -2647,6 +2669,7 @@ void MainWindow::UpdatePulse() {
     const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
                    || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
                    || !fRender.fExportHandled      // an export's progress + completion
+                   || !fRender.RegionJobHandled()  // ... and a region job's (M4.4)
                    || fPeakLoader.HasWork();       // envelopes still arriving (M4.4)
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -3495,30 +3518,9 @@ void MainWindow::RebuildPeaks() {
 
 
 
-// Render one track in isolation (its clips/notes through its fader + effect
-// chain) to a stereo WAV — the basis for Freeze. Routing/sends are stripped so
-// only the track's own output is baked; solo/mute are cleared so it's audible.
-bool RenderTrackToWav(const Project& src, TrackId id,
-                             const std::string& out) {
-    const Track* t = src.FindTrack(id);
-    if (!t) return false;
-    Project iso;
-    iso.sampleRate = src.sampleRate;
-    iso.tempoBPM   = src.tempoBPM;
-    iso.timeSig    = src.timeSig;
-    iso.tempoMap   = src.tempoMap;
-    Track copy = *t;
-    copy.output = kRoutingMaster;      // straight to the master sum
-    copy.sends.clear();
-    copy.muted = false;
-    copy.soloed = false;
-    copy.frozen = false;
-    copy.freezeClips.clear();
-    copy.freezeMidi.clear();
-    copy.freezeFx.clear();
-    iso.AddTrack(copy);
-    return ExportWav(iso, out, src.sampleRate);
-}
+// (The isolated-track render Freeze uses -- RenderTrackToWav -- lives in
+// src/model/RegionJobs.cpp now: it runs on the region job's worker thread, and
+// everything it needs was already host-testable in the model library.)
 
 // --- off-looper export ------------------------------------------------------
 
