@@ -28,8 +28,8 @@ size, count-in, monitor input), **Help** (About).
 
 **Import a file:** File ▸ Import Audio… — it lands on the first audio track at
 the playhead (or drag it in). WAV (PCM 8/16/24/32-bit and 32-bit float), AIFF,
-FLAC and Ogg Vorbis: the format comes from the file's header, not its
-extension, so a renamed file still opens.
+and — in a build made with the libraries — FLAC and Ogg Vorbis. The format
+comes from the file's header, not its extension, so a renamed file still opens.
 
 **Record:** click `R` on a track to arm it (and `I` to hear it while
 monitoring, if your input would otherwise be silent), then the Record button in
