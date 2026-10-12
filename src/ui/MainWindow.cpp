@@ -479,30 +479,35 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     audioMenu->AddItem(fMonInItem);
     menuBar->AddItem(new ThemedMenuItem(audioMenu));
 
-    // --- Transport bar (below the menu) ---
+    // --- Transport bar (below the menu, M3.1) ---
+    // The bar draws its own buttons, the LCD well and the status line; the
+    // widgets below are its children, placed by LayoutTransportBar (their
+    // design offsets here are only the starting geometry).
     BRect barRect(0, 0, bounds.right, Themed(kTransportH));
-    fTransport = new TransportBar(barRect, BMessenger(this),
-                                  MSG_PLAY, MSG_STOP, MSG_REC,
-                                  MSG_ZOOM_OUT, MSG_ZOOM_IN);
+    TransportActions actions;
+    actions.play    = MSG_PLAY;
+    actions.stop    = MSG_STOP;
+    actions.rec     = MSG_REC;
+    actions.zoomOut = MSG_ZOOM_OUT;
+    actions.zoomIn  = MSG_ZOOM_IN;
+    actions.rtz     = kMsgTransportRtz;
+    actions.rewind  = kMsgTransportRewind;
+    actions.forward = kMsgTransportForward;
+    actions.loop    = kMsgTransportLoop;
+    actions.click   = kMsgClickToggle;   // the same action the C key posts
+    actions.punch   = kMsgTransportPunch;
+    fTransport = new TransportBar(barRect, BMessenger(this), actions);
     BView* bar = fTransport;
 
-    BFont lcdFont(be_bold_font);
-    lcdFont.SetSize(Themed(15.0f));
-    fTimeView = new BStringView(BRect(Themed(218), Themed(6), Themed(354),
-                                        Themed(kTransportH) - Themed(5)),
-                                "time", "1.1   0:00.000");
-    fTimeView->SetFont(&lcdFont);
-    fTimeView->SetAlignment(B_ALIGN_CENTER);
-    bar->AddChild(fTimeView);
-    // (Zoom -/+ buttons are drawn by the TransportBar at x366..420.)
-
-    // "Vol" label + master volume slider (0..150% -> gain 0..1.5).
-    fVolLbl = new BStringView(BRect(Themed(430), Themed(8), Themed(460),
-                                    Themed(kTransportH) - Themed(6)),
+    // "Vol" label + master volume slider (0..150% -> gain 0..1.5). Row B --
+    // the row under the buttons -- so the transport row keeps its width for
+    // the LCD and the tempo field.
+    fVolLbl = new BStringView(BRect(Themed(602), Themed(35), Themed(632),
+                                    barRect.bottom - Themed(4)),
                               "vollbl", "Vol");
     bar->AddChild(fVolLbl);
-    fMaster = new BSlider(BRect(Themed(462), Themed(4), Themed(588),
-                                Themed(kTransportH) - Themed(4)),
+    fMaster = new BSlider(BRect(Themed(634), Themed(33), Themed(760),
+                                barRect.bottom - Themed(3)),
                           "master", NULL, new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
@@ -510,38 +515,40 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(fMaster);
 
     // "BPM" label + tempo field (affects grid/snap + metronome on the next
-    // Play).
-    fBpmLbl = new BStringView(BRect(Themed(602), Themed(8), Themed(636),
-                                    Themed(kTransportH) - Themed(6)),
+    // Play). Row A, right of the LCD.
+    fBpmLbl = new BStringView(BRect(Themed(602), Themed(10), Themed(636),
+                                    Themed(30)),
                                           "bpmlbl", "BPM");
     bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
     // A kit text field, so the well behind the digits is the theme's rather
     // than a stock white box in the dark look (T1).
-    fTempo = new DawTextField(BRect(Themed(638), Themed(6), Themed(704),
-                                    Themed(kTransportH) - Themed(6)),
+    fTempo = new DawTextField(BRect(Themed(638), Themed(9), Themed(704),
+                                    Themed(29)),
                               "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
     fTempo->SetDivider(0.0f);
     bar->AddChild(fTempo);
 
-    // Loudness readout (momentary / short-term LUFS + true peak dBTP).
-    fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
-                                      Themed(kTransportH) - Themed(6)),
+    // Loudness readout (momentary / short-term LUFS + true peak dBTP), in the
+    // transport row left of the tempo field.
+    fLoudView = new BStringView(BRect(Themed(722), Themed(10), Themed(858),
+                                      Themed(28)),
                                 "loud", "M --  S --  TP --");
     {
         // A size down from the bar's labels: the readout has to hold three
-        // signed figures in the room between the tempo field and the meter.
+        // signed figures in the room between the LCD and the tempo field.
         BFont small(be_plain_font);
         small.SetSize(Themed(10.5f));
         fLoudView->SetFont(&small);
     }
     bar->AddChild(fLoudView);
 
-    // Master output meter, pinned to the right of the transport bar.
-    fMeter = new MeterView(BRect(bounds.right - Themed(130), Themed(5),
+    // Master output meter, pinned to the right of the transport bar; it spans
+    // both rows, so it reads like the console's master meter.
+    fMeter = new MeterView(BRect(bounds.right - Themed(130), Themed(4),
                                  bounds.right - Themed(6),
-                                 Themed(kTransportH) - Themed(5)));
+                                 Themed(kTransportH) - Themed(4)));
     bar->AddChild(fMeter);
 
     // --- The panes (M1.4) ---
@@ -652,6 +659,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // A restored window frame resizes the bar before the user touches anything,
     // so the layout has to be applied once here as well as on every resize.
     LayoutTransportBar();
+    // The bar's readouts start on the real state, not on a placeholder: the
+    // position in the current format, the tempo/meter line, and the lamps.
+    UpdateTimeReadout(fProject->transport.playhead);
+    UpdateTransportReadouts();
     // Below this the bar has nothing left to hide: the transport controls, the
     // time readout and the meter need the room, and a window that clipped them
     // would be showing a fault rather than a small window.
@@ -730,16 +741,21 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
 
 void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
-        case MSG_PLAY:  fTransportCtl.StartPlayback(); break;
+        case MSG_PLAY:
+            fTransportCtl.StartPlayback();
+            UpdateTransportReadouts();   // the Play lamp + the status line
+            break;
         case MSG_STOP:
             fTransportCtl.StopPlayback();
             fRecCtl.StopRecording();
+            UpdateTransportReadouts();
             break;
         case MSG_REC:
         case kMsgTransportRecord:   // the R key (M3.2), same as the Rec button
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
             if (fRecCtl.fRecMode) fRecCtl.StopRecording();
             else          fRecCtl.StartRecording();
+            UpdateTransportReadouts();
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
             fRecCtl.UpdateMidiMonitor();
@@ -794,6 +810,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgTransportRange: {   // M4.2: the loop range changed under a roll
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
+            UpdateTransportReadouts();   // the Loop lamp follows the model
             if (fTransportCtl.fPlaying)        // restart from the new position
                 fTransportCtl.StartPlayback();
             break;
@@ -830,14 +847,60 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
             break;
         case MSG_METRONOME:
-        case kMsgClickToggle:   // the C key (M3.2), same as the menu item
+        case kMsgClickToggle:   // the C key (M3.2) and the bar's Click button
             fTransportCtl.fMetronome = !fTransportCtl.fMetronome;
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
+            UpdateTransportReadouts();
             break;
         case kMsgTransportLayout:   // the bar's width changed (see TransportBar)
             LayoutTransportBar();
             break;
+        // --- the transport bar's own controls (M3.1) ------------------------
+        // Return to zero, rewind and fast-forward run exactly what the
+        // keyboard map runs (TimelineView owns the playhead math); loop toggles
+        // through the timeline's own ToggleLoop, which owns the "adopt the
+        // last range / the markers" rule.
+        case kMsgTransportRtz:
+            if (fTimeline) fTimeline->ReturnToZero();
+            break;
+        case kMsgTransportRewind:  NudgePlayheadBar(-1); break;
+        case kMsgTransportForward: NudgePlayheadBar(+1); break;
+        case kMsgTransportLoop:
+            if (fTimeline) fTimeline->ToggleLoop();   // posts kMsgTransportRange
+            UpdateTransportReadouts();
+            break;
+        case kMsgTransportPunch:
+            fProject->transport.punchEnabled = !fProject->transport.punchEnabled;
+            UpdateTransportReadouts();
+            break;
+        case kMsgTimeCycle:   // the big display was clicked: next format
+            fTimeMode = NextTimeMode(fTimeMode);
+            UpdateTimeReadout(fProject->transport.playhead);
+            break;
+        case kMsgTimeEntry: {
+            // What was typed in the display, in the format it was typed in
+            // (M3.1). A position that cannot be read changes nothing and says
+            // so in the status line: a plausible-but-wrong seek is worse than
+            // a refusal.
+            const char* text = nullptr;
+            if (msg->FindString("text", &text) != B_OK || text == nullptr) break;
+            fProject->tempoMap.sampleRate = fProject->sampleRate;
+            const double rate = fTransportCtl.fEngine
+                              ? fTransportCtl.fEngine->OutputRate()
+                              : fProject->sampleRate;
+            Frame where = 0;
+            if (ParseTimePosition(fTimeMode, text, rate, fProject->tempoMap, &where)) {
+                if (fTimeline) fTimeline->SeekTo(where);
+                SetTransportStatus("Position set");
+            } else {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "Cannot read '%s' as %s (%s)",
+                              text, TimeModeTag(fTimeMode), TimeModeHint(fTimeMode));
+                SetTransportStatus(buf);
+            }
+            break;
+        }
         case kMsgMeterClipReset:
             // The master meter was clicked. Clear the latched flags where they
             // live (the engine, or the recorder during a take); the fetch_and
@@ -1858,6 +1921,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);
             fTimeline->Invalidate();   // grid + ruler follow tempo
+            UpdateTransportInfo();     // the readout line names the tempo too
             // Rebuild the running engine so the metronome + tempo-synced effects
             // (delay) pick up the new tempo live; stopped, it applies next Play.
             fTransportCtl.ReloadActiveEngine();
@@ -1958,6 +2022,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // The transport bar's own readouts first (M3.1): the lamps, the
+            // status line and the tempo/meter/DSP/xrun line, all change-guarded
+            // inside the bar, so a tick that changed nothing costs no repaint.
+            UpdateTransportReadouts();
             // A rebuild runs on the engine's worker thread now (M4.1): its
             // outcome -- failure included -- is picked up here, where the UI may
             // be touched, instead of blocking the window on the load.
@@ -2133,22 +2201,28 @@ void MainWindow::LayoutTransportBar() {
     // meter was invisible for exactly that reason (M3.3). Clamp to the window.
     if (W > Bounds().Width()) W = Bounds().Width();
 
-    // Design offsets, from the original 1000-wide layout: meter 130 from the
-    // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
+    // Two rows (M3.1): the transport row A, the status row B. The bar draws
+    // the buttons, the LCD well and the status text; everything here is a
+    // child widget, and everything is placed FROM the right so nothing can
+    // overlap. The design offsets are the defaults: meter 6 from the right
+    // edge and 124 wide, the cluster may not cross x 602 (that is where the
+    // design put it, and where the LCD's own right edge leaves the gap).
     const float kGap     = Themed(12.0f);
     const float kMeterW  = Themed(124.0f);
     const float kLoudW   = Themed(136.0f);
-    const float kBpmR    = Themed(704.0f);   // right edge of the tempo field
-    const float kSliderR = Themed(588.0f);   // right edge of the master slider
-    const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
+    const float kFieldW  = Themed(66.0f);    // the tempo field
+    const float kBpmLblW = Themed(34.0f);
+    const float kVolLblW = Themed(30.0f);
+    const float kSliderW = Themed(126.0f);   // the master volume
+    const float kClusterL = Themed(602.0f);  // the right cluster's own left edge
 
     if (fMeter) {
         // Placed AND sized: the meter is built before the theme scale is known
         // on a HiDPI system (the tests override the scale after the window
         // exists), so a pin that only moved it would leave it at its design
-        // size in a 150% bar.
-        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
-        fMeter->ResizeTo(kMeterW, Themed(26.0f));
+        // size in a 150% bar. It spans both rows.
+        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(4.0f));
+        fMeter->ResizeTo(kMeterW, Themed(kTransportH) - Themed(8.0f));
     }
 
     const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
@@ -2167,22 +2241,44 @@ void MainWindow::LayoutTransportBar() {
         shown = on;
     };
 
-    // The loudness readout only fits beside the tempo field.
-    const bool showLoud = rightEdge - kLoudW >= kBpmR + kGap;
-    if (fLoudView && showLoud) fLoudView->MoveTo(W - Themed(278.0f), Themed(8.0f));
+    // Row A, right to left: the tempo field (with its label), then the
+    // loudness readout. Each is placed only when what is left of it still
+    // clears the LCD's own right edge -- a readout that does not fit is
+    // dropped rather than drawn over the position.
+    const float kLcdR = Themed(590.0f);
+    float aRight = rightEdge;
+    const bool showBpm = aRight - kFieldW - kBpmLblW >= kClusterL;
+    if (showBpm) {
+        fTempo->MoveTo(aRight - kFieldW, Themed(9.0f));
+        fTempo->ResizeTo(kFieldW, Themed(20.0f));
+        fBpmLbl->MoveTo(aRight - kFieldW - kBpmLblW, Themed(10.0f));
+    }
+    setVisible(fBpmShown, showBpm, { fBpmLbl, fTempo });
+    aRight -= showBpm ? (kFieldW + kBpmLblW + kGap) : 0.0f;
+
+    const bool showLoud = showBpm && aRight - kLoudW >= kClusterL
+                       && (W - Themed(6.0f) - kMeterW) >= kLcdR + kGap;
+    if (fLoudView && showLoud) {
+        fLoudView->MoveTo(aRight - kLoudW, Themed(10.0f));
+        fLoudView->ResizeTo(kLoudW, Themed(18.0f));
+    }
     setVisible(fLoudShown, showLoud, { fLoudView });
 
-    // The tempo field only fits when the meter leaves room for the field
-    // ITSELF -- it is the rightmost of the left-hand controls, so clearing the
-    // slider is not enough (which is exactly how it ended up under the meter).
-    const bool showBpm = rightEdge >= kBpmR + kGap;
-    setVisible(fBpmShown, showBpm, { fBpmLbl, fTempo });
-
-    // The master slider only fits beside whatever is now the rightmost control
-    // of the left cluster: the tempo field when it is shown, the slider's own
-    // right edge when it is not.
-    const bool showVol = rightEdge >= (showBpm ? kBpmR : kSliderR) + kGap;
+    // Row B, right to left: the master volume. The mixer has the same fader,
+    // which is what makes it droppable on a narrow window.
+    const bool showVol = rightEdge - kSliderW - kVolLblW >= kClusterL;
+    if (showVol) {
+        fMaster->MoveTo(rightEdge - kSliderW, Themed(33.0f));
+        fMaster->ResizeTo(kSliderW, Themed(20.0f));
+        fVolLbl->MoveTo(rightEdge - kSliderW - kVolLblW, Themed(35.0f));
+    }
     setVisible(fVolShown, showVol, { fVolLbl, fMaster });
+
+    // The LCD needs a legible width, and the meter must not cover it: below
+    // that the whole display goes rather than a squeezed fragment of it (the
+    // transport buttons and the status line keep working).
+    const bool showLcd = (W - Themed(6.0f) - kMeterW) >= kLcdR + kGap;
+    fTransport->SetLcdVisible(showLcd);
 }
 
 // Show or hide the inspector pane (View > Inspector, key I). Collapsing the
@@ -3562,10 +3658,9 @@ void MainWindow::ApplyTheme() {
     }
 
     const rgb_color chrome = ColChrome();
-    if (fTimeView != nullptr) {
-        fTimeView->SetViewColor(ColLcd());
-        fTimeView->SetHighColor(ColLcdText());
-    }
+    // (The time display is the bar's own child now — TransportTimeView — and it
+    // takes the LCD tokens in its own ApplyTheme, so a mode switch re-colours it
+    // with the rest of the bar.)
     for (BStringView* label : { fVolLbl, fBpmLbl, fLoudView }) {
         if (label == nullptr) continue;
         label->SetViewColor(chrome);
@@ -3610,18 +3705,135 @@ void MainWindow::SetThemeMode(ThemeMode mode) {
     SaveSettings();   // it is a preference: it survives the quit
 }
 
+// The big position (M3.1). The format is the window's own (fTimeMode): the
+// display view cycles it by asking, and every position in every format comes
+// from the kit-free TimeDisplay header, so what is shown and what a typed
+// entry means cannot drift apart.
 void MainWindow::UpdateTimeReadout(Frame playhead) {
     const double rate = fTransportCtl.fEngine ? fTransportCtl.fEngine->OutputRate() : fProject->sampleRate;
-    const double sec  = rate > 0 ? playhead / rate : 0.0;
-    const int    mins = static_cast<int>(sec / 60.0);
-    const double rem  = sec - mins * 60.0;
-    // Bar:beat from the tempo map alongside min:sec.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
+    if (!fTransport || fTransport->TimeView() == nullptr) return;
+    const std::string text =
+        FormatTimePosition(fTimeMode, playhead, rate, fProject->tempoMap);
+    fTransport->TimeView()->SetPosition(text.c_str(), TimeModeTag(fTimeMode));
+}
+
+// The readout line under the position: the tempo and meter at the playhead,
+// the audio callback's own load and the xruns (M3.1). The load figure is the
+// engine's PEAK hold since the last poll, taken (and cleared) here: what
+// matters is the worst block, not the average one.
+void MainWindow::UpdateTransportInfo() {
+    if (!fTransport) return;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    const Frame ph = fProject->transport.playhead;
+    const double bpm = fProject->tempoMap.BpmAt(ph);
+    int num = 4, den = 4;
+    fProject->tempoMap.Meter(ph, &num, &den);
+
+    uint64_t xruns = 0;
+    if (fTransportCtl.fEngine) {
+        // The PEAK since the last poll, taken (and cleared) here: an average
+        // hides exactly the block that overran and clicked. Between polls the
+        // figure is therefore "the worst block in the last ~16 ms", which is
+        // what a DAW's load meter is for. A take that reads it twice in one
+        // event (a state change right after a pulse) keeps the last value
+        // instead of flashing 0.
+        const bigtime_t peakUs = fTransportCtl.fEngine->TakePeakCallbackUs();
+        if (peakUs > 0) fDspPercent = fTransportCtl.fEngine->LoadPercentFor(peakUs);
+        xruns = fTransportCtl.fEngine->Xruns();
+    }
+    const float dsp = fDspPercent;
+    // The take's own xrun (the recorder's ring overflowing) is a dropout too,
+    // and it is latched for the take, so one is one.
+    if (fRecCtl.fRecorder && fRecCtl.fRecorder->Xrun())
+        xruns += 1;
+
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%.1f BPM  %d/%d   DSP %.0f%%   XR %llu",
+                  bpm, num, den, dsp, (unsigned long long)xruns);
+    fTransport->SetInfo(buf);
+}
+
+// The lamps on the transport buttons. Every piece of state is somebody else's
+// (the transport controller, the record controller, the project's transport) —
+// this only mirrors it out to the bar.
+void MainWindow::UpdateTransportButtons() {
+    if (!fTransport) return;
+    fTransport->SetPlaying(fTransportCtl.fPlaying);
+    fTransport->SetRecording(fRecCtl.fRecMode);
+    fTransport->SetLoop(fProject->transport.loopEnabled);
+    fTransport->SetClick(fTransportCtl.fMetronome);
+    fTransport->SetPunch(fProject->transport.punchEnabled);
+}
+
+// The status line: the transport's state, so it is never stale — a job or an
+// error message replaces it until the state changes again.
+void MainWindow::UpdateTransportStatus() {
+    if (!fTransport) return;
+    std::string s;
+    if (fRecCtl.fRecMode) {
+        if (fRecCtl.fCapturePending)      s = "Recording: count-in";
+        else if (fRecCtl.fLoopRecord)     s = "Recording: loop takes";
+        else if (!fRecCtl.fTakePath.empty()) {
+            const size_t slash = fRecCtl.fTakePath.find_last_of('/');
+            s = "Recording " + (slash == std::string::npos
+                                ? fRecCtl.fTakePath
+                                : fRecCtl.fTakePath.substr(slash + 1));
+        } else s = "Recording";
+    } else if (fTransportCtl.fPlaying) {
+        s = fProject->transport.loopEnabled ? "Playing (loop)" : "Playing";
+    } else if (fTransportCtl.fMonitoring) {
+        s = "Monitoring input";
+    } else {
+        s = "Stopped";
+    }
+    if (s == fStatusState) return;   // the state has not changed: leave any
+                                     // job/error message standing
+    fStatusState = s;
+    fTransport->SetStatus(s.c_str());
+}
+
+void MainWindow::SetTransportStatus(const char* text) {
+    if (!fTransport) return;
+    fTransport->SetStatus(text ? text : "");
+}
+
+// The bar view and one of its control rects, for the functional tests: a click
+// has to land where the bar DREW the button, not at an offset a test guessed
+// (the arrange-depth package learned that the hard way -- docs/HANDOFF.md).
+BView* MainWindow::TransportBarView() const { return fTransport; }
+
+BRect MainWindow::TransportButtonRect(int which) const {
+    if (which < 0 || which >= (int)TransportButton::Count) return BRect();
+    return ButtonRect((TransportButton)which);
+}
+
+// The three readouts the bar's own state drives, in one call: the lamps, the
+// status line and the LCD's info line. Every path that changes one of them
+// (the pulse, a button, a key, the menus) goes through here.
+void MainWindow::UpdateTransportReadouts() {
+    UpdateTransportButtons();
+    UpdateTransportStatus();
+    UpdateTransportInfo();
+}
+
+// Rewind / fast-forward (M3.1): the playhead to the previous / next bar, on
+// the tempo map's own bar boundaries. The bar the playhead is IN is the anchor,
+// so pressing rewind inside bar 3 lands on bar 2's downbeat rather than bar 3's.
+void MainWindow::NudgePlayheadBar(int dir) {
+    if (!fTimeline) return;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    const Frame ph = fProject->transport.playhead;
     int bar = 1, beat = 1;
-    fProject->tempoMap.BarBeat(playhead, &bar, &beat);
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
-    fTimeView->SetText(buf);
+    fProject->tempoMap.BarBeat(ph, &bar, &beat);
+    if (dir < 0 && bar <= 1) {        // already in the first bar: the start
+        fTimeline->ReturnToZero();
+        return;
+    }
+    const int target = dir < 0 ? bar - 1 : bar + 1;
+    const Frame f = FrameAtBarBeat(fProject->tempoMap, target, 1, 0);
+    if (f < 0) return;
+    fTimeline->SeekTo(f);
 }
 
 void MainWindow::PushRollPlayhead(Frame ph) {

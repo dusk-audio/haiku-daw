@@ -47,6 +47,7 @@
 // -DDAW_LV2=OFF build too.
 #include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
 #include "../src/ui/MixerWindow.h"      // kMsgMixFx (open the effects editor)
+#include "../src/ui/TransportBar.h"     // TransportButton + ButtonRect (M3.1)
 #include "../src/dsp/SidechainKey.h"    // kExtKeySlot (the picker's appended slot)
 #ifdef DAW_HAVE_LV2
 #include "../src/plugin/Lv2Host.h"
@@ -5305,6 +5306,253 @@ static void CheckViewColor(MainWindow* win, const char* parent, const char* name
                 expected.red, expected.green, expected.blue);
 }
 
+// --- 26. M3.1: the transport bar --------------------------------------------
+
+// Every button posts its own action, the big display cycles its format and
+// takes a typed position, and the readout line names the tempo, the meter, the
+// callback load and the xrun count. Every click goes to the BAR at the rect
+// the bar itself reports (`TransportButtonRect`), so a control that moved
+// cannot still pass through an offset a test remembered (docs/HANDOFF.md).
+static void TestTransportBar(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_transport_bar\n");
+
+    // Something to play: an empty project stops playback again immediately,
+    // which would read as "the Play button does nothing".
+    {
+        const char* wav = "/tmp/haiku_daw_ui_tbar.wav";
+        std::remove(wav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 3000, -3000 };
+        CHECK(w.Open(wav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "tbar-track";
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000 * 8;
+        c.sourcePath = wav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+    }
+
+    BView* bar = nullptr;
+    BView* timeView = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        bar = win->TransportBarView();
+        if (bar) timeView = bar->FindView("time");
+        win->Unlock();
+    }
+    CHECK(bar != nullptr);
+    CHECK(timeView != nullptr);
+    Shot("transport-bar");
+
+    auto lock = [&](const std::function<void()>& fn) {
+        if (win->LockWithTimeout(1000000) == B_OK) { fn(); win->Unlock(); }
+    };
+    auto click = [&](int which, int32 clicks = 1) {
+        BRect r;
+        lock([&] { r = win->TransportButtonRect(which); });
+        BMessage m(B_MOUSE_DOWN);
+        m.AddInt32("buttons", 1);
+        m.AddInt32("clicks", clicks);
+        m.AddPoint("where", BPoint((r.left + r.right) * 0.5f,
+                                   (r.top + r.bottom) * 0.5f));
+        BMessenger(bar).SendMessage(&m);
+    };
+    auto playing = [&] {
+        bool p = false;
+        lock([&] { p = win->IsPlaying(); });
+        return p;
+    };
+    auto loopOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.loopEnabled; });
+        return on;
+    };
+    auto punchOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.punchEnabled; });
+        return on;
+    };
+    auto metronomeOn = [&] {
+        bool on = false;
+        lock([&] { on = win->MetronomeOn(); });
+        return on;
+    };
+    auto playhead = [&] {
+        Frame f = -1;
+        lock([&] { f = project.transport.playhead; });
+        return f;
+    };
+    auto setPlayhead = [&](Frame f) {
+        lock([&] {
+            project.transport.playhead = f;
+            if (TimelineView* tv = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                tv->SetPlayhead(f);
+        });
+    };
+
+    const int kRtz = (int)TransportButton::Rtz;
+    const int kRewind = (int)TransportButton::Rewind;
+    const int kForward = (int)TransportButton::Forward;
+    const int kPlay = (int)TransportButton::Play;
+    const int kStop = (int)TransportButton::Stop;
+    const int kLoop = (int)TransportButton::Loop;
+    const int kClick = (int)TransportButton::Click;
+    const int kPunch = (int)TransportButton::Punch;
+    const int kZoomIn = (int)TransportButton::ZoomIn;
+
+    // Play / Stop: the two the bar has always had, now through the same hit
+    // test as the rest.
+    CHECK(!playing());
+    click(kPlay);
+    CHECK(WaitFor([&] { return playing(); }));
+    Shot("transport-bar-playing");
+    click(kStop);
+    CHECK(WaitFor([&] { return !playing(); }));
+
+    // Loop, metronome and punch: each button flips the state it stands for,
+    // and flips it back (the state is the model's/the controller's, not the
+    // button's own copy).
+    CHECK(!loopOn());
+    click(kLoop);
+    CHECK(WaitFor([&] { return loopOn(); }));
+    click(kLoop);
+    CHECK(WaitFor([&] { return !loopOn(); }));
+    CHECK(!metronomeOn());
+    click(kClick);
+    CHECK(WaitFor([&] { return metronomeOn(); }));
+    click(kClick);
+    CHECK(WaitFor([&] { return !metronomeOn(); }));
+    CHECK(!punchOn());
+    click(kPunch);
+    CHECK(WaitFor([&] { return punchOn(); }));
+    click(kPunch);
+    CHECK(WaitFor([&] { return !punchOn(); }));
+
+    // Return to zero: back to frame 0 wherever the playhead was.
+    setPlayhead(48000);
+    CHECK(playhead() == 48000);
+    click(kRtz);
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // Rewind / fast-forward: one bar, on the tempo map's own boundaries. At
+    // 120 BPM 4/4 and 48 kHz a bar is 96000 frames, so bar 3 starts at
+    // 192000 and bar 4 at 288000.
+    setPlayhead(288000);                       // in bar 4
+    click(kRewind);
+    CHECK(WaitFor([&] { return playhead() == 192000; }));   // bar 3's downbeat
+    click(kForward);
+    CHECK(WaitFor([&] { return playhead() == 288000; }));   // bar 4's
+    setPlayhead(0);
+    click(kRewind);                            // already at the first bar
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // The zoom pair still zooms (it moved; its action did not).
+    {
+        double before = 0.0, after = 0.0;
+        auto framesPerPixel = [&] {
+            double fpp = 0.0;
+            lock([&] {
+                if (TimelineView* tv =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                    const float x0 = tv->FrameToX(0);
+                    const float x1 = tv->FrameToX(48000);
+                    if (x1 > x0) fpp = 48000.0 / (double)(x1 - x0);
+                }
+            });
+            return fpp;
+        };
+        before = framesPerPixel();
+        click(kZoomIn);
+        CHECK(WaitFor([&] { after = framesPerPixel(); return after < before * 0.75; }));
+    }
+
+    // The big display: a click cycles the format, and what the bar shows is
+    // what the window says the current format is (one piece of state).
+    {
+        int mode = -1;
+        lock([&] { mode = win->TransportTimeMode(); });
+        BMessage m(B_MOUSE_DOWN);
+        m.AddInt32("buttons", 1);
+        m.AddInt32("clicks", 1);
+        m.AddPoint("where", BPoint(40, 20));   // inside the display's frame
+        BMessenger(timeView).SendMessage(&m);
+        CHECK(WaitFor([&] {
+            int now = -1;
+            lock([&] { now = win->TransportTimeMode(); });
+            return now != mode;
+        }));
+        // ... and the tag under it names that format.
+        std::string tag;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                tag = tv->TagText();
+        });
+        int now = -1;
+        lock([&] { now = win->TransportTimeMode(); });
+        CHECK(!tag.empty());
+        CHECK(tag == TimeModeTag((TimeMode)now));
+
+        // Cycle on to minutes:seconds, then type a position into the display
+        // and check the playhead MOVED there.
+        for (int guard = 0; guard < 5; guard++) {
+            int m2 = -1;
+            lock([&] { m2 = win->TransportTimeMode(); });
+            if (m2 == (int)TimeMode::MinSec) break;
+            BMessage c(B_MOUSE_DOWN);
+            c.AddInt32("buttons", 1);
+            c.AddInt32("clicks", 1);
+            c.AddPoint("where", BPoint(40, 20));
+            BMessenger(timeView).SendMessage(&c);
+            snooze(120000);
+        }
+        int modeNow = -1;
+        lock([&] { modeNow = win->TransportTimeMode(); });
+        CHECK(modeNow == (int)TimeMode::MinSec);
+
+        BMessage entry(kMsgTimeEntry);
+        entry.AddString("text", "1:30");
+        win->PostMessage(&entry);
+        CHECK(WaitFor([&] { return playhead() == (Frame)(90 * 48000); }));
+
+        // A position that cannot be read changes NOTHING and says so (a
+        // plausible-but-wrong seek would be worse than the refusal).
+        BMessage bad(kMsgTimeEntry);
+        bad.AddString("text", "banana");
+        win->PostMessage(&bad);
+        snooze(400000);
+        CHECK(playhead() == (Frame)(90 * 48000));
+        std::string status;
+        lock([&] {
+            if (auto* b = dynamic_cast<TransportBar*>(bar)) status = b->StatusText();
+        });
+        CHECK(status.find("Cannot read") != std::string::npos);
+    }
+
+    // The readout line: tempo, meter, the callback's load and the xruns.
+    {
+        std::string info;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                info = tv->InfoText();
+        });
+        CHECK(info.find("BPM") != std::string::npos);
+        CHECK(info.find("DSP") != std::string::npos);
+        CHECK(info.find("XR") != std::string::npos);
+    }
+
+    // Leave the transport as the rest of the suite expects to find it.
+    setPlayhead(0);
+    CHECK(WaitQuiet());
+}
+
 // The dock hosts one page at a time, switched from the strip's segmented
 // control: the editor (the roll or its hint), the samples and the plugins. The
 // browsers are the SAME views their windows host, so what is checked here is
@@ -6308,6 +6556,7 @@ static int32 TestThread(void*) {
     TestShortcutsWindow(win);
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
+    TestTransportBar(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);

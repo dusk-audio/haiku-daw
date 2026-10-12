@@ -25,6 +25,8 @@
 #include "RenderJobs.h"              // export/freeze/region rendering
 #include "TransportController.h"      // the engine + transport state
 
+#include "../model/TimeDisplay.h"      // the transport's time formats (M3.1)
+
 #include <Messenger.h>
 #include <Window.h>
 
@@ -218,6 +220,13 @@ public:
     // do. The suite keeps ONE window for the whole run (closing it quits the
     // app), so the restore path is otherwise unreachable from a test.
     void ReloadSettings() { LoadSettings(); }
+    // The transport bar's own state (M3.1), for the functional tests: which
+    // format the big display is showing, and the two text lines it draws.
+    int TransportTimeMode() const { return (int)fTimeMode; }
+    // The bar view itself, so a test clicks a control where the BAR says it is
+    // (TransportButtonRect) instead of computing an offset (docs/HANDOFF.md).
+    BView* TransportBarView() const;
+    BRect TransportButtonRect(int which) const;   // daw::TransportButton
 
 private:
     // Feed one live event to every armed track whose route accepts it.
@@ -361,7 +370,6 @@ private:
     TimelineView*   fTimeline;
     InspectorView*  fInspector = nullptr;   // left track-inspector column
     class TransportBar* fTransport = nullptr;
-    BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
     BStringView*    fVolLbl = nullptr;     // labels + readouts the bar hides
     BStringView*    fBpmLbl = nullptr;     // when there is no room for them
@@ -459,6 +467,20 @@ private:
     ExportChoices             fExportChoices;    // the dialog's last settings
 
     void OpenExportWindow(bool stems);            // the options dialog
+
+    // ---- the transport bar's own state (M3.1) -----------------------------
+    // The time display's format is the WINDOW's: the display view cycles it by
+    // asking, and the window formats every position, so there is one copy of
+    // "which format are we showing" and one place that can format it.
+    TimeMode fTimeMode = TimeMode::Bbt;
+    void UpdateTransportReadouts();  // all three, for one state change
+    void UpdateTransportInfo();      // tempo/meter + DSP load + xruns (LCD)
+    void UpdateTransportButtons();   // playing/recording/loop/click/punch lamps
+    void UpdateTransportStatus();    // the state line, when the state changed
+    void SetTransportStatus(const char* text);   // one message, until it changes
+    void NudgePlayheadBar(int dir);  // rewind / fast-forward one bar
+    std::string fStatusState;        // the last state string shown
+    float       fDspPercent = 0.0f;  // the last measured callback peak load
 };
 
 } // namespace daw
