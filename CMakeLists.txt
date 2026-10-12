@@ -498,6 +498,13 @@ add_executable(stream_loop_tests tests/stream_loop_tests.cpp)
 target_link_libraries(stream_loop_tests PRIVATE daw_model)
 add_test(NAME stream_loop_tests COMMAND stream_loop_tests)
 
+# The stream pool's kit-free half (M4.3): the fixed set of fill threads (one
+# worker per stream, always; Stop joins; no work is lost) and the order a build
+# starts them in (which clip the transport needs next, loop included).
+add_executable(stream_pool_tests tests/stream_pool_tests.cpp)
+target_link_libraries(stream_pool_tests PRIVATE daw_model)
+add_test(NAME stream_pool_tests COMMAND stream_pool_tests)
+
 add_executable(midicontrol_tests tests/midicontrol_tests.cpp)
 target_link_libraries(midicontrol_tests PRIVATE daw_model)
 add_test(NAME midicontrol_tests COMMAND midicontrol_tests)

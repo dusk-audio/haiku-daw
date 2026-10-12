@@ -4647,12 +4647,17 @@ static void TestSeamlessLoop(MainWindow* win, Project& project) {
 static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     std::printf("big project playback ...\n");
 
-    // One real (if short) WAV for every clip: the point is the count.
+    // One real (if short) WAV for every clip: the point is the count. It carries
+    // a SIGNAL (a quiet square, so every frame is non-zero), because the test
+    // asks whether sound came out at all (M4.3) — silence cannot tell "the graph
+    // landed" from "the streams are open and delivering".
     const char* wav = "/tmp/haiku_daw_ui_big.wav";
     {
         WavWriter w;
         if (w.Open(wav, 48000, 2)) {
-            std::vector<int16_t> frames(48000 * 2, 0);   // 1 s of silence
+            std::vector<int16_t> frames(48000 * 2);
+            for (size_t i = 0; i < frames.size(); i++)
+                frames[i] = ((i / 64) % 2) ? 8000 : -8000;
             CHECK(w.WriteInt16(frames.data(), frames.size()));
             CHECK(w.Close());
         }
@@ -4717,12 +4722,32 @@ static void TestBigProjectPlayback(MainWindow* win, Project& project) {
     // WINDOW budget below is the one it fixes: the transport rolls without
     // waiting for a single file open.
     CHECK(uiMs < 300000);
-    // The graph still lands (an upper bound, not a budget): MEASURED 2026-10-10,
-    // VM, 39 tracks / 320 clips: 2592 ms — the same disk work as before, now
-    // off the window thread. M4.3's stream pool is what brings the AUDIO start
-    // under 300 ms; a bound near the measurement would be a flake on a VM two
-    // agents share, not a regression guard.
+    // The graph still lands. M4.1 measured 2592 ms and M4.2 3439 ms for this
+    // project (39 tracks then); M4.3's stream pool and the batched priming bring
+    // the ENGINE's own build inside the plan's 300 ms — that is the number below,
+    // measured on the builder thread, and it is the plan's audio-start budget.
+    // The window's message latency (`uiMs` above) is a separate thing and is not
+    // the engine's to fix; the end-to-end `readyMs` is printed for the record.
+    const bigtime_t buildUs = win->EngineBuildUs();
+    std::printf("  big project: engine build %llu us, "
+                "command-to-graph %.0f ms\n",
+                (unsigned long long)buildUs, (double)readyMs / 1000.0);
+    // MEASURED 2026-10-12 on the VM (2 vCPU): 329 streams, 135 ms. This is the
+    // plan's 300 ms audio-start budget, measured where the engine owns it. The
+    // bound is deliberately tight (3x the measurement): 3295 ms is what a
+    // per-clip prime wait costs, and 462 ms is what the pool costs if a stream
+    // whose source has ended is allowed to make the build wait — both are
+    // regressions this must fail on.
+    CHECK(buildUs > 0 && buildUs < 400000);
     CHECK(readyMs < 12000000);
+    // Sound actually comes out: the pool is filling the clips at the playhead,
+    // so the master meter reads a level. This is the end-to-end guard for the
+    // stream pool — counters alone would pass with every stream silent.
+    CHECK(WaitFor([&] { return win->MasterPeakL() > 0.0f; }, 5000000));
+    std::printf("  big project: master peak %.3f, sound %.0f ms after the play "
+                "command (%.0f ms after the graph landed)\n",
+                win->MasterPeakL(), (double)(system_time() - t0) / 1000.0,
+                (double)(system_time() - t0 - readyMs) / 1000.0);
     snooze(2000000);            // let the timeline draw it for a while
     Shot("big-project-playing");
     {
