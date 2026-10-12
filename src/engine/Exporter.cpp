@@ -3,6 +3,7 @@
 #include "WavSource.h"
 #include "IAudioSink.h"
 #include "Resampler.h"
+#include "../dsp/SincResampler.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
 #include "../synth/IInstrument.h"
@@ -78,7 +79,12 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
     if (c.sourceOffset > 0)
         src.Seek(c.sourceOffset);
 
-    Resampler rs(src.FrameRate(), outRate);
+    // The OFFLINE resampler: a windowed-sinc (M4.5) rather than the linear one,
+    // because what comes out of here is the file that leaves the app, and the
+    // linear interpolator's images fold back at only -10..-20 dB while this one
+    // holds its stopband ~90 dB down. Same interface, so nothing else changes.
+    // The live monitor path keeps the linear one (Engine).
+    SincResampler rs(src.FrameRate(), outRate);
     const float* chunk = nullptr;
     size_t frames = 0;
     while (src.ReadChunk(&chunk, &frames)) {

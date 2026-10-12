@@ -251,7 +251,14 @@ static void TestKickDucksBass() {
     CHECK(std::fabs(RightAt(out, K + KDUR - 480) / L - g) < 0.005);
     const double coef = std::exp(-1.0 / (1.0 * 0.001 * SR));
     for (int64_t n : { ATT, 2 * ATT, 5 * ATT }) {
-        const double want = g + (1.0 - g) * std::pow(coef, (double)n);
+        // The envelope's first update lands ON the onset frame, so the frame
+        // K+n carries coef^(n+1) frames of smoothing. (These values used to be
+        // calibrated with coef^n because the linear Resampler's equal-rate
+        // path — which the exporter used for every clip at the project rate —
+        // delays every decoded sample by one frame, so the key reached the
+        // detector at K+1. M4.5's SincResampler passes equal rates through
+        // exactly, and the key now arrives at the frame it was authored on.)
+        const double want = g + (1.0 - g) * std::pow(coef, (double)n + 1.0);
         CHECK(std::fabs(RightAt(out, K + n) / L - want) < 2e-3);
     }
 }

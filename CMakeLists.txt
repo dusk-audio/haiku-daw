@@ -65,6 +65,7 @@ add_library(daw_model
     src/dsp/Gate.cpp            # kit-free noise gate / expander
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
+    src/dsp/SincResampler.cpp   # kit-free windowed-sinc SRC for the offline path
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
     src/synth/SampleBank.cpp    # kit-free loaded-soundfont store + cache
     src/synth/SfzParser.cpp     # kit-free SFZ -> LoadedInstrument
@@ -225,6 +226,12 @@ add_test(NAME wavwriter_tests COMMAND wavwriter_tests)
 add_executable(resampler_tests tests/resampler_tests.cpp)
 target_link_libraries(resampler_tests PRIVATE daw_model)
 add_test(NAME resampler_tests COMMAND resampler_tests)
+
+# The offline resampler (M4.5): aliasing rejection and passband flatness
+# measured against the linear one, plus the streaming/identity contract.
+add_executable(sinc_resampler_tests tests/sinc_resampler_tests.cpp)
+target_link_libraries(sinc_resampler_tests PRIVATE daw_model)
+add_test(NAME sinc_resampler_tests COMMAND sinc_resampler_tests)
 
 add_executable(effect_tests tests/effect_tests.cpp)
 target_link_libraries(effect_tests PRIVATE daw_model)
