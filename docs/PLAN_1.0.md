@@ -19,9 +19,12 @@
 > entry and the installed docs and templates, a CMake resource step that fails
 > loudly instead of skipping, the README/CHANGELOG/ROADMAP/USER_GUIDE pass and
 > the status table, and the extended release checklist. Three items are still
-> open and are named so they cannot be mistaken for done: **M1.5** is measured,
-> not built — the draw-time protocol is in
-> `docs/agent-prompts/23-offscreen-and-icons.md` and waits on Marc's run;
+> open and are named so they cannot be mistaken for done: **M1.5** — its
+> play-start half is measured and fixed (the VM's 51-track/320-clip build went
+> **3295 ms → 151 ms**, M4.1/M4.3; the timeline **draw**-time number is the one
+> still missing, its protocol in
+> `docs/agent-prompts/23-offscreen-and-icons.md` waiting on Marc's run) — and
+> the back-buffer it decides is not built;
 > **M1.6** has its artwork and plumbing (`data/icons/`, the rdef blocks, the
 > MIME SetIcon call) but not the HVIF bytes, which need Icon-O-Matic on a Haiku
 > machine; and **M5.3** (output-device selection in Preferences) did not land —

@@ -125,10 +125,9 @@ against each other, and not a merged total):
   M4.6 (dynamic LV2 latency) and M7.1's LV2 sidechain tail. Records
   `45-sinc-resampler-PR.md`, `46-dynamic-latency-PR.md`,
   `47-lv2-sidechain-PR.md` (host 69/69 each, syntax check 75 OK 4 FAIL).
-- M7.2 time-stretch is the `feature/timestretch` row above. (Two records carry
-  the number 44 — `48-pr1-integration-fixes.md` on `feature/m3-shell` and
-  `44-multichannel-input-PR.md` on `feature/multichannel-input`; rename one
-  when the branches meet.)
+- M7.2 time-stretch is the `feature/timestretch` row above. These five rows and
+  PR 1's integration record (`48-pr1-integration-fixes.md` — 48, not 44: the
+  multichannel package owns 44) landed together in PRs #19–#21.
 
 Each agent: branch `feature/<package-name>`, conventional commits (`feat(fx): ...`), all kit-free code must pass `ctest --test-dir build-host` on the Linux host. Haiku-only code (`src/ui/`, `src/engine/` targets, `src/plugin/PluginHost.cpp`) cannot compile on the Linux host — pattern-faithful edits, Marc verifies on the Haiku VM.
 

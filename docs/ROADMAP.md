@@ -89,7 +89,7 @@ sort, with sends, a monitor section, and BS.1770 metering.
   short-term LUFS + true-peak dBTP, live readout in the transport bar. Integrated
   disabled on the audio thread (RT-safe); available offline.
 
-## Phase T — Tempo & meter map  ✅ DONE (step changes)
+## Phase T — Tempo & meter map  ✅ DONE
 
 - ✅ Kit-free `TempoMap` (T1): frame-anchored tempo + meter changes, exact
   frame<->beat integral, meter-aware BBT. Project field + IO. Host-tested.
@@ -97,7 +97,12 @@ sort, with sends, a monitor section, and BS.1770 metering.
 - ✅ Metronome (T3): clicks follow tempo changes, accent follows meter.
 - ✅ UI (T4): right-click the ruler to add/remove tempo (preset BPM) + meter
   (preset signature) changes; amber/blue markers on the ruler.
-- *Deferred:* tempo ramps (accel/rit); BBT transport readout.
+- ✅ Tempo ramps (accel/rit): `TempoChange::ramp` interpolates the tempo across
+  a segment, `TempoAt`/the frame<->beat integrals walk it, the ruler's
+  right-click menu toggles "Ramp to next tempo", the segment draws as a
+  diagonal, and `ProjectIO` persists the flag.
+- ✅ BBT transport readout: the transport's time display cycles BBT, min:sec,
+  samples and timecode (M3.1; the earlier readout is Phase G's).
 
 ## Phase B — Automation  ✅ DONE (gain + pan)
 

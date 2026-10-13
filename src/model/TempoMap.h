@@ -2,7 +2,7 @@
 //
 // Replaces the single project tempo/meter with a sorted list of frame-anchored
 // tempo changes and meter (time-signature) changes. Tempo is constant between
-// changes (instant jumps; no ramps in v1). Anchoring at frames keeps frame<->
+// changes, each able to ramp into the next (accel/rit). Anchoring at frames keeps frame<->
 // beat conversion exact and non-circular: a beat position is just the integral
 // of tempo over frames.
 //

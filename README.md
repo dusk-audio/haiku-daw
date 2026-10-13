@@ -235,8 +235,9 @@ the version string says 1.0.0 and the changelog heading says unreleased.
   Alt-drag); it keeps the recorded pitch, and the last few milliseconds of a
   stretched clip that ends mid-file are windowed down rather than continued
   into the material after it.
-- **Of the 128 MIDI controllers, six are audible** — CC1 (mod wheel), CC7,
-  CC10, CC11, CC64 (sustain) and pitch-bend. Any other controller can be
+- **Five of the 128 MIDI controllers are audible** — CC1 (mod wheel), CC7,
+  CC10, CC11 and CC64 (sustain) — plus pitch-bend, which is its own message
+  rather than a controller number. Any other controller can be
   recorded, drawn, saved and exported, but nothing listens to it yet, and live
   controller moves are engine-wide rather than per input device.
 - **VST is not supported**, by design — LV2 is the plugin format here.
