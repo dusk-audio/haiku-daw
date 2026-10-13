@@ -4353,6 +4353,19 @@ static void TestArrangeTracks(MainWindow* win, Project& project,
             }));
             CHECK(markerCount() == markersBefore + 1);   // moved, not copied
             CHECK(undoName() == "Move Marker");
+            // A test earlier in the run saved a project, so the autosave
+            // runner can leave a recovery file behind -- and a modal "Recover?"
+            // in front of this window makes the shot useless (found by reading
+            // the pass: the marker lane was behind one). Clear it first; the
+            // suite deletes it at start-up for the same reason.
+            {
+                BPath settings;
+                if (ProjectDocument::SettingsPath(settings) == B_OK) {
+                    BPath recovery(settings);
+                    if (recovery.Append("recovery.dawproj") == B_OK)
+                        BEntry(recovery.Path()).Remove();
+                }
+            }
             Shot("markers-lane-moved");
             win->PostMessage(MSG_EDIT_UNDO);
             CHECK(WaitFor([&] {

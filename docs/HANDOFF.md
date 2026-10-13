@@ -267,6 +267,15 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   draw while the screen is locked: draw timings print nothing and screenshots
   show the lock screen. Visual review and draw measurements need it unlocked
   (or the hardware box, 192.168.1.186).
+- **...and the blanker comes back DURING a run.** `screen_blanker` covers the
+  display after ~10 idle minutes, and a full `DAW_UI_SHOTS` pass is now longer
+  than that: the shots taken late in the pass come out solid black while the
+  early ones are fine (found 2026-10-13 — the three new windows' shots were the
+  black ones, i.e. exactly the ones nobody had seen before). Kill it
+  repeatedly for the run, not once before it:
+  `(while true; do for p in $(ps | grep "[s]creen_blanker" | awk '{print $2}'); do kill $p 2>/dev/null; done; sleep 20; done) &`
+  Note the second `ps` field: Haiku prints the path first, so `awk '{print $1}'`
+  feeds `kill` a path and silently does nothing.
 - **A killed dirty run wedges the next one.** Killing `ui_functional_tests` or
   the app with unsaved changes leaves
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
