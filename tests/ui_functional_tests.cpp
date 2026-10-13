@@ -473,12 +473,16 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
     std::printf("test_message_round_trip\n");
     const size_t before = project.Tracks().size();
     win->PostMessage(MSG_NEW_MIDI);
+    // The FIRST check in the file gets a longer wait than the 5 s default: it
+    // is the one that runs against a cold-started window (a fresh build, a
+    // cold file cache), and it failed once in a no-LV2 run that passed on a
+    // re-run with the same binary. A slow start is not what this asserts.
     CHECK(WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         const size_t now = project.Tracks().size();
         win->Unlock();
         return now == before + 1;
-    }));
+    }, 20000000));
 }
 
 // --- package 32: the CC lane offers ANY controller, and it reaches a voice ---
