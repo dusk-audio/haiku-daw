@@ -42,6 +42,7 @@
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
 #include "../model/RegionOps.h"
+#include "../model/ProjectTimebase.h"   // ScaleProjectTimebase (a template's rate)
 #include "../model/SmfIO.h"
 #include "../model/MidiOps.h"
 #include "../model/RecordPlan.h"
@@ -241,6 +242,43 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         strips.push_back(std::move(s));
     }
     return strips;
+}
+
+// The ONE encoder for kMsgMixStrips. The mixer's decoder reads its own field
+// names ("g", "mu", "sn", ...) and this message is sent from two places: the
+// refresh funnel, and View > Mixer asking an already-open mixer to update.
+// Those two encodings drifted -- the View path still wrote "gain"/"mute"/"arm"
+// and never wrote a name, a send count or an output label -- so opening the
+// mixer a second time replaced its strips with default ones. Both go through
+// here now, and anything added to MixerStripInfo is added once.
+static void AddMixerStripsPayload(BMessage& m, const Project& p) {
+    for (const MixerStripInfo& s : BuildMixerStrips(p)) {
+        m.AddInt64("tid", (int64)s.trackId);
+        m.AddString("nm", s.name.c_str());
+        m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
+        m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
+        m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
+        m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
+        // Count first, then this strip's inserts appended to the one flat run
+        // the mixer slices back apart in strip order.
+        m.AddInt32("fx", (int32)s.fx.size());
+        for (const MixerInsertInfo& ins : s.fx) {
+            m.AddString("fxn", ins.name.c_str());
+            m.AddBool("fxb", ins.bypassed);
+        }
+        m.AddInt32("sn", (int32)s.sends.size());
+        // The send labels/levels travel the same way the inserts do: one flat
+        // run across all strips, sliced by "sn".
+        for (const MixerSendInfo& si : s.sends) {
+            m.AddString("sdn", si.label.c_str());
+            m.AddFloat("slv", si.level);
+        }
+        m.AddFloat("tr", s.trim);
+        m.AddBool("ph", s.phaseInvert);
+        m.AddInt32("sg", s.soloGroup);
+        m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
+    }
+    m.AddFloat("mg", p.masterGain);
 }
 
 // Decode a posted note list (PianoRoll -> here). kMsgApplyNotes and
@@ -764,33 +802,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fTimeline)  fTimeline->Invalidate();
             if (fMixerMsgr.IsValid()) {   // refresh an open mixer's strip state
                 BMessage m(kMsgMixStrips);
-                for (const MixerStripInfo& s : BuildMixerStrips(*fProject)) {
-                    m.AddInt64("tid", (int64)s.trackId);
-                    m.AddString("nm", s.name.c_str());
-                    m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
-                    m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
-                    m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
-                    m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
-                    // Count first, then this strip's inserts appended to the one
-                    // flat run the mixer slices back apart in strip order.
-                    m.AddInt32("fx", (int32)s.fx.size());
-                    for (const MixerInsertInfo& ins : s.fx) {
-                        m.AddString("fxn", ins.name.c_str());
-                        m.AddBool("fxb", ins.bypassed);
-                    }
-                    m.AddInt32("sn", (int32)s.sends.size());
-                    // The send labels/levels travel the same way the inserts
-                    // do: one flat run across all strips, sliced by "sn".
-                    for (const MixerSendInfo& si : s.sends) {
-                        m.AddString("sdn", si.label.c_str());
-                        m.AddFloat("slv", si.level);
-                    }
-                    m.AddFloat("tr", s.trim);
-                    m.AddBool("ph", s.phaseInvert);
-                    m.AddInt32("sg", s.soloGroup);
-                    m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
-                }
-                m.AddFloat("mg", fProject->masterGain);
+                AddMixerStripsPayload(m, *fProject);
                 fMixerMsgr.SendMessage(&m);
             }
             // ... and an open markers window, whose list is model data too. A
@@ -1178,23 +1190,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // the current strips rather than stacking a second rack.
             if (fMixerMsgr.IsValid()) {
                 BMessage r(kMsgMixStrips);
-                r.AddFloat("mg", fProject->masterGain);
-                for (const MixerStripInfo& st : strips) {
-                    r.AddInt64("tid", (int64)st.trackId);
-                    r.AddFloat("gain", st.gain);
-                    r.AddFloat("pan", st.pan);
-                    r.AddBool("mute", st.muted);
-                    r.AddBool("solo", st.soloed);
-                    r.AddBool("arm", st.armed);
-                    r.AddBool("mon", st.inputMonitor);
-                    r.AddInt32("color", st.colorIndex);
-                    r.AddInt32("type", st.type);
-                    r.AddInt32("fx", (int32)st.fx.size());
-                    for (const MixerInsertInfo& in : st.fx) {
-                        r.AddString("fxn", in.name.c_str());
-                        r.AddBool("fxb", in.bypassed);
-                    }
-                }
+                AddMixerStripsPayload(r, *fProject);
                 if (fMixerMsgr.SendMessage(&r) == B_OK) {
                     BMessage act(kMsgMixerActivate);   // bring it to the front
                     fMixerMsgr.SendMessage(&act);
@@ -1535,8 +1531,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fStack->Execute(std::move(macro), *fProject);
                     UpdateTitle();
                 }
-                // Refresh the other strips/panes so the change shows live.
-                if (t->muteGroup > 0)
+                // Refresh the other strips/panes so the change shows live. Both
+                // group rules cascade in the model (SetTrackMuteCommand and
+                // SetTrackSoloCommand both write every member), so BOTH have to
+                // bring the refresh with them -- with only the mute-group test,
+                // soloing one member of a solo group left the other members'
+                // S lamps stale in an open mixer.
+                if (t->muteGroup > 0 || t->soloGroup > 0)
                     PostMessage(kMsgUiRefresh);
                 fTimeline->Invalidate();
             }
@@ -3376,8 +3377,10 @@ void MainWindow::NewProjectFrom(const std::string& templateId,
     if (!fromTemplate) *fProject = Project{};
 
     const double rate = fPrefsSampleRate > 0 ? (double)fPrefsSampleRate : 48000.0;
-    fProject->sampleRate = rate;
-    fProject->tempoMap.sampleRate = rate;
+    // A template carries a timeline, and a timeline is frames: adopting the
+    // preferred rate without moving them would re-interpret every clip start
+    // and length at the new rate. AdoptProjectRate rescales first.
+    AdoptProjectRate(*fProject, rate);
     fStack->Clear();
     fDoc.NoteNew();               // no path, and nothing to lose
     fRecCtl.fTakeDir.clear();

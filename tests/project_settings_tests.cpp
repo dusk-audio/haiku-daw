@@ -420,6 +420,81 @@ int main() {
         std::remove(path.c_str());
     }
 
+    // --- AdoptProjectRate ---------------------------------------------------
+    // What the New Project flow uses when a template's rate differs from the
+    // preferred one: the frames move with the rate, or a 48 kHz template opened
+    // at 44.1 kHz would come out 8.8 % short. A matching rate must stay a
+    // no-op -- a rescale of 1.0 still rounds every frame through the ratio.
+    {
+        Project p;
+        p.sampleRate = 48000.0;
+        p.tempoMap.sampleRate = 48000.0;
+        Track t;
+        t.id = p.NextTrackId();
+        t.type = TrackType::Audio;
+        Clip c;
+        c.id = p.NextClipId();
+        c.startFrame = 48000;         // 1 s in
+        c.lengthFrames = 24000;       // half a second
+        t.clips.push_back(c);
+        p.AddTrack(t);
+
+        // Same rate: bit-identical frames.
+        AdoptProjectRate(p, 48000.0);
+        CHECK(p.sampleRate == 48000.0);
+        CHECK(p.Tracks()[0].clips[0].startFrame == 48000);
+        CHECK(p.Tracks()[0].clips[0].lengthFrames == 24000);
+
+        // Another rate: the timeline moves with it.
+        AdoptProjectRate(p, 96000.0);
+        CHECK(p.sampleRate == 96000.0);
+        CHECK(p.tempoMap.sampleRate == 96000.0);
+        CHECK(p.Tracks()[0].clips[0].startFrame == 96000);
+        CHECK(p.Tracks()[0].clips[0].lengthFrames == 48000);
+
+        // A rate of zero is not a rate: nothing happens.
+        AdoptProjectRate(p, 0.0);
+        CHECK(p.sampleRate == 96000.0);
+        CHECK(p.Tracks()[0].clips[0].startFrame == 96000);
+    }
+
+    // --- ResampleMediaFile: the target name is already taken ----------------
+    // `tone-96k.wav` can be somebody else's file -- a hand-made one, or the
+    // conversion of a DIFFERENT source that shares the stem. It must survive
+    // untouched and the new copy must step aside, while converting the SAME
+    // source twice stays idempotent (asserted in the block above).
+    {
+        const std::string src = TempPath("collide.wav");
+        const std::string taken = TempPath("collide-96k.wav");
+        {   // the source: 0.5 s at 48 kHz
+            WavWriter w;
+            CHECK(w.OpenFormat(src, 48000, 2, 32, true));
+            std::vector<float> buf(24000 * 2, 0.25f);
+            CHECK(w.WriteFloat(buf.data(), buf.size(), false));
+            CHECK(w.Close());
+        }
+        {   // the impostor: a different file entirely (1 s, different tone)
+            WavWriter w;
+            CHECK(w.OpenFormat(taken, 48000, 2, 16, false));
+            std::vector<float> buf(48000 * 2, 0.1f);
+            CHECK(w.WriteFloat(buf.data(), buf.size(), false));
+            CHECK(w.Close());
+        }
+        const std::string out = ResampleMediaFile(src, 96000.0);
+        CHECK(out == TempPath("collide-96k-1.wav"));   // stepped aside
+        CHECK(!out.empty());
+        // ... and the file that was there is byte-for-byte what it was: same
+        // length, same rate, still 16-bit.
+        WavSource impostor;
+        CHECK(impostor.Open(taken));
+        CHECK(impostor.IsValid());
+        CHECK(impostor.FrameRate() == 48000.0);
+        CHECK(impostor.TotalFrames() == 48000);
+        std::remove(src.c_str());
+        std::remove(taken.c_str());
+        if (!out.empty()) std::remove(out.c_str());
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
