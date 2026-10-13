@@ -12,6 +12,42 @@ addressed, with two partials named at the end.
 | `4e69e67` | `feat(ui): the kit-free rules behind the console's refresh, identity and text` |
 | `54fa8c3` | `feat(fx): a live wet/dry setter, and an LV2 enum's own names` |
 | `314ddbf` | `fix(ui): the mixer, and the windows it shares a session with (A–R)` |
+| `a20de4e` | `docs(agent-prompts): record the mixer UX package` |
+| `b62a3c3` | `fix(ui): post the mixer's test keys the way the app_server does` |
+
+## Reopened after the integration run (item P)
+
+The first full VM run reported two failures, both in `TestUxMixer`'s keyboard
+checks: the ↑/↓ nudge and the `M` key. **They were the test's fault, not the
+mixer's.**
+
+Haiku only routes a key to the focus view when the message is a *focus
+message*. `BWindow::task_looper` asks `_DetermineTarget` (which for
+`B_KEY_DOWN` returns `CurrentFocus()`) only when the header target is
+`B_PREFERRED_TOKEN`, and `BWindow::_HandleKeyDown` bails out on its first line
+otherwise (`BWindow::_IsFocusMessage`). A key posted with the **window's own
+token** — `window->PostMessage(&key)`, or `BMessenger(window).SendMessage`,
+which is what the test did — is not one, so it falls through to
+`BWindow::MessageReceived`, which does not handle keys at all, and the event is
+dropped. Real events from the app_server carry the preferred token.
+
+The codebase already shows the difference: the FX window's Cmd-Z test works
+because `EffectsWindow::DispatchMessage` intercepts that key itself, before the
+framework's routing. Where an app does not intercept, only a preferred-token
+key reaches `KeyDown` — which is why the mixer's own code was correct and the
+test was not.
+
+The keys are now posted to the looper's *preferred handler*
+(`BMessenger((const BHandler*)nullptr, (const BLooper*)mixer)`), which is the
+faithful shape and exercises the whole real chain: `task_looper` →
+`_DetermineTarget` → `CurrentFocus()` → `BView::MessageReceived` → `KeyDown`.
+
+Two diagnostics went with it, because "the keys do nothing" and "the view never
+took the focus" are different bugs: the focused view is now printed and
+asserted (`CHECK(mixer->CurrentFocus() == strips)` — item P's focusable
+requirement, `B_NAVIGABLE` + `MakeFocus`), and the gain/mute lines print
+whether the key changed anything rather than printing only on success. A future
+run of this check therefore says which half broke.
 
 ## Files
 
@@ -25,7 +61,7 @@ Changed: `src/dsp/MeterMath.h`, `src/engine/Engine.{h,cpp}`,
 `tests/lv2fixture/{manifest.ttl,plugins.ttl,daw_test_plugins.cpp}`,
 `tests/ui_functional_tests.cpp`, `CMakeLists.txt`, `docs/USER_GUIDE.md`.
 
-## Verification (this tree, at `314ddbf`)
+## Verification (this tree, at `b62a3c3`)
 
 1. `cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release && cmake --build build-host -j2`
 
@@ -38,13 +74,16 @@ build exit=0
 
 2. `ctest --test-dir build-host`
 
-```
+```sh
 76/76 Test #76: projectio_fuzz_tests .............   Passed    0.47 sec
 
 100% tests passed out of 76
 
 Total Test time (real) =   2.76 sec
 ```
+(Re-run after the item-P test fix at `b62a3c3`: build exit 0, **100% tests
+passed out of 76**, 3.53 s. The integration branch carries its own extra host
+tests, so its count is higher; this branch's is 76.)
 
 (The 76 includes the new `ui_rules_tests` and the two extra checks files below.
 Green before and after the package, so nothing regressed.)
