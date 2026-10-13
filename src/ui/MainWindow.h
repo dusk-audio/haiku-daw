@@ -545,9 +545,14 @@ private:
     void UpdateTransportInfo();      // tempo/meter + DSP load + xruns (LCD)
     void UpdateTransportButtons();   // playing/recording/loop/click/punch lamps
     void UpdateTransportStatus();    // the state line, when the state changed
-    void SetTransportStatus(const char* text);   // one message, until it changes
+    void SetTransportStatus(const char* text);   // one message, until it expires
+    void ExpireTransportStatus();    // ... which the 2 Hz title poll does
     void NudgePlayheadBar(int dir);  // rewind / fast-forward one bar
     std::string fStatusState;        // the last state string shown
+    // When the job/error message on the status line gives the row back to the
+    // transport state (0 = none standing). Set by SetTransportStatus; the
+    // deadline is checked by the title poll, see ExpireTransportStatus.
+    bigtime_t   fStatusExpiryUs = 0;
     float       fDspPercent = 0.0f;  // the last measured callback peak load
 };
 

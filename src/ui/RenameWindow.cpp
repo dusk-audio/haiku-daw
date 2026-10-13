@@ -19,7 +19,8 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
                     : (what == kMsgRenameMarker ? "Rename Marker"
                                                 : "Rename Track"),
               B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
-              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fTrack(track), fApply(apply), fWhat(what), fAux(aux),
       fOldName(current ? current : "") {
     // Layout Kit (M1.4): the window sizes itself to its contents, which is
@@ -32,11 +33,16 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
     fText = new DawTextField("name", "Name:", current, new BMessage(MSG_OK));
     DawButton* ok = new DawButton("ok", "OK", new BMessage(MSG_OK));
     ok->MakeDefault(true);
+    // A visible way out beside the keyboard one: the same B_QUIT_REQUESTED
+    // Escape posts (B_CLOSE_ON_ESCAPE above), so both leave without renaming.
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(B_QUIT_REQUESTED));
     BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
         .SetInsets(Themed(8.0f))
         .Add(fText)
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
+            .Add(cancel)
             .Add(ok)
         .End()
         .End();

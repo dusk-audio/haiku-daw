@@ -50,13 +50,22 @@ constexpr uint32 kMsgPluginChosen = 'pbch';
 // dock's window) has nothing to do about either.
 constexpr uint32 kMsgBrowserDone = 'pbdn';
 
+// A pick in a browser that has NO track to add to (the dock's page before the
+// user selects one), posted to the window that owns the status line. The rows
+// used to be silently inert: a click that does nothing and says nothing reads
+// as a broken browser, so the pick answers "select a track first" instead.
+constexpr uint32 kMsgPluginNoTrack = 'pbnt';
+
 class PluginBrowserView : public ThemedGroupView {
 public:
     // `target` is where a choice is posted (the inspector, which turns it into
     // a SetFxCommand against "track"). `track` is the chain the choice applies
     // to; set it to kInvalidTrackId for "no track selected", which makes the
-    // rows inert rather than inserting into the wrong track.
-    PluginBrowserView(TrackId track, BMessenger target);
+    // rows inert rather than inserting into the wrong track -- and asks
+    // `status` (the main window, when the dock hosts this view) to say so on
+    // the status line, so the click is answered rather than swallowed.
+    PluginBrowserView(TrackId track, BMessenger target,
+                      BMessenger status = BMessenger());
 
     // Retarget (the dock's page follows the selection): the same list, a
     // different chain.
@@ -91,6 +100,7 @@ private:
     void PostChoice(int32 index);
 
     BMessenger         fTarget;   // -> the inspector (the chosen plugin)
+    BMessenger         fStatus;   // -> the window with the status line, or none
     TrackId            fTrack;
     BListView*         fList   = nullptr;
     BScrollView*       fScroll = nullptr;

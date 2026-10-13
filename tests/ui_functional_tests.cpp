@@ -348,6 +348,54 @@ static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
     return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
 }
 
+// --- the UX shell (fix/ux-shell): the status line and the dialog vocabulary --
+//
+// Shared by the tests below and by the dialog tests further down, so they live
+// with the other helpers.
+
+// The status line as the transport bar last set it.
+static std::string TransportStatus(MainWindow* win) {
+    std::string s;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (auto* bar = dynamic_cast<TransportBar*>(win->TransportBarView()))
+            s = bar->StatusText();
+        win->Unlock();
+    }
+    return s;
+}
+
+// The vocabulary the shell settled on, checked on a real window of the app's
+// own class: a Cancel button and a primary one whose label is the verb; the
+// primary button is the window's DEFAULT (what BWindow routes Return to, the
+// registration no kit button ever made) and is focusable by Tab; and the window
+// closes on Escape (B_CLOSE_ON_ESCAPE turns the key into B_QUIT_REQUESTED).
+// The caller closes the window by posting exactly that.
+static void CheckVocabulary(BWindow* w, const char* title,
+                            const char* primaryName, const char* primaryLabel) {
+    if (w == nullptr) { CHECK(w != nullptr); return; }
+    if (w->LockWithTimeout(2000000) != B_OK) {
+        CHECK(false);   // "the dialog answered its lock"
+        return;
+    }
+    CHECK(std::strcmp(WindowTitle(w), title) == 0);
+    CHECK((w->Flags() & B_CLOSE_ON_ESCAPE) != 0);
+    DawButton* cancel = dynamic_cast<DawButton*>(w->FindView("cx"));
+    DawButton* primary = dynamic_cast<DawButton*>(w->FindView(primaryName));
+    CHECK(cancel != nullptr);
+    CHECK(cancel != nullptr && cancel->Label() != nullptr
+          && std::strcmp(cancel->Label(), "Cancel") == 0);
+    CHECK(primary != nullptr);
+    CHECK(primary != nullptr && primary->Label() != nullptr
+          && std::strcmp(primary->Label(), primaryLabel) == 0);
+    // The default registration: BWindow::_DetermineTarget routes B_ENTER to
+    // the button DefaultButton() names, and BButton::KeyDown invokes on it.
+    CHECK(primary != nullptr && w->DefaultButton() == primary);
+    // ... which is only type-safe because a kit button IS a BButton.
+    CHECK(dynamic_cast<BButton*>(primary) != nullptr);
+    CHECK(primary != nullptr && (primary->Flags() & B_NAVIGABLE) != 0);
+    w->Unlock();
+}
+
 static bool AlertUp(const char* title) {
     return WindowUp(title);
 }
@@ -710,6 +758,15 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     std::printf("  export: file written\n");
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
+    // A finished bounce SAYS so on the status line (the same pass that closes
+    // its bar), not only on stderr -- checked before WaitQuiet, because the
+    // message is transient on purpose (kStatusHoldUs).
+    CHECK(WaitFor([&] {
+        const std::string s = TransportStatus(win);
+        return s.find("Exported") != std::string::npos
+            && s.find("haiku_daw_ui_export.wav") != std::string::npos;
+    }, 60000000));
+    std::printf("  export: %s\n", TransportStatus(win).c_str());
     CHECK(WaitQuiet());   // its bar closes on a pulse
     std::printf("  export: done\n");
 }
@@ -805,13 +862,14 @@ static void ClearExportAlert() {
     snooze(200000);
 }
 
-// The export OPTIONS dialog: a plain BWindow titled "Export" (the alert above
-// carries the same title, which is why BAlert is excluded).
+// The export OPTIONS dialog: a plain BWindow whose title NAMES THE ACTION
+// ("Export Mix" for this flow; see TestDialogVocabulary for the stems one), so
+// it can no longer be confused with the failure alert, which stays "Export".
 static BWindow* FindExportDialog() {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
         if (!w || w->IsHidden()) continue;
-        if (std::strcmp(WindowTitle(w), "Export") != 0) continue;
+        if (std::strcmp(WindowTitle(w), "Export Mix") != 0) continue;
         if (dynamic_cast<BAlert*>(w) != nullptr) continue;
         return w;
     }
@@ -843,6 +901,11 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
     if (!dlg) return;
     snooze(300000);
+
+    // The dialog the app opened for a MIXDOWN names it (the stems one is
+    // checked in TestDialogVocabulary), and its vocabulary is Cancel + Export
+    // Mix with Return on the verb.
+    CheckVocabulary(dlg, "Export Mix", "ok", "Export Mix");
 
     // THIS is the window this suite can screenshot. The one MainWindow opens
     // is not mapped by this VM's app_server -- it is in the window list, not
@@ -899,7 +962,7 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     // quitting stops being DRAWN before it is removed, and touching one in that
     // state is how this suite used to hang and, before that, crash.
     CHECK(WaitFor([&] {
-        return !WindowListed("Export") && VisibleWindows() >= windowsBefore + 1;
+        return !WindowListed("Export Mix") && VisibleWindows() >= windowsBefore + 1;
     }));
     HideOtherWindows(win);
     CHECK(WaitQuiet());
@@ -1852,6 +1915,72 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return playing(); }));
     sendKey(" ");                              // leave the transport stopped
     CHECK(WaitFor([&] { return !playing(); }));
+
+    // --- the UX-shell rule: only a TEXT FIELD holds the map -----------------
+    // Clicking a slider (the master volume) or a list used to take the whole
+    // keyboard map with it: R/S/M/Home/,/. and the arrows did nothing until
+    // the user clicked the timeline back. The map owns its keys whatever
+    // control has the focus; only a key the map does NOT bind stays with the
+    // focus view.
+    BView* master = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        master = win->FindView("master");
+        win->Unlock();
+    }
+    CHECK(master != nullptr);
+    if (master != nullptr) {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            master->MakeFocus(true);
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = win->CurrentFocus() == master;
+            win->Unlock();
+            return ok;
+        }));
+
+        auto playhead = [&] {
+            daw::Frame ph = -1;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ph = project.transport.playhead;
+                win->Unlock();
+            }
+            return ph;
+        };
+        // Home reaches the transport: the playhead goes to the start.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            project.transport.playhead = 96000;
+            win->Unlock();
+        }
+        sendKey("\x01");   // B_HOME
+        CHECK(WaitFor([&] { return playhead() == 0; }));
+
+        // M drops a marker (the map's Editing action, not the slider's).
+        auto markerCount = [&] {
+            size_t n = 0;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                n = project.markers.size();
+                win->Unlock();
+            }
+            return n;
+        };
+        const size_t before = markerCount();
+        sendKey("m");
+        CHECK(WaitFor([&] { return markerCount() == before + 1; }));
+
+        // The slider itself still has its value (the map does not touch it),
+        // and an UNBOUND key is still the focused control's: 'z' does nothing
+        // to the transport.
+        const bool stillStopped = !playing();
+        sendKey("z");
+        snooze(200000);
+        CHECK(stillStopped && !playing());
+    }
+
+    // Put the focus back on the timeline for whatever runs next.
+    if (timeline) BMessenger(timeline).SendMessage(&down);
+    snooze(150000);
 }
 
 // M1.2 slice B: every shared layout metric is a function of the theme scale
@@ -4402,9 +4531,206 @@ static void TestWidgetKit(MainWindow* win) {
     }
     CHECK(!invokedOutside);
 
+    // --- the default button and Tab (the UX-shell pass) ---------------------
+    // A kit button IS a BButton now: that is the type BWindow::SetDefaultButton
+    // takes and calls back into, so MakeDefault can register instead of only
+    // drawing a border (which is what it did: Return did nothing in every
+    // converted dialog).
+    CHECK(dynamic_cast<BButton*>(button) != nullptr);
+    // ... and it is reachable by Tab, like every other kit control.
+    CHECK((button->Flags() & B_NAVIGABLE) != 0);
+    CHECK((toggle->Flags() & B_NAVIGABLE) != 0);
+
+    // MakeDefault reaches the WINDOW: that is the registration BWindow routes
+    // Return to (BWindow::_DetermineTarget), and the thing that was missing.
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        button->MakeDefault(true);
+        probe->Unlock();
+    }
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->DefaultButton() == button;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    // A default button DRAWS differently (the look's B_DEFAULT_BUTTON frame),
+    // which is what the shot below is for.
+    Shot("widget-kit-default");
+
+    // One default per window: making another button the default demotes this
+    // one (BWindow's own bookkeeping, through the same override).
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        toggle->MakeDefault(true);
+        probe->Unlock();
+    }
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->DefaultButton() == toggle;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        probe->SetDefaultButton(nullptr);   // no dangling default on teardown
+        probe->Unlock();
+    }
+
     probe->Lock();
     probe->Quit();
     snooze(150000);
+}
+
+// The three transient dialogs no other test opens get looked at here: Rename
+// (the Save-Preset prompt's class), Quantize (the roll's) and the stems export
+// dialog. Each is closed the way Escape closes it -- B_QUIT_REQUESTED -- and
+// must go quietly, without sending anything.
+static void TestDialogVocabulary(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("ux shell: dialog vocabulary ...\n");
+
+    // Rename. A track id that exists (nothing is applied: the window is never
+    // told OK).
+    {
+        const TrackId tid = project.Tracks().empty()
+                          ? kInvalidTrackId : project.Tracks().front().id;
+        const int before = VisibleWindows();
+        RenameWindow* rn = new RenameWindow(BRect(200, 200, 460, 244), tid,
+                                            "track-name", BMessenger(win), 0,
+                                            0, nullptr);
+        rn->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("rename-dialog");
+        CheckVocabulary(rn, "Rename Track", "ok", "OK");
+        rn->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(rn); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // Quantize.
+    {
+        const int before = VisibleWindows();
+        QuantizeOpts opts;
+        QuantizeWindow* qz = new QuantizeWindow(BRect(200, 200, 500, 452),
+                                                opts, BMessenger(win));
+        qz->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("quantize-dialog");
+        CheckVocabulary(qz, "Quantize", "ok", "Quantize");
+        qz->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(qz); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // The export options dialog, stems mode: its TITLE names the action (the
+    // file panel behind it does), where "Export" alone did not say which.
+    {
+        const int before = VisibleWindows();
+        ExportChoices c;
+        ExportWindow* ew = new ExportWindow(BRect(200, 200, 580, 560), c,
+                                            /*stems*/ true, BMessenger(win));
+        ew->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("export-stems-dialog");
+        CheckVocabulary(ew, "Export Stems", "ok", "Export Stems");
+        ew->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(ew); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // The mixdown one carries the other title and verb, so the two cannot be
+    // the same dialog under two names.
+    {
+        const int before = VisibleWindows();
+        ExportChoices c;
+        ExportWindow* ew = new ExportWindow(BRect(200, 200, 580, 560), c,
+                                            /*stems*/ false, BMessenger(win));
+        ew->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(200000);
+        CheckVocabulary(ew, "Export Mix", "ok", "Export Mix");
+        ew->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(ew); }));
+    }
+
+    CHECK(WaitQuiet());
+}
+
+// The status line's job messages (the UX-shell pass): a refused second render
+// says so instead of returning in silence, a cancelled one says what happened,
+// and either way the message is TRANSIENT -- after a few seconds the transport
+// state takes the row back, so a stale "Export cancelled" is not still there
+// ten minutes later.
+static void TestRenderFeedback(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("ux shell: render feedback ...\n");
+
+    // Long enough that the render is still going when the second request lands
+    // (the same fixture TestExportCancel uses).
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "status-synth");
+    CHECK(LockedAddTrack(win, project, t));
+
+    // The remembered choices are pinned first: by this point in the suite an
+    // earlier test has left "Loop range" selected, and a loop-range bounce of
+    // one second can finish before the second request is even handled -- which
+    // would make the refusal check pass or fail on timing rather than on the
+    // behaviour. Whole project, plain WAV: a long render, deliberately.
+    {
+        BMessage opts(kMsgExportOptions);
+        opts.AddInt32("container", (int32)AudioFileFormat::Wav);
+        opts.AddInt32("bits", 16);
+        opts.AddInt32("range", 0);
+        opts.AddInt32("stems", 0);
+        win->PostMessage(&opts);
+        snooze(200000);
+    }
+
+    const char* pathA = "/tmp/haiku_daw_ui_status_a.wav";
+    const char* pathB = "/tmp/haiku_daw_ui_status_b.wav";
+    std::remove(pathA);
+    std::remove(pathB);
+
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    const int32 windowsBefore = VisibleWindows();
+    BMessage a(MSG_EXPORT_REF);
+    a.AddRef("directory", &dir);
+    a.AddString("name", "haiku_daw_ui_status_a.wav");
+    win->PostMessage(&a);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+
+    // The second export is refused -- and SAYS so (it used to return in
+    // silence, so choosing Export again looked like a dead menu item).
+    BMessage b(MSG_EXPORT_REF);
+    b.AddRef("directory", &dir);
+    b.AddString("name", "haiku_daw_ui_status_b.wav");
+    win->PostMessage(&b);
+    CHECK(WaitFor([&] {
+        return TransportStatus(win) == "A render is already running";
+    }, 5000000));
+    // No second progress bar, and nothing started for the refused path.
+    CHECK(VisibleWindows() == windowsBefore + 1);
+
+    // Cancel the long one: the message on the row changes to the cancel.
+    win->PostMessage(kMsgExportCancel);
+    CHECK(WaitFor([&] {
+        return TransportStatus(win) == "Export cancelled";
+    }, 60000000));
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; }, 60000000));
+    CHECK(!FileExists(pathB));   // the refused render wrote nothing
+    CHECK(WaitQuiet());
+
+    // The hold is 4 s (kStatusHoldUs) and the deadline is checked by the 2 Hz
+    // title poll, so the row is back to the transport state inside a second of
+    // it. A message left standing forever was the defect; the bound here is
+    // generous on purpose (a slow VM does not fail a timing check).
+    CHECK(WaitFor([&] { return TransportStatus(win) == "Stopped"; }, 20000000));
+
+    std::remove(pathA);
+    std::remove(pathB);
 }
 
 // M1.4: the docked MIDI editor. The timeline posts kMsgOpenEditor (it no
@@ -6209,6 +6535,58 @@ static void TestDockPages(MainWindow* win, Project& project, CommandStack* stack
                    "the plugins list well", __LINE__);
     Shot("dock-plugins");
 
+    // The page with NO track selected (the UX-shell pass): it cannot add an
+    // insert to a chain nobody named, so it must SAY so -- the title asks for a
+    // selection ("add to no track selected" read as an error about a chain the
+    // user never had), and a pick answers on the status line instead of being
+    // swallowed in silence.
+    {
+        auto dockTitle = [&] {
+            std::string s;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (BStringView* t = dynamic_cast<BStringView*>(
+                        win->FindView("edtitle")))
+                    s = t->Text() ? t->Text() : "";
+                win->Unlock();
+            }
+            return s;
+        };
+        BMessage none(kMsgTrackSelected);
+        none.AddInt64("track", 0);          // kInvalidTrackId: nothing selected
+        win->PostMessage(&none);
+        CHECK(WaitFor([&] {
+            return dockTitle().find("select a track") != std::string::npos;
+        }));
+        std::printf("  plugins page with no track: \"%s\"\n",
+                    dockTitle().c_str());
+
+        BView* v = nullptr;
+        win->Lock();
+        v = win->FindView("pluginbrowserview");
+        win->Unlock();
+        CHECK(v != nullptr);
+        if (v != nullptr) {
+            win->Lock();
+            if (BListView* l = dynamic_cast<BListView*>(v->FindView("list")))
+                l->Invoke();   // the LIST's own invocation, a double-click
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] {
+            return TransportStatus(win) == "Select a track first";
+        }, 5000000));
+
+        // Back to a real selection for the rest of the test (the pick below
+        // selects its own track; this keeps the page honest in between).
+        TrackId back = kInvalidTrackId;
+        win->Lock();
+        if (!project.Tracks().empty()) back = project.Tracks().front().id;
+        win->Unlock();
+        BMessage sel(kMsgTrackSelected);
+        sel.AddInt64("track", (int64)back);
+        win->PostMessage(&sel);
+        snooze(200000);
+    }
+
     // The strip's own controls belong ON the strip: a title with an unlimited
     // max size, next to a control that stretches, once pushed Pop out and the x
     // past the window's edge -- a layout can be perfectly "valid" and still
@@ -6921,6 +7299,13 @@ static void TestProjectSettings(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return FindVisibleWindow("Project Settings") != nullptr; }));
     Shot("project-settings");
 
+    // The settings vocabulary (the UX-shell pass): Cancel + Apply, Apply is the
+    // default, Escape closes. The old pair was "Close" (which discarded) next
+    // to a Preferences window whose "Close" meant "done" -- one word, two
+    // meanings, and neither said which.
+    CheckVocabulary(FindVisibleWindow("Project Settings"), "Project Settings",
+                    "ap", "Apply");
+
     // One window: asking again activates it.
     win->PostMessage(MSG_PROJECT_SETTINGS);
     snooze(400000);
@@ -7070,6 +7455,10 @@ static void TestNewProjectTemplates(MainWindow* win, Project& project,
     win->PostMessage(MSG_NEW_PROJECT);
     CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
     Shot("new-project");
+
+    // An action dialog: Cancel + the verb, Return presses Create, Escape closes.
+    CheckVocabulary(FindVisibleWindow("New Project"), "New Project", "ok",
+                    "Create");
 
     // The rows the shipped templates produce (when the copy rule ran, which is
     // what makes a build tree usable at all).
@@ -7253,6 +7642,33 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
     Shot("preferences");
 
+    // The vocabulary (the UX-shell pass): a SETTINGS window is Cancel + Apply,
+    // its Apply is the default button (Return applies), and Escape closes it
+    // (the same B_QUIT_REQUESTED Cancel posts -- so Escape discards what was
+    // not applied, exactly like Cancel).
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            DawButton* cancel = dynamic_cast<DawButton*>(w->FindView("cx"));
+            DawButton* apply  = dynamic_cast<DawButton*>(w->FindView("ap"));
+            CHECK(cancel != nullptr && cancel->Label() != nullptr
+                  && std::strcmp(cancel->Label(), "Cancel") == 0);
+            CHECK(apply != nullptr && apply->Label() != nullptr
+                  && std::strcmp(apply->Label(), "Apply") == 0);
+            CHECK(apply != nullptr && w->DefaultButton() == apply);
+            CHECK((w->Flags() & B_CLOSE_ON_ESCAPE) != 0);
+            // The device row says what is true for a user -- the system's
+            // default is used -- and not what a roadmap note said.
+            if (BMenuField* dv = dynamic_cast<BMenuField*>(w->FindView("dv")))
+                CHECK(dv->Menu() != nullptr && dv->Menu()->ItemAt(0) != nullptr
+                      && std::strcmp(dv->Menu()->ItemAt(0)->Label(),
+                                     "System default") == 0);
+            if (BStringView* hint = dynamic_cast<BStringView*>(w->FindView("dvh")))
+                CHECK(BString(hint->Text()).FindFirst("not available yet") >= 0);
+            w->Unlock();
+        }
+    }
+
     // It shows the app's values, not its own defaults.
     {
         const PrefsView v = shownValues();
@@ -7281,6 +7697,60 @@ static void TestPreferences(MainWindow* win, Project& project) {
     win->PostMessage(MSG_PREFERENCES);
     snooze(400000);
     CHECK(countPrefs() == 1);
+
+    // A SETTING is not a commit (the UX-shell pass): changing a control in the
+    // window changes nothing outside it until Apply -- this used to apply on
+    // every pick, so there was no way to look at a choice before taking it.
+    // (A menu row is marked here the way the existing edits do it, but WITHOUT
+    // the window's change path: marking is what a user's click does.)
+    const int uncommitted = beforeCountIn == 4 ? 2 : 4;
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            BMenu* m = static_cast<PreferencesWindow*>(w)->CountInField()->Menu();
+            for (int32 i = 0; i < m->CountItems(); i++)
+                if (BMenuItem* it = m->ItemAt(i))
+                    it->SetMarked(it->Label() != nullptr
+                                  && std::atoi(it->Label()) == uncommitted);
+            w->Unlock();
+        }
+    }
+    snooze(300000);
+    CHECK((int)win->CountInBarsForTest() == beforeCountIn);   // the app is untouched
+    CHECK(shownValues().countInBars == uncommitted);          // the window shows it
+
+    // Apply is a real button of the window: invoking it is what a click does,
+    // and it commits the whole view.
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (DawButton* apply = dynamic_cast<DawButton*>(w->FindView("ap")))
+                apply->Invoke();
+            w->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] { return (int)win->CountInBarsForTest() == uncommitted; }));
+
+    // Cancel -- and Escape, which posts the same B_QUIT_REQUESTED -- leaves
+    // WITHOUT applying what the window was holding. Checked on the dark-mode
+    // box: flipping it and cancelling must not switch the look.
+    {
+        const ThemeMode mode = ActiveThemeMode();
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (BCheckBox* dark = dynamic_cast<BCheckBox*>(w->FindView("dm")))
+                dark->SetValue(mode == ThemeMode::Dark ? B_CONTROL_OFF
+                                                       : B_CONTROL_ON);
+            w->Unlock();
+        }
+        if (w != nullptr) w->PostMessage(B_QUIT_REQUESTED);   // what Escape posts
+        CHECK(WaitFor([&] { return findPrefs() == nullptr; }));
+        snooze(300000);
+        CHECK(ActiveThemeMode() == mode);
+    }
+    win->PostMessage(MSG_PREFERENCES);   // back for the rest of the test
+    CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
+    snooze(200000);
 
     // Count-in: pick "4 bars" in the window's menu and take its change path.
     CHECK(edit([](PreferencesWindow* w) {
@@ -7565,6 +8035,7 @@ static int32 TestThread(void*) {
     TestArrangeDepth(win, project, &stack);
     TestArrangeTracks(win, project, &stack);
     TestWidgetKit(win);
+    TestDialogVocabulary(win, project);   // the UX-shell dialog vocabulary
     TestDockedEditor(win, project, &stack);
     TestShortcutsWindow(win);
     TestPreferences(win, project);   // M3.5: opens and puts itself away
@@ -7573,6 +8044,7 @@ static int32 TestThread(void*) {
     TestMetering(win, project, stack);
     TestTransportBar(win, project);
     TestRegionJob(win, project);
+    TestRenderFeedback(win, project);   // the status line's job messages
     TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);

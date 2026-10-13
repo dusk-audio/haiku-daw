@@ -58,7 +58,7 @@ NewProjectWindow::NewProjectWindow(std::vector<TemplateInfo> templates,
     : BWindow(BRect(160, 160, 160 + 440, 160 + 220), "New Project",
               B_TITLED_WINDOW,
               B_FLOATING_APP_WINDOW_FEEL | B_NOT_ZOOMABLE | B_NOT_RESIZABLE
-              | B_ASYNCHRONOUS_CONTROLS),
+              | B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
       fTemplates(std::move(templates)), fLookedIn(std::move(lookedIn)),
       fApply(apply) {
     // A dialog with no rows at all would be a dead end; the caller adds the

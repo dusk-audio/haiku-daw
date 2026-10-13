@@ -41,6 +41,7 @@
 #include "../engine/Resampler.h"
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
+#include "../model/KeyMap.h"            // TimelineTakesKey (the key-routing gate)
 #include "../model/RegionOps.h"
 #include "../model/ProjectTimebase.h"   // ScaleProjectTimebase (a template's rate)
 #include "../model/SmfIO.h"
@@ -135,6 +136,12 @@ enum {
     MSG_TOGGLE_DOCK      = 'tdck',   // show/hide the docked bottom pane
     MSG_POP_OUT_EDITOR   = 'poed',   // dock the MIDI editor out into a window
 };
+
+// How long a job/error message stands on the status line before the transport
+// state takes the row back (see SetTransportStatus). Long enough to read and
+// look away, short enough that a stale "Exported mix.wav" is not still there
+// minutes later.
+static const bigtime_t kStatusHoldUs = 4 * 1000 * 1000;
 
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
@@ -378,7 +385,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
     BMenu* fileMenu = new BMenu("File");
-    fileMenu->AddItem(new ThemedMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
+    // "New" opens the New Project dialog, so it carries the same ellipsis as
+    // Save As…/Preferences… (a menu item that opens a window announces it).
+    fileMenu->AddItem(new ThemedMenuItem("New" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_NEW_PROJECT), 'N'));
     fileMenu->AddItem(new ThemedMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fRecentMenu = new BMenu("Open Recent");
     fileMenu->AddItem(new ThemedMenuItem(fRecentMenu));
@@ -732,12 +742,13 @@ MainWindow::~MainWindow() {
 
 void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
     if (message->what == B_KEY_DOWN && fTimeline) {
-        // The timeline takes the transport keys only when nothing else is
-        // using them: a focused control (a text field being edited, a slider's
-        // arrows) keeps its keys, and Tab always belongs to BWindow's own
-        // focus navigation -- stealing it made the keyboard unusable. The
-        // common cases this covers: nothing focused yet (a fresh window), or
-        // the timeline itself after a click on it.
+        // The timeline takes the map's keys unless a TEXT FIELD is being typed
+        // into -- the one thing that holds them. A control that merely has the
+        // focus keeps only the keys the map does not bind: clicking the master
+        // volume slider or a browser's list used to swallow R/S/M/Home/,/. and
+        // the arrows, because any focus held everything but Space. The rule is
+        // the kit-free TimelineTakesKey(); Tab still belongs to BWindow's own
+        // focus navigation, and Cmd shortcuts keep flowing to the menus.
         BView* focus = CurrentFocus();
         int32 mods = 0;
         message->FindInt32("modifiers", &mods);
@@ -745,18 +756,16 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
                             && bytes != nullptr;
         const bool isTab = haveBytes && bytes[0] == B_TAB;
-        // Space is the transport's WHATEVER control holds the focus, except a
-        // text field being typed into (the same rule the aux windows apply to
-        // their own spacebar passthrough). A focused BControl eats Space in the
-        // kit's own KeyDown -- the dock's page switch re-sent its page on every
-        // press and the transport never started: click a page, press Space,
-        // nothing happens at all (found by this suite once the dock's pages
-        // were driven for real).
-        const bool isSpace = haveBytes && bytes[0] == B_SPACE;
         const bool textFocus = dynamic_cast<BTextControl*>(focus) != nullptr
                             || dynamic_cast<BTextView*>(focus) != nullptr;
-        const bool held = focus != nullptr && focus != fTimeline
-                       && !(isSpace && !textFocus);
+        const bool mapTakes = haveBytes
+                           && TimelineTakesKey(bytes[0], (uint32_t)mods,
+                                              textFocus);
+        // An unbound key is still the focused control's (a list's Up/Down, a
+        // slider's own keys); with nothing focused there is nobody else to give
+        // it to, so it goes to the timeline as it always did.
+        const bool held = textFocus
+                       || (!mapTakes && focus != nullptr && focus != fTimeline);
         if (!(mods & B_COMMAND_KEY) && !held && !isTab) {
             // Hand it straight to the timeline: a BMessage carries no
             // retarget verb (Haiku's BMessage has no SetTarget), and this is
@@ -961,6 +970,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // A stock window (a file panel) finished building its views after
             // Show() returned: one more pass over them.
             ThemeStockWindows();
+            break;
+
+        case kMsgPluginNoTrack:
+            // A pick in the dock's Plugins page with no track selected: the
+            // page cannot add an insert to a chain nobody named, so it says
+            // what it needs (see PluginBrowserView::PostChoice).
+            SetTransportStatus("Select a track first");
             break;
 
         case MSG_THEME_MODE:
@@ -1866,6 +1882,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_TITLE:
             UpdateTitle();   // cheap; SetTitle only fires on an actual change
+            ExpireTransportStatus();   // a job message older than its hold goes
             break;
         case MSG_BROWSER:
             // The docked page is the browser's home now (T2); Pop out in the
@@ -2553,17 +2570,26 @@ void MainWindow::SetDockPage(int page) {
             break;
         case kDockPlugins:
             if (fDockPlugins == nullptr)
-                fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
+                fDockPlugins = new PluginBrowserView(fSelTrack,
+                                                     BMessenger(fInspector),
+                                                     BMessenger(this));
             else
                 fDockPlugins->SetTrack(fSelTrack);
             fEditorPane->GroupLayout()->AddView(fDockPlugins, 1.0f);
             // Name the chain a pick will land in: the page adds to whichever
             // track the inspector is pointed at, and that is not otherwise
-            // visible from the dock.
+            // visible from the dock. With NO track selected the page cannot add
+            // anything -- say what it needs instead of "add to no track
+            // selected", which read as an error about a chain nobody named.
             {
                 Track* t = fProject->FindTrack(fSelTrack);
-                BString title("Plugins \xE2\x80\x94 add to ");
-                title << (t != nullptr ? t->name.c_str() : "no track selected");
+                BString title("Plugins \xE2\x80\x94 ");
+                if (t != nullptr) {
+                    title << "add to ";
+                    title << t->name.c_str();
+                } else {
+                    title << "select a track to add to";
+                }
                 fDockTitle->SetText(title.String());
             }
             fDockPop->SetEnabled(true);
@@ -3990,7 +4016,8 @@ void MainWindow::UpdateTransportButtons() {
 }
 
 // The status line: the transport's state, so it is never stale — a job or an
-// error message replaces it until the state changes again.
+// error message replaces it until it EXPIRES (kStatusHoldUs; the 2 Hz title
+// poll drops it, see ExpireTransportStatus) or the state changes.
 void MainWindow::UpdateTransportStatus() {
     if (!fTransport) return;
     std::string s;
@@ -4013,12 +4040,27 @@ void MainWindow::UpdateTransportStatus() {
     if (s == fStatusState) return;   // the state has not changed: leave any
                                      // job/error message standing
     fStatusState = s;
+    fStatusExpiryUs = 0;             // the state line replaced the message
     fTransport->SetStatus(s.c_str());
 }
 
 void MainWindow::SetTransportStatus(const char* text) {
     if (!fTransport) return;
     fTransport->SetStatus(text ? text : "");
+    // A job/error message is transient: the transport state takes the row back
+    // after a few seconds. The timer is the existing 2 Hz title poll's -- one
+    // more runner for a deadline that a runner already visits would be a
+    // second thing to keep alive for nothing.
+    fStatusExpiryUs = system_time() + kStatusHoldUs;
+}
+
+// The message's hold is up: put the transport state back. Called from the 2 Hz
+// title poll, so a message outlives its work by at most that poll's interval.
+void MainWindow::ExpireTransportStatus() {
+    if (fStatusExpiryUs == 0 || system_time() < fStatusExpiryUs) return;
+    fStatusExpiryUs = 0;
+    fStatusState.clear();   // force UpdateTransportStatus to set the state line
+    UpdateTransportStatus();
 }
 
 // The bar view and one of its control rects, for the functional tests: a click
