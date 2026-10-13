@@ -4885,24 +4885,57 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
     std::printf("ux shell: render feedback ...\n");
 
-    // The fixture must be long, in WALL-CLOCK terms -- not just long in
-    // material. Two things depend on the first export still running when the
-    // second request is handled: the refusal, and the cancel that follows it.
-    // The first cut of this test learned both halves the hard way. A
-    // whole-project bounce of the suite's project (mostly silent) finished in
-    // well under the time the test takes to look at a window; and one
-    // 120-second note was still not enough -- the diagnostic showed the first
-    // export's bar up, then gone, one 5-second wait later (so ~24x realtime),
-    // and the second request was not DEQUEUED until after that, because a
-    // render at full tilt saturates the 2-vCPU VM. Twelve long notes put the
-    // render tens of seconds out, which no plausible queue delay outlasts. The
-    // cancel below stops every one of them within a chunk, so the suite pays
-    // for the seconds before it, not for the render.
+    // The fixture has to be (a) everything the bounce can render and (b) long.
+    // (a) is the part the first two versions got wrong, and the exporter's own
+    // code is what proves it: by this point in the suite an earlier meter test
+    // has SOLOED its fixture and muted every other track, and ExportWav
+    // computes BOTH its project end and the material it walks from the AUDIBLE
+    // tracks only (`anySolo` -> only soloed ones). So the bounce rendered that
+    // one short clip -- tens of milliseconds -- and the progress bar it raised
+    // was gone before the test could look. The solo goes, the rest stays muted,
+    // and the fixture is the only audible thing.
+    {
+        win->Lock();
+        for (Track& other : project.Tracks()) {
+            other.soloed = false;   // a solo, not a mute, is what silenced us
+            other.muted  = true;
+        }
+        win->Unlock();
+        // A model change made directly posts the same refresh the app's own
+        // edit paths do, or the screen shows the old lamps (UI_GUIDELINES §2).
+        win->PostMessage(kMsgUiRefresh);
+    }
+    // (b) Twelve 120-second notes: seconds of real render (the twelve are a
+    // chord -- the cost is per note-sample, not per second of material, which
+    // is why one note was not enough), and the cancel below stops every one of
+    // them within a chunk.
     for (int i = 0; i < 12; i++) {
         char name[32];
         std::snprintf(name, sizeof(name), "status-synth-%d", i);
         Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, name);
         CHECK(LockedAddTrack(win, project, t));
+    }
+    // What the bounce will walk, in the log: the exporter's own rule (nothing
+    // is soloed now, so audible = unmuted) over the same fields it reads. A
+    // test that prints its fixture's size would have caught the empty-render
+    // problem the first time.
+    {
+        Frame projEnd = 0;
+        int audible = 0;
+        win->Lock();
+        for (const Track& tr : project.Tracks()) {
+            if (tr.muted) continue;
+            audible++;
+            for (const Clip& c : tr.clips)
+                if (c.startFrame + c.lengthFrames > projEnd)
+                    projEnd = c.startFrame + c.lengthFrames;
+            for (const MidiNote& n : tr.CollectPlaybackNotes())
+                if (n.startFrame + n.lengthFrames > projEnd)
+                    projEnd = n.startFrame + n.lengthFrames;
+        }
+        win->Unlock();
+        std::printf("  fixture: %d audible track(s), %.0f s of material\n",
+                    audible, (double)projEnd / project.sampleRate);
     }
 
     // The remembered choices are pinned first: by this point in the suite an
@@ -4913,8 +4946,8 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     // options message works -- every export flow in this suite posts it and
     // then hides what it opens), so the panel is put away again before
     // anything here is COUNTED: a panel left up is one extra visible window,
-    // and every count below (windowsBefore, the "bar appeared" wait, WaitQuiet
-    // at the end) is about the quiet screen.
+    // and every count below (windowsBefore, the "exactly one bar" check,
+    // WaitQuiet at the end) is about the quiet screen.
     {
         BMessage opts(kMsgExportOptions);
         opts.AddInt32("container", (int32)AudioFileFormat::Wav);
@@ -4937,30 +4970,25 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     BMessage a(MSG_EXPORT_REF);
     a.AddRef("directory", &dir);
     a.AddString("name", "haiku_daw_ui_status_a.wav");
-    win->PostMessage(&a);
-    // The bar means the first render STARTED (StartExport raises it before the
-    // worker is given anything). If it never appears, the export was refused
-    // before it began -- a leftover job from the test before this one -- and
-    // the status line names whichever it was.
-    const bool barUp = WaitFor([&] {
-        return VisibleWindows() == windowsBefore + 1;
-    });
-    if (!barUp)
-        std::printf("  DIAG no export bar: windows %d (base %d), status \"%s\"\n",
-                    (int)VisibleWindows(), (int)windowsBefore,
-                    TransportStatus(win).c_str());
-    CHECK(barUp);
-
-    // The second export is refused -- and SAYS so (it used to return in
-    // silence, so choosing Export again looked like a dead menu item).
     BMessage b(MSG_EXPORT_REF);
     b.AddRef("directory", &dir);
     b.AddString("name", "haiku_daw_ui_status_b.wav");
+
+    // The second export is refused -- and SAYS so (it used to return in
+    // silence, so choosing Export again looked like a dead menu item).
+
+    // Both requests go in BACK TO BACK, and that is the guarantee: a window
+    // handles its queue in order, so the first request has started its render
+    // before the second is looked at, and no render of this fixture can be
+    // over in the microseconds between two messages on one thread. The first
+    // version waited for the first render's progress bar before asking for the
+    // second -- a race the test can lose (a short bar is easy to miss between
+    // polls, and a render that never rendered anything made it millisecond
+    // short), and losing it turned "the second export is refused" into "the
+    // second export ran".
+    const bigtime_t askedUs = system_time();
+    win->PostMessage(&a);
     win->PostMessage(&b);
-    // 30 s, not 5: the refusal is set the moment the request is DEQUEUED, and
-    // while the first render is saturating the VM the window's queue drains
-    // slowly (that is what the fixture above is sized for). The message itself
-    // then stands for its own 4-second hold, so the poll below cannot miss it.
     const bool refused = WaitFor([&] {
         return TransportStatus(win) == "A render is already running";
     }, 30000000);
@@ -4972,7 +5000,12 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
                     TransportStatus(win).c_str(), (int)VisibleWindows(),
                     (int)windowsBefore);
     CHECK(refused);
-    // No second progress bar, and nothing started for the refused path.
+    // How long the request took to be handled is worth a line in the log: it
+    // is the number a loaded VM moves, and it is what the first versions of
+    // this test were really measuring.
+    std::printf("  refusal after %.0f ms\n", (system_time() - askedUs) / 1000.0);
+    // The refusal is only set while the first render IS running, so the bar it
+    // raised is up right now -- and nothing was raised for the refused path.
     CHECK(VisibleWindows() == windowsBefore + 1);
 
     // Cancel the long one: the message on the row changes to the cancel.

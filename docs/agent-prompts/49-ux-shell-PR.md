@@ -372,13 +372,31 @@ The two writers do not fight — `SetTransportStatus` never touches
 a standing job message is left alone by both the 60 Hz pulse and the 2 Hz
 tick, in the merged tree included.
 
-The same DIAGs also showed why the second export started instead of being
-refused: the first bar was up, then gone one five-second wait later (120
-seconds of material in under five seconds, ~24x realtime), and the second
-request was not dequeued until after that, because a render at full tilt
-saturates the VM's two vCPUs. The fixture is twelve long notes now (tens of
-seconds of render) and the refusal's wait is 30 s, so the request cannot be
-dequeued after the render is already over.
+The next run's log — the first export's success line printed ABOVE the bar
+diagnostic — plus the exporter's own code then settled what two attempts had
+been guessing at. Three things were wrong, in order of how much they hid:
+
+1. **The fixture was not audible, so nothing was being rendered.** An earlier
+   meter test leaves its fixture SOLOED (`PlayMeterFixture`) with every other
+   track muted — and `ExportWav` computes both its project end and the
+   material it walks from the **audible** tracks only (`anySolo` → the soloed
+   ones). The "whole project" bounce was therefore one short clip: tens of
+   milliseconds, its progress bar gone before the test could look. The twelve
+   long notes the previous attempt added were never part of the render at
+   all. Fixed: clear every solo, mute the rest (the same shape the suite's own
+   meter fixture uses), so the twelve notes ARE the render.
+2. **The test raced its own observation.** It waited for the first render's
+   progress bar before asking for the second, so a bar it missed made the
+   second request land after the first had finished. The queue is the
+   guarantee now: both requests go in back to back, and a window handles its
+   messages in order, so the first has started its render before the second is
+   looked at — no render of this fixture can be over in the microseconds
+   between them.
+3. **The fixture's size was invisible.** The test now prints, on every run,
+   the number of audible tracks and the material length it will render
+   (computed with the exporter's own rule over the same fields it reads) and
+   how long the refusal took to arrive. Either line would have caught (1)
+   immediately.
 
 The expiry machinery was checked on the way and is intact in the merged tree:
 the 2 Hz `MSG_TITLE` case runs `UpdateTitle(); ExpireTransportStatus();
