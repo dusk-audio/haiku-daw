@@ -36,4 +36,10 @@ INSTALL()
 	# resource (haiku-daw.rdef), so there is nothing beside it to install.
 	mkdir -p "$appsDir/HaikuDAW"
 	cp build/daw "$appsDir/HaikuDAW/HaikuDAW"
+	# The New Project templates: the app looks for them beside its binary and
+	# in $dataDir/haiku-daw/templates (CMakeLists.txt's install rule targets
+	# the same directory; this copy is here because INSTALL() copies the
+	# binary by hand instead of running `make install`).
+	mkdir -p "$dataDir/haiku-daw/templates"
+	cp data/templates/*.dawproj "$dataDir/haiku-daw/templates/"
 }

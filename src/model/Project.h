@@ -190,6 +190,15 @@ struct Track {
     bool              inputMonitor = false;  // hear the input live w/o record-enable
     bool              soloSafe = false;      // stays audible even when another solos
     int               muteGroup = 0;         // >0 = mute-group id; muting any member mutes all
+    // Mixer strip extras (M3.4). `trim` is the INPUT trim: a gain applied to
+    // the track's own material ahead of its fader and its inserts (the console
+    // meaning of the word), `phaseInvert` flips that material's polarity, and
+    // `soloGroup` is the solo analogue of `muteGroup`: soloing any member
+    // solos every member. All three are separate from gain/pan so gain/pan
+    // automation cannot drop them.
+    float             trim = 1.0f;           // linear, 1.0 = unity (ceiling 4.0)
+    bool              phaseInvert = false;   // polarity flip on this track
+    int               soloGroup = 0;         // >0 = solo-group id
     TrackId           output = kInvalidTrackId;  // routing target; 0 = master
     int               colorIndex = 0;   // index into the UI track-color palette
     int               height     = 72;  // lane height in pixels (UI)
@@ -291,6 +300,10 @@ public:
     TempoMap      tempoMap;            // variable tempo + meter (authoritative)
     Transport     transport;
     std::vector<Marker> markers;      // named position markers (sorted by frame)
+    // The project's own notes (M3.6): free text the Project Settings window
+    // edits, saved with the project. Empty writes no line at all, so a project
+    // that never uses it stays byte-identical to the format before it.
+    std::string   notes;
 
     const std::vector<Track>& Tracks() const { return fTracks; }
     std::vector<Track>&       Tracks()       { return fTracks; }
@@ -317,6 +330,7 @@ public:
         tempoMap   = TempoMap{};
         transport  = Transport{};
         markers.clear();
+        notes.clear();
         fLastTrackId = kInvalidTrackId;
         fLastClipId  = kInvalidClipId;
     }

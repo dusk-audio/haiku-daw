@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 static int g_checks = 0, g_fails = 0;
 #define CHECK(cond)                                                       \
@@ -189,6 +190,117 @@ int main() {
         AppSettings m4;
         CHECK(m4.Deserialize("buffer 256\n"));   // older file: no line
         CHECK(m4.markerLaneVisible == false);
+    }
+
+    // --- the Preferences window's keys (M3.5) ----------------------------
+    {
+        // Every one round-trips, spaces in the folder path included.
+        AppSettings p;
+        p.defaultSampleRate = 96000;
+        p.metronomeSound    = 2;
+        p.metronomeLevel    = 0.75f;
+        p.uiScale           = 1.5f;
+        p.projectDir        = "/boot/home/My Projects";
+        p.autosaveSeconds   = 300;
+        AppSettings p2;
+        CHECK(p2.Deserialize(p.Serialize()));
+        CHECK(p2.defaultSampleRate == 96000);
+        CHECK(p2.metronomeSound == 2);
+        CHECK(std::fabs(p2.metronomeLevel - 0.75f) < 1e-3);
+        CHECK(std::fabs(p2.uiScale - 1.5f) < 1e-3);
+        CHECK(p2.projectDir == "/boot/home/My Projects");
+        CHECK(p2.autosaveSeconds == 300);
+
+        // A file from before the window existed keeps every default: the
+        // 48 kHz new-project rate, the click sound, the 30 s autosave.
+        AppSettings old;
+        CHECK(old.Deserialize("buffer 256\nmetronome 1\n"));
+        CHECK(old.defaultSampleRate == 48000);
+        CHECK(old.metronomeSound == 0);
+        CHECK(std::fabs(old.metronomeLevel - 0.30f) < 1e-3);
+        CHECK(old.uiScale == 0.0f);          // follow the system font
+        CHECK(old.projectDir.empty());
+        CHECK(old.autosaveSeconds == 30);
+
+        // An empty folder value is a value ("the panel's own default"), not a
+        // missing line: it must survive a round trip.
+        AppSettings empty;
+        empty.projectDir = "";
+        AppSettings empty2;
+        empty2.projectDir = "/stale";
+        CHECK(empty2.Deserialize(empty.Serialize()));
+        CHECK(empty2.projectDir.empty());
+    }
+
+    // --- the sanitiser: a hand-edited file cannot break the app ----------
+    {
+        // A buffer that is not one of the offered sizes snaps to the closest;
+        // a missing/garbage one (0, or a negative) comes back as the default
+        // -- 0 frames would divide by zero in the audio path.
+        AppSettings s;
+        CHECK(s.Deserialize("buffer 500\n"));
+        CHECK(s.bufferFrames == 512);
+        AppSettings z;
+        CHECK(z.Deserialize("buffer 0\n"));
+        CHECK(z.bufferFrames == 512);
+        AppSettings neg;
+        CHECK(neg.Deserialize("buffer -64\n"));
+        CHECK(neg.bufferFrames == 512);
+        AppSettings big;
+        CHECK(big.Deserialize("buffer 99999\n"));
+        CHECK(big.bufferFrames == 2048);
+        // ... and the offered sizes themselves are left exactly alone.
+        for (int i = 0; i < kBufferFrameChoiceCount; i++) {
+            AppSettings k;
+            CHECK(k.Deserialize("buffer " + std::to_string(kBufferFrameChoices[i]) + "\n"));
+            CHECK(k.bufferFrames == kBufferFrameChoices[i]);
+        }
+
+        // The new-project rate: garbage -> the default, an odd rate -> nearest.
+        AppSettings r;
+        CHECK(r.Deserialize("defrate garbage\n"));
+        CHECK(r.defaultSampleRate == 48000);
+        AppSettings r2;
+        CHECK(r2.Deserialize("defrate 44000\n"));
+        CHECK(r2.defaultSampleRate == 44100);
+
+        // Level, sound and scale are clamped to what the engine and Themed()
+        // can actually work with.
+        AppSettings m;
+        CHECK(m.Deserialize("metlvl 4.5\nmetsnd 9\nuiscale -2\n"));
+        CHECK(std::fabs(m.metronomeLevel - 1.0f) < 1e-3);
+        CHECK(m.metronomeSound == kMetronomeSoundCount - 1);
+        CHECK(m.uiScale == 0.0f);
+        AppSettings m2;
+        CHECK(m2.Deserialize("metlvl -1\nmetsnd -3\n"));
+        CHECK(m2.metronomeLevel == 0.0f);
+        CHECK(m2.metronomeSound == 0);
+        AppSettings m3;
+        CHECK(m3.Deserialize("uiscale 9\n"));
+        CHECK(m3.uiScale == 3.0f);
+
+        // Autosave: 0 is off and stays off; a silly interval is clamped.
+        AppSettings a0;
+        CHECK(a0.Deserialize("autosv 0\n"));
+        CHECK(a0.autosaveSeconds == 0);
+        AppSettings a1;
+        CHECK(a1.Deserialize("autosv 1\n"));   // too often: the shortest sane one
+        CHECK(a1.autosaveSeconds == 5);
+        AppSettings a2;
+        CHECK(a2.Deserialize("autosv 99999\n"));
+        CHECK(a2.autosaveSeconds == 3600);
+        AppSettings a3;
+        CHECK(a3.Deserialize("autosv -30\n"));
+        CHECK(a3.autosaveSeconds == 0);
+
+        // The old numeric guard still holds and the sanitiser does not defeat
+        // it: a good line beside a bad one is still parsed.
+        AppSettings e;
+        CHECK(e.Deserialize("countin 3\n"));
+        CHECK(e.countInBars == 3);
+        AppSettings e2;
+        CHECK(e2.Deserialize("countin 99\n"));
+        CHECK(e2.countInBars == 8);   // clamped, not wrapped
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

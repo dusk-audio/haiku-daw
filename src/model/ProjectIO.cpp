@@ -1,6 +1,7 @@
 #include "ProjectIO.h"
 
 #include "Base64.h"
+#include "Commands.h"   // kTrackTrimMax (the clamp the loader shares with the command)
 
 #include <algorithm>
 #include <cstdio>
@@ -223,6 +224,12 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
     for (const Marker& mk : p.markers)
         f << "marker " << (long long)mk.frame << " " << Quote(mk.name) << "\n";
 
+    // The project's notes (M3.6). An optional line, written only when there is
+    // something to write -- the append-only rule every post-1.0 field follows,
+    // so a project that never sets notes saves the bytes it always did.
+    if (!p.notes.empty())
+        f << "notes " << Quote(p.notes) << "\n";
+
     for (const Track& t : p.Tracks()) {
         const char* ty = t.type == TrackType::Midi ? "midi"
                        : t.type == TrackType::Bus  ? "bus" : "audio";
@@ -240,6 +247,17 @@ bool ProjectIO::Save(const Project& p, const std::string& path) {
         // by luck. A project that folds nothing writes the legacy bytes.
         if (t.collapsed)
             f << "trackfold " << t.id << " 1\n";
+        // Mixer strip extras (M3.4): input trim, polarity, solo group. One
+        // optional line each, written only when the field is not its default,
+        // addressed by track id and applied after the whole file is read (see
+        // the parser) — so a project that never touches them saves
+        // byte-identically to a pre-M3.4 build's file.
+        if (t.trim != 1.0f)
+            f << "tracktrim " << t.id << " " << t.trim << "\n";
+        if (t.phaseInvert)
+            f << "trackphase " << t.id << " 1\n";
+        if (t.soloGroup > 0)
+            f << "tracksologroup " << t.id << " " << t.soloGroup << "\n";
 
         for (const Clip& c : t.clips) {
             f << "clip " << c.id << " "
@@ -426,6 +444,12 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     bool tempo0Ramp = false;   // ramp flag for the frame-0 tempo
     // Track folds, applied once every track exists (see the `trackfold` case).
     std::vector<std::pair<TrackId, bool>> folded;
+    // Mixer strip extras (M3.4), same rule and for the same reason: addressed
+    // by track id, applied after the whole file has been read, so where the
+    // line sits relative to its track record cannot decide whether it survives.
+    std::vector<std::pair<TrackId, float>> trims;
+    std::vector<std::pair<TrackId, bool>>  phases;
+    std::vector<std::pair<TrackId, int>>   soloGroups;
 
     auto commit = [&]() {
         if (!haveTrack) return;
@@ -510,6 +534,11 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             Marker mk; mk.frame = (Frame)fr; mk.name = Unquote(line, escaped);
             p.markers.push_back(mk);
         }
+        else if (kw == "notes") {
+            // The project's own notes (M3.6). Optional: a file without the line
+            // loads as a project with no notes, which is what it is.
+            p.notes = Unquote(line, escaped);
+        }
         else if (kw == "transport") {
             long long ph = 0, ls = 0, le = 0; int loop = 0;
             iss >> ph >> loop >> ls >> le;
@@ -567,6 +596,25 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
             long long id = -1; int fold = 0;
             if (!(iss >> id >> fold)) continue;
             folded.emplace_back((TrackId)id, fold != 0);
+        }
+        else if (kw == "tracktrim") {
+            // Optional (M3.4): absent in every older file, where the track
+            // keeps the unity default. A value outside the fader's own range
+            // is clamped, never rejected: a damaged line must not cost the
+            // whole project.
+            long long id = -1; float v = 1.0f;
+            if (!(iss >> id >> v)) continue;
+            trims.emplace_back((TrackId)id, v);
+        }
+        else if (kw == "trackphase") {
+            long long id = -1; int inv = 0;
+            if (!(iss >> id >> inv)) continue;
+            phases.emplace_back((TrackId)id, inv != 0);
+        }
+        else if (kw == "tracksologroup") {
+            long long id = -1; int g = 0;
+            if (!(iss >> id >> g)) continue;
+            soloGroups.emplace_back((TrackId)id, g > 0 ? (int)g : 0);
         }
         else if (kw == "clip" && haveTrack) {
             Clip c;
@@ -805,6 +853,20 @@ bool ProjectIO::Load(Project& out, const std::string& path) {
     // Track folds, now that every track record has been committed.
     for (const auto& f : folded)
         if (Track* t = p.FindTrack(f.first)) t->collapsed = f.second;
+    // The mixer strip extras (M3.4), same place and same reason. The trim is
+    // clamped here as well as in the command: a hand-edited file is input too.
+    for (const auto& e : trims) {
+        if (Track* t = p.FindTrack(e.first)) {
+            float v = e.second;
+            if (!(v >= 0.0f)) v = 0.0f;
+            if (v > kTrackTrimMax) v = kTrackTrimMax;
+            t->trim = v;
+        }
+    }
+    for (const auto& e : phases)
+        if (Track* t = p.FindTrack(e.first)) t->phaseInvert = e.second;
+    for (const auto& e : soloGroups)
+        if (Track* t = p.FindTrack(e.first)) t->soloGroup = e.second;
 
     out = std::move(p);   // clean parse -> commit; live session was untouched
     return true;
