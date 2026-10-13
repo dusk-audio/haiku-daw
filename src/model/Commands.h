@@ -310,6 +310,28 @@ private:
     int         fIndex = -1;
 };
 
+// Move the marker at `oldFrame` to `newFrame` (the marker lane's drag). Pass
+// `name` to disambiguate when two markers share a frame (else the first at
+// that frame is moved). Project::markers stays sorted by frame, so a move
+// across another marker reorders: Do() removes and re-inserts at the sorted
+// position, and Undo() puts the marker back at the index it came from.
+// A marker's frame is all that changes — the name rides along.
+class MoveMarkerCommand : public Command {
+public:
+    MoveMarkerCommand(Frame oldFrame, std::string name, Frame newFrame)
+        : fOldFrame(oldFrame), fName(std::move(name)), fNewFrame(newFrame) {}
+    bool Do(Project& p) override;
+    void Undo(Project& p) override;
+    std::string Name() const override { return "Move Marker"; }
+private:
+    Frame       fOldFrame;
+    std::string fName;
+    Frame       fNewFrame;
+    Marker      fMoved;             // the marker as it was, old frame and all
+    int         fOldIndex = -1;     // where it sat before the move
+    int         fNewIndex = -1;     // where Do() put it
+};
+
 // Add a MIDI region (clip) to a track. Allocates a clip id in Do() if unset;
 // Undo() removes it. CreatedId() gives the id after Do() (for the UI).
 class AddMidiClipCommand : public Command {
