@@ -5,6 +5,7 @@
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../dsp/SidechainKey.h"   // kExtKeySlot (the picker writes it)
 #include "../dsp/EffectFactory.h"  // EffectTakesSidechain: who gets a Key row
+#include "../model/ParamDisplay.h" // ParamValueText (scale-point names + units)
 #include "../plugin/PluginHost.h"
 #include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
@@ -152,7 +153,16 @@ struct HostParam { const char* name; float mn; float mx; float def;
                    bool isInteger; bool isToggled;
                    // Points into the host's listing, which is built once at
                    // startup and never mutated; null for non-enumerations.
-                   const std::vector<float>* scalePoints; };
+                   const std::vector<float>* scalePoints;
+                   // Parallel to scalePoints: each point's own label. Null when
+                   // the host described no names, which is every add-on and an
+                   // LV2 plugin that declared no rdfs:labels.
+                   const std::vector<std::string>* scalePointNames;
+                   // The unit the port NAME declares ("Frequency (Hz)"), empty
+                   // when it declares none. Read from the name rather than a
+                   // units extension because that is where the convention puts
+                   // it and where every plugin this host has seen writes it.
+                   std::string unit; };
 
 static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
     std::vector<HostParam> out;
@@ -162,14 +172,16 @@ static std::vector<HostParam> HostParamsFor(const EffectDesc& d) {
                 // The add-on ABI does not describe integer/toggled/enum ports,
                 // so a native plugin's params are always treated as continuous.
                 out.push_back({ p.name.c_str(), p.mn, p.mx, p.def,
-                                false, false, nullptr });
+                                false, false, nullptr, nullptr,
+                                ParamUnitFromName(p.name) });
     }
 #ifdef DAW_HAVE_LV2
     else if (d.type == EffectType::Lv2) {
         if (const Lv2PluginInfo* pi = Lv2Host::Instance().Find(d.pluginName))
             for (const Lv2ParamInfo& p : pi->params)
                 out.push_back({ p.name.c_str(), p.mn, p.mx, p.def, p.isInteger,
-                                p.isToggled, &p.scalePoints });
+                                p.isToggled, &p.scalePoints, &p.scalePointNames,
+                                ParamUnitFromName(p.name) });
     }
 #endif
     return out;
@@ -427,6 +439,8 @@ void EffectsView::Retarget(std::vector<EffectDesc> chain, TrackId track,
     fKeySources = std::move(keySources);
     fFocus = (focusSlot >= 0 && focusSlot < (int)fChain.size()) ? focusSlot : -1;
     fHits.clear();
+    // The hovered band belonged to the chain that is leaving (package 52).
+    fHoverBand = fHoverEffect = -1;
     UpdateScrollRange();
     Invalidate();
 }
@@ -440,6 +454,7 @@ void EffectsView::SetChain(std::vector<EffectDesc> chain) {
     // whatever prompted the refresh.
     if (fDragEffect >= 0 || fCommit) return;
     fChain = std::move(chain);
+    fHoverBand = fHoverEffect = -1;   // the hovered band's index may mean another one now
     if (fFocus >= (int)fChain.size()) {
         // The insert this window exists to edit is gone; the same rule the
         // apply path uses, for the same reason.
@@ -505,7 +520,10 @@ void EffectsView::DrawKnob(BRect r, const char* label, float value,
 }
 
 void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
-    SetHighColor(Rgb(16, 18, 22));
+    // The well of a graph is the LCD token, not a literal near-black: a
+    // hard-coded dark grey is a black rectangle inside a light panel in System
+    // mode (UI_GUIDELINES §5).
+    SetHighColor(ColLcd());
     FillRect(r);
     // dB grid (-18..+18) + 0 line.
     for (int db = -18; db <= 18; db += 6) {
@@ -537,7 +555,7 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
             if (db < -84) db = -84; if (db > 0) db = 0;
             return r.bottom - (db + 84.0f) / 84.0f * r.Height();
         };
-        SetHighColor(Rgb(46, 96, 86));   // dim teal spectrum fill
+        SetHighColor(MixColor(ColPlay(), ColLcd(), 0.55f));   // dim spectrum fill
         for (float x = r.left + 1; x <= r.right; x += 1.0f) {
             const double f = xToFreq(x);
             const int k = (int)(f / binHz + 0.5);
@@ -564,18 +582,48 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
         px = x; py = y;
     }
 
-    // Draggable band handles (x = freq, y = gain).
+    // Draggable band handles (x = freq, y = gain). The active band (hovered or
+    // dragged) is highlighted and its numbers are printed below (package 52):
+    // a 2D drag sets three values at once -- freq, gain and, through the wheel,
+    // Q -- and none of them was on screen.
+    const int activeBand = (fDragKind == 5 && fDragEffect == effIdx) ? fDragSlot
+                         : (fHoverBand >= 0 && fHoverEffect == effIdx) ? fHoverBand
+                         : -1;
     for (int b = 0; b < 5; b++) {
         const float f = d.p((size_t)(b * 3));
         const float g = d.p((size_t)(b * 3 + 1));
         const float hx = freqToX(f <= 20 ? 20 : f);
         const float hy = dbToY(g);
         SetHighColor(TrackColor(b));
-        FillEllipse(BPoint(hx, hy), 5, 5);
+        FillEllipse(BPoint(hx, hy), b == activeBand ? 7 : 5,
+                    b == activeBand ? 7 : 5);
         SetHighColor(ColText());
-        StrokeEllipse(BPoint(hx, hy), 5, 5);
+        StrokeEllipse(BPoint(hx, hy), b == activeBand ? 7 : 5,
+                      b == activeBand ? 7 : 5);
         fHits.push_back({ effIdx, 5, b, BRect(hx - 6, hy - 6, hx + 6, hy + 6),
                           0, 0 });
+    }
+
+    // The active band's numbers, in the graph's top-left corner (the axis
+    // labels own the bottom edge).
+    if (activeBand >= 0 && activeBand < 5) {
+        const float f = d.p((size_t)(activeBand * 3));
+        const float g = d.p((size_t)(activeBand * 3 + 1));
+        const float q = d.p((size_t)(activeBand * 3 + 2));
+        char num[64];
+        std::snprintf(num, sizeof(num),
+                      f >= 1000.0f ? "B%d  %.2f kHz  %+.1f dB  Q %.2f"
+                                   : "B%d  %.0f Hz  %+.1f dB  Q %.2f",
+                      activeBand + 1, f >= 1000.0f ? f / 1000.0f : f, g, q);
+        // A strip of the well behind it, so the numbers stay readable over the
+        // FFT overlay and the curve.
+        const float tw = StringWidth(num);
+        BRect tag(r.left + 2, r.top + 2, r.left + 8 + tw, r.top + 16);
+        if (tag.right > r.right - 2) tag.right = r.right - 2;
+        SetHighColor(ColLcd());
+        FillRect(tag);
+        SetHighColor(ColLcdText());
+        DrawString(num, BPoint(r.left + 5, r.top + 14));
     }
 
     // Axis labels last (on top of the curve/handles) so they stay legible.
@@ -593,16 +641,17 @@ void EffectsView::DrawEqGraph(BRect r, const EffectDesc& d, int effIdx) {
 }
 
 void EffectsView::DrawCompCurve(BRect r, const EffectDesc& d, int effIdx) {
-    SetHighColor(Rgb(16, 18, 22));
+    SetHighColor(ColLcd());
     FillRect(r);
-    // Gain-reduction meter strip down the right edge (live), 0..-24 dB.
+    // Gain-reduction meter strip down the right edge (live), 0..-24 dB. Its
+    // well and its bar are theme tokens, like every other meter in the app.
     const float grDb = (effIdx >= 0 && effIdx < fGrN) ? -fGr[effIdx] : 0.0f;  // >=0
     const float meterW = 14.0f;
     BRect gm(r.right - meterW, r.top, r.right, r.bottom);
-    SetHighColor(Rgb(12, 14, 17));
+    SetHighColor(ColBackground());
     FillRect(gm);
     const float grN = grDb / 24.0f > 1.0f ? 1.0f : grDb / 24.0f;   // fraction
-    SetHighColor(Rgb(232, 150, 70));
+    SetHighColor(MeterColor(kMeterWarn));
     FillRect(BRect(gm.left + 2, gm.top, gm.right - 1, gm.top + grN * gm.Height()));
     SetHighColor(ColGrid());
     StrokeRect(gm);
@@ -661,9 +710,27 @@ void EffectsView::Draw(BRect) {
         // A bypassed insert keeps its panel but reads as inactive, the same way
         // the channel strip dims its row.
         SetHighColor(d.bypassed ? ColTextDim() : ColText());
-        const std::string titleStr = EffectDisplayName(d);
-        const char* title = titleStr.c_str();
-        DrawString(title, BPoint(panel.left + 8, panel.top + 15));
+        // Where the title has to STOP: the row carries buttons to its right
+        // (Del, the reorder pair, the plugin's own "UI") and, for an EQ, the FFT
+        // box to its left. A plugin name is routinely longer than the space --
+        // "DAW Test Filter Unit" over a title row full of buttons -- and a title
+        // printed over them is unreadable twice over (package 52; the rule is
+        // UI_GUIDELINES §3, "Text fits").
+        float titleRight = panel.right - 52.0f - 6.0f;          // the Del button
+        if (fFocus < 0)
+            titleRight = std::min(titleRight, panel.right - 3 * kBtnW - 60.0f - 6.0f);
+#ifdef DAW_HAVE_LV2
+        if (d.type == EffectType::Lv2 && Lv2UiWindow::HasNativeUi(d.pluginName))
+            titleRight = std::min(titleRight, panel.right - 5 * kBtnW - 62.0f - 6.0f);
+#endif
+        if (d.type == EffectType::Eq)
+            titleRight = std::min(titleRight, panel.left + 96.0f - 6.0f);
+        {
+            BString title(EffectDisplayName(d).c_str());
+            TruncateString(&title, B_TRUNCATE_END,
+                           std::max(20.0f, titleRight - (panel.left + 8.0f)));
+            DrawString(title.String(), BPoint(panel.left + 8, panel.top + 15));
+        }
 
         // Up / Down / Remove buttons in the title bar.
         auto btn = [&](float rx, const char* lbl, int kind) {
@@ -692,9 +759,10 @@ void EffectsView::Draw(BRect) {
         }
 #endif
         BRect rm(panel.right - 52, panel.top + 2, panel.right - 4, panel.top + kTitleH - 2);
-        SetHighColor(Rgb(120, 60, 60)); FillRect(rm);
+        SetHighColor(ColRec()); FillRect(rm);   // destructive: the record red
         SetHighColor(ColGrid());        StrokeRect(rm);
-        SetHighColor(ColText());        DrawString("Del", BPoint(rm.left + 12, rm.bottom - 5));
+        SetHighColor(LabelOn(ColRec()));
+        DrawString("Del", BPoint(rm.left + 12, rm.bottom - 5));
         fHits.push_back({ (int)i, 3, 0, rm, 0, 0 });
 
         // EQ analyzer (FFT) on/off toggle in the title bar.
@@ -722,7 +790,8 @@ void EffectsView::Draw(BRect) {
 
         BRect byp(panel.left + 6, hdr.top + 3, panel.left + 6 + kBypassW,
                   hdr.bottom - 3);
-        SetHighColor(d.bypassed ? Rgb(150, 110, 50) : ColHeaderHi());
+        SetHighColor(d.bypassed ? MixColor(ColMute(), ColHeaderHi(), 0.35f)
+                                : ColHeaderHi());
         FillRect(byp);
         SetHighColor(ColGrid());
         StrokeRect(byp);
@@ -889,12 +958,19 @@ void EffectsView::Draw(BRect) {
                     fHits.push_back({ (int)i, 9, (int)pi, tr, p.mn, p.mx });
                 }
 
-                char buf[32];
-                std::snprintf(buf, sizeof buf,
-                              (p.isInteger || (p.mx - p.mn) >= 100.0f)
-                                  ? "%.0f" : "%.2f", val);
+                // The value as text (package 52): the scale point's own name
+                // where the plugin declared one ("Lowpass" rather than "2"), the
+                // number otherwise, and the unit the port name declares
+                // ("440 Hz"). ParamDisplay.h owns the rules and is host-tested;
+                // this is the only place they are drawn.
+                const std::string text = ParamValueText(
+                    val, p.isInteger, p.mn, p.mx, p.unit, p.scalePoints,
+                    p.scalePointNames);
                 SetHighColor(ColTextDim());
-                DrawString(buf, BPoint(panel.right - kParamValW - 2, ry + 15));
+                BString valText(text.c_str());
+                TruncateString(&valText, B_TRUNCATE_END, kParamValW - 2.0f);
+                DrawString(valText.String(),
+                           BPoint(panel.right - kParamValW - 2, ry + 15));
                 ry += kParamRowH;
             }
         } else {
@@ -1065,6 +1141,37 @@ void EffectsView::MouseDown(BPoint where) {
         }
         return;
     }
+    // ... and the same gesture for the two control kinds that never had it
+    // (package 52): a built-in KNOB (kind 0) and an EQ band HANDLE (kind 5).
+    // Their defaults are the descriptor's own -- MakeDefault(type) builds the
+    // insert the Add menu would, and EqDesc() is the band's factory setting --
+    // so "reset" means the same thing here as it does for a plugin port.
+    if (kind == 0 && clicks > 1
+        && h.effect >= 0 && h.effect < (int)fChain.size()) {
+        EffectDesc& d = fChain[h.effect];
+        const EffectDesc def = MakeDefault(d.type);
+        EnsureParamSlot(d, h.slot);
+        if ((size_t)h.slot < def.params.size())
+            d.params[(size_t)h.slot] = def.params[(size_t)h.slot];
+        fDragEffect = -1;
+        Apply(); Invalidate();
+        return;
+    }
+    if (kind == 5 && clicks > 1
+        && h.effect >= 0 && h.effect < (int)fChain.size()) {
+        EffectDesc& d = fChain[h.effect];
+        const EffectDesc def = EqDesc();
+        if (h.slot >= 0 && h.slot < 5) {
+            EnsureParamSlot(d, h.slot * 3 + 2);   // freq, gain and Q together
+            for (int k = 0; k < 3; k++) {
+                const size_t to = (size_t)(h.slot * 3 + k);
+                if (to < def.params.size()) d.params[to] = def.params[to];
+            }
+        }
+        fDragEffect = -1;
+        Apply(); Invalidate();
+        return;
+    }
 
     switch (kind) {
         case 11:  // bypass: a discrete toggle, committed on the click
@@ -1096,6 +1203,12 @@ void EffectsView::MouseDown(BPoint where) {
             fDragStart = where;
             fDragStartVal = (fDragEffect >= 0 && fDragEffect < (int)fChain.size())
                             ? fChain[fDragEffect].p((size_t)fDragSlot) : 0;
+            // The EQ handle's OTHER axis (its gain): the band index names the
+            // freq slot, so the gain has to be taken here, before the gesture
+            // starts writing it.
+            fDragStartValY =
+                (kind == 5 && fDragEffect >= 0 && fDragEffect < (int)fChain.size())
+                    ? fChain[fDragEffect].p((size_t)(fDragSlot * 3 + 1)) : 0;
             SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             break;
         }
@@ -1250,8 +1363,33 @@ void EffectsView::MouseDown(BPoint where) {
     }
 }
 
-void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
-    if (fDragEffect < 0 || fDragEffect >= (int)fChain.size()) return;
+void EffectsView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
+    // Hover (package 52): with no drag in flight, the EQ band under the pointer
+    // is the ACTIVE band, and the graph prints its numbers. It used to do
+    // nothing at all outside a drag, so a band's freq/gain/Q were unreadable
+    // while you were deciding where to put them.
+    if (fDragEffect < 0) {
+        int band = -1, eff = -1;
+        for (const Hit& h : fHits) {
+            if (h.kind != 5 || !h.rect.Contains(where)) continue;
+            band = h.slot; eff = h.effect;
+            break;
+        }
+        const bool changed = (band != fHoverBand || eff != fHoverEffect);
+        fHoverBand = band;
+        fHoverEffect = eff;
+        if (changed) Invalidate();
+        // Leave the leave-transit case alone: the caller scrolls the panel.
+        if (transit == B_ENTERED_VIEW || transit == B_INSIDE_VIEW
+            || transit == B_EXITED_VIEW)
+            return;
+        return;
+    }
+    if (fDragEffect >= (int)fChain.size()) return;
+    // Shift is the fine rate on every drag path (package 52), the same gesture
+    // the wheel has had since M1.3: a knob, a parameter slider and the EQ
+    // handle all divide their rate by ten while it is held.
+    const float fine = (modifiers() & B_SHIFT_KEY) != 0 ? 0.1f : 1.0f;
     EffectDesc& d = fChain[fDragEffect];
     // Push the changed param straight to the running engine so the effect
     // responds live while dragging (mixing feel); commit is on mouse-up.
@@ -1268,22 +1406,31 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         d.params[slot] = v;
         live(slot, v);
     };
-    if (fDragKind == 12) {   // wet/dry: x across the track, no live preview
-        float t = (fDragRect.Width() > 0)
-                  ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
+    if (fDragKind == 12) {   // wet/dry: x across the track, live preview
+        const float t = DragFraction(where.x, fDragRect.left, fDragRect.Width(),
+                                     fDragStart.x, fine);
         d.mix = ClampFxMix(t);
-        Invalidate();        // the drawing follows the pointer; the audio waits
-        return;              // for MouseUp -- see the header comment in Draw
+        // The engine holds each insert's wet/dry as its own atomic (not a
+        // numbered param slot), so the live preview needs its own message. Every
+        // other row in this panel sounds while it moves; this one waited for
+        // the release (package 52).
+        BMessage m(kMsgFxLiveMix);
+        m.AddInt64("track", (int64)fTrack);
+        m.AddInt32("fx", fDragEffect);
+        m.AddFloat("mix", d.mix);
+        fApply.SendMessage(&m);
+        Invalidate();
+        return;
     }
     if (fDragKind == 0) {   // knob: vertical drag over ~160 px = full range
-        const float dv = (fDragStart.y - where.y) / 160.0f * (fDragMax - fDragMin);
+        const float dv = (fDragStart.y - where.y) / 160.0f * (fDragMax - fDragMin)
+                       * fine;
         float v = fDragStartVal + dv;
         if (v < fDragMin) v = fDragMin; if (v > fDragMax) v = fDragMax;
         setP(fDragSlot, v);
     } else if (fDragKind == 9) {   // parameter slider: x across the track
-        float t = (fDragRect.Width() > 0)
-                  ? (where.x - fDragRect.left) / fDragRect.Width() : 0.0f;
-        if (t < 0) t = 0; if (t > 1) t = 1;
+        const float t = DragFraction(where.x, fDragRect.left, fDragRect.Width(),
+                                     fDragStart.x, fine);
         float v = fDragMin + t * (fDragMax - fDragMin);
         // Coerce through the SAME function the host uses, so the value shown and
         // the value the plugin receives cannot disagree -- and so a toggle gets
@@ -1299,10 +1446,14 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         const float top = PanelTop((size_t)fDragEffect) + kTitleH + kHeaderH + 4;
         BRect r(kPanelPad + 6, top, Bounds().Width() - kPanelPad - 6, top + kGraphH - 6);
         const double lo = std::log10(20.0), hi = std::log10(20000.0);
-        double tf = (where.x - r.left) / r.Width();
-        if (tf < 0) tf = 0; if (tf > 1) tf = 1;
+        // The pointer's own delta, in the graph's two axes, with Shift for a
+        // fine rate: grabbing a handle never makes it jump, and a narrow
+        // freq/Q placement is possible without a pixel-perfect hand.
+        const float tf = DragFraction(where.x, r.left, r.Width(), fDragStart.x, fine);
         const float freq = (float)std::pow(10.0, lo + tf * (hi - lo));
-        float gain = 18.0f - (where.y - r.top) / r.Height() * 36.0f;
+        const float gAt = 18.0f - (where.y - r.top) / r.Height() * 36.0f;
+        const float gAt0 = 18.0f - (fDragStart.y - r.top) / r.Height() * 36.0f;
+        float gain = fDragStartValY + (gAt - gAt0) * fine;
         if (gain < -18) gain = -18; if (gain > 18) gain = 18;
         setP(fDragSlot * 3, freq);
         setP(fDragSlot * 3 + 1, gain);
@@ -1313,6 +1464,9 @@ void EffectsView::MouseMoved(BPoint where, uint32, const BMessage*) {
 void EffectsView::MouseUp(BPoint) {
     if (fDragEffect >= 0) Apply();   // commit the drag as one undoable change
     fDragEffect = fDragSlot = fDragKind = -1;
+    // The gesture is over but the pointer has not moved yet, so the hover state
+    // still names the handle that was dragged -- which is what keeps its numbers
+    // on screen until the pointer leaves (package 52).
 }
 
 // A wheel gesture has no mouse-up to commit on, so fold its notches into ONE
@@ -1389,9 +1543,20 @@ bool EffectsView::WheelAdjust(BPoint where, float dy) {
 void EffectsView::OpenBrowser() {
     BRect wr(160, 160, 620, 560);
     if (BWindow* w = Window()) {
-        // Offer it beside the editor rather than at a fixed screen position.
+        // Offer it beside the editor rather than at a fixed screen position --
+        // and CLAMPED TO THE SCREEN (package 52): an editor near the right or
+        // bottom edge used to open the browser at f.right + 12, i.e. entirely
+        // off-window, and the "Add Effect…" button then looked like it did
+        // nothing at all.
         BRect f = w->Frame();
         wr.OffsetTo(f.right + 12, f.top);
+        const BRect sf = BScreen(w).Frame();
+        if (wr.right > sf.right - 8.0f)
+            wr.OffsetTo(sf.right - 8.0f - wr.Width(), wr.top);
+        if (wr.left < sf.left + 8.0f) wr.OffsetTo(sf.left + 8.0f, wr.top);
+        if (wr.bottom > sf.bottom - 8.0f)
+            wr.OffsetTo(wr.left, sf.bottom - 8.0f - wr.Height());
+        if (wr.top < sf.top + 8.0f) wr.OffsetTo(wr.left, sf.top + 8.0f);
     }
     (new PluginBrowser(wr, fTrack, BMessenger(this), fApply))->Show();
 }
@@ -1507,6 +1672,13 @@ void EffectsWindow::MessageReceived(BMessage* msg) {
         if (pending) EncodeFxChain(reply, fView->Chain());
         msg->SendReply(&reply);
         if (pending) fView->DropPendingEdit();   // applied by the caller now
+        return;
+    }
+    if (msg->what == kMsgFxDropPending) {
+        // The project is being replaced: whatever this panel has not committed
+        // belongs to the project that is going, and its commit would name a
+        // track id the new project reuses (see kMsgFxDropPending).
+        if (fView) fView->DropPendingEdit();
         return;
     }
     if (msg->what == kMsgFxRetarget) {

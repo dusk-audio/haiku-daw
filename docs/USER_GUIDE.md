@@ -105,21 +105,47 @@ pitch-bend and the mod wheel are audible, live and on playback.
   box, and **dB entry** — double-click a fader or its value to type a level.
   A send level takes effect on the next Play (the engine builds its send tables
   with the graph).
+- **The mixer window** is a console: the master strip is pinned to the right
+  edge, and anything wider than the window scrolls with the scrollbar (or the
+  wheel over empty panel space). The strips follow the arrangement — a track
+  added, deleted or reordered shows up at once.
+  - Each strip's `In` opens the same input picker the inspector offers,
+    `→Mst`/`→Bus` the same output picker, and `Auto` cycles the track's
+    automation lane mode (the one the timeline's Auto box shows).
+  - Every fader is a dB fader: the whole range from silence to +12 dB is on the
+    travel, 0 dB sits at its own tick, and a typed level is never silently
+    clamped.
+  - The meters are stereo (one bar per channel) with a peak-hold tick and a
+    clip lamp per strip; click the lamp to clear it, as on the master meter.
+  - The keyboard drives it: click a strip (or `←`/`→`) to make it current,
+    `↑`/`↓` nudge its gain by 0.5 dB, `M`/`S`/`R` toggle mute, solo and
+    record-arm. Shift is the fine rate while dragging a fader, pan, trim or
+    send knob, and while turning the wheel over one.
 - **Buses and sends:** create a bus (Track ▸ New Bus), then give tracks an
   output or a send in the inspector. Pre-fader sends tap before the fader and
   its effects. Solo groups: put the same number in several tracks' `G` boxes
-  and soloing one solos the group.
+  and soloing one solos the group. The sends editor shows each level in dB and
+  names the track it belongs to.
 - **Inserts:** the inspector's insert slots. Click an empty slot to add a
   built-in effect, a native add-on, or an LV2 plugin; click a filled row to
   edit it (an LV2 plugin with its own interface opens *that*, and it drives the
-  sound while you play). Each insert has a bypass dot and a wet/dry control.
+  sound while you play). Each insert has a bypass dot and a wet/dry control —
+  the wet/dry slider sounds while you drag it, like every other control in the
+  panel. Double-click any control there (knob, parameter row, wet/dry or an EQ
+  band handle) to put it back to its default, and hold Shift while dragging for
+  a fine rate. An LV2 parameter with named values shows the plugin's own name
+  ("Lowpass"), and a port whose name declares a unit ("Frequency (Hz)") shows
+  it. Hovering or dragging an EQ band handle prints that band's frequency, gain
+  and Q in the graph; the wheel over a handle turns its Q.
   The compressor and gate — and an LV2 plugin with sidechain inputs — take a
   **Key** from any other track.
 - **Automation:** cycle a track's `Auto` box to the parameter you want, then
   click the lane to add points and drag them. Volume, pan and any effect
   parameter can be automated.
 - The master strip has a BS.1770 loudness meter (momentary, short-term, true
-  peak) so you can see what an export will measure.
+  peak) so you can see what an export will measure. The master level is an
+  ordinary undoable edit (Cmd-Z takes a fader move back) and marks the project
+  as changed, so File ▸ Close prompts for it.
 
 ## Preferences and Project Settings
 

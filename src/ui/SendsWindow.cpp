@@ -30,11 +30,12 @@ static constexpr float kLevelMax = 2.0f;   // sends can exceed unity
 
 SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
                          std::vector<std::pair<TrackId, std::string>> buses,
-                         TrackId track, BMessenger apply)
+                         TrackId track, BMessenger apply, const char* trackName)
     : BWindow(frame, "Sends", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fSends(std::move(sends)), fBuses(std::move(buses)),
-      fTrack(track), fApply(apply) {
+      fTrack(track), fTrackName(trackName ? trackName : ""), fApply(apply) {
+    UpdateTitle(fTrackName.c_str());
     // A BGroupView, because this window's contents are rebuilt whenever a
     // send is added or removed: a group layout takes children at any time.
     BGroupView* root = new ThemedGroupView("root", B_VERTICAL, Themed(6.0f));
@@ -43,6 +44,29 @@ SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
     fRoot = root;
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
     Rebuild();
+}
+
+// The title names the track: one window is retargeted from track to track, so
+// "Sends" alone would not say whose sends are on screen (the same rule the
+// effects window's title has followed since T2).
+void SendsWindow::UpdateTitle(const char* trackName) {
+    std::string title = "Sends";
+    if (trackName != nullptr && trackName[0] != '\0')
+        title += std::string(" \xE2\x80\x94 ") + trackName;   // em dash
+    SetTitle(title.c_str());
+}
+
+void SendsWindow::Retarget(std::vector<Send> sends,
+                           std::vector<std::pair<TrackId, std::string>> buses,
+                           TrackId track, const char* trackName) {
+    fSends = std::move(sends);
+    fBuses = std::move(buses);
+    fTrack = track;
+    fTrackName = trackName ? trackName : "";
+    UpdateTitle(fTrackName.c_str());
+    Rebuild();          // new rows, new marks, new bus list
+    if (IsHidden()) Show();
+    Activate(true);
 }
 
 void SendsWindow::Apply() {
@@ -117,11 +141,23 @@ void SendsWindow::Rebuild() {
         rowLayout->AddItem(BSpaceLayoutItem::CreateGlue());
         layout->AddView(row);
 
-        // Level slider.
+        // Level slider, with its value as a NUMBER (package 52): the row said
+        // "Level" and nothing else, so the one thing a send level is -- how
+        // loud it is -- was only visible by ear. The formatter goes on BEFORE
+        // the first SetValue: a slider reserves room for its text line from the
+        // moment it has any, and the window sizes itself with the layout.
         BMessage* lm = new BMessage(MSG_SLVL);
         lm->AddInt32("send", (int32)i);
         DawSlider* sl = new DawSlider("level", "Level", lm, 0, 1000,
                                       B_HORIZONTAL);
+        sl->SetValueText([](int32 v) {
+            const float level = (v / 1000.0f) * kLevelMax;
+            char buf[32];
+            if (level <= 1e-4f) std::snprintf(buf, sizeof buf, "-inf dB");
+            else std::snprintf(buf, sizeof buf, "%+.1f dB",
+                               20.0f * std::log10(level));
+            return std::string(buf);
+        });
         float t = s.level / kLevelMax;
         if (t < 0) t = 0; if (t > 1) t = 1;
         sl->SetValue((int32)(t * 1000.0f));
@@ -143,6 +179,40 @@ void SendsWindow::DispatchMessage(BMessage* m, BHandler* h) {
 
 void SendsWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
+        case kMsgSendsActivate:
+            // Already open on this track: come to the front rather than opening
+            // a second copy of the same send list (package 52).
+            Activate(true);
+            SetWorkspaces(B_CURRENT_WORKSPACE);
+            break;
+        case kMsgSendsRetarget: {
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            const char* name = nullptr;
+            msg->FindString("name", &name);
+            std::vector<Send> sends;
+            std::vector<std::pair<TrackId, std::string>> buses;
+            for (int32 i = 0;; i++) {
+                int64 dest = 0;
+                if (msg->FindInt64("sd", i, &dest) != B_OK) break;
+                Send s;
+                s.dest = (TrackId)dest;
+                msg->FindFloat("sl", i, &s.level);
+                int32 pre = 0;
+                msg->FindInt32("sp", i, &pre);
+                s.preFader = (pre != 0);
+                sends.push_back(s);
+            }
+            for (int32 i = 0;; i++) {
+                int64 id = 0;
+                if (msg->FindInt64("bid", i, &id) != B_OK) break;
+                const char* bn = nullptr;
+                msg->FindString("bname", i, &bn);
+                buses.push_back({ (TrackId)id, bn ? bn : "" });
+            }
+            Retarget(std::move(sends), std::move(buses), (TrackId)tid, name);
+            break;
+        }
         case MSG_SLVL: {
             int32 send = -1, v = 0;
             msg->FindInt32("send", &send);

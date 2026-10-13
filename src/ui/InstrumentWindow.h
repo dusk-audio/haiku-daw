@@ -32,17 +32,31 @@ namespace daw {
 //         string "path"; int32 "preset".
 constexpr uint32 kMsgApplyInstrument = 'inst';
 
+// MainWindow -> InstrumentWindow: point the (single-instance) window at another
+// track's voice — the whole descriptor and the track's name for the title.
+constexpr uint32 kMsgInstRetarget = 'inrt';
+// Bring the (already open) instrument window to the front.
+constexpr uint32 kMsgInstActivate = 'inac';
+
 class InstrumentWindow : public BWindow, public ThemeAware {
 public:
+    // `trackName` goes into the title: one window is retargeted from track to
+    // track now, so the title says WHICH track's voice is in it.
     InstrumentWindow(BRect frame, InstrumentDesc inst, TrackId track,
-                     BMessenger apply);
+                     BMessenger apply, const char* trackName = nullptr);
     ~InstrumentWindow() override;
 
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
 
+    // Point the window at another track's instrument (see kMsgInstRetarget).
+    // Every edit is applied as it is made, so there is nothing local to settle.
+    void Retarget(InstrumentDesc inst, TrackId track, const char* trackName);
+    TrackId Track() const { return fTrack; }
+
 private:
     void Build();
+    void UpdateTitle(const char* trackName);
     // T1: a mode switch re-runs the build (panel, rows and readouts).
     void ApplyTheme() override { Build(); }
     void Apply();
@@ -62,6 +76,7 @@ private:
 
     InstrumentDesc             fDesc;
     TrackId                    fTrack;
+    std::string                fTrackName;
     BMessenger                 fApply;
     BView*                     fRoot;
     BFilePanel*                fPanel = nullptr;

@@ -7370,8 +7370,376 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
 }
 
-static void TestThemeMode(MainWindow* win) {
-    const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
+// The mixer and the windows it shares a session with (package 52). Every check
+// here drives the REAL widget: the messages the strips post, the file-panel
+// ref an Open arrives as, and a key sent to the mixer window the way the input
+// server delivers one.
+//
+// It runs LAST among the project-touching tests because the last section
+// replaces the session (an Open), which is the point of it.
+static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_ux_mixer\n");
+
+    // --- fixture: two named tracks, so a strip list has something to show ---
+    Track a;
+    a.id = project.NextTrackId();
+    a.type = TrackType::Audio;
+    a.name = "ux-a";
+    CHECK(LockedAddTrack(win, project, a));
+    Track b;
+    b.id = project.NextTrackId();
+    b.type = TrackType::Audio;
+    b.name = "ux-b";
+    CHECK(LockedAddTrack(win, project, b));
+
+    // --- the rack: one strip per track, and it FOLLOWS a track added --------
+    win->PostMessage(MSG_MIXER_TEST);
+    MixerStripsView* strips = nullptr;
+    BWindow* mixer = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || w == win) continue;
+            if (w->LockWithTimeout(500000) != B_OK) continue;
+            BView* v = w->FindView("strips");
+            if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+            w->Unlock();
+            if (strips) return true;
+        }
+        return false;
+    }));
+    CHECK(strips != nullptr);
+    if (strips == nullptr) return;
+
+    auto stripCount = [&] {
+        size_t n = 0;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            n = strips->Strips().size();
+            mixer->Unlock();
+        }
+        return n;
+    };
+    auto stripNames = [&] {
+        std::string s;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            for (const MixerStripInfo& st : strips->Strips()) s += st.name + ",";
+            mixer->Unlock();
+        }
+        return s;
+    };
+    const size_t before = stripCount();
+    CHECK(before >= 2);
+    CHECK(stripNames().find("ux-a") != std::string::npos);
+    std::printf("  rack: %zu strips [%s]\n", before, stripNames().c_str());
+
+    // Track > New Audio goes through the app's own menu handler, and the rack
+    // has to grow the strip for it: it used to need an unrelated edit (a mute
+    // toggle, a marker rename) to show up at all.
+    win->PostMessage(MSG_NEW_AUDIO);
+    CHECK(WaitFor([&] { return stripCount() > before; }));
+    const size_t afterAdd = stripCount();
+    CHECK(WaitFor([&] { return stripNames().find("Audio") != std::string::npos; }));
+    std::printf("  after Track > New Audio: %zu strips [%s]\n", afterAdd,
+                stripNames().c_str());
+
+    // A track deletion (the model + the refresh a delete posts) takes its strip
+    // with it. Left up, that strip looked live and dropped every edit silently.
+    {
+        TrackId gone = kInvalidTrackId;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (!project.Tracks().empty()) gone = project.Tracks().back().id;
+            win->Unlock();
+        }
+        if (gone != kInvalidTrackId) {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                stack->Execute(std::make_unique<RemoveTrackCommand>(gone), project);
+                win->Unlock();
+            }
+            win->PostMessage(kMsgUiRefresh);
+            CHECK(WaitFor([&] { return stripCount() == afterAdd - 1; }));
+            std::printf("  after deleting a track: %zu strips\n", stripCount());
+        }
+    }
+
+    // The rack as it stands: the shot is taken with the mixer in front, so what
+    // is reviewed is the console -- strips, meters, lamps and the master.
+    if (mixer->LockWithTimeout(1000000) == B_OK) {
+        mixer->Activate(true);
+        mixer->Unlock();
+    }
+    snooze(300000);
+    Shot("ux-mixer");
+
+    // --- the master fader is an undoable, DIRTYING edit (item D) ------------
+    // It used to write project.masterGain directly, so there was no Cmd-Z for a
+    // master move and a session whose only change was the level reported clean:
+    // File > Close gave no prompt and the level was lost.
+    {
+        float was = 1.0f;
+        bool wasDirty = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            was = project.masterGain;
+            wasDirty = stack->IsDirty();
+            win->Unlock();
+        }
+        BMessage m(kMsgApplyMaster);
+        m.AddFloat("gain", 0.5f);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = std::fabs(project.masterGain - 0.5f) < 1e-3f;
+            win->Unlock();
+            return ok;
+        }));
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool dirtied = stack->IsDirty();
+            const bool named = stack->UndoName() == "Set Master Gain";
+            win->Unlock();
+            return dirtied && named;
+        }));
+        std::printf("  master fader: an undoable, dirtying edit\n");
+        // And it undoes, which the direct write never could.
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = std::fabs(project.masterGain - was) < 1e-3f;
+            win->Unlock();
+            return ok;
+        }));
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool same = stack->IsDirty() == wasDirty;
+            win->Unlock();
+            return same;
+        }));
+    }
+
+    // --- the keyboard drives the rack (item P) -----------------------------
+    // There was no focus and no KeyDown at all: a mixer could only be mixed
+    // with a mouse. A click on the strip's NAME bar (never a control that opens
+    // a popup -- that would wedge the run) makes it current and focuses the view.
+    {
+        BPoint click(50.0f, 0.0f);        // on the strip's NAME bar
+        BPoint screen = click;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            click.y = strips->Bounds().Height() - 12.0f;
+            screen = strips->ConvertToScreen(click);
+            mixer->Unlock();
+        }
+        BMessage md(B_MOUSE_DOWN);
+        md.AddInt32("buttons", 1);
+        md.AddInt32("clicks", 1);
+        md.AddPoint("where", click);
+        md.AddPoint("screen_where", screen);
+        BMessenger(strips).SendMessage(&md);
+        BMessage mu(B_MOUSE_UP);
+        mu.AddInt32("buttons", 0);
+        mu.AddInt32("clicks", 1);
+        mu.AddPoint("where", click);
+        mu.AddPoint("screen_where", screen);
+        BMessenger(strips).SendMessage(&mu);
+        snooze(100000);
+
+        int cur = -1;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            cur = strips->CurrentStrip();
+            mixer->Unlock();
+        }
+        std::printf("  mixer keyboard: current strip %d of %zu\n", cur,
+                    stripCount());
+        CHECK(cur == 0);
+
+        // Down-arrow nudges the strip's gain by 0.5 dB, through the same
+        // message path a mouse drag takes (so it is one undoable edit).
+        float wasGain = 0.0f;
+        TrackId firstId = kInvalidTrackId;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (!project.Tracks().empty()) {
+                wasGain = project.Tracks().front().gain;
+                firstId = project.Tracks().front().id;
+            }
+            win->Unlock();
+        }
+        BMessage key(B_KEY_DOWN);
+        const char down = (char)B_DOWN_ARROW;
+        key.AddString("bytes", std::string(1, down).c_str());
+        key.AddInt32("modifiers", 0);
+        BMessenger(mixer).SendMessage(&key);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && t->gain < wasGain - 1e-3f;
+            float now = wasGain;
+            if (t) now = t->gain;
+            win->Unlock();
+            if (ok)
+                std::printf("  mixer keyboard: gain %.4f -> %.4f\n", wasGain, now);
+            return ok;
+        }));
+        // 'm' toggles the current strip's mute, through kMsgApplyMix.
+        BMessage mk(B_KEY_DOWN);
+        mk.AddString("bytes", "m");
+        mk.AddInt32("modifiers", 0);
+        BMessenger(mixer).SendMessage(&mk);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && t->muted;
+            win->Unlock();
+            return ok;
+        }));
+        // ... and put it back, so the fixture is as it was.
+        BMessenger(mixer).SendMessage(&mk);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && !t->muted;
+            win->Unlock();
+            return ok;
+        }));
+    }
+
+    // --- one sends window per editor, retargeted (item L) -------------------
+    // Two windows on one track silently overwrote each other's edits, because
+    // each commits its whole list.
+    {
+        const size_t w0 = (size_t)VisibleWindows();
+        BMessage s1(kMsgMixSends);
+        s1.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s1);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-a"); }));
+        // An instrument editor for an AUDIO track: refused, because there is no
+        // voice to edit there (and a window opened on a stale snapshot would
+        // then commit a whole descriptor for the wrong kind of track).
+        {
+            const size_t w1 = (size_t)VisibleWindows();
+            BMessage s2(kMsgMixInst);
+            s2.AddInt64("track", (int64)a.id);
+            win->PostMessage(&s2);
+            snooze(300000);
+            CHECK((size_t)VisibleWindows() == w1);
+        }
+
+        // Asking again for the same track: the SAME window is activated, not a
+        // second copy of the send list.
+        BMessage s3(kMsgMixSends);
+        s3.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s3);
+        snooze(200000);
+        int sendsWindows = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strncmp(WindowTitle(w), "Sends", 5) == 0)
+                sendsWindows++;
+        }
+        CHECK(sendsWindows == 1);
+
+        // Another track RETARGETS it: same window, its title now names ux-b.
+        BMessage s4(kMsgMixSends);
+        s4.AddInt64("track", (int64)b.id);
+        win->PostMessage(&s4);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-b"); }));
+        int sendsWindows2 = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strncmp(WindowTitle(w), "Sends", 5) == 0)
+                sendsWindows2++;
+        }
+        CHECK(sendsWindows2 == 1);
+        std::printf("  sends windows: same=%d retargeted=%d (%zu -> %zu windows)\n",
+                    sendsWindows, sendsWindows2, w0, (size_t)VisibleWindows());
+
+        // Deleting that track closes it (checked in the refresh funnel).
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<RemoveTrackCommand>(b.id), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+        CHECK(WaitFor([&] { return !WindowUp("Sends \xE2\x80\x94 ux-b"); }));
+    }
+
+    // --- A: an Open closes every window addressed by track id --------------
+    // Track ids restart at 1 in a loaded file, so a panel left up edits the NEW
+    // project's same-numbered track -- and the effects panel commits its whole
+    // chain, which is a data-corrupting write saved as an undoable edit.
+    {
+        const char* openPath = "/tmp/haiku_daw_ui_uxmix.dawproj";
+        std::remove(openPath);
+        {
+            Project other;
+            other.sampleRate = project.sampleRate;
+            CHECK(other.AddTrack(MakeMidiTrack(other, { { 60, 100, 0, 4800 } },
+                                               "ux-opened")));
+            CHECK(ProjectIO::Save(other, openPath));
+        }
+        // The editor windows that hold a track id, all up at once: the mixer,
+        // the generic effects panel, the sends editor.
+        win->PostMessage(MSG_MIXER_TEST);
+        CHECK(WaitFor([&] { return WindowUp("Mixer"); }));
+        {
+            BMessage fx(kMsgShowFx);
+            fx.AddInt64("track", (int64)a.id);
+            fx.AddInt32("focus", -1);
+            win->PostMessage(&fx);
+            CHECK(WaitFor([&] {
+                for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                    BWindow* w = be_app->WindowAt(i);
+                    if (w && !w->IsHidden()
+                        && std::strstr(WindowTitle(w), "ux-a") != nullptr)
+                        return true;
+                }
+                return false;
+            }));
+        }
+        BMessage s5(kMsgMixSends);
+        s5.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s5);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-a"); }));
+
+        int upBefore = VisibleWindows();
+        std::printf("  before Open: %d window(s) up\n", upBefore);
+        CHECK(upBefore >= 4);   // main + mixer + effects + sends
+
+        // Dirty the project first, so the unsaved-changes prompt is the one
+        // that appears (and Discard is the answer that loads).
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<SetTrackNameCommand>(a.id, "ux-a2"),
+                           project);
+            win->Unlock();
+        }
+        entry_ref ref;
+        CHECK(BEntry(openPath).GetRef(&ref) == B_OK);
+        BMessage open(MSG_OPEN_REF);
+        open.AddRef("refs", &ref);
+        win->PostMessage(&open);
+        CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+        CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
+
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool loaded = project.Tracks().size() == 1
+                             && project.Tracks().front().name == "ux-opened";
+            win->Unlock();
+            return loaded;
+        }));
+        // Every one of them closed. This is the check the package exists for.
+        CHECK(WaitFor([&] { return VisibleWindows() == 1; }, 20000000));
+        std::printf("  after Open: %d window(s) up\n", VisibleWindows());
+        CHECK(!WindowUp("Mixer"));
+        CHECK(!WindowUp("Sends \xE2\x80\x94 ux-a"));
+        std::remove(openPath);
+    }
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
+static void TestThemeMode(MainWindow* win) {    const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
 
     // The user's own panel colour, before anything is switched. Haiku keeps it
     // in the app_server and SAVES it, which is why the app may never write it.
@@ -7587,6 +7955,11 @@ static int32 TestThread(void*) {
     TestNewProjectTemplates(win, project, stack);
     TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
+    // The mixer and the windows it shares a session with (package 52). Also
+    // replaces the project (its item-A check IS a project replacement), which
+    // is why it comes after the unsaved-changes flow and before the theme
+    // switch, which depends on no project state at all.
+    TestUxMixer(win, project, &stack);
     // The theme switch flips the whole process and puts it back; last, so no
     // other test's shots depend on the mode it leaves behind.
     TestThemeMode(win);

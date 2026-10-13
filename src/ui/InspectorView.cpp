@@ -160,7 +160,27 @@ void InspectorView::Layout() {
     float bottom = recY - 20.0f;
     if (bottom < y + 40.0f) bottom = y + 40.0f;
     fFaderR = BRect(w * 0.5f - 42.0f, y, w * 0.5f - 4.0f, bottom);
-    fMeterR = BRect(w * 0.5f + 6.0f,  y, w * 0.5f + 24.0f, bottom);
+    // The meter block: a clip lamp over a stereo bar PAIR (package 52). One bar
+    // for the louder channel could not say WHICH channel was hot, and had no
+    // hold and no lamp at all.
+    fLampR    = BRect(w * 0.5f + 6.0f, y, w * 0.5f + 24.0f, y + 7.0f);
+    const float mTop = y + 9.0f;
+    fMeterLR  = BRect(w * 0.5f + 6.0f,  mTop, w * 0.5f + 14.0f, bottom);
+    fMeterRR  = BRect(w * 0.5f + 16.0f, mTop, w * 0.5f + 24.0f, bottom);
+    fMeterR   = BRect(w * 0.5f + 6.0f, y, w * 0.5f + 24.0f, bottom);
+}
+
+// The selected track's output peaks, with the holds and the lamp latches moved
+// on every tick (the master meter's own two state machines).
+void InspectorView::SetMeter(float l, float r) {
+    fPeakL = l; fPeakR = r;
+    const int64_t now = system_time();
+    fHoldL.Update(LinToFrac(l), now);
+    fHoldR.Update(LinToFrac(r), now);
+    fClipL.Latch(ReachesClipLevel(l));
+    fClipR.Latch(ReachesClipLevel(r));
+    Invalidate(fMeterR);
+    Invalidate(fLampR);
 }
 
 void InspectorView::Draw(BRect) {
@@ -206,8 +226,12 @@ void InspectorView::Draw(BRect) {
     } else {
         inLabel += InputShortLabel(t->input);
     }
+    // The In lamp: lit when an input is routed, in the monitor's own token --
+    // not a hand-picked green, which reads as a foreign rectangle on a light
+    // panel in System mode (UI_GUIDELINES §5; the mixer's strips use the same
+    // token for the same control, package 52).
     DrawButton(this, fInputR, inLabel.c_str(),
-               t->input.kind != InputSource::kNone, Rgb(52, 104, 74));
+               t->input.kind != InputSource::kNone, ColMon());
 
     // Sends, output routing, group.
     char sb[16];
@@ -312,9 +336,12 @@ void InspectorView::Draw(BRect) {
 
     // Channel fader + VU meter (peak-fed) side by side. The meter is the
     // shared dB-scaled bar since M3.3 (same maths, same thresholds as the
-    // master meter).
+    // master meter), one bar per channel with a hold tick and a clip lamp
+    // (package 52).
     DrawFader(this, fFaderR, GainToFrac(t->gain), kUnityFrac);
-    DrawMeterBar(this, fMeterR, std::max(fPeakL, fPeakR), false);
+    DrawMeterBar(this, fMeterLR, fPeakL, false, -1.0f, fHoldL.Frac());
+    DrawMeterBar(this, fMeterRR, fPeakR, false, -1.0f, fHoldR.Frac());
+    DrawClipLamp(this, fLampR, fClipL.Clipped() || fClipR.Clipped());
 
     char db[16];
     const float d = GainToDb(t->gain);
@@ -354,52 +381,11 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fInputR.Contains(where)) {
-        // The choices, their labels and their order are TrackInputs.h's -- one
-        // definition, shared with the arrangement header's In field.
-        const std::vector<InputSource> choices = TrackInputChoices(*t);
-        BPopUpMenu* menu = new BPopUpMenu("input", false, false);
-        for (const InputSource& c : choices) {
-            BMenuItem* it = new ThemedMenuItem(InputChoiceLabel(c).c_str(), NULL);
-            if (SameInput(c, t->input))
-                it->SetMarked(true);
-            menu->AddItem(it);
-        }
-        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-        const int32 pick = sel ? menu->IndexOf(sel) : -1;
-        delete menu;
-        if (pick >= 0 && (size_t)pick < choices.size()) {
-            const InputSource chosen = choices[(size_t)pick];
-            const TrackChannels width = WidthOfChoice(chosen);
-            const bool setWidth = (width != t->channels);
-            fStack->Execute(std::make_unique<SetTrackInputCommand>(id, chosen),
-                            *fProject);
-            // A channel choice says how wide the take is (M5): one channel is
-            // mono, a pair stereo. One gesture, two undoable document edits.
-            if (setWidth)
-                fStack->Execute(std::make_unique<SetTrackChannelsCommand>(id, width),
-                                *fProject);
-        }
-        Refresh();
-        if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
+        PickInput(id, ConvertToScreen(where));
         return;
     }
     if (fOutR.Contains(where)) {
-        BPopUpMenu* menu = new BPopUpMenu("out", false, false);
-        menu->AddItem(new ThemedMenuItem("Master", NULL));
-        std::vector<TrackId> targets;
-        for (const Track& bt : fProject->Tracks()) {
-            if (bt.type != TrackType::Bus || bt.id == id) continue;
-            menu->AddItem(new ThemedMenuItem(bt.name.c_str(), NULL));
-            targets.push_back(bt.id);
-        }
-        BMenuItem* sel = menu->Go(ConvertToScreen(where), false, true);
-        const int32 pick = sel ? menu->IndexOf(sel) : -1;
-        delete menu;
-        if (pick == 0)
-            fStack->Execute(std::make_unique<SetTrackOutputCommand>(id, kInvalidTrackId), *fProject);
-        else if (pick > 0 && (size_t)(pick - 1) < targets.size())
-            fStack->Execute(std::make_unique<SetTrackOutputCommand>(id, targets[(size_t)(pick - 1)]), *fProject);
-        Refresh();
+        PickOutput(id, ConvertToScreen(where));
         return;
     }
     if (fGroupR.Contains(where)) {
@@ -427,13 +413,12 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (fSendsR.Contains(where)) {
-        std::vector<std::pair<TrackId, std::string>> buses;
-        for (const Track& bt : fProject->Tracks())
-            if (bt.type == TrackType::Bus && bt.id != id)
-                buses.push_back({bt.id, bt.name});
-        BPoint p = ConvertToScreen(where);
-        BRect wr(p.x, p.y, p.x + 340, p.y + 320);
-        (new SendsWindow(wr, t->sends, buses, id, BMessenger(Window())))->Show();
+        // Through the main window, which owns the single instance of this
+        // editor (package 52): opening one here directly would put a second
+        // window on the same track, and each commits its whole send list.
+        BMessage m(kMsgMixSends);
+        m.AddInt64("track", (int64)id);
+        if (BWindow* w = Window()) w->PostMessage(&m);
         return;
     }
     // --- Insert slots ------------------------------------------------------
@@ -487,13 +472,22 @@ void InspectorView::MouseDown(BPoint where) {
         return;
     }
     if (t->type == TrackType::Midi && fInstR.Contains(where)) {
-        BPoint p = ConvertToScreen(where);
-        BRect wr(p.x, p.y, p.x + 280, p.y + 190);
-        (new InstrumentWindow(wr, t->instrument, id, BMessenger(Window())))->Show();
+        // Same single-instance rule as the sends button above.
+        BMessage m(kMsgMixInst);
+        m.AddInt64("track", (int64)id);
+        if (BWindow* w = Window()) w->PostMessage(&m);
         return;
     }
     if (fAutoR.Contains(where)) {   // cycle the timeline's automation lane mode
         if (BWindow* w = Window()) w->PostMessage(kMsgCycleAuto);
+        return;
+    }
+    // A click on the meter block clears the clip lamp, the master meter's own
+    // gesture (package 52).
+    if (fMeterR.Contains(where)) {
+        fClipL.Reset();
+        fClipR.Reset();
+        Invalidate(fLampR);
         return;
     }
 
@@ -509,6 +503,66 @@ void InspectorView::MouseDown(BPoint where) {
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;   // no jump: dragging changes it relative to here
     }
+}
+
+// The input picker for a named track, opening at a screen point. Moved out of
+// MouseDown so the MIXER's strip can offer the same choice (package 52): the
+// choices, their labels and their order are TrackInputs.h's one definition, and
+// the command path is this one, so a strip and the inspector cannot disagree.
+void InspectorView::PickInput(TrackId id, BPoint screenAt) {
+    Track* t = fProject->FindTrack(id);
+    if (t == nullptr) return;   // the track went away under the caller
+    // The choices, their labels and their order are TrackInputs.h's -- one
+    // definition, shared with the arrangement header's In field.
+    const std::vector<InputSource> choices = TrackInputChoices(*t);
+    BPopUpMenu* menu = new BPopUpMenu("input", false, false);
+    for (const InputSource& c : choices) {
+        BMenuItem* it = new ThemedMenuItem(InputChoiceLabel(c).c_str(), NULL);
+        if (SameInput(c, t->input))
+            it->SetMarked(true);
+        menu->AddItem(it);
+    }
+    BMenuItem* sel = menu->Go(screenAt, false, true);
+    const int32 pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick >= 0 && (size_t)pick < choices.size()) {
+        const InputSource chosen = choices[(size_t)pick];
+        const TrackChannels width = WidthOfChoice(chosen);
+        const bool setWidth = (width != t->channels);
+        fStack->Execute(std::make_unique<SetTrackInputCommand>(id, chosen),
+                        *fProject);
+        // A channel choice says how wide the take is (M5): one channel is
+        // mono, a pair stereo. One gesture, two undoable document edits.
+        if (setWidth)
+            fStack->Execute(std::make_unique<SetTrackChannelsCommand>(id, width),
+                            *fProject);
+    }
+    Refresh();
+    if (BWindow* w = Window()) w->PostMessage(kMsgMonitorRefresh);
+}
+
+// The output picker (Master, or any other bus). Public for the mixer's ->Bus
+// button, for the same one-path reason as PickInput.
+void InspectorView::PickOutput(TrackId id, BPoint screenAt) {
+    if (fProject->FindTrack(id) == nullptr) return;
+    BPopUpMenu* menu = new BPopUpMenu("out", false, false);
+    menu->AddItem(new ThemedMenuItem("Master", NULL));
+    std::vector<TrackId> targets;
+    for (const Track& bt : fProject->Tracks()) {
+        if (bt.type != TrackType::Bus || bt.id == id) continue;
+        menu->AddItem(new ThemedMenuItem(bt.name.c_str(), NULL));
+        targets.push_back(bt.id);
+    }
+    BMenuItem* sel = menu->Go(screenAt, false, true);
+    const int32 pick = sel ? menu->IndexOf(sel) : -1;
+    delete menu;
+    if (pick == 0)
+        fStack->Execute(std::make_unique<SetTrackOutputCommand>(id, kInvalidTrackId), *fProject);
+    else if (pick > 0 && (size_t)(pick - 1) < targets.size())
+        fStack->Execute(std::make_unique<SetTrackOutputCommand>(id, targets[(size_t)(pick - 1)]), *fProject);
+    Refresh();
+    // A routing change moves the graph: the strip's ->Bus label has to follow.
+    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
 }
 
 // The plugin browser's choice, when it was opened from an empty insert slot.

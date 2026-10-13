@@ -122,15 +122,16 @@ void TransportController::StopPlayback(bool resumeMonitor) {
         fEngine->Stop();
     fPlaying = false;
     if (fWin->fTransport) fWin->fTransport->SetPlaying(false);
+    // Bars to zero, everywhere the transport's tick had been feeding: the
+    // master meter, the track meters and -- the one this used to miss -- the
+    // MIXER's, which has no tick of its own once the pulse stops. The clip
+    // latch and the peak hold are the VIEW's state and are deliberately kept: a
+    // lamp that cleared itself when the transport stopped would hide the clip
+    // that just happened. The holds fall during the decay window below.
+    fWin->ClearMeters();
+    fWin->fMeterDecayUntil = system_time() + MainWindow::kMeterDecayUs;
     fWin->UpdatePulse();
     fWin->PushRollPlayhead(-1);   // hide the roll playhead when stopped
-    // Bars to zero. The clip latch and the peak hold are the VIEW's state and
-    // are deliberately kept: a lamp that cleared itself when the transport
-    // stopped would hide the clip that just happened.
-    fWin->fMeter->SetReadings(MeterReadings{});
-    fWin->fTimeline->ClearTrackPeaks();
-    fWin->UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
-                          Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
     if (resumeMonitor)
         fWin->fRecCtl.UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed

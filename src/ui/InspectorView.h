@@ -27,7 +27,16 @@ public:
 
     void SetTrack(TrackId id) { fTrack = id; Invalidate(); }
     TrackId SelectedTrack() const { return fTrack; }
-    void SetMeter(float l, float r) { fPeakL = l; fPeakR = r; Invalidate(fMeterR); }
+    void SetMeter(float l, float r);   // peak-fed, with a hold + clip latch per channel
+
+    // The input and output pickers, for the track named (which need not be the
+    // selected one): `screenAt` is where the popup opens, in screen coordinates.
+    // Public because the MIXER's strip buttons offer the same two choices
+    // (kMsgMixInput / kMsgMixOutput route here): one picker, one list and one
+    // command path, so a strip and the inspector cannot disagree about what a
+    // track's input or output may be.
+    void PickInput(TrackId id, BPoint screenAt);
+    void PickOutput(TrackId id, BPoint screenAt);
 
     void Draw(BRect update) override;
     void MouseDown(BPoint where) override;
@@ -56,7 +65,15 @@ private:
     int   fFxRows = 0;          // rows drawn, including the trailing empty slot
     BRect FxRowRect(int i) const;
     BRect fAutoR, fPanR, fFaderR, fMeterR;
+    // The meter block (package 52): a clip lamp over a stereo bar PAIR, so the
+    // inspector's meter reads like the mixer strips'. fMeterR is the whole
+    // block's hit box (a click there clears the latches).
+    BRect fLampR, fMeterLR, fMeterRR;
     float fPeakL = 0.0f, fPeakR = 0.0f;   // selected track output level
+    // Peak hold + clip latch, per channel: the same two state machines the
+    // master meter runs (M3.3), so a hold falls at the same rate here.
+    PeakHold  fHoldL, fHoldR;
+    ClipLatch fClipL, fClipR;
 
     // Fader / pan drag (preview by writing the model, commit one command on up).
     enum class Drag { None, Fader, Pan, FxSlot };
