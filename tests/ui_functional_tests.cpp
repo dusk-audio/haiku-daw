@@ -4673,6 +4673,21 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "status-synth");
     CHECK(LockedAddTrack(win, project, t));
 
+    // The remembered choices are pinned first: by this point in the suite an
+    // earlier test has left "Loop range" selected, and a loop-range bounce of
+    // one second can finish before the second request is even handled -- which
+    // would make the refusal check pass or fail on timing rather than on the
+    // behaviour. Whole project, plain WAV: a long render, deliberately.
+    {
+        BMessage opts(kMsgExportOptions);
+        opts.AddInt32("container", (int32)AudioFileFormat::Wav);
+        opts.AddInt32("bits", 16);
+        opts.AddInt32("range", 0);
+        opts.AddInt32("stems", 0);
+        win->PostMessage(&opts);
+        snooze(200000);
+    }
+
     const char* pathA = "/tmp/haiku_daw_ui_status_a.wav";
     const char* pathB = "/tmp/haiku_daw_ui_status_b.wav";
     std::remove(pathA);
