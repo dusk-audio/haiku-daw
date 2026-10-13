@@ -115,6 +115,15 @@ the internal roadmap line about the multichannel-input package.
 | `f0f263e` | feat(ui): one way out of every dialog, and one vocabulary |
 | `35ebbc2` | fix(ui): render jobs report on the status line, and messages expire |
 | `95df51b` | test(ui): the UX-shell checks, VM-side |
+| `74d5333` | docs: the UX-shell record (fix/ux-shell) |
+| `b7e9385` | test(ui): pin the render-feedback fixture's export choices |
+
+`b7e9385` is a fix to the test added one commit earlier: by the point
+`TestRenderFeedback` runs, an earlier test has left the remembered export
+range on "Loop range", and a one-second bounce can finish before the second
+export request is handled — the refusal would then pass or fail on timing
+rather than on behaviour. The test pins whole-project WAV first, which is
+also what makes its first render a long one.
 
 Each commit leaves the tree it touches self-consistent (checked by grepping
 the commit's own blobs for the symbols it introduces): A adds
