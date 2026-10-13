@@ -137,6 +137,12 @@ enum {
     MSG_POP_OUT_EDITOR   = 'poed',   // dock the MIDI editor out into a window
 };
 
+// How long a job/error message stands on the status line before the transport
+// state takes the row back (see SetTransportStatus). Long enough to read and
+// look away, short enough that a stale "Exported mix.wav" is not still there
+// minutes later.
+static const bigtime_t kStatusHoldUs = 4 * 1000 * 1000;
+
 // Sentinel "track id" the effects editor uses to target the master FX chain.
 static const TrackId kMasterFxTarget = ~(TrackId)0;
 
@@ -1876,6 +1882,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case MSG_TITLE:
             UpdateTitle();   // cheap; SetTitle only fires on an actual change
+            ExpireTransportStatus();   // a job message older than its hold goes
             break;
         case MSG_BROWSER:
             // The docked page is the browser's home now (T2); Pop out in the
@@ -4009,7 +4016,8 @@ void MainWindow::UpdateTransportButtons() {
 }
 
 // The status line: the transport's state, so it is never stale — a job or an
-// error message replaces it until the state changes again.
+// error message replaces it until it EXPIRES (kStatusHoldUs; the 2 Hz title
+// poll drops it, see ExpireTransportStatus) or the state changes.
 void MainWindow::UpdateTransportStatus() {
     if (!fTransport) return;
     std::string s;
@@ -4032,12 +4040,27 @@ void MainWindow::UpdateTransportStatus() {
     if (s == fStatusState) return;   // the state has not changed: leave any
                                      // job/error message standing
     fStatusState = s;
+    fStatusExpiryUs = 0;             // the state line replaced the message
     fTransport->SetStatus(s.c_str());
 }
 
 void MainWindow::SetTransportStatus(const char* text) {
     if (!fTransport) return;
     fTransport->SetStatus(text ? text : "");
+    // A job/error message is transient: the transport state takes the row back
+    // after a few seconds. The timer is the existing 2 Hz title poll's -- one
+    // more runner for a deadline that a runner already visits would be a
+    // second thing to keep alive for nothing.
+    fStatusExpiryUs = system_time() + kStatusHoldUs;
+}
+
+// The message's hold is up: put the transport state back. Called from the 2 Hz
+// title poll, so a message outlives its work by at most that poll's interval.
+void MainWindow::ExpireTransportStatus() {
+    if (fStatusExpiryUs == 0 || system_time() < fStatusExpiryUs) return;
+    fStatusExpiryUs = 0;
+    fStatusState.clear();   // force UpdateTransportStatus to set the state line
+    UpdateTransportStatus();
 }
 
 // The bar view and one of its control rects, for the functional tests: a click

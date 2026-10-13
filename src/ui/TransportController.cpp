@@ -75,8 +75,13 @@ void TransportController::StartPlayback() {
     if (dev != B_OK) {
         fWin->ReportError("Audio Device",
                     "The audio output device could not be opened.\n\n"
-                    "Check the Audio menu's buffer size, and that no other "
-                    "application holds the device.");
+                    // The menu path, in the app's own UTF-8 hex-escape spelling
+                    // (U+25B8, the black right-pointing small triangle). The
+                    // buffer size moved out of the Audio menu in M3.5 and this
+                    // text used to send the user to a menu that no longer has
+                    // the item.
+                    "The buffer size is in File \xE2\x96\xB8 Preferences.\n\n"
+                    "Check that no other application holds the device.");
         std::fprintf(stderr, "MainWindow: engine load failed (%s)\n",
                      strerror(dev));
         fEngine.reset();
@@ -227,8 +232,13 @@ void TransportController::PollEngineLoad() {
     if (rc != B_ENTRY_NOT_FOUND)
         fWin->ReportError("Audio Device",
                     "The audio output device could not be opened.\n\n"
-                    "Check the Audio menu's buffer size, and that no other "
-                    "application holds the device.");
+                    // The menu path, in the app's own UTF-8 hex-escape spelling
+                    // (U+25B8, the black right-pointing small triangle). The
+                    // buffer size moved out of the Audio menu in M3.5 and this
+                    // text used to send the user to a menu that no longer has
+                    // the item.
+                    "The buffer size is in File \xE2\x96\xB8 Preferences.\n\n"
+                    "Check that no other application holds the device.");
     std::fprintf(stderr, "MainWindow: engine load failed (%s)\n", strerror(rc));
     if (!fPlaying) return;   // the monitor path loads synchronously and reports itself
     fEngine->Stop();

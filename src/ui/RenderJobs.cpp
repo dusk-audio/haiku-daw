@@ -16,8 +16,21 @@
 
 #include <cstdio>
 #include <cmath>
+#include <string>
 
 namespace daw {
+
+namespace {
+
+// The file name part of a path, for a status line ("Exported mix.wav"): the
+// whole path does not fit the bar and the beginning is the part that never
+// changes ("/boot/home/...").
+std::string BaseNameOf(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+} // namespace
 
 void RenderJobs::StartExport(const char* path, bool stems) {
 
@@ -25,8 +38,14 @@ void RenderJobs::StartExport(const char* path, bool stems) {
     // One job at a time, whichever kind -- the same rule StartRegionJob
     // applies. Without the region half of the test an export could start on
     // top of a running Freeze: two progress windows on one protocol, and one
-    // Cancel (which raises both flags) stopping both jobs.
-    if (fExportThread.joinable() || fRegionThread.joinable()) return;
+    // Cancel (which raises both flags) stopping both jobs. The refusal says so
+    // on the status line, exactly as the region job's does (it used to return
+    // in silence, and a second Export from the menu looked like nothing at all
+    // had happened).
+    if (fExportThread.joinable() || fRegionThread.joinable()) {
+        fWin->SetTransportStatus("A render is already running");
+        return;
+    }
 
     fWin->fTransportCtl.StopPlayback();
     fWin->FlushFxEditors();
@@ -98,20 +117,32 @@ void RenderJobs::FinishExport() {
 
     // Cancellation is checked FIRST: a stems run that was stopped after some
     // stems were written still reports a count, and that is a cancel, not a
-    // finished export.
+    // finished export. Every branch says what happened on the status line: a
+    // bounce is the app's longest silent operation, and stderr is not where a
+    // user looks (the region jobs have done this all along).
     if (fExportCancel.load()) {
         std::fprintf(stderr, "MainWindow: export cancelled: %s\n",
                      fExportPath.c_str());
+        fWin->SetTransportStatus("Export cancelled");
     } else if (fExportOk) {
-        if (fExportIsStems)
+        if (fExportIsStems) {
+            char msg[64];
+            std::snprintf(msg, sizeof(msg), "Exported %d stems", fExportWritten);
             std::fprintf(stderr, "MainWindow: exported %d stem(s) to %s\n",
                          fExportWritten, fExportPath.c_str());
-        else
+            fWin->SetTransportStatus(msg);
+        } else {
             std::fprintf(stderr, "MainWindow: exported %s\n",
                          fExportPath.c_str());
+            const std::string msg = "Exported " + BaseNameOf(fExportPath);
+            fWin->SetTransportStatus(msg.c_str());
+        }
     } else {
         std::fprintf(stderr, "MainWindow: export failed: %s\n",
                      fExportPath.c_str());
+        fWin->SetTransportStatus("Export failed");   // the alert below is the
+                                                     // loud half of the same
+                                                     // report
         // Only a real failure is worth an alert: a cancel is the user's own
         // doing, and it already said so on stderr.
         BAlert* a = new ThemedAlertWindow("Export", "The export failed. Nothing was "
