@@ -92,9 +92,9 @@ file existed is in `git log` and `docs/ROADMAP.md`.
   resample of the media, tempo, meter, notes). Output-device selection is not
   in this release: the Preferences row for it is disabled and audio goes to the
   system default device.
-- File ▸ New opens a template chooser — Empty, Band (eight audio tracks into a
-  bus) and Producer (MIDI and audio with a reverb bus) — from `.dawproj`
-  templates the package installs.
+- File ▸ New opens a template chooser — Empty, Band (eight audio tracks, the
+  drums routed to a bus) and Producer (MIDI and audio with a reverb bus) — from
+  `.dawproj` templates the package installs.
 - A single `.dawproj` text file with portable relative media paths; preferences
   and window layout persisted; a sample browser over BFS attributes and live
   queries; keyboard shortcuts help.

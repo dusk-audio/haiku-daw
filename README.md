@@ -197,9 +197,9 @@ visibly broken main window.
 | [docs/HANDOFF.md](docs/HANDOFF.md) | Milestone history, the build, the host ⇄ VM dev loop, hard-won lessons |
 | [docs/HAIKU_CONFORMANCE.md](docs/HAIKU_CONFORMANCE.md) | How it uses each Haiku kit, and where it conforms or deliberately does not |
 | [docs/UI_GUIDELINES.md](docs/UI_GUIDELINES.md) | The rules for anything under `src/ui/`, including the screenshot pass |
-| [docs/PLAN_1.0.md](docs/PLAN_1.0.md) | The remaining work to 1.0, milestone by milestone |
+| [docs/PLAN_1.0.md](docs/PLAN_1.0.md) | The 1.0 plan, milestone by milestone, with the status header that says what landed |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phases already landed, and what is deferred |
-| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | The hardware-only pass a release needs |
+| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | The pass a release needs: installation, hardware, and the visual check |
 | [CHANGELOG.md](CHANGELOG.md) | What is in 1.0 |
 
 ## Project layout
