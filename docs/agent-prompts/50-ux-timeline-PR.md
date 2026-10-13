@@ -137,6 +137,68 @@ in `src/model/Commands.{h,cpp}`. Tests: `tests/arrange_logic_tests.cpp`
 | 4 | `SelectionTargetFor`: clip selection first | "selection target" — 1 check (the both-set order) |
 | 5 | `MoveMarkerCommand`: append instead of inserting in frame order | "move marker" — 4 checks (the reorder, its undo, the redo, the two-on-one-frame case) |
 
+## Reopened: the first VM run of the merged branch (`feature/ux-pass`)
+
+The integration run found two failures in this package. Both are dealt with
+here, and the user guide's slip line (item H) is corrected with them.
+
+**`TestClipStretch` (eight checks) — a real regression, and the code was
+wrong.** The block Cmd-drags the clip's right edge to stretch it. Item H made
+the slip zone accept `B_COMMAND_KEY` as well as `B_OPTION_KEY` (right — a PC's
+Alt IS Command here), but the slip test sat BEFORE the corner/edge zones in
+`HitTest`'s `zoneFor`, so a Cmd-press on the right edge resolved to
+`Zone::Slip`: the stretch drag became a SLIP — every assertion failed (length,
+ratio, source offset, the undo name). Master's order was only safe because
+Option was the sole slip bit and Cmd fell through to the geometry.
+Fixed by resolving the GRIPS first — corners (fade), then edges (trim/stretch),
+then the body (slip with both Alt bits) — with a comment naming the trap, so
+`Cmd`+right edge stretches again, `Cmd`+corner fades, and Alt in the body
+still slips (the M2.1 cursor checks and the section-13 slip gesture cover that
+side). The user guide's slip line now says "through a clip's middle", which is
+what the rule is. This is the regression test: the VM's `TestClipStretch` and
+the M2.1 cursor checks are the ones that catch it, and neither can be run here.
+
+**`TestArrangeDepth:3302` (`!range()` before the range-drag section) — a
+precondition that was racing the app_server.** Only one code path in the tree
+sets a time range: `PreviewDrag`'s `RangeSelect` branch, i.e. a `B_MOUSE_MOVED`
+while a range drag is live. The failing line ran after the section's focusing
+click (`click(frameX(200000), laneMidA)`), which posts a DOWN and an UP with
+nothing in between — so the move had to come from the app_server: the press
+calls `SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS)`, so the server
+also reports the REAL pointer to the view, and a report landing between the
+press and the release is, to the view, an ordinary drag (it moved more than the
+4 px threshold). That sets a range the click then legitimately keeps. The same
+click cleared a range fine later in the same run (section 2's check passed),
+which is what rules out the click's clearing behaviour. Two things were done:
+
+1. The regression above left a range behind in the first place (its second
+   gesture's press lands left of the clip once the clip is not stretched, which
+   starts a range drag) — fixed with the rest.
+2. The precondition is now a lock-guarded `ClearTimeRange()` with the failure
+   mode written down, instead of an assertion about the click: section 2 checks
+   "a bare click clears the range" on purpose, with a range set first, so no
+   behaviour check is lost — the line was a duplicate that could only fail for a
+   reason that has nothing to do with the section it guards. Section 2 is
+   untouched.
+
+**Considered and not done:** making the view ignore pointer reports whose
+message does not say a button is down (which would kill the whole class). The
+timeline's drag previews and the CLIP COMMITS depend on those reports, so a
+wrong reading of the field — e.g. a `B_MOUSE_MOVED` that omits `buttons` — would
+make every real drag silently do nothing, and this package has no VM to try it
+on. If the race shows up again in a check that is about behaviour (section 2,
+or a clip drag landing nowhere), that guard is the follow-up, with a VM run to
+settle the field's presence.
+
+**The suite's runtime**: this package's new checks add no long waits on a green
+run — every `WaitFor` watches state a gesture in the same block sets within one
+posted message (the marker drag's frame, the Delete, the rename commit, the
+loop), so they return on the first poll; the only added sleeps are 0.4 s of
+`snooze` around the two new clip sections' zoom change, and two `Shot()`s. The
+300 s overrun is suite-wide (four packages, ~1900 lines, 19 shots); the failing
+probes' timeouts are what inflate it, and this package's two failures are fixed
+above rather than papered over.
+
 ## Not verified here
 
 - **The VM half.** `tests/ui_functional_tests.cpp` was extended but could not

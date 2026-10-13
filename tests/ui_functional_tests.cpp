@@ -3298,8 +3298,22 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
     // --- 1. A drag on empty lane content makes a time range ----------------
     std::printf("  depth: range drag\n");
     {
+        // The state this section STARTS from, stated rather than asserted: the
+        // bare click above clears the range (that gesture is checked on purpose
+        // in section 2, where a range is set first), but a synthetic click can
+        // be joined by the app_server's own report of the real pointer — the
+        // press sets SetMouseEventMask(B_POINTER_EVENTS), so a pointer report
+        // that lands between the press and the release is, to the view, an
+        // ordinary range drag. That race would set a range HERE and fail a line
+        // whose subject is the drag below, not the click. (Seen once on the VM:
+        // the merged branch's run failed this check while section 2's identical
+        // click passed in the same run.)
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->ClearTimeRange();
+            win->Unlock();
+        }
         Frame a = -1, b = -1;
-        CHECK(!range(&a, &b));          // the focusing click left none
+        CHECK(!range(&a, &b));          // ...and it really is clear now
         // The drag itself: press, move, release -- the pointer events a mouse
         // sends, with the release far enough for the 4 px threshold. It must
         // start on EMPTY content: a press inside a clip is a clip drag (which
