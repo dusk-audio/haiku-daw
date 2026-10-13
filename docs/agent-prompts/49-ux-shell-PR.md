@@ -361,7 +361,26 @@ between the two requests; the cancel stops it within a 64k-frame chunk, so the
 suite pays for one chunk.
 
 **3. `Stopped` after the hold (`4947`)** is the one the six lines did not pin
-down. The expiry machinery in the merged tree is intact — the 2 Hz
+down — and the DIAGs from the next run answered it: the row held
+"Monitoring input", the state line for a transport with input monitoring live
+(a track left armed with its I lamp by an earlier test). The app is right and
+the check was wrong: what the finding promised is that the *job message* does
+not outlive its hold, and what replaces it is the transport's state, whatever
+that state is. The check asserts that now (and prints the row if it fails).
+The two writers do not fight — `SetTransportStatus` never touches
+`fStatusState`, and the state writer only writes when the state CHANGED — so
+a standing job message is left alone by both the 60 Hz pulse and the 2 Hz
+tick, in the merged tree included.
+
+The same DIAGs also showed why the second export started instead of being
+refused: the first bar was up, then gone one five-second wait later (120
+seconds of material in under five seconds, ~24x realtime), and the second
+request was not dequeued until after that, because a render at full tilt
+saturates the VM's two vCPUs. The fixture is twelve long notes now (tens of
+seconds of render) and the refusal's wait is 30 s, so the request cannot be
+dequeued after the render is already over.
+
+**The original three-line summary of this item, kept for the reasoning:** The expiry machinery in the merged tree is intact — the 2 Hz
 `MSG_TITLE` case runs `UpdateTitle(); ExpireTransportStatus(); RefreshRolls();
 ` with `kStatusHoldUs` at 4 s, `ExpireTransportStatus` is byte-identical to
 this branch's, and no other code calls `TransportBar::SetStatus` — and the
