@@ -121,6 +121,12 @@ constexpr uint32 MSG_PREFERENCES      = 'prfs';
 // File > Project Settings… (M3.6): sample rate, tempo, meter and notes.
 constexpr uint32 MSG_PROJECT_SETTINGS = 'prjs';
 
+// MainWindow -> itself, one shot (package 51): the audition engine has been
+// idle since its last click, so it is stopped again (the click's release tail
+// has rung out by then). Private to MainWindow.cpp's own wiring, but declared
+// here beside the other message ids so a test can post it.
+constexpr uint32 MSG_AUDITION_IDLE    = 'auid';
+
 class MainWindow : public BWindow, public ThemeAware {
 public:
     // A mode switch re-takes every colour this window cached (the window's own
@@ -445,6 +451,44 @@ private:
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
     BMessenger                fMarkersMsgr;  // open markers window (the list push)
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
+
+    // --- the piano roll's sync + audition (package 51) ---------------------
+    // Every open roll (the docked view and the popped-out window) is pushed the
+    // region's current state whenever the stack moved, so no roll ever commits
+    // a note list the model no longer has — the stale-list bug. `fRollSerial`
+    // is the CommandStack serial the last push carried; the 2 Hz title poll and
+    // every stack-changing path call RefreshRolls(), which skips the work when
+    // nothing moved.
+    uint64_t                  fRollSerial = 0;
+    // The region the POPPED-OUT roll window shows (the docked one is named by
+    // fDockTrack/fDockClip): the push has to name a region even when the model
+    // no longer has it, and that is answered by adding its content or "gone".
+    TrackId                   fRollTrack = kInvalidTrackId;
+    ClipId                    fRollClip  = kInvalidClipId;
+    void RefreshRolls(bool force = false);
+    // The region state one push carries (the note/event array shape lives in
+    // PianoRoll.h: AddRollNotes/AddRollEvents).
+    void AddRegionPayload(class BMessage& m, TrackId track, ClipId clip,
+                          uint64_t serial);
+    // The follow-playhead policy, pushed to every roll (the View menu's mark is
+    // the single source of truth).
+    void PushRollFollow();
+    // The docked roll when it holds the focus: the Edit menu routes Cut/Copy/
+    // Paste/Duplicate there when it does, so Cmd-C in the docked editor copies
+    // NOTES rather than silently copying the arrangement's clips (the roll is a
+    // view of this window, so the menu bar's shortcuts get first refusal).
+    PianoRollView* FocusedRoll() const;
+    // The audition (package 51, item D). The roll asks; this decides: the
+    // preference, the engine to raise when the transport is idle, the track it
+    // plays through.
+    bool     fRollPreview = true;                 // Preferences: preview notes
+    bool     fAuditionUp = false;
+    TrackId  fAuditionTrack = kInvalidTrackId;
+    BMessageRunner* fAuditionIdle = nullptr;      // stops the idle engine
+    Engine*  EnsureAuditionEngine(TrackId track);
+    void     StopAuditionEngine();
+    void     HandleRollAudition(const BMessage* msg);
+    void     StartAuditionIdleTimer();
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
     // An open native LV2 editor watching one insert (engine -> editor values).

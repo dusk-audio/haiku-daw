@@ -60,6 +60,24 @@ inline int CcDefault(int cc) {
     return 0;
 }
 
+// What a controller DOES to a voice today, or nullptr when the region carries
+// it (and the engine saves and exports it) without an audible effect of its
+// own. This table is the model's own statement of the list the evaluators
+// above implement, and it is the ONE source the piano roll's lane menu labels
+// come from -- so the menu cannot advertise an effect the engine does not have,
+// nor hide one it does. Pitch bend is not a CC and is handled as its own lane;
+// it always acts (see PitchBendAt / MidiExpression.h).
+inline const char* CcVoiceEffect(int cc) {
+    switch (cc) {
+        case 1:  return "mod-wheel vibrato";
+        case 7:  return "channel volume";
+        case 10: return "pan";
+        case 11: return "expression";
+        case 64: return "sustain pedal";
+        default: return nullptr;
+    }
+}
+
 // Channel gain from CC7 (volume) x CC11 (expression) at `at`, each 0..127 mapped
 // linearly to 0..1; absent controllers default to 127 (unity). This is the
 // scalar the synth renders a MIDI track's notes through, so a MIDI file's volume
