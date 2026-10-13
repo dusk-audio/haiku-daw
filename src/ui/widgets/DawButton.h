@@ -144,6 +144,17 @@ public:
         BControl::MouseUp(where);
     }
 
+    // BControl's own invoke, deliberately NOT BButton's. BButton::Invoke ends
+    // with SetValue(B_CONTROL_OFF) for a button whose behaviour is not
+    // B_TOGGLE_BEHAVIOR, which unlatches every DawToggle in the app the moment
+    // it is clicked -- the M/S/R/I lamps, the mixer's, the dialog toggles --
+    // and makes the second click report ON again. (It also Sync()s the window
+    // and sleeps 50 ms per click, neither of which the kit's buttons want.)
+    // The value a control reports is the control's, not the base class's.
+    status_t Invoke(BMessage* message = nullptr) override {
+        return BControl::Invoke(message);
+    }
+
     // Space presses the focused button and Return presses the DEFAULT one --
     // BWindow routes the key to this view for that, which is the whole point of
     // MakeDefault. Both invoke; no base call is needed for them (BButton's

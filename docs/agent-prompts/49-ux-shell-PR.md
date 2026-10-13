@@ -117,6 +117,12 @@ the internal roadmap line about the multichannel-input package.
 | `95df51b` | test(ui): the UX-shell checks, VM-side |
 | `74d5333` | docs: the UX-shell record (fix/ux-shell) |
 | `b7e9385` | test(ui): pin the render-feedback fixture's export choices |
+| `8bcf2be` | docs: name the test-pin commit in the UX-shell record |
+| `24f0420` | fix(ui): the unlatched toggles and the flags that never applied |
+
+**Reopened once** — the integration's first VM run found three failures in this
+package (and wedged at the third). All three are fixed in `24f0420`; the
+section at the end of this record is their root-cause write-up.
 
 `b7e9385` is a fix to the test added one commit earlier: by the point
 `TestRenderFeedback` runs, an earlier test has left the remembered export
@@ -215,3 +221,102 @@ by hand:
 - Everything else (A's line numbers and the swallowed keys, C's two "Close"
   meanings, D's three silences and the stale menu path, E's titles, ellipsis
   and copy) was exactly as the review described it.
+
+## Reopened: the VM pass's three failures (all fixed in `24f0420`)
+
+The first VM run of the merged `feature/ux-pass` reported three failures in
+this package:
+
+```
+FAIL tests/ui_functional_tests.cpp:388   (w->Flags() & B_CLOSE_ON_ESCAPE) != 0
+FAIL tests/ui_functional_tests.cpp:971   WaitFor(... !WindowListed("Export Mix") ...)
+FAIL tests/ui_functional_tests.cpp:4651  probeState(kMsgKitToggle, B_CONTROL_OFF)
+```
+
+…and then **wedged**: no print after the third line, the process killed at
+600 s. Root causes, in the order they matter:
+
+**1. `DawToggle` stopped latching — a real app regression, every toggle in the
+app.** `BButton::Invoke` (`src/kits/interface/Button.cpp:451`) ends with
+`if (fBehavior != B_TOGGLE_BEHAVIOR) SetValue(B_CONTROL_OFF);`. `Invoke` is
+virtual, so once `DawButton` derived from `BButton` its clicks went through
+that: the flip was sent (the message carried ON) and then the control's value
+was wiped — the lamp held OFF while claiming ON, and the next click flipped
+OFF→ON again, which is why the test's second click reported ON. Fixed by
+overriding `Invoke` in `DawButton` to call `BControl::Invoke` — what the kit
+had before the base class changed (BButton's also `Sync()`s the window and
+sleeps 50 ms per click). The widget-kit test's second click is the regression
+test, and it now also checks that the control **holds** what it reported.
+
+**2. `B_CLOSE_ON_ESCAPE` never reached three of the six dialogs.** `BWindow`
+has two constructors — `(frame, title, window_type, flags, workspace)` and
+`(frame, title, window_look, window_feel, flags, workspace)` — and
+
+```c++
+BWindow(frame, title, B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, theFlags)
+```
+
+resolves to the **first**, because `B_TITLED_WINDOW` is a `window_type` and the
+five arguments fit. Everything after the feel went into `workspace`; the only
+thing left in `flags` was `B_FLOATING_APP_WINDOW_FEEL` = `0x4` =
+`B_NOT_H_RESIZABLE`. Export, Rename and Quantize had been running with no
+Escape, no `B_NOT_ZOOMABLE`, no `B_NOT_RESIZABLE` — and no way for the pass's
+flag to take, which is exactly what line 388 saw. The other three
+(New Project, Project Settings, Preferences) used the four-argument form,
+which does put the flags in the flags slot, with a stray feel bit riding
+along. All six now write the look and the feel as separate arguments
+(`B_TITLED_WINDOW_LOOK`, `B_NORMAL_WINDOW_FEEL`), which is the form the kit
+already uses correctly in `MarkersWindow.cpp:205`. **Look and feel are
+unchanged from what the windows actually were** (titled, normal — the
+"floating" the M1.4 record believed in never happened either), so the only
+behaviour deltas are the flags that now apply.
+
+Proven on the host with a shim of `BWindow`'s two overloads and the real
+constant values (`B_FLOATING_APP_WINDOW_FEEL` 4, `B_NOT_ZOOMABLE` 0x40,
+`B_NOT_RESIZABLE` 2, `B_ASYNCHRONOUS_CONTROLS` 0x00080000,
+`B_CLOSE_ON_ESCAPE` 0x00800000):
+
+```
+5-arg today -> window_type(type, flags, workspace)       look 1 feel 0 flags 0x00000004 workspace 0x00880042  ESCAPE=LOST
+4-arg today -> window_type(type, flags, workspace)       look 1 feel 0 flags 0x00880046 workspace 0x00000000  ESCAPE=SET
+fixed       -> window_look(look, feel, flags, workspace) look 1 feel 0 flags 0x00880042 workspace 0x00000000  ESCAPE=SET
+```
+
+**3. The hang was a test fault: two off-lock `BView::Flags()` reads.**
+`BView::Flags()` is not a plain getter — it runs `_CheckLock()`
+(`src/kits/interface/View.cpp:1020`), which calls the debugger when the
+view's window lock is not held by the calling thread. The widget-kit block
+read `button->Flags()` and `toggle->Flags()` from the test thread with no
+lock; the assertion raised the debug-server dialog and stopped the whole
+team, which is why nothing printed after it (the HANDOFF's faulted-run
+lesson). Both reads are under the probe's lock now, in one `CHECK`.
+
+**4. The export flow stalled because the panel and the dialog share a
+title.** `ShowPanel` titles the file panel "Export Mix" — and this pass
+renamed the *dialog* to the same name. The wait was
+`!WindowListed("Export Mix") && VisibleWindows() >= windowsBefore + 1`, which
+can never come true once the panel is up. It waits for the dialog **by
+pointer** now (as the shot window above it always did), and `FindExportDialog`
+documents that its title lookup is only unambiguous with no panel up.
+
+### The same constructor trap, outside this package (not touched here)
+
+Three windows still write the five-argument form and so still lose their
+flags: `ExportProgressWindow.cpp:15` (its `B_NOT_CLOSABLE` never applied — the
+progress bar's close box works, which is why Cancel exists), and
+`InstrumentWindow.cpp:74` / `SendsWindow.cpp:34` (their `B_NOT_ZOOMABLE`).
+They are outside this pass's six dialogs, so they are reported rather than
+changed; the fix is the same two-line spelling, with `MarkersWindow` as the
+in-tree example.
+
+### Verification after the fixes (this host)
+
+| Command | Result |
+|---|---|
+| `cmake --build build-host -j2` | exit **0** |
+| `ctest --test-dir build-host` | **100% tests passed, 75/75** |
+| `sh scripts/haiku_syntax_check.sh` | **83 OK, 4 FAIL** (the same pre-existing codec files) |
+
+The VM re-run is the orchestrator's; the three VM mutations this pass must
+now catch are #4/#5/#6 in the table above under the new spellings, plus the
+toggle-value check that caught root cause 1 in the first place.

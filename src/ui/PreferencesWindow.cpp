@@ -95,9 +95,10 @@ int IndexInFloatSet(float v, const float* set, int count) {
 
 PreferencesWindow::PreferencesWindow(const PrefsView& values, BMessenger apply)
     : BWindow(BRect(120, 120, 120 + 460, 120 + 400), "Preferences",
-              B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL | B_NOT_ZOOMABLE | B_NOT_RESIZABLE
-              | B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
+              // Look, feel and flags as three arguments (see ExportWindow).
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
     BView* root = new ThemedView("root", B_WILL_DRAW);

@@ -71,8 +71,16 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
     // The title names the action, exactly as the file panel behind it does
     // ("Export Mix" / "Export Stems"); "Export" alone did not say which of the
     // two the dialog was about to do.
-    : BWindow(frame, stems ? "Export Stems" : "Export Mix", B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL,
+    //
+    // B_TITLED_WINDOW_LOOK and B_NORMAL_WINDOW_FEEL are separate arguments on
+    // purpose: BWindow has a (window_type, flags, workspace) overload too, and
+    // a call written as (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, flags)
+    // resolves to THAT one -- the flags land in `workspace` and are lost (this
+    // is how B_CLOSE_ON_ESCAPE, B_NOT_ZOOMABLE and B_NOT_RESIZABLE were
+    // silently dropped here). A window_look in the third slot picks the
+    // look/feel/flags form, which is the one meant.
+    : BWindow(frame, stems ? "Export Stems" : "Export Mix",
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
               | B_CLOSE_ON_ESCAPE),
       fCur(current), fApply(apply) {

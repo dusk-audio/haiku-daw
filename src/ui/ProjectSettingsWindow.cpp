@@ -77,9 +77,10 @@ bool SameRate(double a, double b) { return std::fabs(a - b) < 0.5; }
 ProjectSettingsWindow::ProjectSettingsWindow(
         const ProjectSettingsView& values, BMessenger apply)
     : BWindow(BRect(140, 140, 140 + 460, 140 + 420), "Project Settings",
-              B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL | B_NOT_ZOOMABLE | B_NOT_RESIZABLE
-              | B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
+              // Look, feel and flags as three arguments (see ExportWindow).
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fApply(apply) {
     BView* root = new ThemedView("root", B_WILL_DRAW);
     BLayoutBuilder::Group<>(this, B_VERTICAL).Add(root);
