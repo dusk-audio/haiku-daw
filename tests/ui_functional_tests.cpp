@@ -4809,7 +4809,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
                                          SnapGrid{ SnapKind::Quarter, false });
     CHECK(want4 != want16);          // the two grids really do differ here
     drawAt(drawFrame, 89);           // a new pitch row: a NEW note's frame
-    CHECK(waitForNoteAt(87, want4));
+    CHECK(waitForNoteAt(89, want4));
     Shot("roll-grid-quarter");
     {
         if (win->LockWithTimeout(1000000) == B_OK) {
