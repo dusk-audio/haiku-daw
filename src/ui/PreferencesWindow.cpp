@@ -240,8 +240,8 @@ void PreferencesWindow::BuildRows(BView* root) {
         // The scale IS applied now (the whole process re-lays out at it); what
         // waits for a launch is the window FRAMES, which stay where the user
         // put them rather than jumping under the pointer.
-        .Add(new PrefsLabel("ush", "Applied now; window sizes settle at the "
-                                   "next launch."))
+        .Add(new PrefsLabel("ush", "Applied on Apply; window sizes settle at "
+                                   "the next launch."))
         .AddGroup(B_HORIZONTAL, Themed(6.0f))
             .Add(fDir)
             .Add(chooseDir)
