@@ -1386,14 +1386,18 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // opens); one that never arrived — a test harness building a view
             // itself — has none, and keeps the pre-51 behaviour.
             if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitCurrent((uint64_t)base, fStack->CurrentSerial())) {
+                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
+                                      fRollGate)) {
                 RefreshRolls(true);
                 break;
             }
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
-                    (TrackId)tid, (ClipId)cid, ParseRollNotes(msg)), *fProject);
+                if (fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollNotes(msg)),
+                        *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial());
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);   // the roll re-reads what the model now has
@@ -1407,18 +1411,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0, cid = 0, base = 0; int32 op = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
-            msg->FindInt64("base", &base);
             msg->FindInt32("op", &op);
             if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitCurrent((uint64_t)base, fStack->CurrentSerial())) {
+                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
+                                      fRollGate)) {
                 RefreshRolls(true);   // the same stale-base rule as above
                 break;
             }
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                fStack->Execute(std::make_unique<ApplyMidiOpCommand>(
-                    (TrackId)tid, (ClipId)cid, ParseRollNotes(msg),
-                    MidiOpName((MidiOp)op)), *fProject);
+                if (fStack->Execute(std::make_unique<ApplyMidiOpCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollNotes(msg),
+                        MidiOpName((MidiOp)op)), *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial());
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);
@@ -1431,7 +1437,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
             if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitCurrent((uint64_t)base, fStack->CurrentSerial())) {
+                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
+                                      fRollGate)) {
                 RefreshRolls(true);
                 break;
             }
@@ -1440,8 +1447,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // Every field is validated by ParseRollEvents: a partial or
                 // out-of-range event would land as a CC0 at frame 0 — invisible
                 // in the editor yet still saved and exported.
-                fStack->Execute(std::make_unique<SetMidiClipEventsCommand>(
-                    (TrackId)tid, (ClipId)cid, ParseRollEvents(msg)), *fProject);
+                if (fStack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollEvents(msg)),
+                        *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial());
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);
@@ -1585,9 +1595,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_AUDITION_IDLE:  // the clicks stopped: release the idle engine
             delete fAuditionIdle;
             fAuditionIdle = nullptr;
-            if (!fTransportCtl.fPlaying && !fRecCtl.fRecMode
-                && !fTransportCtl.fMonitoring)
-                StopAuditionEngine();
+            if (fAuditionHeld > 0) {
+                // A key is still down in the editor: stopping now would reset
+                // the voice mid-note. Look again later.
+                StartAuditionIdleTimer();
+                break;
+            }
+            StopAuditionEngine();
             break;
         case kMsgFxParamCommit: {
             // A native plugin editor's committed gesture: the values it already
@@ -2757,6 +2771,9 @@ void MainWindow::PopOutEditor() {
 // stops naming a region (Pop out has nothing to act on until the next one).
 void MainWindow::ClearDockedEditor() {
     if (fDockRoll != nullptr) {
+        // A key held in the editor goes with it: its note-off would never come,
+        // and the audition's idle timer would keep re-arming for ever.
+        fAuditionHeld = 0;
         fDockRoll->RemoveSelf();
         delete fDockRoll;
         fDockRoll = nullptr;
@@ -3241,8 +3258,7 @@ void MainWindow::ShowReplacedProject(Frame playhead) {
     fRollTrack  = kInvalidTrackId;
     fRollClip   = kInvalidClipId;
     fRollSerial = 0;   // a load must not be skipped by a serial comparison
-    StopAuditionEngine();
-    if (fAuditionIdle != nullptr) { delete fAuditionIdle; fAuditionIdle = nullptr; }
+    StopAuditionEngine();   // ... and the clicks' engine, if it was theirs
     fTimeline->SetProject(fProject);   // same object, new content
     fTimeline->SetPlayhead(playhead);
     UpdateTimeReadout(playhead);
@@ -4234,6 +4250,18 @@ void MainWindow::PushRollFollow() {
 
 // --- the audition (package 51, item D) -------------------------------------
 
+// Every click (re)arms the idle timer: the note's release tail has rung out by
+// the time it fires, and a click while it was pending cancels the stop. Notes
+// still HELD keep it re-arming (MSG_AUDITION_IDLE's handler).
+void MainWindow::StartAuditionIdleTimer() {
+    delete fAuditionIdle;
+    // 3 s: long enough that a slow one-finger arpeggio keeps one engine, short
+    // enough that the device is not held by an editor nobody is clicking.
+    fAuditionIdle = new BMessageRunner(BMessenger(this),
+                                       new BMessage(MSG_AUDITION_IDLE),
+                                       3000000, 1);
+}
+
 // The roll asks; this decides. A click sounds through the region's own track:
 // its instrument, fader and FX, which is the note the region will play. The
 // engine has to be RUNNING for that, so an idle transport gets the monitor-only
@@ -4258,8 +4286,9 @@ Engine* MainWindow::EnsureAuditionEngine(TrackId track) {
         }
         return e;
     }
-    if (fAuditionUp && fAuditionTrack == track && fAuditionIdle != nullptr)
-        return e;   // already up, and the idle timer still owns it
+    if (fAuditionUp && fAuditionTrack == track && e->PlayerRunning())
+        return e;   // already up (a stopped engine would eat the click: the
+                    // ring it drains is only read while the callback runs)
     e->SetBufferFrames(fTransportCtl.fBufferFrames);
     e->SetMonitorOnly(true);
     e->SetAuditionTrack(track);
@@ -4279,14 +4308,27 @@ Engine* MainWindow::EnsureAuditionEngine(TrackId track) {
 }
 
 void MainWindow::StopAuditionEngine() {
+    if (fAuditionIdle != nullptr) {   // whatever else, the timer goes
+        delete fAuditionIdle;
+        fAuditionIdle = nullptr;
+    }
     if (!fAuditionUp) return;
+    const bool wasUp = fAuditionUp;
     fAuditionUp = false;
+    fAuditionTrack = kInvalidTrackId;
+    fAuditionHeld = 0;
+    if (!wasUp) return;
+    // ONLY an engine the clicks own may be stopped: a play, a take and the
+    // armed-track monitor are all the SAME engine object (M4.1 keeps one
+    // player), and stopping it there would freeze the transport with its lamp
+    // still lit and no way back except a manual Stop.
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring)
+        return;
     if (fTransportCtl.fEngine) {
         fTransportCtl.fEngine->Stop();
         fTransportCtl.fEngine->SetMonitorOnly(false);
         fTransportCtl.fEngine->SetAuditionTrack(kInvalidTrackId);
     }
-    fAuditionTrack = kInvalidTrackId;
 }
 
 // The clicks themselves: one note-on/note-off at a time, straight into the
@@ -4301,18 +4343,9 @@ void MainWindow::HandleRollAudition(const BMessage* msg) {
     Engine* e = EnsureAuditionEngine((TrackId)tid);
     if (e == nullptr) return;
     e->AuditionNote((int)pitch, (int)vel, on);
-    // Every click (re)arms the idle timer: the note's release tail has rung out
-    // by the time it fires, and a click while it was pending cancels the stop.
+    if (on)               fAuditionHeld++;
+    else if (fAuditionHeld > 0) fAuditionHeld--;
     StartAuditionIdleTimer();
-}
-
-void MainWindow::StartAuditionIdleTimer() {
-    delete fAuditionIdle;
-    // 3 s: long enough that a slow one-finger arpeggio keeps one engine, short
-    // enough that the device is not held by an editor nobody is clicking.
-    fAuditionIdle = new BMessageRunner(BMessenger(this),
-                                       new BMessage(MSG_AUDITION_IDLE),
-                                       3000000, 1);
 }
 
 // The master meter's readings for one poll (M3.3).
@@ -4684,10 +4717,7 @@ void MainWindow::ApplyPrefs(const PrefsView& v) {
     // state -- turning it off silences the next click (and stops the engine
     // the clicks had raised, if it was theirs).
     fRollPreview = v.previewNotes;
-    if (!fRollPreview) {
-        StopAuditionEngine();
-        if (fAuditionIdle != nullptr) { delete fAuditionIdle; fAuditionIdle = nullptr; }
-    }
+    if (!fRollPreview) StopAuditionEngine();
 
     // The metronome's sound and level: live on the running engine (a stopped
     // one gets them from EnsureEngine's next build).

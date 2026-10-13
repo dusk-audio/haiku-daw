@@ -570,12 +570,11 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames)
         note.bendPhaseFrames = v.bend;
         fLiveNotes.push_back(note);
         if (v.audition) {
-            // An audition voice belongs to ONE bus: the region's own track,
-            // named by the engine's audition target. No route matching, and no
-            // armed track needed.
-            const TrackId target = e.fAuditionTrack.load(std::memory_order_relaxed);
+            // An audition voice belongs to ONE bus: the region's own track, as
+            // THIS graph was built for it. No route matching, and no armed
+            // track needed.
             for (Bus& b : fBuses)
-                if (b.id == target
+                if (b.id == fAuditionTrack
                     && b.auditionNotes.size() < b.auditionNotes.capacity())
                     b.auditionNotes.push_back(note);
             continue;
@@ -739,9 +738,12 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
         if (b.instrument) {
             if (live)
                 b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f, liveExpr);
-            if (aud)
+            if (aud) {
                 b.instrument->Render(b.auditionNotes, nb, frames, bs, 1.0f,
                                      liveExpr);
+                e.fAuditionRendered.fetch_add(b.auditionNotes.size(),
+                                              std::memory_order_relaxed);
+            }
         }
         const float mgl = b.midiGainL.load(std::memory_order_relaxed);
         const float mgr = b.midiGainR.load(std::memory_order_relaxed);
@@ -941,9 +943,12 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
                     if (live)
                         b.instrument->Render(b.liveNotes, mb, frames, blockStart,
                                              1.0f, liveExpr);
-                    if (aud)
+                    if (aud) {
                         b.instrument->Render(b.auditionNotes, mb, frames,
                                              blockStart, 1.0f, liveExpr);
+                        e.fAuditionRendered.fetch_add(b.auditionNotes.size(),
+                                                      std::memory_order_relaxed);
+                    }
                 }
             }
             // The node's own trim/polarity ride along with its fader (M3.4).
@@ -1995,6 +2000,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // region is empty or silent: a click on a bar with no notes yet has to
         // sound through the same instrument the notes will.
         const bool audition = (req.auditionTrack == t.id);
+        if (audition) g.fAuditionTrack = t.id;   // what the RT routing reads
         const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
         if (!audible && !monitor)
             continue;   // a muted track stays silent, clicks included

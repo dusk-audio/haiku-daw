@@ -484,6 +484,7 @@ public:
                   inEndpoint(o.inEndpoint.load(std::memory_order_relaxed)),
                   inChannel(o.inChannel.load(std::memory_order_relaxed)),
                   liveNotes(std::move(o.liveNotes)),
+                  auditionNotes(std::move(o.auditionNotes)),
                   fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
                   fxIdentity(std::move(o.fxIdentity)),
                   fxStateHash(std::move(o.fxStateHash)),
@@ -520,6 +521,12 @@ public:
                 inEndpoint.store(o.inEndpoint.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 liveNotes = std::move(o.liveNotes);
+                // The audition's list rides these hand-written moves too: a bus
+                // moved after its reserve (the graph build's push_back) would
+                // otherwise come back with capacity 0, and the RT hand-off's
+                // `size() < capacity()` guard would then silently drop every
+                // click (the whole feature dead, with no crash to show for it).
+                auditionNotes = std::move(o.auditionNotes);
                 fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
                 fxIdentity = std::move(o.fxIdentity);
                 fxStateHash = std::move(o.fxStateHash);
@@ -594,6 +601,12 @@ public:
         // is stopped. The live controllers are cleared with them: a bend or a
         // pedal left "down" by a keyboard that is no longer sending would
         // otherwise colour the next start.
+        // Which track's bus hears the audition clicks, snapshotted at BUILD
+        // (from BuildRequest::auditionTrack): the bus set and the routing then
+        // cannot disagree -- routing by the Engine's live atomic while the
+        // graph was built for another target silently dropped clicks.
+        TrackId fAuditionTrack = kInvalidTrackId;
+
         void ResetVoices() {
             for (LiveVoice& v : fVoices) v.active = false;
             fLiveNotes.clear();
@@ -809,6 +822,19 @@ public:
     // The most recent completed build's status (B_OK, B_ENTRY_NOT_FOUND, ...).
     status_t LastLoadStatus() const {
         return (status_t)fLoadStatus.load(std::memory_order_relaxed);
+    }
+    // Is the player's callback running now? (Start sets it, Stop clears it.)
+    // The window needs it to tell "the clicks own this engine" from "the
+    // transport does, and it merely looks the same".
+    bool PlayerRunning() const {
+        return fPlayerRunning.load(std::memory_order_acquire);
+    }
+    // Audition notes actually rendered by the callback (package 51): the count
+    // is the whole end-to-end proof of the click path that a test can make
+    // without ears -- a bus that lost its reserved list (the hand-written move)
+    // or a graph built for another target renders none of them.
+    uint64_t AuditionNotesRendered() const {
+        return fAuditionRendered.load(std::memory_order_relaxed);
     }
     // How many BSoundPlayers have been opened (a rebuild must not move this).
     uint64_t PlayersOpened() const {
@@ -1342,6 +1368,8 @@ private:
     // and a burst is at most a fast arpeggio being typed.
     std::atomic<TrackId> fAuditionTrack{kInvalidTrackId};
     MidiEventRing      fAuditionRing{64};
+    // Counted on the RT thread, one per audition note the instrument renders.
+    std::atomic<uint64_t> fAuditionRendered{0};
     // Bumped once per completed RT callback; QuiesceMonitorInput() waits on it
     // to bound the monitor/live-MIDI source teardown UAF window, and the graph
     // reclaimer waits on it to know a retired graph is out of the callback.

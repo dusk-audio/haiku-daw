@@ -13,6 +13,7 @@
 #include "../model/PeakCache.h"
 #include "PeakLoader.h"
 #include "../model/Commands.h"   // RelinkEntry (the Locate… walk)
+#include "../model/RollEdit.h"   // the piano roll's kit-free rules (package 51)
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
 #include "../midi/MidiPort.h"
@@ -227,6 +228,13 @@ public:
     }
     // How many times the transport has crossed a loop end (M4.2). A seamless
     // loop is exactly this counter moving while the three above do not.
+    // How many audition notes the callback has actually rendered (package 51):
+    // the end-to-end proof of the click path that needs no ears.
+    uint64_t AuditionNotesRendered() const {
+        return fTransportCtl.fEngine
+                   ? fTransportCtl.fEngine->AuditionNotesRendered() : 0;
+    }
+    bool AuditionEngineUp() const { return fAuditionUp; }
     uint64_t EngineWraps() const {
         return fTransportCtl.fEngine
                    ? fTransportCtl.fEngine->Wraps() : 0;
@@ -460,6 +468,10 @@ private:
     // every stack-changing path call RefreshRolls(), which skips the work when
     // nothing moved.
     uint64_t                  fRollSerial = 0;
+    // The transition the rolls' own last accepted commit made (RollEdit.h:
+    // RollCommitGate), so two gestures posted in one turn of this loop are both
+    // applied rather than the second silently dropped.
+    RollCommitGate            fRollGate;
     // The region the POPPED-OUT roll window shows (the docked one is named by
     // fDockTrack/fDockClip): the push has to name a region even when the model
     // no longer has it, and that is answered by adding its content or "gone".
@@ -484,6 +496,10 @@ private:
     bool     fRollPreview = true;                 // Preferences: preview notes
     bool     fAuditionUp = false;
     TrackId  fAuditionTrack = kInvalidTrackId;
+    // Notes the roll is HOLDING (a key down on the keyboard column, no note-off
+    // yet). The idle timer must not stop the engine out from under a held note
+    // — a Stop() resets the voice, so the tone would be cut mid-hold.
+    int      fAuditionHeld = 0;
     BMessageRunner* fAuditionIdle = nullptr;      // stops the idle engine
     Engine*  EnsureAuditionEngine(TrackId track);
     void     StopAuditionEngine();

@@ -107,9 +107,31 @@ int main() {
     // --- the commit gate ---------------------------------------------------
     {
         CHECK(RollCommitCurrent(5, 5));
-        CHECK(!RollCommitCurrent(5, 6));    // the model moved on: refuse
+        CHECK(!RollCommitCurrent(5, 6));    // the model moved on
         CHECK(!RollCommitCurrent(0, 1));
         CHECK(RollCommitCurrent(0, 0));     // the empty history is a state too
+    }
+    {
+        // A fresh gate has no own-transition: only an exact match passes.
+        RollCommitGate g;
+        CHECK(RollCommitAllowed(7, 7, g));
+        CHECK(!RollCommitAllowed(7, 8, g));
+        // After the roll's own commit (7 -> 8), a SECOND commit posted in the
+        // same batch (it still names 7, and no push has reached it) is applied
+        // rather than silently dropped -- the model is exactly where that
+        // commit left it.
+        RollCommitAccepted(g, 7, 8);
+        CHECK(RollCommitAllowed(7, 8, g));
+        // ... but only while it is: an undo (8 -> 9) ends the grace, and the
+        // batched commit would then be writing over a state it never saw.
+        CHECK(!RollCommitAllowed(7, 9, g));
+        CHECK(RollCommitAllowed(9, 9, g));   // a re-synced roll is fine again
+        // A different base is never waved through by the historical transition.
+        CHECK(!RollCommitAllowed(6, 8, g));
+        // Two accepted commits in a row: the transition moves with them.
+        RollCommitAccepted(g, 9, 10);
+        CHECK(RollCommitAllowed(9, 10, g));
+        CHECK(!RollCommitAllowed(7, 10, g));   // the older base is dead
     }
 
     // --- the region's window ------------------------------------------------

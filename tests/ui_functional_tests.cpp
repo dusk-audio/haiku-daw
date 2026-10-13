@@ -125,6 +125,9 @@ using namespace daw;
 #ifndef MSG_FOLLOW_TEST
 #define MSG_FOLLOW_TEST 'folw'   // View > Follow Playhead (package 51)
 #endif
+#ifndef MSG_AUDITION_IDLE_TEST
+#define MSG_AUDITION_IDLE_TEST 'auid'   // the audition's idle stopper (package 51)
+#endif
 #ifndef MSG_MIXER_TEST
 #define MSG_MIXER_TEST 'mixr'   // View > Mixer (MainWindow's MSG_MIXER)
 #endif
@@ -4924,6 +4927,42 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     win->PostMessage(MSG_FOLLOW_TEST);
     CHECK(WaitFor([&] { return followOf() == 1; }));
     CHECK(followMarked() == 1);
+
+    // --- D. Audition: a click on the keyboard column sounds -----------------
+    // The engine side cannot be heard by a test, so the engine counts the
+    // audition notes its callback actually RENDERS (Engine::
+    // AuditionNotesRendered). That is the end-to-end proof of the path the
+    // click takes: the view's post, MainWindow's engine, the graph's bus for
+    // the region's track, and the instrument render. It is also the regression
+    // check for the bug this test would have caught: Bus's hand-written move
+    // constructor dropped the reserved audition list, so the graph's bus had
+    // capacity 0 and every click was silently dropped.
+    {
+        const uint64_t before = win->AuditionNotesRendered();
+        const float kx = Themed(20.0f);            // inside the keyboard column
+        const float ky = Themed(28.0f) + (float)(96 - 60) * Themed(12.0f)
+                       + Themed(6.0f);             // pitch 60's row
+        BMessage d(B_MOUSE_DOWN);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", BPoint(kx, ky));
+        BMessenger(roll).SendMessage(&d);
+        snooze(120000);
+        BMessage u(B_MOUSE_UP);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", BPoint(kx, ky));
+        BMessenger(roll).SendMessage(&u);
+        CHECK(WaitFor([&] {
+            return win->AuditionNotesRendered() > before;
+        }));
+        std::printf("  audition: %llu notes rendered\n",
+                    (unsigned long long)win->AuditionNotesRendered());
+        Shot("roll-audition");
+        // Put the idle engine away (the test's own click raised it).
+        win->PostMessage(MSG_AUDITION_IDLE_TEST);
+        CHECK(WaitFor([&] { return !win->AuditionEngineUp(); }));
+    }
 
     // --- The region is gone: the editor closes -----------------------------
     {

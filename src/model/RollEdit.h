@@ -185,6 +185,33 @@ inline bool RollCommitCurrent(uint64_t baseSerial, uint64_t modelSerial) {
     return baseSerial == modelSerial;
 }
 
+// ...but "the serial moved" is not the same as "someone else moved the model".
+// TWO gestures can be posted inside one turn of the window's message loop (a
+// fast click pair, a key burst), and the second carries the SAME base: the push
+// that would raise it is only sent while the first is being handled. Refusing
+// it would silently drop the user's second gesture. So the window remembers the
+// transition its last ACCEPTED roll commit made — the base it named, and the
+// serial that commit left the stack at — and a commit is also allowed while the
+// model is still standing exactly where the roll's own commit left it. Any
+// other change (an undo, another view's edit) leaves that state, and the gate
+// is strict again.
+struct RollCommitGate {
+    uint64_t base   = 0;   // the serial the last accepted commit named
+    uint64_t result = 0;   // ... and the serial it left the stack at
+};
+
+inline bool RollCommitAllowed(uint64_t baseSerial, uint64_t modelSerial,
+                              const RollCommitGate& own) {
+    if (RollCommitCurrent(baseSerial, modelSerial)) return true;
+    return baseSerial == own.base && modelSerial == own.result;
+}
+
+inline void RollCommitAccepted(RollCommitGate& own, uint64_t baseSerial,
+                               uint64_t modelSerial) {
+    own.base   = baseSerial;
+    own.result = modelSerial;
+}
+
 // --- selection edits (nudge, duplicate, copy) -------------------------------
 
 // One note's geometry before a drag: the group move/resize applies ONE delta

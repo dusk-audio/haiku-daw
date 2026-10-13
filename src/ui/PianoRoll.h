@@ -234,6 +234,16 @@ public:
     void ZoomToFitRegion();         // 'f': the whole region in view
     bool ClipboardEmpty() const { return fClipboard.empty(); }
 
+    // --- audition (package 51, item D) -------------------------------------
+    // Tell the main window to sound (or stop) a note through this region's
+    // track instrument. The window decides whether anything comes out (a
+    // preference can mute it, and an idle transport raises the monitor-only
+    // engine for the clicks). Public because the window HOST calls AuditionEnd
+    // to release a key the pointer may still be holding when the editor goes.
+    void Audition(int pitch, int velocity, bool on);
+    void AuditionEnd();   // release whatever this view is holding
+    void AuditionBlip(int pitch, int velocity);   // a short one (on + off)
+
     // --- MIDI transforms ---------------------------------------------------
     // The transform runs here, on the snapshot, and the result is posted as one
     // undoable step (kMsgApplyMidiOp). `param` is the semitone count for
@@ -304,13 +314,6 @@ private:
     // 3 MIDI, -1 none. One switch for the click, the hover highlight and the
     // tooltip, so they cannot disagree about where a button is.
     int   ToolbarButtonAt(BPoint where) const;
-
-    // --- audition (package 51, item D) -------------------------------------
-    // Tell the main window to sound (or stop) a note through this region's
-    // track instrument. The window decides whether anything comes out.
-    void Audition(int pitch, int velocity, bool on);
-    void AuditionEnd();   // release whatever this view is holding
-    void AuditionBlip(int pitch, int velocity);   // a short one (on + off)
 
     // --- the pointer's own feedback (item H) -------------------------------
     // The roll had no BCursor at all: a 5 px resize zone nobody can see. Same
@@ -435,6 +438,9 @@ public:
               std::vector<MidiClipEvent> events,
               TempoMap tempo, double sampleRate, daw::Frame playhead,
               BMessenger apply, const char* trackName = nullptr);
+    // A key held on the keyboard column when the window goes: its note-off
+    // would never come, and the audition engine would keep waiting for it.
+    ~PianoRoll() override { if (fView) fView->AuditionEnd(); }
     void MessageReceived(BMessage* msg) override;   // the pushes from MainWindow
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // Cmd-Z, space
     PianoRollView* RollView() const { return fView; }
