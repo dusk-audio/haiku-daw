@@ -972,6 +972,136 @@ int main() {
         std::remove(path);
     }
 
+    // Mixer strip extras (M3.4): the input trim, the polarity and the solo
+    // group round-trip on their own optional lines, a project that never
+    // touches them writes NONE of them, and an old file loads with the
+    // defaults.
+    {
+        Project a;
+        CommandStack s;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Trimmed"), a);
+        TrackId t = a.Tracks().front().id;
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "Plain"), a);
+        s.Execute(std::make_unique<AddTrackCommand>(TrackType::Midi, "Grouped"), a);
+        TrackId g = a.Tracks().back().id;
+        s.Execute(std::make_unique<SetTrackTrimCommand>(t, 1.5f), a);
+        s.Execute(std::make_unique<SetTrackPhaseCommand>(t, true), a);
+        s.Execute(std::make_unique<SetTrackSoloGroupCommand>(g, 2), a);
+
+        const char* path = "trackstrip_tmp.dawproj";
+        CHECK(ProjectIO::Save(a, path));
+        Project b;
+        CHECK(ProjectIO::Load(b, path));
+        CHECK(b.Tracks().size() == 3);
+        if (b.Tracks().size() == 3) {
+            CHECK(std::abs(b.Tracks()[0].trim - 1.5f) < 1e-4f);
+            CHECK(b.Tracks()[0].phaseInvert == true);
+            CHECK(b.Tracks()[0].soloGroup == 0);
+            CHECK(std::abs(b.Tracks()[1].trim - 1.0f) < 1e-4f);
+            CHECK(b.Tracks()[1].phaseInvert == false);
+            CHECK(b.Tracks()[2].soloGroup == 2);
+        }
+
+        // The save side: one line each, for the tracks that need one, and the
+        // `track` line itself is untouched (the trim is not a new tail field).
+        {
+            std::ifstream in(path);
+            std::string line, firstTrack;
+            int trims = 0, phases = 0, groups = 0;
+            std::string trimLine, groupLine;
+            while (std::getline(in, line)) {
+                if (line.rfind("tracktrim ", 0) == 0)   { trims++;  trimLine = line; }
+                if (line.rfind("trackphase ", 0) == 0)  phases++;
+                if (line.rfind("tracksologroup ", 0) == 0) { groups++; groupLine = line; }
+                if (line.rfind("track ", 0) == 0 && firstTrack.empty())
+                    firstTrack = line;
+            }
+            CHECK(trims == 1);
+            CHECK(phases == 1);
+            CHECK(groups == 1);
+            CHECK(trimLine.rfind("tracktrim 1 ", 0) == 0);
+            CHECK(groupLine == "tracksologroup 3 2");
+            CHECK(firstTrack.rfind("track 1 audio ", 0) == 0);
+            CHECK(firstTrack.find("\"Trimmed\" 0 72 0 0 0")
+                  != std::string::npos);
+        }
+        std::remove(path);
+
+        // A project that touches none of them writes none of them.
+        Project plain;
+        CommandStack ps;
+        ps.Execute(std::make_unique<AddTrackCommand>(TrackType::Audio, "P"), plain);
+        CHECK(ProjectIO::Save(plain, path));
+        {
+            std::ifstream in(path);
+            std::string line;
+            int extras = 0;
+            while (std::getline(in, line))
+                if (line.rfind("tracktrim ", 0) == 0
+                    || line.rfind("trackphase ", 0) == 0
+                    || line.rfind("tracksologroup ", 0) == 0) extras++;
+            CHECK(extras == 0);
+        }
+        std::remove(path);
+    }
+    // Compat: an old file (none of the M3.4 lines) loads with unity trim, no
+    // polarity flip and no solo group; the lines are addressed by id, so one
+    // written before its own track record still lands, a truncated one is
+    // skipped, and a hand-edited out-of-range trim is clamped rather than
+    // costing the whole file.
+    {
+        const char* path = "legacystrip_tmp.dawproj";
+        {
+            std::ofstream out(path);
+            out << "DAW 1 1\n"
+                << "sampleRate 48000\n"
+                << "tempo 120 0\n"
+                << "master 1\n"
+                << "timesig 4 4\n"
+                << "track 1 audio 1 0 0 0 0 \"Old\" 0 72 0 0 0\n"
+                << "track 2 audio 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+                << "tracktrim 2\n"            // truncated: skipped
+                << "tracktrim 9 0.25\n"       // unknown id: no effect
+                << "enddaw\n";
+        }
+        Project p;
+        CHECK(ProjectIO::Load(p, path));
+        CHECK(p.Tracks().size() == 2);
+        if (p.Tracks().size() == 2) {
+            CHECK(std::abs(p.Tracks()[0].trim - 1.0f) < 1e-4f);
+            CHECK(p.Tracks()[0].phaseInvert == false);
+            CHECK(p.Tracks()[0].soloGroup == 0);
+            CHECK(std::abs(p.Tracks()[1].trim - 1.0f) < 1e-4f);
+        }
+        std::remove(path);
+
+        std::ofstream out2("patchstrip_tmp.dawproj");
+        out2 << "DAW 1 1\n"
+             << "sampleRate 48000\n"
+             << "tempo 120 0\n"
+             << "master 1\n"
+             << "timesig 4 4\n"
+             << "tracktrim 2 0.5\n"          // for a track not read yet
+             << "track 1 audio 1 0 0 0 0 \"One\" 0 72 0 0 0\n"
+             << "track 2 audio 1 0 0 0 0 \"Two\" 0 72 0 0 0\n"
+             << "tracktrim 1 99\n"           // out of range: clamped
+             << "trackphase 1 1\n"
+             << "tracksologroup 1 4\n"
+             << "enddaw\n";
+        out2.close();
+        Project q;
+        CHECK(ProjectIO::Load(q, "patchstrip_tmp.dawproj"));
+        CHECK(q.Tracks().size() == 2);
+        if (q.Tracks().size() == 2) {
+            CHECK(std::abs(q.Tracks()[0].trim - kTrackTrimMax) < 1e-4f);
+            CHECK(q.Tracks()[0].phaseInvert == true);
+            CHECK(q.Tracks()[0].soloGroup == 4);
+            CHECK(std::abs(q.Tracks()[1].trim - 0.5f) < 1e-4f);
+            CHECK(q.Tracks()[1].phaseInvert == false);
+        }
+        std::remove("patchstrip_tmp.dawproj");
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }

@@ -21,6 +21,7 @@
 #include "../src/ui/RenameWindow.h"     // kMsgRenameClip (the Edit > Rename flow)
 #include "../src/ui/MixerWindow.h"      // MixerStripsView::Strips (the mid-drag check)
 #include "../src/ui/MarkersWindow.h"    // MarkersView::Markers (the M2.7 list)
+#include "../src/ui/PreferencesWindow.h"   // the Preferences window (M3.5)
 #include "../src/ui/widgets/DawButton.h"   // the kit (M1.3)
 #include "../src/ui/widgets/DawControlLook.h"
 #include "../src/ui/widgets/DawCheckBox.h"
@@ -47,6 +48,7 @@
 // -DDAW_LV2=OFF build too.
 #include "../src/ui/EffectsWindow.h"    // the editor messages, MakeInsertDesc
 #include "../src/ui/MixerWindow.h"      // kMsgMixFx (open the effects editor)
+#include "../src/ui/TransportBar.h"     // TransportButton + ButtonRect (M3.1)
 #include "../src/dsp/SidechainKey.h"    // kExtKeySlot (the picker's appended slot)
 #ifdef DAW_HAVE_LV2
 #include "../src/plugin/Lv2Host.h"
@@ -63,6 +65,8 @@
 #include <MenuBar.h>
 #include <MenuItem.h>
 #include <Directory.h>
+#include <FindDirectory.h>   // find_path (the template directory, M3.7)
+#include <kernel/image.h>    // B_APP_IMAGE_SYMBOL
 #include <Entry.h>
 #include <File.h>
 #include <ListView.h>
@@ -290,6 +294,30 @@ static bool WindowUp(const char* title) {
             return true;
     }
     return false;
+}
+
+// The one VISIBLE window with this title (nullptr when there is none), and how
+// many there are -- "asking again activates the open one instead of stacking a
+// second" is checked with the count. Neither takes a lock: a modal prompt holds
+// the main window's looper, so a locking predicate would block instead of
+// failing.
+static BWindow* FindVisibleWindow(const char* title) {
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
+            return w;
+    }
+    return nullptr;
+}
+
+static int CountVisibleWindows(const char* title) {
+    int n = 0;
+    for (int32 i = 0; i < be_app->CountWindows(); i++) {
+        BWindow* w = be_app->WindowAt(i);
+        if (w && !w->IsHidden() && std::strcmp(WindowTitle(w), title) == 0)
+            n++;
+    }
+    return n;
 }
 
 // Is a window with this title still in the application's list AT ALL --
@@ -1402,9 +1430,21 @@ static void TestFileMenuFlows(MainWindow* win, Project& project,
     CHECK(VisibleWindows() == 1);
     CHECK(FileExists(savePath));
 
-    // New over the dirty project: the prompt, then Discard.
+    // New over the dirty project: the New Project dialog (M3.7) first, then
+    // the prompt for the unsaved changes, then Discard.
     CHECK(dirtyIt());
     win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return WindowUp("New Project"); }));
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        CHECK(np != nullptr);
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            chooser->SelectId("empty");
+            chooser->PostChosen();     // Create
+            np->Unlock();
+        }
+    }
     CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
     Shot("unsaved-changes-alert");
     CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
@@ -5472,6 +5512,591 @@ static void CheckViewColor(MainWindow* win, const char* parent, const char* name
                 expected.red, expected.green, expected.blue);
 }
 
+// --- 26. M3.1: the transport bar --------------------------------------------
+
+// Every button posts its own action, the big display cycles its format and
+// takes a typed position, and the readout line names the tempo, the meter, the
+// callback load and the xrun count. Every click goes to the BAR at the rect
+// the bar itself reports (`TransportButtonRect`), so a control that moved
+// cannot still pass through an offset a test remembered (docs/HANDOFF.md).
+static void TestTransportBar(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_transport_bar\n");
+
+    // Something to play: an empty project stops playback again immediately,
+    // which would read as "the Play button does nothing".
+    {
+        const char* wav = "/tmp/haiku_daw_ui_tbar.wav";
+        std::remove(wav);
+        WavWriter w;
+        const int16_t frames[4] = { 0, 0, 3000, -3000 };
+        CHECK(w.Open(wav, 48000, 2));
+        CHECK(w.WriteInt16(frames, 4));
+        CHECK(w.Close());
+        Track t;
+        t.id = project.NextTrackId();
+        t.type = TrackType::Audio;
+        t.name = "tbar-track";
+        Clip c;
+        c.id = project.NextClipId();
+        c.startFrame = 0;
+        c.lengthFrames = 48000 * 8;
+        c.sourcePath = wav;
+        t.clips.push_back(c);
+        CHECK(LockedAddTrack(win, project, t));
+    }
+
+    BView* bar = nullptr;
+    BView* timeView = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        bar = win->TransportBarView();
+        if (bar) timeView = bar->FindView("time");
+        win->Unlock();
+    }
+    CHECK(bar != nullptr);
+    CHECK(timeView != nullptr);
+    Shot("transport-bar");
+
+    auto lock = [&](const std::function<void()>& fn) {
+        if (win->LockWithTimeout(1000000) == B_OK) { fn(); win->Unlock(); }
+    };
+    // A click the way the harness posts them: "where" in the view's own
+    // coordinates AND "screen_where", which is what the window's dispatcher
+    // hit-tests to decide which view gets the event (a message with only
+    // "where" is delivered to nobody).
+    auto click = [&](int which, int32 clicks = 1) {
+        BRect r;
+        lock([&] { r = win->TransportButtonRect(which); });
+        const BPoint at((r.left + r.right) * 0.5f, (r.top + r.bottom) * 0.5f);
+        BPoint screen = at;
+        lock([&] { screen = bar->ConvertToScreen(at); });
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", clicks);
+            m.AddInt32("modifiers", 0);
+            m.AddPoint("where", at);
+            m.AddPoint("screen_where", screen);
+            BMessenger(bar).SendMessage(&m);
+        }
+    };
+    auto playing = [&] {
+        bool p = false;
+        lock([&] { p = win->IsPlaying(); });
+        return p;
+    };
+    auto loopOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.loopEnabled; });
+        return on;
+    };
+    auto punchOn = [&] {
+        bool on = false;
+        lock([&] { on = project.transport.punchEnabled; });
+        return on;
+    };
+    auto metronomeOn = [&] {
+        bool on = false;
+        lock([&] { on = win->MetronomeOn(); });
+        return on;
+    };
+    auto playhead = [&] {
+        Frame f = -1;
+        lock([&] { f = project.transport.playhead; });
+        return f;
+    };
+    auto setPlayhead = [&](Frame f) {
+        lock([&] {
+            project.transport.playhead = f;
+            if (TimelineView* tv = dynamic_cast<TimelineView*>(win->FindView("timeline")))
+                tv->SetPlayhead(f);
+        });
+    };
+
+    const int kRtz = (int)TransportButton::Rtz;
+    const int kRewind = (int)TransportButton::Rewind;
+    const int kForward = (int)TransportButton::Forward;
+    const int kPlay = (int)TransportButton::Play;
+    const int kStop = (int)TransportButton::Stop;
+    const int kLoop = (int)TransportButton::Loop;
+    const int kClick = (int)TransportButton::Click;
+    const int kPunch = (int)TransportButton::Punch;
+    const int kZoomIn = (int)TransportButton::ZoomIn;
+
+    // Play / Stop: the two the bar has always had, now through the same hit
+    // test as the rest.
+    CHECK(!playing());
+    click(kPlay);
+    CHECK(WaitFor([&] { return playing(); }));
+    Shot("transport-bar-playing");
+    click(kStop);
+    CHECK(WaitFor([&] { return !playing(); }));
+
+    // Loop, metronome and punch: each button flips the state it stands for,
+    // and flips it back (the state is the model's/the controller's, not the
+    // button's own copy).
+    CHECK(!loopOn());
+    click(kLoop);
+    CHECK(WaitFor([&] { return loopOn(); }));
+    click(kLoop);
+    CHECK(WaitFor([&] { return !loopOn(); }));
+    CHECK(!metronomeOn());
+    click(kClick);
+    CHECK(WaitFor([&] { return metronomeOn(); }));
+    click(kClick);
+    CHECK(WaitFor([&] { return !metronomeOn(); }));
+    CHECK(!punchOn());
+    click(kPunch);
+    CHECK(WaitFor([&] { return punchOn(); }));
+    click(kPunch);
+    CHECK(WaitFor([&] { return !punchOn(); }));
+
+    // Return to zero: back to frame 0 wherever the playhead was.
+    setPlayhead(48000);
+    CHECK(playhead() == 48000);
+    click(kRtz);
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // Rewind / fast-forward: one bar, on the tempo map's own boundaries. At
+    // 120 BPM 4/4 and 48 kHz a bar is 96000 frames, so bar 3 starts at
+    // 192000 and bar 4 at 288000.
+    setPlayhead(288000);                       // in bar 4
+    click(kRewind);
+    CHECK(WaitFor([&] { return playhead() == 192000; }));   // bar 3's downbeat
+    click(kForward);
+    CHECK(WaitFor([&] { return playhead() == 288000; }));   // bar 4's
+    setPlayhead(0);
+    click(kRewind);                            // already at the first bar
+    CHECK(WaitFor([&] { return playhead() == 0; }));
+
+    // The zoom pair still zooms (it moved; its action did not).
+    {
+        double before = 0.0, after = 0.0;
+        auto framesPerPixel = [&] {
+            double fpp = 0.0;
+            lock([&] {
+                if (TimelineView* tv =
+                        dynamic_cast<TimelineView*>(win->FindView("timeline"))) {
+                    const float x0 = tv->FrameToX(0);
+                    const float x1 = tv->FrameToX(48000);
+                    if (x1 > x0) fpp = 48000.0 / (double)(x1 - x0);
+                }
+            });
+            return fpp;
+        };
+        before = framesPerPixel();
+        click(kZoomIn);
+        CHECK(WaitFor([&] { after = framesPerPixel(); return after < before * 0.75; }));
+    }
+
+    // The big display: a click cycles the format, and what the bar shows is
+    // what the window says the current format is (one piece of state).
+    {
+        int mode = -1;
+        lock([&] { mode = win->TransportTimeMode(); });
+        BMessage m(B_MOUSE_DOWN);
+        m.AddInt32("buttons", 1);
+        m.AddInt32("clicks", 1);
+        m.AddPoint("where", BPoint(40, 20));   // inside the display's frame
+        BMessenger(timeView).SendMessage(&m);
+        CHECK(WaitFor([&] {
+            int now = -1;
+            lock([&] { now = win->TransportTimeMode(); });
+            return now != mode;
+        }));
+        // ... and the tag under it names that format.
+        std::string tag;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                tag = tv->TagText();
+        });
+        int now = -1;
+        lock([&] { now = win->TransportTimeMode(); });
+        CHECK(!tag.empty());
+        CHECK(tag == TimeModeTag((TimeMode)now));
+
+        // Cycle on to minutes:seconds, then type a position into the display
+        // and check the playhead MOVED there.
+        for (int guard = 0; guard < 5; guard++) {
+            int m2 = -1;
+            lock([&] { m2 = win->TransportTimeMode(); });
+            if (m2 == (int)TimeMode::MinSec) break;
+            BMessage c(B_MOUSE_DOWN);
+            c.AddInt32("buttons", 1);
+            c.AddInt32("clicks", 1);
+            c.AddPoint("where", BPoint(40, 20));
+            BMessenger(timeView).SendMessage(&c);
+            snooze(120000);
+        }
+        int modeNow = -1;
+        lock([&] { modeNow = win->TransportTimeMode(); });
+        CHECK(modeNow == (int)TimeMode::MinSec);
+
+        BMessage entry(kMsgTimeEntry);
+        entry.AddString("text", "1:30");
+        win->PostMessage(&entry);
+        CHECK(WaitFor([&] { return playhead() == (Frame)(90 * 48000); }));
+
+        // A position that cannot be read changes NOTHING and says so (a
+        // plausible-but-wrong seek would be worse than the refusal).
+        BMessage bad(kMsgTimeEntry);
+        bad.AddString("text", "banana");
+        win->PostMessage(&bad);
+        snooze(400000);
+        CHECK(playhead() == (Frame)(90 * 48000));
+        std::string status;
+        lock([&] {
+            if (auto* b = dynamic_cast<TransportBar*>(bar)) status = b->StatusText();
+        });
+        CHECK(status.find("Cannot read") != std::string::npos);
+    }
+
+    // The readout line: tempo, meter, the callback's load and the xruns.
+    {
+        std::string info;
+        lock([&] {
+            if (auto* tv = dynamic_cast<TransportTimeView*>(timeView))
+                info = tv->InfoText();
+        });
+        CHECK(info.find("BPM") != std::string::npos);
+        CHECK(info.find("DSP") != std::string::npos);
+        CHECK(info.find("XR") != std::string::npos);
+    }
+
+    // Leave the transport as the rest of the suite expects to find it.
+    setPlayhead(0);
+    CHECK(WaitQuiet());
+}
+
+// --- 26b. M4.4: a region job runs off the window thread ---------------------
+
+// Reverse a real clip through the same message the timeline's clip menu posts:
+// the decode happens on a worker thread with the progress bar up (the window
+// keeps answering meanwhile), a cancel leaves the project EXACTLY as it was,
+// and a completed run swaps the clip onto the rendered file.
+static void TestRegionJob(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_region_job\n");
+
+    // Long enough that the decode is a real piece of work: the cancel has to
+    // land while the worker is still running for the check to mean anything.
+    const char* srcPath = "/tmp/haiku_daw_ui_region_src.wav";
+    std::remove(srcPath);
+    {
+        WavWriter w;
+        CHECK(w.Open(srcPath, 48000, 2));
+        // 20 s in 1 s blocks, so a failed write is visible rather than silent.
+        std::vector<int16_t> block(48000 * 2);
+        for (size_t i = 0; i < block.size(); i++)
+            block[i] = (int16_t)((int)(i % 8000) - 4000);
+        bool all = true;
+        for (int s = 0; s < 20; s++) all = all && w.WriteInt16(block.data(), block.size());
+        CHECK(all);
+        CHECK(w.Close());
+    }
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "region-job";
+    Clip c;
+    c.id = project.NextClipId();
+    c.startFrame = 0;
+    c.lengthFrames = 48000 * 20;
+    c.sourcePath = srcPath;
+    t.clips.push_back(c);
+    CHECK(LockedAddTrack(win, project, t));
+
+    // The TRACK's clip, not the id the fixture made: the reverse op replaces
+    // the clip with a fresh one (a new id) pointing at the rendered file, which
+    // is exactly what the test is here to see.
+    auto clipPath = [&] {
+        std::string s;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id))
+                if (!p->clips.empty()) s = p->clips.front().sourcePath;
+            win->Unlock();
+        }
+        return s;
+    };
+    auto postReverse = [&] {
+        BMessage m(kMsgRegionReverse);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt64("clip", (int64)c.id);
+        win->PostMessage(&m);
+    };
+
+    // --- cancel: the bar goes up, and the project is untouched ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        const bool barUp = WaitFor([&] { return VisibleWindows() > before; },
+                                   10000000);
+        std::printf("  region job: the bar %s\n", barUp ? "came up" : "was missed");
+        // The window keeps answering while the worker decodes: this post has to
+        // be handled (the pulse runs, the looper is not blocked).
+        CHECK(barUp);
+        win->PostMessage(kMsgExportCancel);      // the bar's Cancel button
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 60000000));
+        // Nothing changed: same path, and no reversed file anywhere near it.
+        CHECK(clipPath() == srcPath);
+        CHECK(WaitQuiet());
+    }
+
+    // --- and to completion: the clip now points at the rendered file ---
+    {
+        const int32 before = VisibleWindows();
+        postReverse();
+        // The bar APPEARS first, then it closes when the job is done. Waiting
+        // for the close alone races: before the progress window is in the
+        // app's window list "no extra window" is already true, so the wait
+        // returns at once -- and a test that then deletes files would delete
+        // them under a worker that is still reading.
+        CHECK(WaitFor([&] { return VisibleWindows() > before; }, 10000000));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }, 120000000));
+        CHECK(WaitFor([&] { return clipPath() != srcPath; }, 10000000));
+        const std::string now = clipPath();
+        CHECK(!now.empty());
+        CHECK(now != srcPath);
+        CHECK(FileExists(now));
+        // Put the original clip back for whatever runs after this, and take the
+        // rendered file away -- never the source (a cleanup that fires on the
+        // wrong branch is how the first version of this test broke itself).
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (Track* p = project.FindTrack(t.id))
+                if (!p->clips.empty()) p->clips.front().sourcePath = srcPath;
+            win->Unlock();
+        }
+        if (!now.empty() && now != srcPath) std::remove(now.c_str());
+    }
+    std::remove(srcPath);
+    CHECK(WaitQuiet());
+}
+
+// --- 27. M3.4: the mixer strip's own edits ----------------------------------
+
+// The strip's new intents reach the model through the command stack and come
+// back in the strip's snapshot: the input trim, the polarity, the solo group
+// and a send's level. The window is driven by the exact messages the strip
+// posts (kMsgApplyMix / kMsgMixSend), which is also what the strip itself
+// sends — the drawing and the drags are looked at in the screenshot pass.
+static void TestMixerStripExtras(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_mixer_strip_extras\n");
+
+    // An audio track with a send into a bus, so there is something to trim and
+    // something to send to.
+    Track bus;
+    bus.id = project.NextTrackId();
+    bus.type = TrackType::Bus;
+    bus.name = "FX bus";
+    CHECK(LockedAddTrack(win, project, bus));
+    Track t;
+    t.id = project.NextTrackId();
+    t.type = TrackType::Audio;
+    t.name = "strip-track";
+    t.sends.push_back(Send{ bus.id, 1.0f, false });
+    CHECK(LockedAddTrack(win, project, t));
+
+    win->PostMessage(MSG_MIXER_TEST);
+    MixerStripsView* strips = nullptr;
+    BWindow* mixer = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || w == win) continue;
+            if (w->LockWithTimeout(500000) != B_OK) continue;
+            BView* v = w->FindView("strips");
+            if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+            w->Unlock();
+            if (strips) return true;
+        }
+        return false;
+    }));
+    CHECK(strips != nullptr);
+    if (strips == nullptr) return;
+
+    // Asking for the mixer while it is open pushes a fresh strip payload and
+    // raises the window. That payload now has ONE encoder; it used to have a
+    // second, hand-rolled copy whose field names did not match what the mixer
+    // decodes, so the strips came back nameless at unity gain on the second
+    // View > Mixer. The name and the gain are what such a copy loses first.
+    {
+        win->PostMessage(MSG_MIXER_TEST);
+        const bool kept = WaitFor([&] {
+            if (mixer->LockWithTimeout(1000000) != B_OK) return false;
+            bool found = false;
+            for (const MixerStripInfo& s : strips->Strips())
+                if (s.name == "strip-track" && s.gain > 0.9f && s.gain < 1.1f)
+                    found = true;
+            mixer->Unlock();
+            return found;
+        });
+        CHECK(kept);
+    }
+
+    auto trackOf = [&] {
+        Track out;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* p = project.FindTrack(t.id)) out = *p;
+            win->Unlock();
+        }
+        return out;
+    };
+
+    // --- input trim: through the strip's own message ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 0.5f; }));
+    }
+    // --- polarity ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().phaseInvert; }));
+    }
+    // --- the solo group, and the cascade it implies ---
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 0.5f);
+        m.AddBool("phase", true);
+        m.AddInt32("sgroup", 2);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().soloGroup == 2; }));
+
+        // Put the bus in the same group and solo the audio track: the bus has
+        // to come along (the group's whole point).
+        {
+            BMessage b(kMsgApplyMix);
+            b.AddInt64("track", (int64)bus.id);
+            b.AddFloat("gain", 1.0f);
+            b.AddFloat("pan", 0.0f);
+            b.AddBool("mute", false);
+            b.AddBool("solo", false);
+            b.AddFloat("trim", 1.0f);
+            b.AddBool("phase", false);
+            b.AddInt32("sgroup", 2);
+            win->PostMessage(&b);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && bt->soloGroup == 2;
+            win->Unlock();
+            return ok;
+        }));
+        {
+            BMessage s(kMsgApplyMix);
+            s.AddInt64("track", (int64)t.id);
+            s.AddFloat("gain", 1.0f);
+            s.AddFloat("pan", 0.0f);
+            s.AddBool("mute", false);
+            s.AddBool("solo", true);
+            s.AddFloat("trim", 0.5f);
+            s.AddBool("phase", true);
+            s.AddInt32("sgroup", 2);
+            win->PostMessage(&s);
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const Track* at = project.FindTrack(t.id);
+            const bool ok = bt && at && bt->soloed && at->soloed;
+            win->Unlock();
+            return ok;
+        }));
+        // Leave it unsoloed again for the tests after this one.
+        BMessage s2(kMsgApplyMix);
+        s2.AddInt64("track", (int64)t.id);
+        s2.AddFloat("gain", 1.0f);
+        s2.AddFloat("pan", 0.0f);
+        s2.AddBool("mute", false);
+        s2.AddBool("solo", false);
+        s2.AddFloat("trim", 0.5f);
+        s2.AddBool("phase", true);
+        s2.AddInt32("sgroup", 2);
+        win->PostMessage(&s2);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* bt = project.FindTrack(bus.id);
+            const bool ok = bt && !bt->soloed;
+            win->Unlock();
+            return ok;
+        }));
+    }
+    // --- a send's level: the knob's own message ---
+    {
+        BMessage m(kMsgMixSend);
+        m.AddInt64("track", (int64)t.id);
+        m.AddInt32("index", 0);
+        m.AddFloat("level", 0.25f);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] {
+            const Track tr = trackOf();
+            return tr.sends.size() == 1
+                && std::fabs(tr.sends[0].level - 0.25f) < 1e-4f;
+        }));
+    }
+
+    // ... and the strip's own snapshot carries all of it after a refresh.
+    win->PostMessage(kMsgUiRefresh);
+    CHECK(WaitFor([&] {
+        bool ok = false;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            for (const MixerStripInfo& s : strips->Strips())
+                if (s.trackId == t.id)
+                    ok = std::fabs(s.trim - 0.5f) < 1e-4f && s.phaseInvert
+                      && s.soloGroup == 2 && s.sends.size() == 1
+                      && std::fabs(s.sends[0].level - 0.25f) < 1e-4f;
+            mixer->Unlock();
+        }
+        return ok;
+    }));
+    Shot("mixer-strips");
+
+    // Back to the model's defaults for whatever runs next.
+    {
+        BMessage m(kMsgApplyMix);
+        m.AddInt64("track", (int64)t.id);
+        m.AddFloat("gain", 1.0f);
+        m.AddFloat("pan", 0.0f);
+        m.AddBool("mute", false);
+        m.AddBool("solo", false);
+        m.AddFloat("trim", 1.0f);
+        m.AddBool("phase", false);
+        m.AddInt32("sgroup", 0);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] { return trackOf().trim == 1.0f; }));
+    }
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
 // The dock hosts one page at a time, switched from the strip's segmented
 // control: the editor (the roll or its hint), the samples and the plugins. The
 // browsers are the SAME views their windows host, so what is checked here is
@@ -6205,8 +6830,12 @@ static void TestFxRetargetFlush(MainWindow* win, Project& project) {
     // A knob drag: press inside the first knob's cell and pull up. One panel
     // sits at kPanelPad with a title row and a header row above the knobs
     // (22 + 22 + 4); the first cell is 68 design px wide from +8. A generous
-    // point in the middle of it.
-    const BPoint from(50.0f, 100.0f), to(50.0f, 60.0f);
+    // point in the middle of it — THEMED, because the panel's own geometry is:
+    // the run's UI scale is the user preference the settings file carries (and
+    // the Preferences window can change it live), so a point in design pixels
+    // stops being the middle of that cell as soon as the scale is not 100%.
+    const BPoint from(Themed(50.0f), Themed(100.0f));
+    const BPoint to(Themed(50.0f), Themed(60.0f));
     BPoint fromScreen = from, toScreen = to;
     if (fw->LockWithTimeout(1000000) == B_OK) {
         fromScreen = view->ConvertToScreen(from);
@@ -6277,6 +6906,470 @@ static void TestFxRetargetFlush(MainWindow* win, Project& project) {
 // What the mode switch has to do that a unit test cannot see: leave the
 // system's own colours alone, install the mode's control look, and repaint the
 // windows that cached a colour.
+// M3.6: the Project Settings window. It opens from the File menu, it is single
+// instance, it shows the PROJECT's own values, and Apply turns what changed
+// into ONE undoable edit (one "Project Settings" step in the Edit menu, not
+// four). The model arithmetic behind it is host-tested; what this drives is the
+// wiring: window -> message -> CommandStack -> model -> window.
+static void TestProjectSettings(MainWindow* win, Project& project,
+                                CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("project settings ...\n");
+
+    win->PostMessage(MSG_PROJECT_SETTINGS);
+    CHECK(WaitFor([&] { return FindVisibleWindow("Project Settings") != nullptr; }));
+    Shot("project-settings");
+
+    // One window: asking again activates it.
+    win->PostMessage(MSG_PROJECT_SETTINGS);
+    snooze(400000);
+    CHECK(CountVisibleWindows("Project Settings") == 1);
+
+    // What the window shows is what the project IS (not its own defaults).
+    double beforeRate = 0.0, beforeTempo = 0.0;
+    std::string beforeNotes;
+    int beforeNum = 0, beforeDenom = 0;
+    {
+        // The project first, on the main window's lock -- and let it go before
+        // the dialog's lock is taken: locking one window inside the other's
+        // lock is how a suite wedges.
+        win->Lock();
+        beforeRate  = project.sampleRate;
+        beforeTempo = project.tempoBPM;
+        beforeNotes = project.notes;
+        beforeNum   = project.tempoMap.Meters().front().num;
+        beforeDenom = project.tempoMap.Meters().front().denom;
+        win->Unlock();
+    }
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            const ProjectSettingsView shown =
+                static_cast<ProjectSettingsWindow*>(ps)->Values();
+            CHECK(std::fabs(shown.sampleRate - beforeRate) < 0.5);
+            CHECK(std::fabs(shown.tempoBPM - beforeTempo) < 1e-6);
+            CHECK(shown.meterNum == beforeNum && shown.meterDenom == beforeDenom);
+            CHECK(shown.notes == beforeNotes);
+
+            // Change the tempo, the meter and the notes, and apply.
+            static_cast<ProjectSettingsWindow*>(ps)->TempoField()
+                ->SetText("128");
+            BMenu* mm = static_cast<ProjectSettingsWindow*>(ps)->MeterField()->Menu();
+            for (int32 i = 0; i < mm->CountItems(); i++)
+                if (mm->ItemAt(i) != nullptr)
+                    mm->ItemAt(i)->SetMarked(
+                        std::strcmp(mm->ItemAt(i)->Label(), "6/8") == 0);
+            static_cast<ProjectSettingsWindow*>(ps)->NotesView()
+                ->SetText("take 3 is the keeper");
+            static_cast<ProjectSettingsWindow*>(ps)->PostChanges();
+            ps->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = std::fabs(project.tempoBPM - 128.0) < 1e-6
+                     && project.tempoMap.Meters().front().num == 6
+                     && project.tempoMap.Meters().front().denom == 8
+                     && project.notes == "take 3 is the keeper";
+        win->Unlock();
+        return ok;
+    }));
+    // The project's own timeSig followed the map (they are one fact).
+    win->Lock();
+    CHECK(project.timeSig.numerator == 6 && project.timeSig.denominator == 8);
+    // ... and the three changes are ONE edit: the Edit menu's next undo is the
+    // whole thing (the macro), not one of its parts.
+    CHECK(stack.UndoName() == "Project Settings");
+    win->Unlock();
+    Shot("project-settings-applied");
+
+    // The window was told what was applied (a stale dialog is a bug).
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            const ProjectSettingsView shown =
+                static_cast<ProjectSettingsWindow*>(ps)->Values();
+            CHECK(std::fabs(shown.tempoBPM - 128.0) < 1e-6);
+            CHECK(shown.notes == "take 3 is the keeper");
+            ps->Unlock();
+        }
+    }
+
+    // One undo puts all three back: the macro is one step.
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool back = std::fabs(project.tempoBPM - beforeTempo) < 1e-6
+                       && project.notes == beforeNotes
+                       && project.tempoMap.Meters().front().num == beforeNum;
+        win->Unlock();
+        return back;
+    }));
+
+    // The sample rate: the same path, and the map's rate follows the project's
+    // (the whole-project rescale is host-tested; this is the wiring).
+    {
+        BWindow* ps = FindVisibleWindow("Project Settings");
+        if (ps != nullptr && ps->LockWithTimeout(1000000) == B_OK) {
+            ProjectSettingsWindow* pw = static_cast<ProjectSettingsWindow*>(ps);
+            BMenu* rm = pw->RateField()->Menu();
+            for (int32 i = 0; i < rm->CountItems(); i++)
+                if (rm->ItemAt(i) != nullptr
+                    && std::strstr(rm->ItemAt(i)->Label(), "96000") != nullptr)
+                    rm->ItemAt(i)->SetMarked(true);
+            pw->ResampleCheck()->SetValue(B_CONTROL_OFF);   // no file work here
+            pw->PostChanges();
+            ps->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = std::fabs(project.sampleRate - 96000.0) < 1e-9
+                     && std::fabs(project.tempoMap.sampleRate - 96000.0) < 1e-9;
+        win->Unlock();
+        return ok;
+    }));
+    // ... and its undo puts the project back exactly (a Project copy).
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool back = std::fabs(project.sampleRate - beforeRate) < 1e-9;
+        win->Unlock();
+        return back;
+    }));
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
+// M3.7: File > New offers the templates. The suite runs from a build tree, so
+// the app finds data/templates beside its own binary; the directory is named
+// explicitly here so the check does not depend on that copy having happened.
+static void TestNewProjectTemplates(MainWindow* win, Project& project,
+                                    CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("new project templates ...\n");
+
+    // The same lookup the app makes (the suite binary sits beside the app):
+    // point the environment at it so this test drives the code path a build
+    // tree uses, not the installed one.
+    char imageBuf[B_PATH_NAME_LENGTH];
+    std::string buildTemplates;
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_IMAGE_PATH, NULL, imageBuf,
+                  sizeof(imageBuf)) == B_OK) {
+        std::string image(imageBuf);
+        const size_t slash = image.find_last_of('/');
+        if (slash != std::string::npos)
+            buildTemplates = image.substr(0, slash) + "/data/templates";
+    }
+    if (!buildTemplates.empty())
+        setenv("DAW_TEMPLATES_DIR", buildTemplates.c_str(), 1);
+
+    win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
+    Shot("new-project");
+
+    // The rows the shipped templates produce (when the copy rule ran, which is
+    // what makes a build tree usable at all).
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            const std::vector<TemplateInfo>& rows =
+                static_cast<NewProjectWindow*>(np)->Templates();
+            bool hasEmpty = false, hasBand = false, hasProducer = false;
+            for (const TemplateInfo& t : rows) {
+                if (t.id == "empty")    hasEmpty = true;
+                if (t.id == "band")     hasBand = true;
+                if (t.id == "producer") hasProducer = true;
+            }
+            CHECK(hasEmpty);
+            CHECK(!rows.empty() && rows[0].id == "empty");
+            if (!buildTemplates.empty()) {
+                CHECK(hasBand);
+                CHECK(hasProducer);
+            }
+            // Asking again brings the open dialog forward instead of stacking.
+            np->Unlock();
+        }
+    }
+    win->PostMessage(MSG_NEW_PROJECT);
+    snooze(400000);
+    CHECK(CountVisibleWindows("New Project") == 1);
+
+    // Choose Band and create it: the session is replaced by the template's.
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            chooser->SelectId("band");
+            CHECK(chooser->SelectedId() == "band");
+            chooser->PostChosen();
+            np->Unlock();
+        }
+    }
+    // The demo session is dirty by now, so the prompt comes up first.
+    if (WaitFor([&] { return AlertUp("Unsaved Changes"); }, 3000000))
+        AnswerAlertWhenUp("Unsaved Changes", 1);       // Discard
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = project.Tracks().size() == 9 && !stack.IsDirty();
+        win->Unlock();
+        return ok;
+    }));
+    // The template's shape arrived: 8 audio tracks into a bus, named, at the
+    // default sample rate (the template's tracks, not its rate, is what it
+    // brings).
+    {
+        win->Lock();
+        int audio = 0, busy = 0;
+        bool named = true;
+        for (const Track& t : project.Tracks()) {
+            if (t.type == TrackType::Audio) audio++;
+            if (t.type == TrackType::Bus)   busy++;
+            if (t.name.empty()) named = false;
+        }
+        CHECK(audio == 8);
+        CHECK(busy == 1);
+        CHECK(named);
+        win->Unlock();
+    }
+    Shot("new-project-band");
+
+    // A missing template directory is a normal state, not a crash or a dead
+    // end: the dialog still opens, offering the built-in Empty.
+    setenv("DAW_TEMPLATES_DIR", "/tmp/haiku_daw_no_such_templates", 1);
+    win->PostMessage(MSG_NEW_PROJECT);
+    CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
+    {
+        BWindow* np = FindVisibleWindow("New Project");
+        if (np != nullptr && np->LockWithTimeout(1000000) == B_OK) {
+            NewProjectWindow* chooser = static_cast<NewProjectWindow*>(np);
+            // The env override points at nothing, but the build-tree copy is
+            // still a candidate, so at least Empty must be there and the
+            // dialog must be answerable.
+            CHECK(!chooser->Templates().empty());
+            CHECK(chooser->Templates()[0].id == "empty");
+            chooser->SelectId("empty");
+            chooser->PostChosen();       // and it answers: Create
+            np->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool empty = project.Tracks().empty();
+        win->Unlock();
+        return empty;
+    }));
+    unsetenv("DAW_TEMPLATES_DIR");
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
+// M3.5: the Preferences window. It opens from the File menu item, it is single
+// instance, it SHOWS the app's own values, and a change made in it reaches the
+// app, is pushed back to the window, and survives a reload of the settings
+// file. (The Audio menu's radio items and View's Dark Mode live here now; the
+// window is driven the way a user drives it, minus the menus that would block
+// in BPopUpMenu::Go.)
+static void TestPreferences(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("preferences window ...\n");
+
+    auto findPrefs = [&]() -> BWindow* {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Preferences") == 0)
+                return w;
+        }
+        return nullptr;
+    };
+    auto countPrefs = [&] {
+        int n = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strcmp(WindowTitle(w), "Preferences") == 0)
+                n++;
+        }
+        return n;
+    };
+    // What the window is showing, read under its lock.
+    auto shownValues = [&]() {
+        PrefsView v;
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            v = static_cast<PreferencesWindow*>(w)->Values();
+            w->Unlock();
+        }
+        return v;
+    };
+    // Drive one control the way a click does: set it, then take the window's
+    // own change path (both under the lock -- a view method runs on its
+    // window's thread).
+    auto edit = [&](const std::function<void(PreferencesWindow*)>& fn) {
+        BWindow* w = findPrefs();
+        if (w == nullptr || w->LockWithTimeout(1000000) != B_OK) return false;
+        fn(static_cast<PreferencesWindow*>(w));
+        static_cast<PreferencesWindow*>(w)->NotifyChanged();
+        w->Unlock();
+        return true;
+    };
+
+    // What the app had before the window is opened, so the test can put it
+    // back and leave the rest of the run (and the settings file) as it found
+    // them. The scale is kept BOTH ways: the live theme scale (what the screen
+    // is drawn at) and the stored preference the window shows (0 = "follow the
+    // system font", which is a value and not a scale).
+    const int beforeBuffer = (int)win->BufferFramesForTest();
+    const int beforeCountIn = (int)win->CountInBarsForTest();
+    const ThemeMode beforeMode = ActiveThemeMode();
+    const float beforeScaleLive = ThemeScale();
+    const float beforeScalePref = shownValues().uiScale;
+
+    // Mark the menu item whose label carries this number ("1024 frames",
+    // "125%", "4 bars", "Off" = 0). Restoring by VALUE, not by index, is what
+    // makes the test indifferent to the settings file it inherits: a run that
+    // crashed mid-way leaves one behind, and a hard-coded restore then makes a
+    // different change than the one it is undoing.
+    auto markValue = [](BMenu* m, int value) {
+        if (m == nullptr) return false;
+        for (int32 i = 0; i < m->CountItems(); i++) {
+            BMenuItem* it = m->ItemAt(i);
+            if (it == nullptr || it->Label() == nullptr) continue;
+            if (std::atoi(it->Label()) == value) {
+                it->SetMarked(true);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    win->PostMessage(MSG_PREFERENCES);
+    CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
+    Shot("preferences");
+
+    // It shows the app's values, not its own defaults.
+    {
+        const PrefsView v = shownValues();
+        CHECK(v.bufferFrames == beforeBuffer);
+        CHECK(v.countInBars == beforeCountIn);
+        CHECK(v.darkMode == (beforeMode == ThemeMode::Dark));
+    }
+    // ... and it SAYS what its two timing-sensitive rows promise (M3.5): the
+    // buffer at the next Play, the scale now. A row whose effect is not where
+    // the user looks for it is a row that appears not to work.
+    {
+        BWindow* w = findPrefs();
+        bool haveBufferHint = false, haveScaleHint = false;
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("bfh")))
+                haveBufferHint = BString(h->Text()).FindFirst("next Play") >= 0;
+            if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("ush")))
+                haveScaleHint = BString(h->Text()).FindFirst("Applied now") >= 0;
+            w->Unlock();
+        }
+        CHECK(haveBufferHint);
+        CHECK(haveScaleHint);
+    }
+
+    // One window: asking again activates this one (the mixer's rule).
+    win->PostMessage(MSG_PREFERENCES);
+    snooze(400000);
+    CHECK(countPrefs() == 1);
+
+    // Count-in: pick "4 bars" in the window's menu and take its change path.
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->CountInField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 3);      // kCountInChoices[3] = 4
+    }));
+    CHECK(WaitFor([&] { return win->CountInBarsForTest() == 4; }));
+
+    // Buffer size: what the row PROMISES is "applied at the next Play" — the
+    // device is not re-opened under a running transport — so BOTH halves are
+    // checked: the value the app now holds, and the engine that the next Play
+    // builds with it. (The check the row makes is honest only if the Play
+    // really uses it; a value nothing reads would pass a state check and still
+    // be a dead control.)
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->BufferField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 3);      // kBufferFrameChoices[3] = 1024
+    }));
+    CHECK(WaitFor([&] { return win->BufferFramesForTest() == 1024; }));
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->EngineBufferFramesForTest() == 1024; }));
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+
+    // The UI scale: applied NOW, process-wide (Theme.h), and the app's own
+    // record of it moves with it — a record that disagreed with the screen is
+    // how a 125% row ended up over a 100% layout.
+    CHECK(edit([](PreferencesWindow* w) {
+        BMenu* m = w->ScaleField()->Menu();
+        for (int32 i = 0; i < m->CountItems(); i++)
+            m->ItemAt(i)->SetMarked(i == 2);      // kUiScaleChoices[2] = 1.25
+    }));
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
+    CHECK(shownValues().uiScale == 1.25f);
+
+    // Dark mode: the control that moved out of the View menu still flips the
+    // whole look (TestThemeMode covers the mode switch itself).
+    CHECK(edit([&](PreferencesWindow* w) {
+        w->DarkCheck()->SetValue(ActiveThemeMode() == ThemeMode::Dark
+                                 ? B_CONTROL_OFF : B_CONTROL_ON);
+    }));
+    CHECK(WaitFor([&] { return ActiveThemeMode() != beforeMode; }));
+
+    // Everything the window did is in the settings file: reload it the way a
+    // restart would and read the values back out of the window. The SCALE is
+    // the interesting one here — a reload reads the preference and must apply
+    // it, or the app remembers 125% while drawing at 100%.
+    win->ReloadSettings();
+    win->PostMessage(MSG_PREFERENCES);
+    snooze(400000);
+    {
+        const PrefsView v = shownValues();
+        CHECK(v.countInBars == 4);        // the choices the window made came
+        CHECK(v.bufferFrames == 1024);    // back out of the settings file
+        CHECK(v.uiScale == 1.25f);
+    }
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
+
+    // Put the run's own state back, by value: the settings file is one of the
+    // files the next test run inherits, and a run that crashed before this
+    // point leaves the values it had reached.
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->BufferField()->Menu(), beforeBuffer);
+    }));
+    CHECK(WaitFor([&] { return win->BufferFramesForTest() == beforeBuffer; }));
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->CountInField()->Menu(), beforeCountIn);
+    }));
+    CHECK(WaitFor([&] { return win->CountInBarsForTest() == beforeCountIn; }));
+    CHECK(edit([&](PreferencesWindow* w) {
+        return markValue(w->ScaleField()->Menu(),
+                         (int)(beforeScalePref * 100.0f + 0.5f));
+    }));
+    CHECK(WaitFor([&] {
+        return std::fabs(ThemeScale()
+                         - (beforeScalePref > 0.0f ? beforeScalePref
+                                                   : beforeScaleLive)) < 1e-3f;
+    }));
+    if (ActiveThemeMode() != beforeMode) {
+        win->PostMessage(MSG_THEME_MODE);
+        CHECK(WaitFor([&] { return ActiveThemeMode() == beforeMode; }));
+    }
+
+    HideOtherWindows(win);   // the window is ours; put it away
+    CHECK(WaitQuiet());
+}
+
 static void TestThemeMode(MainWindow* win) {
     const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
 
@@ -6474,8 +7567,13 @@ static int32 TestThread(void*) {
     TestWidgetKit(win);
     TestDockedEditor(win, project, &stack);
     TestShortcutsWindow(win);
+    TestPreferences(win, project);   // M3.5: opens and puts itself away
+    TestProjectSettings(win, project, stack);   // M3.6: applies and undoes
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
+    TestTransportBar(win, project);
+    TestRegionJob(win, project);
+    TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
     TestSidechainPicker(win, project);
@@ -6483,8 +7581,10 @@ static int32 TestThread(void*) {
     TestPeakCache(win, project);
     TestSeamlessLoop(win, project);
     TestBigProjectPlayback(win, project);
-    // New leaves no path behind, so the unsaved-changes flow after it still
-    // exercises the save-panel branch.
+    // Both replace the session, so they run here: New leaves no path behind,
+    // so the unsaved-changes flow after it still exercises the save-panel
+    // branch.
+    TestNewProjectTemplates(win, project, stack);
     TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
     // The theme switch flips the whole process and puts it back; last, so no

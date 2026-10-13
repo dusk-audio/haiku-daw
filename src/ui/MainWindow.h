@@ -19,11 +19,16 @@
 #include "../midi/MidiRecorder.h"
 #include "../plugin/FxWatchTable.h"   // the open editors + what a chain edit means
 #include "ExportWindow.h"             // ExportChoices (the export dialog's fields)
+#include "PreferencesWindow.h"        // PrefsView (M3.5)
+#include "ProjectSettingsWindow.h"    // ProjectSettingsView (M3.6)
+#include "NewProjectWindow.h"         // TemplateInfo rows (M3.7)
 #include "ProjectDocument.h"          // the project's file, recovery, recent list
 #include "Theme.h"                    // ThemeAware + the tokens (T1)
 #include "RecordController.h"         // the record state + the recorder
 #include "RenderJobs.h"              // export/freeze/region rendering
 #include "TransportController.h"      // the engine + transport state
+
+#include "../model/TimeDisplay.h"      // the transport's time formats (M3.1)
 
 #include <Messenger.h>
 #include <Window.h>
@@ -107,6 +112,14 @@ constexpr uint32 MSG_DOCK_PAGE        = 'dkpg';
 // MainWindow -> itself, a moment after a file panel is shown: the panel builds
 // its views after Show() returns, so the themed colours go on a second time.
 constexpr uint32 MSG_THEME_STOCK      = 'thst';
+// --- M3.5, added here so this block stays the end of the file --------------
+// File > Preferences…: the Preferences window, single-instance. What the
+// window itself posts back (kMsgPrefsChanged and friends) is in
+// PreferencesWindow.h — this is only the id that opens it, and what the
+// functional tests post.
+constexpr uint32 MSG_PREFERENCES      = 'prfs';
+// File > Project Settings… (M3.6): sample rate, tempo, meter and notes.
+constexpr uint32 MSG_PROJECT_SETTINGS = 'prjs';
 
 class MainWindow : public BWindow, public ThemeAware {
 public:
@@ -224,10 +237,40 @@ public:
     }
     bool IsRecording() const { return fRecCtl.fRecMode; }
     bool MetronomeOn() const { return fTransportCtl.fMetronome; }
+    // The Preferences window's effect on the transport, for the functional
+    // test (both are private state the window's message changes; M3.5).
+    int BufferFramesForTest() const { return (int)fTransportCtl.fBufferFrames; }
+    int CountInBarsForTest()  const { return fRecCtl.fCountInBars; }
     // For the functional tests: re-run the settings load, which a restart would
     // do. The suite keeps ONE window for the whole run (closing it quits the
     // app), so the restore path is otherwise unreachable from a test.
-    void ReloadSettings() { LoadSettings(); }
+    //
+    // The hook takes the window lock ITSELF when the caller is not the window
+    // thread. LoadSettings walks views (the marker lane, the dock page, the
+    // master slider, the panes), and a BView call off the window's thread does
+    // not merely fail: Haiku asserts "Looper must be locked.", the debug_server
+    // stops the whole team, and the run wedges — which is exactly what M3.5's
+    // preferences test did to the suite (stack in `41-preferences-PR.md`'s
+    // follow-up record). A caller that already holds the lock still works: the
+    // load then runs inline, on the thread that owns it.
+    void ReloadSettings() {
+        if (find_thread(NULL) == Thread()) { LoadSettings(); return; }
+        if (Lock()) { LoadSettings(); Unlock(); }
+    }
+    // The engine's own buffer size, for the test that checks what the
+    // Preferences row PROMISES: a change applies at the next Play. 0 = no
+    // engine yet.
+    int EngineBufferFramesForTest() const {
+        return fTransportCtl.fEngine ? (int)fTransportCtl.fEngine->BufferFrames()
+                                     : 0;
+    }
+    // The transport bar's own state (M3.1), for the functional tests: which
+    // format the big display is showing, and the two text lines it draws.
+    int TransportTimeMode() const { return (int)fTimeMode; }
+    // The bar view itself, so a test clicks a control where the BAR says it is
+    // (TransportButtonRect) instead of computing an offset (docs/HANDOFF.md).
+    BView* TransportBarView() const;
+    BRect TransportButtonRect(int which) const;   // daw::TransportButton
 
 private:
     // Feed one live event to every armed track whose route accepts it.
@@ -253,8 +296,12 @@ private:
     void SaveFxPreset(TrackId tid, int fx, const char* name);
     bool SaveTo(const char* path);   // false = the file was not written
     void LoadFrom(const char* path, bool asRecovery = false);
-    // File > New: ask, then a fresh empty project at the session's rate.
-    void NewProject();
+    // File > New (M3.7): the New Project dialog (Empty or a template), then
+    // the unsaved-changes prompt, then the new session. `templatePath` empty
+    // means the built-in Empty.
+    void ShowNewProjectWindow();
+    void NewProjectFrom(const std::string& templateId,
+                        const std::string& templatePath);
     void RememberProject(const std::string& path);  // recent list + menu
     // After a load: one dialog for media that is gone, then either silence
     // (Skip) or a walk to find each file (Locate…), applied as one command.
@@ -285,18 +332,10 @@ private:
     void ExportMidi(const char* path);    // project MIDI tracks -> .mid
     void RebuildPeaks();             // rebuild waveform envelopes after load
 
-    // Clip region ops (decode-backed): normalize to unity peak (via clip gain),
-    // reverse (render a new file), strip silence (split into clips). Each finds
-    // the clip, does any file work, and issues the resulting command(s).
-    void RegionNormalize(TrackId track, ClipId clip);
-    void RegionReverse(TrackId track, ClipId clip);
-    void RegionStripSilence(TrackId track, ClipId clip);
-    void FreezeTrack(TrackId track, bool freeze);   // render-to-audio / restore
-    // Decode a clip's played region to interleaved-stereo float at the source
-    // rate. Returns frames decoded (0 on failure); sets outRate to the file rate.
-    int64_t DecodeClipRegion(const Clip& c, std::vector<float>& out,
-                             double& outRate) const;
-    // A unique path in the take/working dir for a rendered region/freeze file.
+    // (The clip region ops -- normalize, reverse, strip silence -- and Freeze
+    // are RenderJobs' worker jobs now; see src/ui/RenderJobs.h. Their bodies,
+    // including the isolated-track render, live in the kit-free
+    // src/model/RegionJobs.cpp.)
 
     Project*        fProject;        // non-owning (the session)
     CommandStack*   fStack;          // non-owning
@@ -315,7 +354,6 @@ private:
     BMenuItem*      fSelectAllItem = nullptr;
     BMenuItem*      fDupItem       = nullptr;
     BMenuItem*      fSilenceItem   = nullptr;   // Edit > Insert Silence (range)
-    BMenuItem*      fThemeItem     = nullptr;   // View > Dark Mode (T1)
     BMenuItem*      fMarkerLaneItem = nullptr;  // View > Marker Lane (M2.7)
     BMenuItem*      fDupTrackItem  = nullptr;   // Track > Duplicate Track (M2.6)
     BMenuItem*      fInspectorItem = nullptr;   // View > Inspector (I)
@@ -371,7 +409,6 @@ private:
     TimelineView*   fTimeline;
     InspectorView*  fInspector = nullptr;   // left track-inspector column
     class TransportBar* fTransport = nullptr;
-    BStringView*    fTimeView;
     BStringView*    fLoudView = nullptr;   // LUFS / true-peak readout
     BStringView*    fVolLbl = nullptr;     // labels + readouts the bar hides
     BStringView*    fBpmLbl = nullptr;     // when there is no room for them
@@ -448,12 +485,11 @@ private:
     BFilePanel*               fImportPanel = nullptr;
     BFilePanel*               fMidiImportPanel = nullptr;
     BFilePanel*               fMidiExportPanel = nullptr;
-    BMenuItem*                fMetItem = nullptr;   // metronome toggle
+    BMenuItem*                fMetItem = nullptr;   // Audio > Metronome toggle
     BMenuItem*                fDimItem = nullptr;   // monitor dim toggle
     BMenuItem*                fMonoItem = nullptr;  // monitor mono toggle
-    BMenu*                    fBufMenu = nullptr;   // buffer-size submenu (for marks)
-    BMenu*                    fCountInMenu = nullptr; // radio submenu (for marks)
-    BMenuItem*                fMonInItem = nullptr;   // input-monitor toggle
+    // (Buffer size, count-in and input monitoring left the Audio menu for the
+    // Preferences window in M3.5; the menu keeps the quick toggles.)
     BMenuItem*                fFollowItem = nullptr;  // follow/chase playhead toggle
     std::string               fLastDir;      // last Open/Save/Import directory
     ProjectDocument           fDoc;          // the file, recovery copy, recent list
@@ -469,6 +505,50 @@ private:
     ExportChoices             fExportChoices;    // the dialog's last settings
 
     void OpenExportWindow(bool stems);            // the options dialog
+
+    // --- the Preferences window (M3.5), grouped at the end ----------------
+    // Show and activate the one that exists, or make it — the same
+    // single-instance rule the mixer and the markers window follow.
+    void ShowPreferencesWindow();
+    void PushPrefsToWindow();      // the current state -> the open window
+    // The state the window shows, taken from where each field actually lives
+    // (the controllers for the transport's own, the members below for the rest).
+    PrefsView CurrentPrefs() const;
+    // One funnel for every way a preference arrives (the window's message and
+    // the Audio menu's ids): applies, tells the engine, and persists.
+    void ApplyPrefs(const PrefsView& values);
+    // The crash-recovery runner at the chosen interval; 0 = no runner at all.
+    void StartAutosave(int seconds);
+    // --- the Project Settings window (M3.6), the same shape ----------------
+    void ShowProjectSettingsWindow();
+    void PushProjectSettingsToWindow();
+    ProjectSettingsView CurrentProjectSettings() const;
+    // The differences between `values` and the project become ONE undoable
+    // command-stack edit ("Project Settings"), applied here.
+    void ApplyProjectSettings(const ProjectSettingsView& values);
+    BMessenger fProjSettingsMsgr;       // the open Project Settings window
+    BMessenger fPrefsMsgr;              // the open Preferences window
+    BMessenger fNewProjectMsgr;         // the open New Project dialog (M3.7)
+    // The preferences nothing else owns: the rate a NEW project starts at, the
+    // UI scale (0 = the user's font), the default project folder and the
+    // autosave interval. Loaded/saved with the rest of AppSettings.
+    int         fPrefsSampleRate    = 48000;
+    float       fPrefsUiScale       = 0.0f;
+    std::string fPrefsProjectDir;
+    int         fPrefsAutosaveSeconds = 30;
+    // ---- the transport bar's own state (M3.1) -----------------------------
+    // The time display's format is the WINDOW's: the display view cycles it by
+    // asking, and the window formats every position, so there is one copy of
+    // "which format are we showing" and one place that can format it.
+    TimeMode fTimeMode = TimeMode::Bbt;
+    void UpdateTransportReadouts();  // all three, for one state change
+    void UpdateTransportInfo();      // tempo/meter + DSP load + xruns (LCD)
+    void UpdateTransportButtons();   // playing/recording/loop/click/punch lamps
+    void UpdateTransportStatus();    // the state line, when the state changed
+    void SetTransportStatus(const char* text);   // one message, until it changes
+    void NudgePlayheadBar(int dir);  // rewind / fast-forward one bar
+    std::string fStatusState;        // the last state string shown
+    float       fDspPercent = 0.0f;  // the last measured callback peak load
 };
 
 } // namespace daw

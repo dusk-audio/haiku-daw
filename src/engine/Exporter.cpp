@@ -722,9 +722,17 @@ bool ExportWav(const Project& project, const std::string& outPath,
         // gain is position-independent, so it spans the whole padded buffer; an
         // automation lane maps buffer offset i -> timeline (i - inLat)/scale.
         const bool automated = t.gainAuto.Count() > 0 || t.panAuto.Count() > 0;
+        // The track's input trim and polarity (M3.4) ride on the same multiply
+        // the live engine folds them into: they scale this track's own
+        // material, and a bounce must land at the level the transport plays.
+        const float trimSign = (t.trim != 1.0f || t.phaseInvert)
+            ? t.trim * (t.phaseInvert ? -1.0f : 1.0f)
+            : 1.0f;
         if (!automated) {
             float gLR[2];
             EqualPowerGains(t.gain, t.pan, &gLR[0], &gLR[1]);
+            gLR[0] *= trimSign;
+            gLR[1] *= trimSign;
             for (int64_t i = 0; i < totalOutPadded; ++i) {
                 nb[i * 2 + 0] *= gLR[0];
                 nb[i * 2 + 1] *= gLR[1];
@@ -738,8 +746,8 @@ bool ExportWav(const Project& project, const std::string& outPath,
                 const float p = t.panAuto.ValueAt(pf, t.pan);
                 float gLR[2];
                 EqualPowerGains(g, p, &gLR[0], &gLR[1]);
-                nb[i * 2 + 0] *= gLR[0];
-                nb[i * 2 + 1] *= gLR[1];
+                nb[i * 2 + 0] *= gLR[0] * trimSign;
+                nb[i * 2 + 1] *= gLR[1] * trimSign;
             }
         }
 

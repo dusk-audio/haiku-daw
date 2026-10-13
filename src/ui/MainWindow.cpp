@@ -42,6 +42,7 @@
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
 #include "../model/RegionOps.h"
+#include "../model/ProjectTimebase.h"   // ScaleProjectTimebase (a template's rate)
 #include "../model/SmfIO.h"
 #include "../model/MidiOps.h"
 #include "../model/RecordPlan.h"
@@ -58,6 +59,7 @@
 #include <Button.h>
 #include <File.h>
 #include <FindDirectory.h>
+#include <kernel/image.h>   // B_APP_IMAGE_SYMBOL (the template lookup, M3.7)
 #include <Entry.h>
 #include <Directory.h>   // create_directory (stems folder)
 #include <FilePanel.h>
@@ -217,7 +219,21 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         // LV2 URI through the host -- which the mixer's own looper must not do.
         for (const EffectDesc& d : t.fx)
             s.fx.push_back(MixerInsertInfo{ EffectDisplayName(d), d.bypassed });
-        s.sendCount = (int)t.sends.size();
+        // The strip extras (M3.4): the trim, the polarity, the solo group and
+        // one entry per aux send — the destination's NAME, resolved here on
+        // the main thread, never an id the mixer would have to look up.
+        s.trim        = t.trim;
+        s.phaseInvert = t.phaseInvert;
+        s.soloGroup   = t.soloGroup;
+        for (const Send& send : t.sends) {
+            MixerSendInfo si;
+            si.level = send.level;
+            if (const Track* dest = p.FindTrack(send.dest))
+                si.label = dest->name.substr(0, 4);
+            else
+                si.label = "?";
+            s.sends.push_back(std::move(si));
+        }
         s.hasInput = t.input.kind != InputSource::kNone;
         if (t.output == kInvalidTrackId) s.outLabel = "Mst";
         else if (const Track* bt = p.FindTrack(t.output))
@@ -226,6 +242,43 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         strips.push_back(std::move(s));
     }
     return strips;
+}
+
+// The ONE encoder for kMsgMixStrips. The mixer's decoder reads its own field
+// names ("g", "mu", "sn", ...) and this message is sent from two places: the
+// refresh funnel, and View > Mixer asking an already-open mixer to update.
+// Those two encodings drifted -- the View path still wrote "gain"/"mute"/"arm"
+// and never wrote a name, a send count or an output label -- so opening the
+// mixer a second time replaced its strips with default ones. Both go through
+// here now, and anything added to MixerStripInfo is added once.
+static void AddMixerStripsPayload(BMessage& m, const Project& p) {
+    for (const MixerStripInfo& s : BuildMixerStrips(p)) {
+        m.AddInt64("tid", (int64)s.trackId);
+        m.AddString("nm", s.name.c_str());
+        m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
+        m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
+        m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
+        m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
+        // Count first, then this strip's inserts appended to the one flat run
+        // the mixer slices back apart in strip order.
+        m.AddInt32("fx", (int32)s.fx.size());
+        for (const MixerInsertInfo& ins : s.fx) {
+            m.AddString("fxn", ins.name.c_str());
+            m.AddBool("fxb", ins.bypassed);
+        }
+        m.AddInt32("sn", (int32)s.sends.size());
+        // The send labels/levels travel the same way the inserts do: one flat
+        // run across all strips, sliced by "sn".
+        for (const MixerSendInfo& si : s.sends) {
+            m.AddString("sdn", si.label.c_str());
+            m.AddFloat("slv", si.level);
+        }
+        m.AddFloat("tr", s.trim);
+        m.AddBool("ph", s.phaseInvert);
+        m.AddInt32("sg", s.soloGroup);
+        m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
+    }
+    m.AddFloat("mg", p.masterGain);
 }
 
 // Decode a posted note list (PianoRoll -> here). kMsgApplyNotes and
@@ -340,6 +393,14 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     fileMenu->AddItem(new ThemedMenuItem("Export Stems" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_STEMS)));
     fileMenu->AddItem(new ThemedMenuItem("Export MIDI" B_UTF8_ELLIPSIS, new BMessage(MSG_EXPORT_MIDI)));
     fileMenu->AddSeparatorItem();
+    // Project Settings… (M3.6): the project's own rate, tempo, meter and notes.
+    fileMenu->AddItem(new ThemedMenuItem("Project Settings" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_PROJECT_SETTINGS)));
+    // Preferences… (M3.5): the window that now carries what used to be the
+    // Audio menu's radio submenus and View's Dark Mode toggle.
+    fileMenu->AddItem(new ThemedMenuItem("Preferences" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_PREFERENCES)));
+    fileMenu->AddSeparatorItem();
     // Close is the window's own quit request, so the unsaved-changes prompt
     // applies exactly as it does to the title-bar button and Cmd-Q.
     fileMenu->AddItem(new ThemedMenuItem("Close", new BMessage(MSG_CLOSE), 'W'));
@@ -405,8 +466,6 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // like the mixer.
     viewMenu->AddItem(new ThemedMenuItem("Markers", new BMessage(MSG_MARKERS),
                                          'M'));
-    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
-    viewMenu->AddItem(fMetItem);
     viewMenu->AddItem(new ThemedMenuItem("Master Effects" B_UTF8_ELLIPSIS,
                                     new BMessage(MSG_MASTER_FX)));
     viewMenu->AddSeparatorItem();
@@ -421,13 +480,9 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     viewMenu->AddItem(fInspectorItem);
     fDockItem = new ThemedMenuItem("Editor & Browsers", new BMessage(MSG_TOGGLE_DOCK), 'J');
     viewMenu->AddItem(fDockItem);
-    viewMenu->AddSeparatorItem();
-    // The look (T1): the user's own colours and the stock Haiku controls, or
-    // the DAW's dark palette in the DAW's own windows. It moves into the
-    // Preferences window when M3.5 builds one.
-    fThemeItem = new ThemedMenuItem("Dark Mode", new BMessage(MSG_THEME_MODE));
-    fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
-    viewMenu->AddItem(fThemeItem);
+    // (Dark Mode moved into the Preferences window (M3.5), which is where the
+    // theme package promised it would land; MSG_THEME_MODE is unchanged and
+    // the window posts it.)
     viewMenu->AddSeparatorItem();
     viewMenu->AddItem(new ThemedMenuItem("Zoom to Fit", new BMessage(MSG_ZOOMFIT), 'F'));
     fFollowItem = new ThemedMenuItem("Follow Playhead", new BMessage(MSG_FOLLOW));
@@ -443,66 +498,45 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                     new BMessage(MSG_BROWSER)));
     menuBar->AddItem(new ThemedMenuItem(viewMenu));
 
-    // Audio > Buffer Size (latency vs xrun; applies on the next Play).
+    // Audio: the quick toggles only (M3.5). Buffer size, count-in and input
+    // monitoring are preferences now and live in the Preferences window; what
+    // is left here is what a user flips while working, and the metronome is
+    // the one that belongs to audio.
     BMenu* audioMenu = new BMenu("Audio");
-    fBufMenu = new BMenu("Buffer Size");
-    fBufMenu->SetRadioMode(true);
-    const int bufOpts[] = { 128, 256, 512, 1024, 2048 };
-    for (int n : bufOpts) {
-        char lbl[32];
-        std::snprintf(lbl, sizeof(lbl), "%d frames (~%.1f ms)", n,
-                      1000.0 * n / fProject->sampleRate);
-        BMessage* m = new BMessage(MSG_BUFFER);
-        m->AddInt32("frames", n);
-        BMenuItem* it = new ThemedMenuItem(lbl, m);
-        if ((size_t)n == fTransportCtl.fBufferFrames) it->SetMarked(true);
-        fBufMenu->AddItem(it);
-    }
-    audioMenu->AddItem(new ThemedMenuItem(fBufMenu));
-    audioMenu->AddSeparatorItem();
-    // Count-in: metronome bars before capture begins.
-    fCountInMenu = new BMenu("Count-in");
-    fCountInMenu->SetRadioMode(true);
-    const int ciOpts[] = { 0, 1, 2 };
-    for (int n : ciOpts) {
-        char lbl[24];
-        if (n == 0) std::snprintf(lbl, sizeof(lbl), "Off");
-        else        std::snprintf(lbl, sizeof(lbl), "%d bar%s", n, n > 1 ? "s" : "");
-        BMessage* m = new BMessage(MSG_COUNTIN);
-        m->AddInt32("bars", n);
-        BMenuItem* it = new ThemedMenuItem(lbl, m);
-        if (n == fRecCtl.fCountInBars) it->SetMarked(true);
-        fCountInMenu->AddItem(it);
-    }
-    audioMenu->AddItem(new ThemedMenuItem(fCountInMenu));
-    fMonInItem = new ThemedMenuItem("Monitor Input", new BMessage(MSG_MONITOR_IN));
-    audioMenu->AddItem(fMonInItem);
+    fMetItem = new ThemedMenuItem("Metronome", new BMessage(MSG_METRONOME));
+    fMetItem->SetMarked(fTransportCtl.fMetronome);
+    audioMenu->AddItem(fMetItem);
     menuBar->AddItem(new ThemedMenuItem(audioMenu));
 
-    // --- Transport bar (below the menu) ---
+    // --- Transport bar (below the menu, M3.1) ---
+    // The bar draws its own buttons, the LCD well and the status line; the
+    // widgets below are its children, placed by LayoutTransportBar (their
+    // design offsets here are only the starting geometry).
     BRect barRect(0, 0, bounds.right, Themed(kTransportH));
-    fTransport = new TransportBar(barRect, BMessenger(this),
-                                  MSG_PLAY, MSG_STOP, MSG_REC,
-                                  MSG_ZOOM_OUT, MSG_ZOOM_IN);
+    TransportActions actions;
+    actions.play    = MSG_PLAY;
+    actions.stop    = MSG_STOP;
+    actions.rec     = MSG_REC;
+    actions.zoomOut = MSG_ZOOM_OUT;
+    actions.zoomIn  = MSG_ZOOM_IN;
+    actions.rtz     = kMsgTransportRtz;
+    actions.rewind  = kMsgTransportRewind;
+    actions.forward = kMsgTransportForward;
+    actions.loop    = kMsgTransportLoop;
+    actions.click   = kMsgClickToggle;   // the same action the C key posts
+    actions.punch   = kMsgTransportPunch;
+    fTransport = new TransportBar(barRect, BMessenger(this), actions);
     BView* bar = fTransport;
 
-    BFont lcdFont(be_bold_font);
-    lcdFont.SetSize(Themed(15.0f));
-    fTimeView = new BStringView(BRect(Themed(218), Themed(6), Themed(354),
-                                        Themed(kTransportH) - Themed(5)),
-                                "time", "1.1   0:00.000");
-    fTimeView->SetFont(&lcdFont);
-    fTimeView->SetAlignment(B_ALIGN_CENTER);
-    bar->AddChild(fTimeView);
-    // (Zoom -/+ buttons are drawn by the TransportBar at x366..420.)
-
-    // "Vol" label + master volume slider (0..150% -> gain 0..1.5).
-    fVolLbl = new BStringView(BRect(Themed(430), Themed(8), Themed(460),
-                                    Themed(kTransportH) - Themed(6)),
+    // "Vol" label + master volume slider (0..150% -> gain 0..1.5). Row B --
+    // the row under the buttons -- so the transport row keeps its width for
+    // the LCD and the tempo field.
+    fVolLbl = new BStringView(BRect(Themed(602), Themed(35), Themed(632),
+                                    barRect.bottom - Themed(4)),
                               "vollbl", "Vol");
     bar->AddChild(fVolLbl);
-    fMaster = new BSlider(BRect(Themed(462), Themed(4), Themed(588),
-                                Themed(kTransportH) - Themed(4)),
+    fMaster = new BSlider(BRect(Themed(634), Themed(33), Themed(760),
+                                barRect.bottom - Themed(3)),
                           "master", NULL, new BMessage(MSG_MASTER),
                           0, 150, B_HORIZONTAL);
     fMaster->SetModificationMessage(new BMessage(MSG_MASTER));
@@ -510,38 +544,40 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     bar->AddChild(fMaster);
 
     // "BPM" label + tempo field (affects grid/snap + metronome on the next
-    // Play).
-    fBpmLbl = new BStringView(BRect(Themed(602), Themed(8), Themed(636),
-                                    Themed(kTransportH) - Themed(6)),
+    // Play). Row A, right of the LCD.
+    fBpmLbl = new BStringView(BRect(Themed(602), Themed(10), Themed(636),
+                                    Themed(30)),
                                           "bpmlbl", "BPM");
     bar->AddChild(fBpmLbl);
     char bpm[16];
     std::snprintf(bpm, sizeof(bpm), "%.0f", fProject->tempoBPM);
     // A kit text field, so the well behind the digits is the theme's rather
     // than a stock white box in the dark look (T1).
-    fTempo = new DawTextField(BRect(Themed(638), Themed(6), Themed(704),
-                                    Themed(kTransportH) - Themed(6)),
+    fTempo = new DawTextField(BRect(Themed(638), Themed(9), Themed(704),
+                                    Themed(29)),
                               "tempo", NULL, bpm, new BMessage(MSG_TEMPO));
     fTempo->SetDivider(0.0f);
     bar->AddChild(fTempo);
 
-    // Loudness readout (momentary / short-term LUFS + true peak dBTP).
-    fLoudView = new BStringView(BRect(Themed(722), Themed(8), Themed(858),
-                                      Themed(kTransportH) - Themed(6)),
+    // Loudness readout (momentary / short-term LUFS + true peak dBTP), in the
+    // transport row left of the tempo field.
+    fLoudView = new BStringView(BRect(Themed(722), Themed(10), Themed(858),
+                                      Themed(28)),
                                 "loud", "M --  S --  TP --");
     {
         // A size down from the bar's labels: the readout has to hold three
-        // signed figures in the room between the tempo field and the meter.
+        // signed figures in the room between the LCD and the tempo field.
         BFont small(be_plain_font);
         small.SetSize(Themed(10.5f));
         fLoudView->SetFont(&small);
     }
     bar->AddChild(fLoudView);
 
-    // Master output meter, pinned to the right of the transport bar.
-    fMeter = new MeterView(BRect(bounds.right - Themed(130), Themed(5),
+    // Master output meter, pinned to the right of the transport bar; it spans
+    // both rows, so it reads like the console's master meter.
+    fMeter = new MeterView(BRect(bounds.right - Themed(130), Themed(4),
                                  bounds.right - Themed(6),
-                                 Themed(kTransportH) - Themed(5)));
+                                 Themed(kTransportH) - Themed(4)));
     bar->AddChild(fMeter);
 
     // --- The panes (M1.4) ---
@@ -652,13 +688,19 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // A restored window frame resizes the bar before the user touches anything,
     // so the layout has to be applied once here as well as on every resize.
     LayoutTransportBar();
+    // The bar's readouts start on the real state, not on a placeholder: the
+    // position in the current format, the tempo/meter line, and the lamps.
+    UpdateTimeReadout(fProject->transport.playhead);
+    UpdateTransportReadouts();
     // Below this the bar has nothing left to hide: the transport controls, the
     // time readout and the meter need the room, and a window that clipped them
     // would be showing a fault rather than a small window.
     SetSizeLimits(620.0f, 32767.0f, 300.0f, 32767.0f);
-    // Autosave for crash recovery; check for a leftover once the looper runs.
-    fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
-                                   30LL * 1000 * 1000);   // every 30 s
+    // Autosave for crash recovery at the preference's interval (M3.5; 30 s
+    // unless the user chose otherwise, and off when they chose 0). LoadSettings
+    // above has already put the interval in place; check for a leftover once
+    // the looper runs.
+    StartAutosave(fPrefsAutosaveSeconds);
     fTitlePoll = new BMessageRunner(BMessenger(this), new BMessage(MSG_TITLE),
                                     500LL * 1000);        // 2 Hz dirty marker
     UpdateTitle();
@@ -669,14 +711,12 @@ MainWindow::~MainWindow() {
     // The peak loader only touches files and its own list, but it must not
     // outlive the window that drains it (M4.4).
     fPeakLoader.Stop();
-    // The export worker renders a snapshot taken on this thread, so it has to
-    // stop before anything it touches goes away. The cancel flag is polled
-    // between blocks, so this waits at most one block (and none at all when
-    // nothing is running).
-    if (fRender.fExportThread.joinable()) {
-        fRender.fExportCancel.store(true);
-        fRender.fExportThread.join();
-    }
+    // The export AND region workers render a snapshot taken on this thread,
+    // so both have to stop before anything they touch goes away. The cancel
+    // flags are polled between blocks, so this waits at most one block (and
+    // none at all when nothing is running); a joinable thread left behind
+    // would terminate the process at destruction.
+    fRender.Stop();
     delete fPulse;
     delete fAutosave;
     delete fTitlePoll;
@@ -730,16 +770,21 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
 
 void MainWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
-        case MSG_PLAY:  fTransportCtl.StartPlayback(); break;
+        case MSG_PLAY:
+            fTransportCtl.StartPlayback();
+            UpdateTransportReadouts();   // the Play lamp + the status line
+            break;
         case MSG_STOP:
             fTransportCtl.StopPlayback();
             fRecCtl.StopRecording();
+            UpdateTransportReadouts();
             break;
         case MSG_REC:
         case kMsgTransportRecord:   // the R key (M3.2), same as the Rec button
             // Toggle: Rec starts, Rec again (or Stop) finishes the take.
             if (fRecCtl.fRecMode) fRecCtl.StopRecording();
             else          fRecCtl.StartRecording();
+            UpdateTransportReadouts();
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
             fRecCtl.UpdateMidiMonitor();
@@ -755,24 +800,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fTimeline)  fTimeline->Invalidate();
             if (fMixerMsgr.IsValid()) {   // refresh an open mixer's strip state
                 BMessage m(kMsgMixStrips);
-                for (const MixerStripInfo& s : BuildMixerStrips(*fProject)) {
-                    m.AddInt64("tid", (int64)s.trackId);
-                    m.AddString("nm", s.name.c_str());
-                    m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
-                    m.AddBool("mu", s.muted); m.AddBool("so", s.soloed);
-                    m.AddBool("ar", s.armed); m.AddBool("mo", s.inputMonitor);
-                    m.AddInt32("ci", s.colorIndex); m.AddInt32("ty", s.type);
-                    // Count first, then this strip's inserts appended to the one
-                    // flat run the mixer slices back apart in strip order.
-                    m.AddInt32("fx", (int32)s.fx.size());
-                    for (const MixerInsertInfo& ins : s.fx) {
-                        m.AddString("fxn", ins.name.c_str());
-                        m.AddBool("fxb", ins.bypassed);
-                    }
-                    m.AddInt32("sn", s.sendCount);
-                    m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
-                }
-                m.AddFloat("mg", fProject->masterGain);
+                AddMixerStripsPayload(m, *fProject);
                 fMixerMsgr.SendMessage(&m);
             }
             // ... and an open markers window, whose list is model data too. A
@@ -794,6 +822,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgTransportRange: {   // M4.2: the loop range changed under a roll
             const Frame ph = fProject->transport.playhead;
             UpdateTimeReadout(ph);
+            UpdateTransportReadouts();   // the Loop lamp follows the model
             if (fTransportCtl.fPlaying)        // restart from the new position
                 fTransportCtl.StartPlayback();
             break;
@@ -810,34 +839,79 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fMonoItem) fMonoItem->SetMarked(fTransportCtl.fMonMono);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMonitorMono(fTransportCtl.fMonMono);
             break;
+        // Count-in and input monitoring are preferences now (M3.5) and the
+        // Preferences window is where they are chosen; these ids are kept and
+        // land on the same funnel, so anything that still posts them (a test,
+        // a future key) behaves exactly like the window.
         case MSG_COUNTIN: {
             int32 bars = 0;
             msg->FindInt32("bars", &bars);
-            fRecCtl.fCountInBars = bars;
-            if (fCountInMenu)
-                for (int32 i = 0; i < fCountInMenu->CountItems(); i++)
-                    if (BMenuItem* it = fCountInMenu->ItemAt(i))
-                        it->SetMarked(it->Message()
-                            && it->Message()->FindInt32("bars") == bars);
+            PrefsView v = CurrentPrefs();
+            v.countInBars = bars;
+            ApplyPrefs(v);
             break;
         }
-        case MSG_MONITOR_IN:
-            fTransportCtl.fMonitorInput = !fTransportCtl.fMonitorInput;
-            if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
-            if (fTimeline)  fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);  // lane "I" lamp
-            // Live toggle while a take is running.
-            if (fRecCtl.fRecorder) fRecCtl.fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
-            if (fTransportCtl.fEngine)   fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
+        case MSG_MONITOR_IN: {
+            PrefsView v = CurrentPrefs();
+            v.monitorInput = !v.monitorInput;
+            ApplyPrefs(v);
             break;
+        }
         case MSG_METRONOME:
-        case kMsgClickToggle:   // the C key (M3.2), same as the menu item
+        case kMsgClickToggle:   // the C key (M3.2) and the bar's Click button
             fTransportCtl.fMetronome = !fTransportCtl.fMetronome;
             if (fMetItem) fMetItem->SetMarked(fTransportCtl.fMetronome);
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMetronome(fTransportCtl.fMetronome);
+            UpdateTransportReadouts();
             break;
         case kMsgTransportLayout:   // the bar's width changed (see TransportBar)
             LayoutTransportBar();
             break;
+        // --- the transport bar's own controls (M3.1) ------------------------
+        // Return to zero, rewind and fast-forward run exactly what the
+        // keyboard map runs (TimelineView owns the playhead math); loop toggles
+        // through the timeline's own ToggleLoop, which owns the "adopt the
+        // last range / the markers" rule.
+        case kMsgTransportRtz:
+            if (fTimeline) fTimeline->ReturnToZero();
+            break;
+        case kMsgTransportRewind:  NudgePlayheadBar(-1); break;
+        case kMsgTransportForward: NudgePlayheadBar(+1); break;
+        case kMsgTransportLoop:
+            if (fTimeline) fTimeline->ToggleLoop();   // posts kMsgTransportRange
+            UpdateTransportReadouts();
+            break;
+        case kMsgTransportPunch:
+            fProject->transport.punchEnabled = !fProject->transport.punchEnabled;
+            UpdateTransportReadouts();
+            break;
+        case kMsgTimeCycle:   // the big display was clicked: next format
+            fTimeMode = NextTimeMode(fTimeMode);
+            UpdateTimeReadout(fProject->transport.playhead);
+            break;
+        case kMsgTimeEntry: {
+            // What was typed in the display, in the format it was typed in
+            // (M3.1). A position that cannot be read changes nothing and says
+            // so in the status line: a plausible-but-wrong seek is worse than
+            // a refusal.
+            const char* text = nullptr;
+            if (msg->FindString("text", &text) != B_OK || text == nullptr) break;
+            fProject->tempoMap.sampleRate = fProject->sampleRate;
+            const double rate = fTransportCtl.fEngine
+                              ? fTransportCtl.fEngine->OutputRate()
+                              : fProject->sampleRate;
+            Frame where = 0;
+            if (ParseTimePosition(fTimeMode, text, rate, fProject->tempoMap, &where)) {
+                if (fTimeline) fTimeline->SeekTo(where);
+                SetTransportStatus("Position set");
+            } else {
+                char buf[96];
+                std::snprintf(buf, sizeof(buf), "Cannot read '%s' as %s (%s)",
+                              text, TimeModeTag(fTimeMode), TimeModeHint(fTimeMode));
+                SetTransportStatus(buf);
+            }
+            break;
+        }
         case kMsgMeterClipReset:
             // The master meter was clicked. Clear the latched flags where they
             // live (the engine, or the recorder during a take); the fetch_and
@@ -890,10 +964,59 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
 
         case MSG_THEME_MODE:
-            // View > Dark Mode: a preference, applied live and saved.
+            // Toggle the look. It was the View menu's Dark Mode item; that
+            // item moved into the Preferences window (M3.5), which posts its
+            // whole state as kMsgPrefsChanged instead (ApplyPrefs sets the
+            // mode from the "dark" field). This id is kept for the functional
+            // test, which is what drives the switch now.
             SetThemeMode(ActiveThemeMode() == ThemeMode::Dark ? ThemeMode::System
                                                               : ThemeMode::Dark);
             break;
+
+        case MSG_PROJECT_SETTINGS:      // File > Project Settings… (M3.6)
+            ShowProjectSettingsWindow();
+            break;
+        case kMsgProjSettingsChanged: {
+            // Apply was pressed: the differences are one edit (see
+            // ApplyProjectSettings).
+            ProjectSettingsView v = CurrentProjectSettings();
+            double d = 0.0;
+            int32 i = 0;
+            bool b = false;
+            const char* s = nullptr;
+            if (msg->FindDouble("rate", &d) == B_OK)  v.sampleRate = d;
+            if (msg->FindDouble("tempo", &d) == B_OK) v.tempoBPM = d;
+            if (msg->FindInt32("mnum", &i) == B_OK)   v.meterNum = i;
+            if (msg->FindInt32("mdenom", &i) == B_OK) v.meterDenom = i;
+            if (msg->FindString("notes", &s) == B_OK && s) v.notes = s;
+            if (msg->FindBool("resample", &b) == B_OK) v.resampleMedia = b;
+            ApplyProjectSettings(v);
+            break;
+        }
+        case MSG_PREFERENCES:
+            ShowPreferencesWindow();
+            break;
+        case kMsgPrefsChanged: {
+            // One message carries the whole set; missing fields keep what the
+            // window last showed (a partial push cannot blank a preference).
+            PrefsView v = CurrentPrefs();
+            int32 i = 0;
+            float f = 0.0f;
+            bool b = false;
+            const char* s = nullptr;
+            if (msg->FindInt32("buffer", &i)  == B_OK) v.bufferFrames = i;
+            if (msg->FindInt32("defrate", &i) == B_OK) v.defaultSampleRate = i;
+            if (msg->FindInt32("countin", &i) == B_OK) v.countInBars = i;
+            if (msg->FindInt32("metsnd", &i)  == B_OK) v.metronomeSound = i;
+            if (msg->FindFloat("metlvl", &f)  == B_OK) v.metronomeLevel = f;
+            if (msg->FindBool("monin", &b)    == B_OK) v.monitorInput = b;
+            if (msg->FindBool("dark", &b)     == B_OK) v.darkMode = b;
+            if (msg->FindFloat("uiscale", &f) == B_OK) v.uiScale = f;
+            if (msg->FindString("projdir", &s) == B_OK && s) v.projectDir = s;
+            if (msg->FindInt32("autosv", &i)  == B_OK) v.autosaveSeconds = i;
+            ApplyPrefs(v);
+            break;
+        }
 
         case MSG_TOGGLE_DOCK:
             SetDockShown(fDock == nullptr || fDock->Parent() == nullptr);
@@ -980,8 +1103,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgExportCancel:
             // The progress window's button. The worker polls this between
             // blocks; the completion path (on the pulse) closes the window, so
-            // the bar never disappears before the outcome is known.
+            // the bar never disappears before the outcome is known. The same
+            // bar serves the region jobs (M4.4), so both flags are raised --
+            // whichever job is running is the one that reads its own.
             fRender.fExportCancel.store(true);
+            fRender.fRegionCancel.store(true);
             break;
         case MSG_IMPORT_MIDI:
             if (!fMidiImportPanel) {
@@ -1062,23 +1188,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // the current strips rather than stacking a second rack.
             if (fMixerMsgr.IsValid()) {
                 BMessage r(kMsgMixStrips);
-                r.AddFloat("mg", fProject->masterGain);
-                for (const MixerStripInfo& st : strips) {
-                    r.AddInt64("tid", (int64)st.trackId);
-                    r.AddFloat("gain", st.gain);
-                    r.AddFloat("pan", st.pan);
-                    r.AddBool("mute", st.muted);
-                    r.AddBool("solo", st.soloed);
-                    r.AddBool("arm", st.armed);
-                    r.AddBool("mon", st.inputMonitor);
-                    r.AddInt32("color", st.colorIndex);
-                    r.AddInt32("type", st.type);
-                    r.AddInt32("fx", (int32)st.fx.size());
-                    for (const MixerInsertInfo& in : st.fx) {
-                        r.AddString("fxn", in.name.c_str());
-                        r.AddBool("fxb", in.bypassed);
-                    }
-                }
+                AddMixerStripsPayload(r, *fProject);
                 if (fMixerMsgr.SendMessage(&r) == B_OK) {
                     BMessage act(kMsgMixerActivate);   // bring it to the front
                     fMixerMsgr.SendMessage(&act);
@@ -1352,22 +1462,63 @@ void MainWindow::MessageReceived(BMessage* msg) {
             }
             break;
         }
+        case kMsgMixSend: {
+            // One aux send's level (M3.4). The strip's knob writes the same
+            // list the sends editor does — SetSendsCommand — so there is ONE
+            // path from the UI to the model and one place the guarantee lives.
+            int64 tid = 0; int32 index = -1; float level = 1.0f;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("index", &index);
+            msg->FindFloat("level", &level);
+            if (Track* t = fProject->FindTrack((TrackId)tid)) {
+                if (index >= 0 && index < (int32)t->sends.size()) {
+                    std::vector<Send> sends = t->sends;
+                    sends[(size_t)index].level = level;
+                    fStack->Execute(std::make_unique<SetSendsCommand>((TrackId)tid,
+                                                                     std::move(sends)),
+                                    *fProject);
+                    UpdateTitle();
+                    // A send's level is read from the graph's own send tables,
+                    // which are built with the graph — the same "applies on
+                    // the next Play" the sends editor's edits have had since
+                    // A3. Rebuilding per knob move would rebuild a 320-clip
+                    // project's graph dozens of times per gesture.
+                    fTimeline->Invalidate();
+                }
+            }
+            break;
+        }
         case kMsgApplyMix: {
             int64 tid = 0; float g = 1, p = 0; bool mu = false, so = false;
+            float trim = 1.0f; bool phase = false; int32 sgroup = 0;
             msg->FindInt64("track", &tid);
             msg->FindFloat("gain", &g);
             msg->FindFloat("pan", &p);
             msg->FindBool("mute", &mu);
             msg->FindBool("solo", &so);
+            msg->FindFloat("trim", &trim);
+            msg->FindBool("phase", &phase);
+            msg->FindInt32("sgroup", &sgroup);
             if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                // One macro, so the whole strip -- gain, pan, mute, solo and the
-                // mute-group cascade -- is one undo step. Unchanged fields get
-                // no sub-command at all.
+                // One macro, so the whole strip -- gain, pan, mute, solo, the
+                // trim, the polarity, the solo group and the mute-group
+                // cascade -- is one undo step. Unchanged fields get no
+                // sub-command at all.
                 auto macro = std::make_unique<MacroCommand>("Mixer Strip");
                 if (t->gain   != g)  macro->Add(std::make_unique<SetTrackGainCommand>((TrackId)tid, g));
                 if (t->pan    != p)  macro->Add(std::make_unique<SetTrackPanCommand>((TrackId)tid, p));
                 if (t->muted  != mu) macro->Add(std::make_unique<SetTrackMuteCommand>((TrackId)tid, mu));
                 if (t->soloed != so) macro->Add(std::make_unique<SetTrackSoloCommand>((TrackId)tid, so));
+                // The M3.4 fields are sent as their OWN fields, and only acted
+                // on when the message actually carries them: a poster that
+                // knows only gain/pan/mute/solo (an older editor, a test) must
+                // not silently reset a trim it never had an opinion about.
+                if (msg->HasFloat("trim") && t->trim != trim)
+                    macro->Add(std::make_unique<SetTrackTrimCommand>((TrackId)tid, trim));
+                if (msg->HasBool("phase") && t->phaseInvert != phase)
+                    macro->Add(std::make_unique<SetTrackPhaseCommand>((TrackId)tid, phase));
+                if (msg->HasInt32("sgroup") && t->soloGroup != (int)sgroup)
+                    macro->Add(std::make_unique<SetTrackSoloGroupCommand>((TrackId)tid, (int)sgroup));
                 if (t->muteGroup > 0 && t->muted != mu) {
                     const int grp = t->muteGroup;
                     for (const Track& o : fProject->Tracks())
@@ -1378,8 +1529,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     fStack->Execute(std::move(macro), *fProject);
                     UpdateTitle();
                 }
-                // Refresh the other strips/panes so the change shows live.
-                if (t->muteGroup > 0)
+                // Refresh the other strips/panes so the change shows live. Both
+                // group rules cascade in the model (SetTrackMuteCommand and
+                // SetTrackSoloCommand both write every member), so BOTH have to
+                // bring the refresh with them -- with only the mute-group test,
+                // soloing one member of a solo group left the other members'
+                // S lamps stale in an open mixer.
+                if (t->muteGroup > 0 || t->soloGroup > 0)
                     PostMessage(kMsgUiRefresh);
                 fTimeline->Invalidate();
             }
@@ -1739,22 +1895,26 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgRegionNormalize: case kMsgRegionReverse: case kMsgRegionStrip: {
+            // The decode runs on a worker thread now (M4.4): this only starts
+            // the job. Applying its result — and refusing to apply a cancelled
+            // one — happens in the pulse.
             int64 tid = 0, cid = 0;
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindInt64("clip", &cid);
-            if (msg->what == kMsgRegionNormalize)
-                fRender.RegionNormalize((TrackId)tid, (ClipId)cid);
-            else if (msg->what == kMsgRegionReverse)
-                fRender.RegionReverse((TrackId)tid, (ClipId)cid);
-            else
-                fRender.RegionStripSilence((TrackId)tid, (ClipId)cid);
+            const RenderJobs::RegionOp op =
+                  msg->what == kMsgRegionNormalize ? RenderJobs::RegionOp::Normalize
+                : msg->what == kMsgRegionReverse ? RenderJobs::RegionOp::Reverse
+                                                 : RenderJobs::RegionOp::StripSilence;
+            fRender.StartRegionJob(op, (TrackId)tid, (ClipId)cid);
             break;
         }
         case kMsgFreezeTrack: {
             int64 tid = 0; bool freeze = true;
             if (msg->FindInt64("track", &tid) != B_OK) break;
             msg->FindBool("freeze", &freeze);
-            fRender.FreezeTrack((TrackId)tid, freeze);
+            if (freeze) fRender.StartRegionJob(RenderJobs::RegionOp::Freeze,
+                                               (TrackId)tid);
+            else        fRender.FreezeTrack((TrackId)tid, false);   // a restore
             break;
         }
         case MSG_SHORTCUTS: {
@@ -1843,7 +2003,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_BUFFER: {
             int32 frames = 512;
             msg->FindInt32("frames", &frames);
-            fTransportCtl.fBufferFrames = (size_t)frames;   // applied at the next Play
+            // Buffer size is a preference (M3.5) and lives in the window; the
+            // id still works and applies at the next Play, as it always did.
+            PrefsView v = CurrentPrefs();
+            v.bufferFrames = frames;
+            ApplyPrefs(v);
             break;
         }
         case MSG_TEMPO: {
@@ -1858,14 +2022,24 @@ void MainWindow::MessageReceived(BMessage* msg) {
             std::snprintf(buf, sizeof(buf), "%.0f", bpm);
             fTempo->SetText(buf);
             fTimeline->Invalidate();   // grid + ruler follow tempo
+            UpdateTransportInfo();     // the readout line names the tempo too
             // Rebuild the running engine so the metronome + tempo-synced effects
             // (delay) pick up the new tempo live; stopped, it applies next Play.
             fTransportCtl.ReloadActiveEngine();
             break;
         }
-        case MSG_NEW_PROJECT:
-            NewProject();
+        case MSG_NEW_PROJECT:          // File > New: the dialog (M3.7)
+            ShowNewProjectWindow();
             break;
+        case kMsgNewProjectChosen: {
+            const char* id = nullptr;
+            const char* path = nullptr;
+            msg->FindString("id", &id);
+            msg->FindString("path", &path);
+            NewProjectFrom(id != nullptr ? id : "empty",
+                           path != nullptr ? path : "");
+            break;
+        }
         case MSG_SAVE:
         case MSG_SAVE_AS:
             // Save goes straight to the project's own file once it has one --
@@ -1879,6 +2053,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 BMessenger to(this);
                 fSavePanel = new BFilePanel(B_SAVE_PANEL, &to, NULL, 0, false,
                                             new BMessage(MSG_SAVE_REF));
+                // The default project folder (M3.5): where a first save
+                // starts. After the first save the panel remembers the folder
+                // the user actually used, which is the better answer.
+                if (!fPrefsProjectDir.empty())
+                    fSavePanel->SetPanelDirectory(fPrefsProjectDir.c_str());
             }
             ShowPanel(fSavePanel, "Save Project", ProjectDocument::DisplayName(fDoc.Path()) + ".dawproj");
             break;
@@ -1958,6 +2137,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // The transport bar's own readouts first (M3.1): the lamps, the
+            // status line and the tempo/meter/DSP/xrun line, all change-guarded
+            // inside the bar, so a tick that changed nothing costs no repaint.
+            UpdateTransportReadouts();
             // A rebuild runs on the engine's worker thread now (M4.1): its
             // outcome -- failure included -- is picked up here, where the UI may
             // be touched, instead of blocking the window on the load.
@@ -1984,6 +2167,21 @@ void MainWindow::MessageReceived(BMessage* msg) {
                     }
                 } else {
                     fRender.FinishExport();
+                }
+            }
+            // A region job reports through the same pulse and the same bar
+            // (M4.4). Its model edits land in FinishRegionJob, on this thread.
+            if (!fRender.RegionJobHandled()) {
+                if (fRender.RegionJobRunning()) {
+                    const float f =
+                        fRender.fRegionProgress.load(std::memory_order_relaxed);
+                    if (f >= 0.0f && fRender.fRegionProgMsgr.IsValid()) {
+                        BMessage pm(kMsgExportProgress);
+                        pm.AddFloat("f", f);
+                        fRender.fRegionProgMsgr.SendMessage(&pm);
+                    }
+                } else {
+                    fRender.FinishRegionJob();
                 }
             }
             // Before any branch: an open native editor is fed on every pulse,
@@ -2148,22 +2346,28 @@ void MainWindow::LayoutTransportBar() {
     // meter was invisible for exactly that reason (M3.3). Clamp to the window.
     if (W > Bounds().Width()) W = Bounds().Width();
 
-    // Design offsets, from the original 1000-wide layout: meter 130 from the
-    // right edge, loudness 278, BPM field ending at 704, slider ending at 588.
+    // Two rows (M3.1): the transport row A, the status row B. The bar draws
+    // the buttons, the LCD well and the status text; everything here is a
+    // child widget, and everything is placed FROM the right so nothing can
+    // overlap. The design offsets are the defaults: meter 6 from the right
+    // edge and 124 wide, the cluster may not cross x 602 (that is where the
+    // design put it, and where the LCD's own right edge leaves the gap).
     const float kGap     = Themed(12.0f);
     const float kMeterW  = Themed(124.0f);
     const float kLoudW   = Themed(136.0f);
-    const float kBpmR    = Themed(704.0f);   // right edge of the tempo field
-    const float kSliderR = Themed(588.0f);   // right edge of the master slider
-    const float kVolR    = Themed(460.0f);   // right edge of the "Vol" label
+    const float kFieldW  = Themed(66.0f);    // the tempo field
+    const float kBpmLblW = Themed(34.0f);
+    const float kVolLblW = Themed(30.0f);
+    const float kSliderW = Themed(126.0f);   // the master volume
+    const float kClusterL = Themed(602.0f);  // the right cluster's own left edge
 
     if (fMeter) {
         // Placed AND sized: the meter is built before the theme scale is known
         // on a HiDPI system (the tests override the scale after the window
         // exists), so a pin that only moved it would leave it at its design
-        // size in a 150% bar.
-        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(5.0f));
-        fMeter->ResizeTo(kMeterW, Themed(26.0f));
+        // size in a 150% bar. It spans both rows.
+        fMeter->MoveTo(W - Themed(6.0f) - kMeterW, Themed(4.0f));
+        fMeter->ResizeTo(kMeterW, Themed(kTransportH) - Themed(8.0f));
     }
 
     const float rightEdge = W - Themed(6.0f) - kMeterW - kGap;   // what the meter leaves
@@ -2182,22 +2386,44 @@ void MainWindow::LayoutTransportBar() {
         shown = on;
     };
 
-    // The loudness readout only fits beside the tempo field.
-    const bool showLoud = rightEdge - kLoudW >= kBpmR + kGap;
-    if (fLoudView && showLoud) fLoudView->MoveTo(W - Themed(278.0f), Themed(8.0f));
+    // Row A, right to left: the tempo field (with its label), then the
+    // loudness readout. Each is placed only when what is left of it still
+    // clears the LCD's own right edge -- a readout that does not fit is
+    // dropped rather than drawn over the position.
+    const float kLcdR = Themed(590.0f);
+    float aRight = rightEdge;
+    const bool showBpm = aRight - kFieldW - kBpmLblW >= kClusterL;
+    if (showBpm) {
+        fTempo->MoveTo(aRight - kFieldW, Themed(9.0f));
+        fTempo->ResizeTo(kFieldW, Themed(20.0f));
+        fBpmLbl->MoveTo(aRight - kFieldW - kBpmLblW, Themed(10.0f));
+    }
+    setVisible(fBpmShown, showBpm, { fBpmLbl, fTempo });
+    aRight -= showBpm ? (kFieldW + kBpmLblW + kGap) : 0.0f;
+
+    const bool showLoud = showBpm && aRight - kLoudW >= kClusterL
+                       && (W - Themed(6.0f) - kMeterW) >= kLcdR + kGap;
+    if (fLoudView && showLoud) {
+        fLoudView->MoveTo(aRight - kLoudW, Themed(10.0f));
+        fLoudView->ResizeTo(kLoudW, Themed(18.0f));
+    }
     setVisible(fLoudShown, showLoud, { fLoudView });
 
-    // The tempo field only fits when the meter leaves room for the field
-    // ITSELF -- it is the rightmost of the left-hand controls, so clearing the
-    // slider is not enough (which is exactly how it ended up under the meter).
-    const bool showBpm = rightEdge >= kBpmR + kGap;
-    setVisible(fBpmShown, showBpm, { fBpmLbl, fTempo });
-
-    // The master slider only fits beside whatever is now the rightmost control
-    // of the left cluster: the tempo field when it is shown, the slider's own
-    // right edge when it is not.
-    const bool showVol = rightEdge >= (showBpm ? kBpmR : kSliderR) + kGap;
+    // Row B, right to left: the master volume. The mixer has the same fader,
+    // which is what makes it droppable on a narrow window.
+    const bool showVol = rightEdge - kSliderW - kVolLblW >= kClusterL;
+    if (showVol) {
+        fMaster->MoveTo(rightEdge - kSliderW, Themed(33.0f));
+        fMaster->ResizeTo(kSliderW, Themed(20.0f));
+        fVolLbl->MoveTo(rightEdge - kSliderW - kVolLblW, Themed(35.0f));
+    }
     setVisible(fVolShown, showVol, { fVolLbl, fMaster });
+
+    // The LCD needs a legible width, and the meter must not cover it: below
+    // that the whole display goes rather than a squeezed fragment of it (the
+    // transport buttons and the status line keep working).
+    const bool showLcd = (W - Themed(6.0f) - kMeterW) >= kLcdR + kGap;
+    fTransport->SetLcdVisible(showLcd);
 }
 
 // Show or hide the inspector pane (View > Inspector, key I). Collapsing the
@@ -2502,6 +2728,7 @@ void MainWindow::UpdatePulse() {
     const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
                    || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
                    || !fRender.fExportHandled      // an export's progress + completion
+                   || !fRender.RegionJobHandled()  // ... and a region job's (M4.4)
                    || fPeakLoader.HasWork();       // envelopes still arriving (M4.4)
     if (need && !fPulse) {
         fPulse = new BMessageRunner(BMessenger(this), new BMessage(MSG_PULSE),
@@ -2884,6 +3111,10 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     // Cancel must leave the session exactly as it was. (The Save answer goes
     // through SaveTo, which flushes the editors itself.)
     if (!ConfirmDiscardChanges()) return;
+    // A render that outlives the project it was rendering must not land in the
+    // next one: track and clip ids restart at 1 in a loaded file, so a freeze
+    // finishing after this point would find the new project's track 1.
+    fRender.CancelRegionJob();
     fTransportCtl.StopPlayback();
     fRecCtl.StopRecording();
     // The editors that are open belong to the project being replaced: their
@@ -3081,19 +3312,95 @@ void MainWindow::FinishRelink() {
     UpdateTitle();         // a repair is an edit: the project is dirty now
 }
 
-// File > New: a fresh, empty session. The sample rate stays -- it belongs to
-// the session (the device), not to the project's content -- and everything
-// else goes. Same "the engine rebuilds at the next play" stance as LoadFrom.
-void MainWindow::NewProject() {
+// --- File > New (M3.7): the dialog, then the new session -------------------
+
+// Where the app's own binary is (a build tree's `build/daw`), for the template
+// lookup. Best effort: an empty answer drops that candidate, it never fails.
+static std::string AppImageDir() {
+    char buf[B_PATH_NAME_LENGTH];
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_IMAGE_PATH, NULL, buf,
+                  sizeof(buf)) != B_OK)
+        return std::string();
+    const std::string path(buf);
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash);
+}
+
+// The installation's data directory (an installed app: the package puts the
+// templates in data/haiku-daw/templates). Best effort, like the above.
+static std::string InstalledDataDir() {
+    char buf[B_PATH_NAME_LENGTH];
+    if (find_path(B_APP_IMAGE_SYMBOL, B_FIND_PATH_DATA_DIRECTORY, NULL, buf,
+                  sizeof(buf)) != B_OK)
+        return std::string();
+    return std::string(buf);
+}
+
+void MainWindow::ShowNewProjectWindow() {
+    if (fNewProjectMsgr.IsValid()) {
+        BMessage act(kMsgNewProjectActivate);
+        fNewProjectMsgr.SendMessage(&act);
+        return;
+    }
+    const std::vector<std::string> candidates =
+        TemplateCandidates(AppImageDir(), InstalledDataDir());
+    std::vector<TemplateInfo> templates =
+        ScanTemplates(FindTemplatesDir(candidates));
+    // The dialog always offers Empty. With a template directory that is the
+    // shipped data/templates/empty.dawproj; without one it is the built-in row
+    // (no file), which is also what makes a missing directory a non-event.
+    bool haveEmpty = false;
+    for (const TemplateInfo& t : templates)
+        if (t.id == "empty") haveEmpty = true;
+    if (!haveEmpty) templates.insert(templates.begin(), EmptyTemplate());
+
+    NewProjectWindow* win = new NewProjectWindow(std::move(templates),
+                                                 candidates, BMessenger(this));
+    fNewProjectMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The session a New (or a template) starts. The sample rate is the
+// default-sample-rate preference (M3.5) -- the rate belongs to the session
+// and to what the user asked new projects to be at, not to the template's
+// content, and the template's tracks, names and routing are what it brings.
+// Same "the engine rebuilds at the next play" stance as LoadFrom.
+void MainWindow::NewProjectFrom(const std::string& templateId,
+                                const std::string& templatePath) {
     if (!ConfirmDiscardChanges()) return;
+    // Same rule as LoadFrom: the project this could render into is about to be
+    // replaced, and a new template's ids start over.
+    fRender.CancelRegionJob();
     fTransportCtl.StopPlayback();
     fRecCtl.StopRecording();
     FlushFxEditors();
     CloseFxEditors();
-    const double rate = fProject->sampleRate;
-    *fProject = Project{};
-    fProject->sampleRate = rate;
-    fProject->tempoMap.sampleRate = rate;
+
+    bool fromTemplate = !templatePath.empty() && templateId != "empty";
+    if (fromTemplate) {
+        TemplateInfo info;
+        info.id = templateId;
+        info.path = templatePath;
+        Project loaded;
+        if (LoadTemplate(info, loaded)) {
+            *fProject = std::move(loaded);
+        } else {
+            // A template that cannot be read is reported and the user gets the
+            // empty session they asked for the new project to be -- never a
+            // half-loaded one.
+            ReportError("New Project",
+                        std::string("The template could not be read: ")
+                        + templatePath + "\nStarting an empty project.");
+            fromTemplate = false;
+        }
+    }
+    if (!fromTemplate) *fProject = Project{};
+
+    const double rate = fPrefsSampleRate > 0 ? (double)fPrefsSampleRate : 48000.0;
+    // A template carries a timeline, and a timeline is frames: adopting the
+    // preferred rate without moving them would re-interpret every clip start
+    // and length at the new rate. AdoptProjectRate rescales first.
+    AdoptProjectRate(*fProject, rate);
     fStack->Clear();
     fDoc.NoteNew();               // no path, and nothing to lose
     fRecCtl.fTakeDir.clear();
@@ -3350,30 +3657,9 @@ void MainWindow::RebuildPeaks() {
 
 
 
-// Render one track in isolation (its clips/notes through its fader + effect
-// chain) to a stereo WAV — the basis for Freeze. Routing/sends are stripped so
-// only the track's own output is baked; solo/mute are cleared so it's audible.
-bool RenderTrackToWav(const Project& src, TrackId id,
-                             const std::string& out) {
-    const Track* t = src.FindTrack(id);
-    if (!t) return false;
-    Project iso;
-    iso.sampleRate = src.sampleRate;
-    iso.tempoBPM   = src.tempoBPM;
-    iso.timeSig    = src.timeSig;
-    iso.tempoMap   = src.tempoMap;
-    Track copy = *t;
-    copy.output = kRoutingMaster;      // straight to the master sum
-    copy.sends.clear();
-    copy.muted = false;
-    copy.soloed = false;
-    copy.frozen = false;
-    copy.freezeClips.clear();
-    copy.freezeMidi.clear();
-    copy.freezeFx.clear();
-    iso.AddTrack(copy);
-    return ExportWav(iso, out, src.sampleRate);
-}
+// (The isolated-track render Freeze uses -- RenderTrackToWav -- lives in
+// src/model/RegionJobs.cpp now: it runs on the region job's worker thread, and
+// everything it needs was already host-testable in the model library.)
 
 // --- off-looper export ------------------------------------------------------
 
@@ -3405,15 +3691,6 @@ void MainWindow::OpenExportWindow(bool stems) {
 // The crash-recovery autosave file (settings dir). A leftover after startup
 // means the last session didn't exit cleanly.
 
-
-// Mark the radio item in `menu` whose message's int32 `field` equals `value`.
-static void MarkRadio(BMenu* menu, const char* field, int32 value) {
-    if (!menu) return;
-    for (int32 i = 0; i < menu->CountItems(); i++)
-        if (BMenuItem* it = menu->ItemAt(i))
-            it->SetMarked(it->Message()
-                          && it->Message()->FindInt32(field) == value);
-}
 
 void MainWindow::LoadSettings() {
     BPath p;
@@ -3496,11 +3773,28 @@ void MainWindow::LoadSettings() {
     fExportChoices.limiter    = s.exportLimiter;
     fExportChoices.range      = s.exportRange;
     fExportChoices.stems      = s.exportStems != 0;
-    MarkRadio(fBufMenu, "frames", (int32)fTransportCtl.fBufferFrames);
-    MarkRadio(fCountInMenu, "bars", fRecCtl.fCountInBars);
-    if (fThemeItem) fThemeItem->SetMarked(ActiveThemeMode() == ThemeMode::Dark);
     if (fMetItem)   fMetItem->SetMarked(fTransportCtl.fMetronome);
-    if (fMonInItem) fMonInItem->SetMarked(fTransportCtl.fMonitorInput);
+    // The Preferences window's own keys (M3.5).
+    fTransportCtl.fMetronomeSound = s.metronomeSound;
+    fTransportCtl.fMetronomeGain  = s.metronomeLevel;
+    fPrefsSampleRate      = s.defaultSampleRate;
+    fPrefsProjectDir      = s.projectDir;
+    // The UI SCALE is APPLIED here, not only read. main.cpp applies the stored
+    // scale before the first window exists, so for a fresh launch the two
+    // agree — but any other reload (the suite's ReloadSettings, and the
+    // startup path in a process that does not go through main.cpp) left the
+    // app REMEMBERING one scale and DRAWING at another. The visible symptom is
+    // a Preferences row showing 125% over a 100% layout, and a change to the
+    // same value being a no-op that never reaches the screen. One number, one
+    // place: what was read is what is drawn.
+    if (fPrefsUiScale != s.uiScale) {
+        fPrefsUiScale = s.uiScale;
+        SetThemeScaleOverride(s.uiScale);
+        ApplyThemeToAllWindows();
+        if (fTimeline) fTimeline->Invalidate();
+    }
+    fPrefsAutosaveSeconds = s.autosaveSeconds;
+    StartAutosave(fPrefsAutosaveSeconds);   // 0 = off
     // The marker lane (M2.7): a view preference, restored with the panes.
     if (fTimeline) fTimeline->SetMarkerLane(s.markerLaneVisible);
     if (fMarkerLaneItem) fMarkerLaneItem->SetMarked(s.markerLaneVisible);
@@ -3540,6 +3834,13 @@ void MainWindow::SaveSettings() {
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
     s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
+    // The Preferences window's keys (M3.5).
+    s.defaultSampleRate = fPrefsSampleRate;
+    s.metronomeSound    = fTransportCtl.fMetronomeSound;
+    s.metronomeLevel    = fTransportCtl.fMetronomeGain;
+    s.uiScale           = fPrefsUiScale;
+    s.projectDir        = fPrefsProjectDir;
+    s.autosaveSeconds   = fPrefsAutosaveSeconds;
     const BRect fr = BWindow::Frame();
     s.winL = fr.left; s.winT = fr.top; s.winR = fr.right; s.winB = fr.bottom;
     // The panes as the user left them (M1.4).
@@ -3581,10 +3882,9 @@ void MainWindow::ApplyTheme() {
     }
 
     const rgb_color chrome = ColChrome();
-    if (fTimeView != nullptr) {
-        fTimeView->SetViewColor(ColLcd());
-        fTimeView->SetHighColor(ColLcdText());
-    }
+    // (The time display is the bar's own child now — TransportTimeView — and it
+    // takes the LCD tokens in its own ApplyTheme, so a mode switch re-colours it
+    // with the rest of the bar.)
     for (BStringView* label : { fVolLbl, fBpmLbl, fLoudView }) {
         if (label == nullptr) continue;
         label->SetViewColor(chrome);
@@ -3625,22 +3925,138 @@ void MainWindow::SetThemeMode(ThemeMode mode) {
         ReadSystemBaseColors();
     InstallControlLookForMode(mode);
     ApplyThemeToAllWindows();
-    if (fThemeItem != nullptr) fThemeItem->SetMarked(mode == ThemeMode::Dark);
     SaveSettings();   // it is a preference: it survives the quit
 }
 
+// The big position (M3.1). The format is the window's own (fTimeMode): the
+// display view cycles it by asking, and every position in every format comes
+// from the kit-free TimeDisplay header, so what is shown and what a typed
+// entry means cannot drift apart.
 void MainWindow::UpdateTimeReadout(Frame playhead) {
     const double rate = fTransportCtl.fEngine ? fTransportCtl.fEngine->OutputRate() : fProject->sampleRate;
-    const double sec  = rate > 0 ? playhead / rate : 0.0;
-    const int    mins = static_cast<int>(sec / 60.0);
-    const double rem  = sec - mins * 60.0;
-    // Bar:beat from the tempo map alongside min:sec.
     fProject->tempoMap.sampleRate = fProject->sampleRate;
+    if (!fTransport || fTransport->TimeView() == nullptr) return;
+    const std::string text =
+        FormatTimePosition(fTimeMode, playhead, rate, fProject->tempoMap);
+    fTransport->TimeView()->SetPosition(text.c_str(), TimeModeTag(fTimeMode));
+}
+
+// The readout line under the position: the tempo and meter at the playhead,
+// the audio callback's own load and the xruns (M3.1). The load figure is the
+// engine's PEAK hold since the last poll, taken (and cleared) here: what
+// matters is the worst block, not the average one.
+void MainWindow::UpdateTransportInfo() {
+    if (!fTransport) return;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    const Frame ph = fProject->transport.playhead;
+    const double bpm = fProject->tempoMap.BpmAt(ph);
+    int num = 4, den = 4;
+    fProject->tempoMap.Meter(ph, &num, &den);
+
+    uint64_t xruns = 0;
+    if (fTransportCtl.fEngine) {
+        // The PEAK since the last poll, taken (and cleared) here: an average
+        // hides exactly the block that overran and clicked. Between polls the
+        // figure is therefore "the worst block in the last ~16 ms", which is
+        // what a DAW's load meter is for. A take that reads it twice in one
+        // event (a state change right after a pulse) keeps the last value
+        // instead of flashing 0.
+        const bigtime_t peakUs = fTransportCtl.fEngine->TakePeakCallbackUs();
+        if (peakUs > 0) fDspPercent = fTransportCtl.fEngine->LoadPercentFor(peakUs);
+        xruns = fTransportCtl.fEngine->Xruns();
+    }
+    const float dsp = fDspPercent;
+    // The take's own xrun (the recorder's ring overflowing) is a dropout too,
+    // and it is latched for the take, so one is one.
+    if (fRecCtl.fRecorder && fRecCtl.fRecorder->Xrun())
+        xruns += 1;
+
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%.1f BPM  %d/%d   DSP %.0f%%   XR %llu",
+                  bpm, num, den, dsp, (unsigned long long)xruns);
+    fTransport->SetInfo(buf);
+}
+
+// The lamps on the transport buttons. Every piece of state is somebody else's
+// (the transport controller, the record controller, the project's transport) —
+// this only mirrors it out to the bar.
+void MainWindow::UpdateTransportButtons() {
+    if (!fTransport) return;
+    fTransport->SetPlaying(fTransportCtl.fPlaying);
+    fTransport->SetRecording(fRecCtl.fRecMode);
+    fTransport->SetLoop(fProject->transport.loopEnabled);
+    fTransport->SetClick(fTransportCtl.fMetronome);
+    fTransport->SetPunch(fProject->transport.punchEnabled);
+}
+
+// The status line: the transport's state, so it is never stale — a job or an
+// error message replaces it until the state changes again.
+void MainWindow::UpdateTransportStatus() {
+    if (!fTransport) return;
+    std::string s;
+    if (fRecCtl.fRecMode) {
+        if (fRecCtl.fCapturePending)      s = "Recording: count-in";
+        else if (fRecCtl.fLoopRecord)     s = "Recording: loop takes";
+        else if (!fRecCtl.fTakePath.empty()) {
+            const size_t slash = fRecCtl.fTakePath.find_last_of('/');
+            s = "Recording " + (slash == std::string::npos
+                                ? fRecCtl.fTakePath
+                                : fRecCtl.fTakePath.substr(slash + 1));
+        } else s = "Recording";
+    } else if (fTransportCtl.fPlaying) {
+        s = fProject->transport.loopEnabled ? "Playing (loop)" : "Playing";
+    } else if (fTransportCtl.fMonitoring) {
+        s = "Monitoring input";
+    } else {
+        s = "Stopped";
+    }
+    if (s == fStatusState) return;   // the state has not changed: leave any
+                                     // job/error message standing
+    fStatusState = s;
+    fTransport->SetStatus(s.c_str());
+}
+
+void MainWindow::SetTransportStatus(const char* text) {
+    if (!fTransport) return;
+    fTransport->SetStatus(text ? text : "");
+}
+
+// The bar view and one of its control rects, for the functional tests: a click
+// has to land where the bar DREW the button, not at an offset a test guessed
+// (the arrange-depth package learned that the hard way -- docs/HANDOFF.md).
+BView* MainWindow::TransportBarView() const { return fTransport; }
+
+BRect MainWindow::TransportButtonRect(int which) const {
+    if (which < 0 || which >= (int)TransportButton::Count) return BRect();
+    return ButtonRect((TransportButton)which);
+}
+
+// The three readouts the bar's own state drives, in one call: the lamps, the
+// status line and the LCD's info line. Every path that changes one of them
+// (the pulse, a button, a key, the menus) goes through here.
+void MainWindow::UpdateTransportReadouts() {
+    UpdateTransportButtons();
+    UpdateTransportStatus();
+    UpdateTransportInfo();
+}
+
+// Rewind / fast-forward (M3.1): the playhead to the previous / next bar, on
+// the tempo map's own bar boundaries. The bar the playhead is IN is the anchor,
+// so pressing rewind inside bar 3 lands on bar 2's downbeat rather than bar 3's.
+void MainWindow::NudgePlayheadBar(int dir) {
+    if (!fTimeline) return;
+    fProject->tempoMap.sampleRate = fProject->sampleRate;
+    const Frame ph = fProject->transport.playhead;
     int bar = 1, beat = 1;
-    fProject->tempoMap.BarBeat(playhead, &bar, &beat);
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%d.%d   %d:%06.3f", bar, beat, mins, rem);
-    fTimeView->SetText(buf);
+    fProject->tempoMap.BarBeat(ph, &bar, &beat);
+    if (dir < 0 && bar <= 1) {        // already in the first bar: the start
+        fTimeline->ReturnToZero();
+        return;
+    }
+    const int target = dir < 0 ? bar - 1 : bar + 1;
+    const Frame f = FrameAtBarBeat(fProject->tempoMap, target, 1, 0);
+    if (f < 0) return;
+    fTimeline->SeekTo(f);
 }
 
 void MainWindow::PushRollPlayhead(Frame ph) {
@@ -3937,6 +4353,229 @@ void MainWindow::UpdateLoudnessReadout(float momLufs, float shortLufs,
     // dB by definition.
     std::snprintf(buf, sizeof(buf), "%s  %s  %s", m, s, tp);
     fLoudView->SetText(buf);
+}
+
+// --- the Preferences window (M3.5) -----------------------------------------
+//
+// One window, like the mixer and the markers window: asking again brings the
+// open one forward with the current values. The window owns none of the state
+// -- these five methods are the only place a preference is read or written.
+
+// What the window shows, from wherever the field actually lives: the
+// transport's own prefs in the controllers, the rest in the members beside
+// fPrefsMsgr.
+PrefsView MainWindow::CurrentPrefs() const {
+    PrefsView v;
+    v.bufferFrames      = (int)fTransportCtl.fBufferFrames;
+    v.countInBars       = fRecCtl.fCountInBars;
+    v.metronomeSound    = fTransportCtl.fMetronomeSound;
+    v.metronomeLevel    = fTransportCtl.fMetronomeGain;
+    v.monitorInput      = fTransportCtl.fMonitorInput;
+    v.darkMode          = ActiveThemeMode() == ThemeMode::Dark;
+    v.defaultSampleRate = fPrefsSampleRate;
+    v.uiScale           = fPrefsUiScale;
+    v.projectDir        = fPrefsProjectDir;
+    v.autosaveSeconds   = fPrefsAutosaveSeconds;
+    return v;
+}
+
+void MainWindow::PushPrefsToWindow() {
+    if (!fPrefsMsgr.IsValid()) return;
+    const PrefsView v = CurrentPrefs();
+    BMessage m(kMsgPrefsValues);
+    m.AddInt32("buffer", v.bufferFrames);
+    m.AddInt32("defrate", v.defaultSampleRate);
+    m.AddInt32("countin", v.countInBars);
+    m.AddInt32("metsnd", v.metronomeSound);
+    m.AddFloat("metlvl", v.metronomeLevel);
+    m.AddBool("monin", v.monitorInput);
+    m.AddBool("dark", v.darkMode);
+    m.AddFloat("uiscale", v.uiScale);
+    m.AddString("projdir", v.projectDir.c_str());
+    m.AddInt32("autosv", v.autosaveSeconds);
+    fPrefsMsgr.SendMessage(&m);
+}
+
+void MainWindow::ShowPreferencesWindow() {
+    if (fPrefsMsgr.IsValid()) {
+        PushPrefsToWindow();
+        BMessage act(kMsgPrefsActivate);
+        fPrefsMsgr.SendMessage(&act);
+        return;
+    }
+    PreferencesWindow* win = new PreferencesWindow(CurrentPrefs(),
+                                                   BMessenger(this));
+    fPrefsMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The one funnel every preference goes through: the window's message and the
+// Audio menu's remaining ids both land here, so the two cannot disagree about
+// what changing a preference does.
+void MainWindow::ApplyPrefs(const PrefsView& v) {
+    // Buffer size: applied at the next Play (the engine is rebuilt then, which
+    // is also when a changed click sound or level reaches it).
+    fTransportCtl.fBufferFrames = (size_t)(v.bufferFrames > 0 ? v.bufferFrames
+                                                              : 512);
+    fRecCtl.fCountInBars = v.countInBars;
+
+    // Input monitoring: live, exactly as the Audio menu's toggle did it --
+    // the timeline's "I" lamp, a running take's recorder, and the engine.
+    if (fTransportCtl.fMonitorInput != v.monitorInput) {
+        fTransportCtl.fMonitorInput = v.monitorInput;
+        if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
+        if (fRecCtl.fRecorder)
+            fRecCtl.fRecorder->SetMonitor(fTransportCtl.fMonitorInput);
+        if (fTransportCtl.fEngine)
+            fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
+    }
+
+    // The metronome's sound and level: live on the running engine (a stopped
+    // one gets them from EnsureEngine's next build).
+    fTransportCtl.fMetronomeSound = v.metronomeSound;
+    fTransportCtl.fMetronomeGain  = v.metronomeLevel;
+    if (fTransportCtl.fEngine) {
+        fTransportCtl.fEngine->SetMetronomeSound(v.metronomeSound);
+        fTransportCtl.fEngine->SetMetronomeGain(v.metronomeLevel);
+    }
+
+    fPrefsSampleRate = v.defaultSampleRate;
+
+    // The look: SetThemeMode applies it everywhere and saves it itself.
+    const bool darkNow = ActiveThemeMode() == ThemeMode::Dark;
+    if (darkNow != v.darkMode)
+        SetThemeMode(v.darkMode ? ThemeMode::Dark : ThemeMode::System);
+
+    // The UI scale (0 = the user's font size). Every window re-takes its
+    // geometry colours and redraws at the new scale; a window's frame and its
+    // split positions stay where the user put them (a restart lays everything
+    // out at the new scale).
+    if (fPrefsUiScale != v.uiScale) {
+        fPrefsUiScale = v.uiScale;
+        SetThemeScaleOverride(v.uiScale);
+        ApplyThemeToAllWindows();
+        if (fTimeline) fTimeline->Invalidate();
+    }
+
+    fPrefsProjectDir = v.projectDir;
+
+    if (fPrefsAutosaveSeconds != v.autosaveSeconds) {
+        fPrefsAutosaveSeconds = v.autosaveSeconds;
+        StartAutosave(fPrefsAutosaveSeconds);
+    }
+
+    SaveSettings();          // a preference survives the quit
+    UpdateTitle();           // nothing here dirties the project, but the title
+                             // is cheap and keeps the poll honest
+    // Tell the window what the app actually took (it re-lays itself out at the
+    // new scale on this push), so the controls never show a value the app did
+    // not apply.
+    PushPrefsToWindow();
+}
+
+// --- the Project Settings window (M3.6) -------------------------------------
+
+// What the project IS, as the window shows it. The meter comes from the tempo
+// map's frame-0 change (the authoritative copy the engine and the ruler read;
+// SetMeterCommand keeps the project's own timeSig equal to it).
+ProjectSettingsView MainWindow::CurrentProjectSettings() const {
+    ProjectSettingsView v;
+    v.sampleRate = fProject->sampleRate;
+    v.tempoBPM   = fProject->tempoBPM;
+    const MeterChange& m0 = fProject->tempoMap.Meters().front();
+    v.meterNum   = m0.num;
+    v.meterDenom = m0.denom;
+    v.notes      = fProject->notes;
+    for (const Track& t : fProject->Tracks())
+        for (const Clip& c : t.clips)
+            if (!c.sourcePath.empty()) v.hasMedia = true;
+    return v;
+}
+
+void MainWindow::PushProjectSettingsToWindow() {
+    if (!fProjSettingsMsgr.IsValid()) return;
+    const ProjectSettingsView v = CurrentProjectSettings();
+    BMessage m(kMsgProjSettingsValues);
+    m.AddDouble("rate", v.sampleRate);
+    m.AddDouble("tempo", v.tempoBPM);
+    m.AddInt32("mnum", v.meterNum);
+    m.AddInt32("mdenom", v.meterDenom);
+    m.AddString("notes", v.notes.c_str());
+    m.AddBool("hasmedia", v.hasMedia);
+    fProjSettingsMsgr.SendMessage(&m);
+}
+
+void MainWindow::ShowProjectSettingsWindow() {
+    if (fProjSettingsMsgr.IsValid()) {
+        PushProjectSettingsToWindow();
+        BMessage act(kMsgProjSettingsActivate);
+        fProjSettingsMsgr.SendMessage(&act);
+        return;
+    }
+    ProjectSettingsWindow* win =
+        new ProjectSettingsWindow(CurrentProjectSettings(), BMessenger(this));
+    fProjSettingsMsgr = BMessenger(win);
+    win->Show();
+}
+
+// The differences become ONE macro command, applied and undone as a unit: a
+// change to the rate AND the tempo AND the notes is one "Project Settings"
+// step in the Edit menu, not four.
+void MainWindow::ApplyProjectSettings(const ProjectSettingsView& values) {
+    const ProjectSettingsView cur = CurrentProjectSettings();
+    auto macro = std::make_unique<MacroCommand>("Project Settings");
+    bool any = false;
+
+    const bool rateChanged = values.sampleRate > 0.0
+        && std::fabs(values.sampleRate - cur.sampleRate) >= 0.5;
+    if (rateChanged) {
+        // First: it rescales the timeline the other edits are positioned in.
+        macro->Add(std::make_unique<SetSampleRateCommand>(
+            values.sampleRate, values.resampleMedia));
+        any = true;
+    }
+    if (std::fabs(values.tempoBPM - cur.tempoBPM) > 1e-6) {
+        double bpm = values.tempoBPM;
+        if (bpm < 20.0)  bpm = 20.0;
+        if (bpm > 300.0) bpm = 300.0;
+        macro->Add(std::make_unique<SetTempoCommand>(bpm));
+        any = true;
+    }
+    if (values.meterNum != cur.meterNum || values.meterDenom != cur.meterDenom) {
+        macro->Add(std::make_unique<SetMeterCommand>(values.meterNum,
+                                                     values.meterDenom));
+        any = true;
+    }
+    if (values.notes != cur.notes) {
+        macro->Add(std::make_unique<SetProjectNotesCommand>(values.notes));
+        any = true;
+    }
+    if (!any) return;              // Apply with nothing changed: a no-op, and
+                                   // not an empty undo step
+
+    if (!fStack->Execute(std::move(macro), *fProject)) return;
+
+    // The window's other views follow the model: the transport's tempo field,
+    // the ruler's grid, the waveforms (a rate change can repoint every clip at
+    // a converted file) and the running engine.
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%.0f", fProject->tempoBPM);
+    if (fTempo != nullptr) fTempo->SetText(buf);
+    if (rateChanged) RebuildPeaks();
+    if (fTimeline != nullptr) fTimeline->Invalidate();
+    fTransportCtl.ReloadActiveEngine();
+    UpdateEditMenu();
+    UpdateTitle();
+    PushProjectSettingsToWindow();   // the window shows what was actually applied
+}
+
+// The crash-recovery runner at the chosen interval; 0 = no runner at all.
+void MainWindow::StartAutosave(int seconds) {
+    delete fAutosave;
+    fAutosave = nullptr;
+    if (seconds <= 0) return;
+    fAutosave = new BMessageRunner(BMessenger(this), new BMessage(MSG_AUTOSAVE),
+                                   (bigtime_t)seconds * 1000000LL);
 }
 
 bool MainWindow::QuitRequested() {

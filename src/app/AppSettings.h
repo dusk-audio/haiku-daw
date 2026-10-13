@@ -13,6 +13,24 @@
 
 namespace daw {
 
+// The values the Preferences window (M3.5) offers for the settings that are a
+// choice, one table each so the window's menus and what a load accepts cannot
+// drift apart: Sanitize() snaps a loaded value to one of these. The tables are
+// also what a functional test reads to drive a menu by index.
+inline constexpr int kBufferFrameChoices[]    = { 128, 256, 512, 1024, 2048 };
+inline constexpr int kBufferFrameChoiceCount = 5;
+inline constexpr int kSampleRateChoices[]     = { 44100, 48000, 96000 };
+inline constexpr int kSampleRateChoiceCount  = 3;
+inline constexpr int kCountInChoices[]        = { 0, 1, 2, 4 };
+inline constexpr int kCountInChoiceCount     = 4;
+inline constexpr int kAutosaveChoices[]       = { 0, 30, 60, 300, 600 };  // s
+inline constexpr int kAutosaveChoiceCount    = 5;
+// The metronome sounds Metronome::Render knows, by index (M3.5).
+inline constexpr int kMetronomeSoundCount    = 3;
+// UI scales the menu offers; 0 is "follow the user's font size" (Theme.h).
+inline constexpr float kUiScaleChoices[]      = { 0.0f, 1.0f, 1.25f, 1.5f };
+inline constexpr int   kUiScaleChoiceCount   = 4;
+
 struct AppSettings {
     int   bufferFrames = 512;
     int   countInBars  = 0;
@@ -46,6 +64,24 @@ struct AppSettings {
     // System is the default; the app never writes a system colour (T1).
     ThemeMode themeMode = ThemeMode::System;
 
+    // --- the Preferences window (M3.5) ------------------------------------
+    // The rate a NEW project starts at (the rate of the running session still
+    // comes from the project itself). One of kSampleRateChoices.
+    int   defaultSampleRate = 48000;
+    // The metronome click: its sound (an index into what Metronome knows, see
+    // kMetronomeSoundCount) and its level (0..1, the click's own gain).
+    int   metronomeSound    = 0;
+    float metronomeLevel    = 0.30f;
+    // The UI scale: 0 = follow the user's font size (Theme.h's default), a
+    // positive value forces it through SetThemeScaleOverride.
+    float uiScale           = 0.0f;
+    // The directory a New/Save panel starts in when the session has no
+    // remembered lastDir yet. Plain path; empty = the panel's own default.
+    std::string projectDir;
+    // The crash-recovery interval in seconds; 0 turns autosave off. One of
+    // kAutosaveChoices (a loaded value is clamped, not snapped).
+    int   autosaveSeconds   = 30;
+
     std::vector<std::string> recentProjects;
     static constexpr size_t kMaxRecent = 10;
 
@@ -77,6 +113,13 @@ struct AppSettings {
     // for missing keys and returns false only on empty/garbage input.
     std::string Serialize() const;
     bool Deserialize(const std::string& text);
+
+    // Snap every preference to a value the app can actually run with, and run
+    // it at the end of Deserialize. A hand-edited, truncated or newer settings
+    // file must not be able to leave the app with a buffer of 0 frames (a
+    // division in the audio path), a negative metronome level, a scale it
+    // cannot draw at, or a metronome sound that is not one it knows.
+    void Sanitize();
 };
 
 } // namespace daw

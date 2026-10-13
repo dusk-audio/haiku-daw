@@ -227,6 +227,10 @@ public:
     void AddMarkerAt(Frame frame);                          // "Marker N"
     void RemoveMarkerAt(Frame frame, const std::string& name);
     void SeekTo(Frame frame);        // move the playhead AND the drawn line
+    // The transport bar's RTZ and Loop buttons run exactly what the keyboard
+    // map's Home/Enter and L run (M3.1) — one implementation, two ways in.
+    void ReturnToZero();             // playhead to the start, view with it
+    void ToggleLoop();               // loop on/off (adopts a range if none)
 
     // Horizontal zoom (multiply frames-per-pixel, clamped) and pan.
     void ZoomBy(double factor);
@@ -542,8 +546,8 @@ private:
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
     // The keyboard map's actions this view runs itself (M3.2). The ones that
     // change state the main window owns (record, click) are posted there.
-    void  ReturnToZero();              // Home / Enter
-    void  ToggleLoop();                // L
+    // (ReturnToZero and ToggleLoop are public above: the transport bar's
+    // buttons run the same code.)
     void  DropMarker();                // M
     std::vector<ClipItem> fClipboard;
 

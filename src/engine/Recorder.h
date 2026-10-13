@@ -94,6 +94,11 @@ public:
     float PeakL() const { return fPeakL.load(); }
     float PeakR() const { return fPeakR.load(); }
 
+    // Did the capture ring overflow during this take (the disk fell behind)?
+    // Latched for the take: the transport's xrun readout adds it to the
+    // engine's own count, because a dropped sample in a take is a dropout too.
+    bool Xrun() const { return fXrun.load(std::memory_order_relaxed); }
+
     // Clip flags, one bit per channel (kMeterClipL/R in dsp/MeterMath.h): the
     // capture hook latches a bit at digital full scale — two compares on the
     // block peak it already computes, no extra pass over the samples — and the

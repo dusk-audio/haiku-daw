@@ -1,0 +1,17 @@
+DAW 1 1
+sampleRate 48000
+tempo 120 0
+master 1
+timesig 4 4
+transport 0 0 0 0
+punch 0 0 0
+marker 0 "Intro"
+track 1 audio 1 0 0 0 0 9 "Kick" 0 72 0 0 0
+track 2 audio 1 0 0 0 0 9 "Snare" 1 72 0 0 0
+track 3 audio 1 0 0 0 0 9 "Hi-Hat" 2 72 0 0 0
+track 4 audio 1 0 0 0 0 0 "Bass" 3 72 0 0 0
+track 5 audio 1 0 0 0 0 0 "Guitar L" 4 72 0 0 0
+track 6 audio 1 0 0 0 0 0 "Guitar R" 5 72 0 0 0
+track 7 audio 1 0 0 0 0 0 "Keys" 6 72 0 0 0
+track 8 audio 1 0 0 0 0 0 "Vocals" 7 72 0 0 0
+track 9 bus 1 0 0 0 0 0 "Drum Bus" 8 72 0 0 0

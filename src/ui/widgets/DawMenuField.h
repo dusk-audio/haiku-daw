@@ -8,30 +8,55 @@
 
 #include "DawControl.h"   // AdoptPanelColors + the look's flag helpers
 
+#include <MenuBar.h>
+#include <PopUpMenu.h>   // Go(): the popup every field in this app is built from
 #include <MenuField.h>
 #include <MenuItem.h>   // BMenuItem::Label (the marked item)
+#include <Window.h>     // the popup this view opens
 
 namespace daw {
 
 class DawMenuField : public BMenuField, public ThemeAware {
 public:
-    void ApplyTheme() override { AdoptPanelColors(this); }
+    void ApplyTheme() override {
+        AdoptPanelColors(this);
+        HideStockBar();
+    }
 
     DawMenuField(BRect frame, const char* name, const char* label, BMenu* menu,
                  uint32 resizingMode = B_FOLLOW_LEFT_TOP,
                  uint32 flags = B_WILL_DRAW | B_NAVIGABLE)
-        : BMenuField(frame, name, label, menu, resizingMode, flags) {}
+        : BMenuField(frame, name, label, menu, resizingMode, flags) {
+        HideStockBar();
+    }
 
     DawMenuField(const char* name, const char* label, BMenu* menu,
                  uint32 flags = B_WILL_DRAW | B_NAVIGABLE)
-        : BMenuField(name, label, menu, flags) {}
+        : BMenuField(name, label, menu, flags) {
+        HideStockBar();
+    }
 
     void AttachedToWindow() override {
         BMenuField::AttachedToWindow();
         AdoptPanelColors(this);
+        HideStockBar();
         SetHighColor(ColText());
         if (Label() != nullptr && Label()[0] != '\0' && ToolTip() == nullptr)
             SetToolTip(Label());
+    }
+
+    // The click opens the menu from the VIEW, because the view is what draws
+    // the field now (see HideStockBar).
+    void MouseDown(BPoint) override { OpenMenu(); }
+
+    void KeyDown(const char* bytes, int32 numBytes) override {
+        for (int32 i = 0; i < numBytes; i++)
+            if (bytes[i] == B_SPACE || bytes[i] == B_RETURN
+                || bytes[i] == B_DOWN_ARROW) {
+                OpenMenu();
+                return;
+            }
+        BMenuField::KeyDown(bytes, numBytes);
     }
 
     // The field is drawn through the control look (T1): a stock frame and
@@ -76,6 +101,51 @@ public:
                    + Themed(110.0f);
         }
         if (height) *height = Themed(20.0f);
+    }
+
+private:
+    // The stock BMenuField draws the marked item's label ITSELF, through its
+    // inner BMenuBar, and a BMenuItem's text colour comes from the system
+    // colour table (`ui_color(B_MENU_ITEM_TEXT_COLOR)`) — which this app may
+    // not write (T1). In Dark mode that is black text over the app's own dark
+    // well: unreadable in every menu field in Preferences, Project Settings
+    // and New Project (found by the M3.5 screenshot pass). So the inner bar is
+    // hidden and the field draws its own value (Draw, above); the click and the
+    // key that used to reach the bar come here instead.
+    void HideStockBar() {
+        if (BMenuBar* bar = MenuBar()) {
+            if (!bar->IsHidden()) bar->Hide();
+        }
+    }
+
+    void OpenMenu() {
+        BMenu* menu = Menu();
+        if (menu == nullptr) return;
+        // The app's own pop-up idiom (see InspectorView's Input picker): the
+        // menu opens over the window and the choice is whatever is under the
+        // pointer when the button comes up.
+        const BPoint at = ConvertToScreen(BPoint(0.0f, Bounds().bottom + 1.0f));
+        // Every menu a DawMenuField is given in this app is a BPopUpMenu
+        // (PickMenu, the export dialog, the preferences rows), which is what
+        // Go() lives on; a plain BMenu has no pop-up of its own.
+        BPopUpMenu* popup = dynamic_cast<BPopUpMenu*>(menu);
+        if (popup == nullptr) return;
+        BMenuItem* chosen = popup->Go(at, false, true);
+        if (chosen == nullptr) return;
+        // What the stock field does with the choice: exactly one marked item,
+        // and its message delivered. Invoke() is protected, so the message goes
+        // to the item's own target -- the window, for every field in this app.
+        for (int32 i = 0; i < menu->CountItems(); i++)
+            if (BMenuItem* it = menu->ItemAt(i)) it->SetMarked(it == chosen);
+        if (BMessage* msg = chosen->Message()) {
+            BMessage send(*msg);
+            BLooper* looper = nullptr;
+            BHandler* handler = chosen->Target(&looper);
+            BMessenger target(handler, looper);
+            if (target.IsValid())      target.SendMessage(&send);
+            else if (Window() != nullptr) Window()->PostMessage(&send);
+        }
+        Invalidate();
     }
 };
 

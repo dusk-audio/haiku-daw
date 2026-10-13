@@ -114,10 +114,14 @@ public:
     DawApplication() : BApplication(DAW_APP_SIGNATURE) {}
 
     void ReadyToRun() override {
-        // The look and the palette BEFORE the first window exists: the mode is
-        // in the settings, the colours are the user's, and the app writes
-        // neither. Dark mode is the DAW's own palette in the DAW's own windows.
-        SetActiveThemeMode(ProjectDocument::ReadSettings().themeMode);
+        // The look, the palette and the UI scale BEFORE the first window
+        // exists: the mode and the scale are in the settings, the colours are
+        // the user's, and the app writes neither. Dark mode is the DAW's own
+        // palette in the DAW's own windows; a scale of 0 (the default) means
+        // the user's own font size (M3.5).
+        const AppSettings settings = ProjectDocument::ReadSettings();
+        SetActiveThemeMode(settings.themeMode);
+        SetThemeScaleOverride(settings.uiScale);
         ReadSystemBaseColors();
         InstallControlLookForMode(ActiveThemeMode());
         RegisterProjectMimeType();

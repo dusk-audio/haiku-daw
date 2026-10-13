@@ -6,6 +6,7 @@
 #include "../src/engine/WavSource.h"
 #include "../src/engine/WavWriter.h"
 #include "../src/model/Project.h"
+#include "../src/model/RegionJobs.h"   // the region jobs' own job surface (M4.4)
 
 #include <atomic>
 #include <cmath>
@@ -338,6 +339,238 @@ int main() {
 
         std::string rm = "rm -rf " + dir;
         if (system(rm.c_str()) != 0) return 1;
+    }
+
+    // --- M4.4: the REGION jobs (normalize / reverse / strip silence) carry the
+    //     same surface as an export: progress that is monotonic and reaches
+    //     exactly 1.0, a cancel that stops the run, and NOTHING left at the
+    //     destination when a job is stopped or fails. ---
+    {
+        const std::string src = path + ".region.wav";
+        const int64_t srcFrames = (int64_t)(SR * 2);      // 2 s: many decode chunks
+        {   // A ramp, with a full second of silence in the middle: the silence
+            // is what Strip Silence has to find, and the ramp makes a reversed
+            // file's first frame tell itself apart from the last.
+            WavWriter w;
+            CHECK(w.Open(src, (int)SR, 2));
+            std::vector<int16_t> buf;
+            for (int64_t i = 0; i < srcFrames; i++) {
+                const bool quiet = (i > srcFrames / 4 && i < 3 * srcFrames / 4);
+                const int16_t v = quiet ? 0
+                    : (int16_t)((i % 6000) - 3000);
+                buf.push_back(v); buf.push_back(v);
+            }
+            CHECK(w.WriteInt16(buf.data(), buf.size()));
+            CHECK(w.Close());
+        }
+        Clip c;
+        c.id = 3;
+        c.startFrame = 0;
+        c.lengthFrames = srcFrames;
+        c.sourcePath = src;
+
+        // Reverse: progress, then the file's own content (first frame == the
+        // source's last), and no temp left behind.
+        {
+            const std::string outPath = path + ".rev.wav";
+            std::remove(outPath.c_str());
+            std::atomic<bool> cancel{false};
+            std::vector<float> seen;
+            bool inRange = true, monotonic = true;
+            RegionJob job;
+            job.cancel = &cancel;
+            job.progress = [&](float f) {
+                seen.push_back(f);
+                if (f < 0.0f || f > 1.0f) inRange = false;
+                if (seen.size() > 1 && f < seen[seen.size() - 2]) monotonic = false;
+            };
+            CHECK(RenderReversedClip(c, SR, outPath, job));
+            CHECK(seen.size() > 1);          // it reported more than once
+            CHECK(inRange);
+            CHECK(monotonic);
+            // Guarded: a job that reported nothing must FAIL the check above,
+            // not walk off an empty vector into a crash (a suite that segfaults
+            // says much less than one that reports the failing check).
+            if (!seen.empty()) CHECK(seen.back() == 1.0f);
+            CHECK(Exists(outPath));
+            CHECK(!Exists(outPath + ".part"));
+
+            WavSource a, b;
+            CHECK(a.Open(src));
+            CHECK(b.Open(outPath));
+            CHECK(b.TotalFrames() == a.TotalFrames());
+            // The source's last frame becomes the rendered file's first: read
+            // both ends and compare (the ramp's ends differ by ~6000/32768).
+            float lastOfSrc = 0.0f, firstOfRev = 0.0f;
+            {
+                std::vector<float> all;
+                const float* ch = nullptr; size_t n = 0;
+                while (a.ReadChunk(&ch, &n)) all.insert(all.end(), ch, ch + n * 2);
+                lastOfSrc = all.empty() ? 0.0f : all[all.size() - 2];
+            }
+            {
+                const float* ch = nullptr; size_t n = 0;
+                if (b.ReadChunk(&ch, &n) && n > 0) firstOfRev = ch[0];
+            }
+            CHECK(std::fabs(firstOfRev - lastOfSrc) < 1e-3f);
+            std::remove(outPath.c_str());
+        }
+
+        // Cancel up front: false, and nothing at the destination.
+        {
+            const std::string outPath = path + ".revc.wav";
+            std::remove(outPath.c_str());
+            std::atomic<bool> cancel{true};
+            RegionJob job;
+            job.cancel = &cancel;
+            CHECK(!RenderReversedClip(c, SR, outPath, job));
+            CHECK(!Exists(outPath));
+            CHECK(!Exists(outPath + ".part"));
+        }
+
+        // Cancel MID-JOB, from inside the progress callback: the same rule —
+        // and the work really STOPS (the decode of a 2 s file reports dozens of
+        // times, so a handful of reports after the flag is the proof).
+        {
+            const std::string outPath = path + ".revm.wav";
+            std::remove(outPath.c_str());
+            std::atomic<bool> cancel{false};
+            int calls = 0;
+            RegionJob job;
+            job.cancel = &cancel;
+            job.progress = [&](float) {
+                ++calls;
+                cancel = true;               // at the very first report
+            };
+            CHECK(!RenderReversedClip(c, SR, outPath, job));
+            CHECK(calls >= 1);
+            CHECK(calls <= 3);               // it stopped, it did not run on
+            CHECK(!Exists(outPath));
+            CHECK(!Exists(outPath + ".part"));
+        }
+
+        // Cancel at the END of the render — after the samples are done, before
+        // the file is in place: the temp must not be renamed over the
+        // destination, and nothing may be left where a finished file goes.
+        {
+            const std::string outPath = path + ".revlate.wav";
+            std::remove(outPath.c_str());
+            std::atomic<bool> cancel{false};
+            RegionJob job;
+            job.cancel = &cancel;
+            job.progress = [&](float f) {
+                if (f > 0.7f) cancel = true;   // past the decode, before the write
+            };
+            CHECK(!RenderReversedClip(c, SR, outPath, job));
+            CHECK(!Exists(outPath));
+            CHECK(!Exists(outPath + ".part"));
+        }
+
+        // A silent source has no peak to normalize to: the op refuses rather
+        // than dividing by (almost) nothing.
+        {
+            const std::string quiet = path + ".silent.wav";
+            {
+                WavWriter w;
+                CHECK(w.Open(quiet, (int)SR, 2));
+                std::vector<int16_t> zeros(48000 * 2, 0);
+                CHECK(w.WriteInt16(zeros.data(), zeros.size()));
+                CHECK(w.Close());
+            }
+            Clip sc;
+            sc.id = 9;
+            sc.startFrame = 0;
+            sc.lengthFrames = 48000;
+            sc.sourcePath = quiet;
+            float gain = 1.0f;
+            RegionJob job;
+            CHECK(!MeasureClipPeak(sc, SR, job, &gain));
+            std::remove(quiet.c_str());
+        }
+
+        // Normalize: the ramp's peak is 3000/32768, so unity peak needs ~10.9x.
+        {
+            float gain = 0.0f;
+            RegionJob job;
+            CHECK(MeasureClipPeak(c, SR, job, &gain));
+            CHECK(std::fabs(gain - (32768.0f / 3000.0f)) < 0.05f);
+        }
+
+        // Strip Silence: the middle second is a gap, so the clip comes back in
+        // two kept spans with 20 ms of air either side of the cut.
+        {
+            std::vector<Span> spans;
+            double rate = 0.0;
+            RegionJob job;
+            StripSilenceParams params;
+            CHECK(AnalyzeClipSilence(c, SR, params, &spans, &rate, job));
+            CHECK(rate == SR);
+            CHECK(spans.size() == 2);
+            if (spans.size() == 2) {
+                // The gap is the middle second; each kept span keeps `pad`
+                // frames of air on the cut side, which is the parameter's own
+                // promise (20 ms here).
+                const int64_t pad = (int64_t)(params.padSec * SR);
+                CHECK(spans[0].start == 0);
+                // One frame of slack: where the fixture's own silence starts is
+                // the fixture's business (its ramp also crosses zero).
+                CHECK(std::llabs(spans[0].end - (srcFrames / 4 + pad)) <= 1);
+                CHECK(std::llabs(spans[1].start - (3 * srcFrames / 4 - pad)) <= 1);
+                CHECK(spans[1].end == srcFrames);
+            }
+            // A cancelled analysis reports nothing.
+            std::atomic<bool> cancel{true};
+            RegionJob cj;
+            cj.cancel = &cancel;
+            std::vector<Span> none;
+            CHECK(!AnalyzeClipSilence(c, SR, params, &none, &rate, cj));
+            CHECK(none.empty());
+        }
+
+        std::remove(src.c_str());
+    }
+
+    // --- M4.4: the freeze render, as a job ---
+    {
+        const std::string outPath = path + ".freeze.wav";
+        std::remove(outPath.c_str());
+        const Project fr = OneNote(SR, 0, (Frame)(SR / 2));
+        /// The only track in that project:
+        const TrackId tid = fr.Tracks().front().id;
+
+        std::atomic<bool> cancel{false};
+        std::vector<float> seen;
+        bool inRange = true, monotonic = true;
+        ExportJob job;
+        job.cancel = &cancel;
+        job.progress = [&](float f) {
+            seen.push_back(f);
+            if (f < 0.0f || f > 1.0f) inRange = false;
+            if (seen.size() > 1 && f < seen[seen.size() - 2]) monotonic = false;
+        };
+        CHECK(RenderTrackToWav(fr, tid, outPath, &job));
+        CHECK(!seen.empty());
+        CHECK(inRange && monotonic);
+        if (!seen.empty()) CHECK(seen.back() == 1.0f);   // guarded: see above
+        CHECK(Exists(outPath));
+        {   // ... and it carries the track's audio, not silence.
+            const std::vector<float> frames = ReadFrames(outPath);
+            float peak = 0.0f;
+            for (float v : frames) peak = std::max(peak, std::fabs(v));
+            CHECK(peak > 0.01f);
+        }
+        std::remove(outPath.c_str());
+
+        // A cancelled freeze leaves nothing.
+        std::atomic<bool> cancel2{true};
+        ExportJob job2;
+        job2.cancel = &cancel2;
+        CHECK(!RenderTrackToWav(fr, tid, outPath, &job2));
+        CHECK(!Exists(outPath));
+        CHECK(!Exists(outPath + ".part"));
+        // ... and a track that does not exist fails rather than writing one.
+        CHECK(!RenderTrackToWav(fr, 4242, outPath, nullptr));
+        CHECK(!Exists(outPath));
     }
 
     std::remove(path.c_str());

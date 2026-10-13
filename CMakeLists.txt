@@ -39,11 +39,15 @@ add_library(daw_model
     src/model/ProjectIO.cpp     # kit-free project save/load
     src/model/Automation.cpp    # kit-free breakpoint automation lanes
     src/model/RegionOps.cpp     # kit-free clip region DSP (peak/reverse/silence)
+    src/model/RegionJobs.cpp    # the region ops + freeze as worker-thread jobs (M4.4)
     src/model/RangeEdit.cpp     # kit-free time-range slicing (M2.4)
     src/model/SmfIO.cpp         # kit-free Standard MIDI File reader/writer
     src/model/MidiOps.cpp       # kit-free MIDI note transforms (quantize/humanize/legato)
+    src/model/ProjectTimebase.cpp # kit-free frame rescale for a sample-rate change
+    src/model/ProjectResample.cpp # kit-free media conversion at another rate
     src/app/AppSettings.cpp     # kit-free app settings text serializer
     src/app/ThemePalette.cpp    # kit-free theme palette derivation (T1)
+    src/app/ProjectTemplates.cpp # kit-free template discovery (M3.7)
     src/engine/WavSource.cpp    # kit-free RIFF/WAVE reader, host-testable
     src/engine/WavWriter.cpp    # kit-free RIFF/WAVE writer, host-testable
     src/engine/Resampler.cpp    # kit-free linear SRC, host-testable
@@ -566,6 +570,23 @@ add_executable(appsettings_tests tests/appsettings_tests.cpp)
 target_link_libraries(appsettings_tests PRIVATE daw_model)
 add_test(NAME appsettings_tests COMMAND appsettings_tests)
 
+# Project Settings (M3.6): the meter/notes commands and their round trip, the
+# timeline rescale a sample-rate change performs (against every frame-bearing
+# field), the undo's exactness, and the media conversion's own output.
+add_executable(project_settings_tests tests/project_settings_tests.cpp)
+target_link_libraries(project_settings_tests PRIVATE daw_model)
+add_test(NAME project_settings_tests COMMAND project_settings_tests)
+
+# The New Project templates (M3.7): the discovery rules, and -- the one that
+# matters -- that the .dawproj files this repository ships parse and build the
+# shape they promise. It reads data/templates from the SOURCE tree, so a broken
+# template fails here rather than in a user's File > New.
+add_executable(project_templates_tests tests/project_templates_tests.cpp)
+target_link_libraries(project_templates_tests PRIVATE daw_model)
+target_compile_definitions(project_templates_tests PRIVATE
+    DAW_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_test(NAME project_templates_tests COMMAND project_templates_tests)
+
 add_executable(loudness_tests tests/loudness_tests.cpp)
 target_link_libraries(loudness_tests PRIVATE daw_model)
 add_test(NAME loudness_tests COMMAND loudness_tests)
@@ -614,6 +635,11 @@ add_executable(smfio_tests tests/smfio_tests.cpp)
 target_link_libraries(smfio_tests PRIVATE daw_model)
 add_test(NAME smfio_tests COMMAND smfio_tests)
 
+# The transport's time formats and their inverse (M3.1): header-only, kit-free.
+add_executable(time_display_tests tests/time_display_tests.cpp)
+target_link_libraries(time_display_tests PRIVATE daw_model)
+add_test(NAME time_display_tests COMMAND time_display_tests)
+
 add_executable(midi_tests tests/midi_tests.cpp)
 target_link_libraries(midi_tests PRIVATE daw_model)
 add_test(NAME midi_tests COMMAND midi_tests)
@@ -639,6 +665,33 @@ add_test(NAME projectio_fuzz_tests COMMAND projectio_fuzz_tests)
 # instead of a hung CI. Generous vs the ~1 s they actually take.
 set_tests_properties(wavsource_fuzz_tests projectio_fuzz_tests
                      PROPERTIES TIMEOUT 60)
+
+# --- the project templates (M3.7) -------------------------------------
+# File > New's templates are ordinary .dawproj files in data/templates. The app
+# finds them BESIDE ITS BINARY in a build tree and in the installation's data
+# directory when packaged, so the build has to put them in the first of those:
+# this is the project's first copy/install rule. A declared OUTPUT per file
+# (not a POST_BUILD copy) so editing a template re-copies it -- the lesson the
+# LV2 fixture's .ttl files taught.
+set(DAW_TEMPLATE_FILES
+    data/templates/empty.dawproj
+    data/templates/band.dawproj
+    data/templates/producer.dawproj)
+set(_daw_template_outputs "")
+foreach(_tpl IN LISTS DAW_TEMPLATE_FILES)
+    get_filename_component(_tpl_name "${_tpl}" NAME)
+    set(_tpl_out "${CMAKE_BINARY_DIR}/data/templates/${_tpl_name}")
+    add_custom_command(
+        OUTPUT "${_tpl_out}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "${CMAKE_BINARY_DIR}/data/templates"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/${_tpl}" "${_tpl_out}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${_tpl}"
+        COMMENT "Copying template ${_tpl_name}")
+    list(APPEND _daw_template_outputs "${_tpl_out}")
+endforeach()
+add_custom_target(daw_templates DEPENDS ${_daw_template_outputs})
 
 # --- Haiku-only targets: the Media Kit engine and its driver ----------
 # CMake sets HAIKU=TRUE when building on Haiku. On other hosts these are
@@ -724,6 +777,9 @@ if(HAIKU)
         src/ui/QuantizeWindow.cpp
         src/ui/MixerWindow.cpp
         src/ui/MarkersWindow.cpp
+        src/ui/PreferencesWindow.cpp   # the Preferences window (M3.5)
+        src/ui/ProjectSettingsWindow.cpp # the Project Settings window (M3.6)
+        src/ui/NewProjectWindow.cpp    # File > New with templates (M3.7)
         src/ui/RenameWindow.cpp
         src/ui/SampleBrowser.cpp
         src/ui/widgets/DawControlLook.cpp
@@ -746,6 +802,14 @@ if(HAIKU)
 
     add_executable(daw src/main.cpp)
     target_link_libraries(daw PRIVATE daw_ui)
+    # The New Project templates sit beside the binary (data/templates), which
+    # is how a build-tree run finds them (M3.7).
+    add_dependencies(daw daw_templates)
+
+    # An installed app: the package's data directory. The recipe's INSTALL()
+    # carries the same copy, because it copies the binary by hand instead of
+    # running `make install`.
+    install(DIRECTORY data/templates DESTINATION data/haiku-daw)
 
     # Attach the app's resource (signature, version, file types, app flags) to
     # the binary: Deskbar and the package manager read the version off the
@@ -778,6 +842,9 @@ if(HAIKU)
     # reporting a pass for a window that never opened.
     add_executable(ui_functional_tests tests/ui_functional_tests.cpp)
     target_link_libraries(ui_functional_tests PRIVATE daw_ui)
+    # The New Project flow's templates (M3.7): the suite runs from the build
+    # tree and opens the dialog for real.
+    add_dependencies(ui_functional_tests daw_templates)
     add_test(NAME ui_functional_tests COMMAND ui_functional_tests)
     # TIMEOUT: a window test that wedges (a prompt nobody answers, a lock held)
     # must fail the suite rather than block ctest forever. The whole run is

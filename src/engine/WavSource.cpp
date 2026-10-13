@@ -1,5 +1,6 @@
 #include "WavSource.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -19,7 +20,11 @@ uint16_t rd_u16(const uint8_t* p) {
 bool WavSource::Open(const std::string& path) {
     fFile.open(path, std::ios::binary);
     if (!fFile) {
-        std::fprintf(stderr, "WavSource: cannot open '%s'\n", path.c_str());
+        // WITH the reason: "cannot open" for a file that is plainly there is
+        // the message that costs an afternoon (a process out of file
+        // descriptors reads exactly like a missing file).
+        std::fprintf(stderr, "WavSource: cannot open '%s': %s\n", path.c_str(),
+                     std::strerror(errno));
         return false;
     }
 

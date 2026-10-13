@@ -180,6 +180,22 @@ public:
     // automated tracks, where automation owns the gain/pan).
     void SetAudible(bool audible);
 
+    // The track's input trim and polarity (M3.4). Separate atoms from the
+    // fader's: they are applied to this clip's contribution on the way into
+    // the track, so a gain/pan automation pass — which overwrites fGainL/R
+    // every block — can never drop them.
+    void SetTrimPhase(float trim, bool invert) {
+        fTrim.store(trim, std::memory_order_relaxed);
+        fPhase.store(invert, std::memory_order_relaxed);
+    }
+
+    // The engine's xrun counter (M3.1): Mix increments it once per block in
+    // which this clip's ring could not supply a frame. The ENGINE outlives
+    // every graph it publishes, so the pointer stays valid for the stream's
+    // whole life, and Mix only runs from the RT callback, which only runs
+    // while the engine is alive.
+    void SetXrunCounter(std::atomic<uint64_t>* counter) { fXruns = counter; }
+
     TrackId Track() const { return fTrackId; }
     Frame ClipStart() const { return fStart; }
     // The source ran out of data (a clip longer than its file, which the model
@@ -254,6 +270,9 @@ private:
     std::atomic<float> fGainL{0.0f};   // per-channel gain after equal-power pan
     std::atomic<float> fGainR{0.0f};
     std::atomic<bool>  fAudible{true};
+    std::atomic<uint64_t>* fXruns = nullptr;   // the engine's counter (M3.1)
+    std::atomic<float> fTrim{1.0f};    // input trim, pre-fader (M3.4)
+    std::atomic<bool>  fPhase{false};  // polarity flip (M3.4)
 
     // The factory's reader for whatever the clip's file is: WAV, AIFF, FLAC or
     // Ogg Vorbis. Owned (the concrete readers are not copyable and their
@@ -324,6 +343,12 @@ public:
             std::atomic<float>                    midiGainR{1.0f};
             std::atomic<float>                    busGainL{1.0f};   // bus fader
             std::atomic<float>                    busGainR{1.0f};
+            // Input trim + polarity (M3.4), applied where the node's OWN
+            // material is scaled (the MIDI fader / the bus fader). Separate
+            // from the gain atoms above for the same reason the streams' are:
+            // automation writes those every block.
+            std::atomic<float>                    trim{1.0f};
+            std::atomic<bool>                     phaseInv{false};
             bool                                  isBus   = false;
             std::atomic<bool>                     audible{true};
             bool                                  liveMonitor = false;  // armed MIDI: synth live input
@@ -444,6 +469,8 @@ public:
                   midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
                   busGainL(o.busGainL.load(std::memory_order_relaxed)),
                   busGainR(o.busGainR.load(std::memory_order_relaxed)),
+                  trim(o.trim.load(std::memory_order_relaxed)),
+                  phaseInv(o.phaseInv.load(std::memory_order_relaxed)),
                   isBus(o.isBus),
                   audible(o.audible.load(std::memory_order_relaxed)),
                   liveMonitor(o.liveMonitor),
@@ -476,6 +503,10 @@ public:
                 midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 busGainL.store(o.busGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 busGainR.store(o.busGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                // The M3.4 pair rides these hand-written moves too: a bus moved
+                // after its trim was set would otherwise come back at unity.
+                trim.store(o.trim.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                phaseInv.store(o.phaseInv.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 isBus = o.isBus;
                 audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 liveMonitor = o.liveMonitor;
@@ -768,6 +799,36 @@ public:
     bigtime_t LastBuildUs() const {
         return fLastBuildUs.load(std::memory_order_relaxed);
     }
+    // ---- the audio thread's own load, and its xruns (M3.1) ----------------
+    // How long the last content callback took, in microseconds. Measured in
+    // PlayTrampoline AROUND FillBuffer: the callback body itself stays
+    // clock-free (no syscall, allocation, lock or I/O in FillBuffer — the RT
+    // rule), and this is the one place the audio thread reads the clock.
+    bigtime_t LastCallbackUs() const {
+        return fLastCallbackUs.load(std::memory_order_relaxed);
+    }
+    // The worst callback since this was last called, and clears it. A load
+    // figure that matters is the PEAK: an average over a second hides exactly
+    // the block that overran and caused the click. The 60 Hz pulse reads it,
+    // so what it reports is the worst block in the last ~16 ms window.
+    bigtime_t TakePeakCallbackUs() {
+        return fPeakCallbackUs.exchange(0, std::memory_order_relaxed);
+    }
+    // A callback duration as a share of the buffer it had to fill, in percent
+    // (0..999). The budget is the buffer duration at the output rate, which is
+    // what an overrun would exceed.
+    float LoadPercentFor(bigtime_t callbackUs) const;
+    // ... for the callback that ran last.
+    float CallbackLoadPercent() const { return LoadPercentFor(LastCallbackUs()); }
+    // Frames the callback must fill, and the rate it fills them at.
+    size_t BufferFrames() const { return fBufferFrames; }
+    // Ring underruns the RT side has seen: one per block in which a clip's
+    // stream could not supply its frames (the `fSkipDebt` path in
+    // TrackStream::Mix). Counted on the audio thread, read here.
+    uint64_t Xruns() const {
+        return fXruns.load(std::memory_order_relaxed);
+    }
+
     // Is a graph in place for the RT side to render?
     bool HasGraph() const { return fGraphs->Active() != nullptr; }
     // Is a rebuild in flight?
@@ -903,6 +964,13 @@ public:
 
     // Toggle the metronome click (RT-safe atomic).
     void SetMetronome(bool on) { fMetronomeOn.store(on); }
+    // The click's level and sound (M3.5, the Preferences window). RT-safe
+    // atomics like the toggle: a change is audible on the next block, and the
+    // default (0.3, click) is exactly what the engine always played.
+    void SetMetronomeGain(float gain) { fMetronomeGain.store(gain); }
+    void SetMetronomeSound(int sound) { fMetronomeSound.store(sound); }
+    float MetronomeGain() const { return fMetronomeGain.load(); }
+    int   MetronomeSound() const { return fMetronomeSound.load(); }
 
     // Monitor section (RT-safe atomics). These affect only what is played out,
     // NOT the peak meters (which reflect the true mix). Dim drops the monitor
@@ -1168,6 +1236,12 @@ private:
     size_t fPlayerBufferBytes   = 0;   // what the device actually negotiated
     std::atomic<uint64_t> fPlayersOpened{0};
     std::atomic<uint64_t> fPlayerStarts{0};
+    // ---- what the callback costs (M3.1) ----------------------------------
+    // Written by the RT thread around FillBuffer (one clock read per callback)
+    // and by TrackStream::Mix on an underrun; read by the window's pulse.
+    std::atomic<bigtime_t> fLastCallbackUs{0};
+    std::atomic<bigtime_t> fPeakCallbackUs{0};   // max since TakePeakCallbackUs
+    std::atomic<uint64_t>  fXruns{0};            // ring underruns (one per block)
 
     // ---- the swappable graph --------------------------------------------
     // Held by pointer so teardown can be explicit: the destructor stops the
@@ -1191,6 +1265,10 @@ private:
     std::atomic<uint32_t> fClipFlags{0};
     std::atomic<float> fMasterGain{1.0f};
     std::atomic<bool>  fMetronomeOn{false};
+    // What the click sounds like (M3.5): the level it has always had, and the
+    // click timbre the Preferences window offers.
+    std::atomic<float> fMetronomeGain{0.3f};
+    std::atomic<int>   fMetronomeSound{0};
     std::atomic<bool>  fMonitorDim{false};
     std::atomic<bool>  fMonitorMono{false};
     std::atomic<IMonitorSource*> fMonSource{nullptr};
