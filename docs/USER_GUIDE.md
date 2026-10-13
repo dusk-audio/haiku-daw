@@ -54,9 +54,11 @@ comes from the file's header, not its extension, so a renamed file still opens.
 monitoring, if your input would otherwise be silent), then the Record button in
 the transport. Count-in bars are in **Preferences** now (the Audio menu keeps
 the metronome toggle); **drag on the ruler** to set the loop, and **Ctrl-drag**
-there to set a punch range (a bare click in the ruler clears the punch).
-Recording inside an enabled loop stacks takes you can comp from — right-click a
-take for **Next Take**.
+there to set a punch range. A plain click on the ruler just moves the playhead —
+**Clear Loop** and **Clear Punch** are entries of the ruler's right-click menu
+(or the Loop button and `L` switch looping off). **L** with no loop range loops
+the bar the playhead is in. Recording inside an enabled loop stacks takes you
+can comp from — right-click a take for **Next Take**.
 
 **Choose the input:** a track's `In` field lists what the system reports —
 `None`, `Default Input`, then each live device with its channels. One channel
@@ -77,14 +79,20 @@ pitch-bend and the mod wheel are audible, live and on playback.
 ## Editing
 
 - **Clips:** drag to move, drag an edge to trim, drag the top corners to set
-  fades. **Cmd**-drag (or **Alt**-drag) the right edge to *stretch* the clip —
-  time-stretch, pitch kept, with the ratio drawn on the clip. Right-click for
-  Copy / Delete / Split here / Normalize / Reverse / Strip Silence / Clear
-  Fades. Overlapping clips crossfade automatically, and **Shift** bypasses the
-  grid for free placement.
+  fades. **Alt**-drag (or **Cmd**-drag) inside a clip *slips* it — the audio
+  moves under the clip's window and the clip stays put. **Cmd**-drag (or
+  **Alt**-drag) the right edge to *stretch* the clip — time-stretch, pitch
+  kept, with the ratio drawn on the clip. Double-click a clip to rename it in
+  place on its name strip (Enter commits, Esc cancels). Right-click for
+  Copy / Delete / Split here / Rename / Mute / Fade Shape / Normalize /
+  Reverse / Strip Silence / Clear Fades. Overlapping clips crossfade
+  automatically, and **Shift** bypasses the grid for free placement. In a
+  crossfade the click always takes the clip drawn on top.
 - **Multi-select:** rubber-band or Cmd-click, then move/delete/duplicate as a
   group. Drag on empty lane area for a time range independent of the clips,
-  then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence.
+  then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence. A range and a clip
+  selection are never both live: whichever you made last is what Delete acts
+  on.
 - **Notes:** double-click a MIDI region to open the **piano roll**. Its tool
   palette (keys `1`–`7`) picks pointer, pencil, brush, eraser, scissors, glue
   and velocity; the bottom lane shows velocity or *any* controller — pick the
