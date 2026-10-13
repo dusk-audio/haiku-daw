@@ -4885,17 +4885,25 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
     std::printf("ux shell: render feedback ...\n");
 
-    // The fixture must be LONG. Two things depend on the first export still
-    // running when the second request is handled: the refusal, and the cancel
-    // that follows it. A whole-project bounce of the suite's project is NOT
-    // long enough to rely on -- most of its material is silent, and the
-    // exporter rendered it in well under the time the test takes to look at a
-    // window (the run that failed proved it: the second export started, wrote
-    // its file and finished). One long note makes the render minutes long (the
-    // renderer walks the project's end frame), and the cancel below stops it
-    // within a chunk, so the suite pays for none of it.
-    Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, "status-synth");
-    CHECK(LockedAddTrack(win, project, t));
+    // The fixture must be long, in WALL-CLOCK terms -- not just long in
+    // material. Two things depend on the first export still running when the
+    // second request is handled: the refusal, and the cancel that follows it.
+    // The first cut of this test learned both halves the hard way. A
+    // whole-project bounce of the suite's project (mostly silent) finished in
+    // well under the time the test takes to look at a window; and one
+    // 120-second note was still not enough -- the diagnostic showed the first
+    // export's bar up, then gone, one 5-second wait later (so ~24x realtime),
+    // and the second request was not DEQUEUED until after that, because a
+    // render at full tilt saturates the 2-vCPU VM. Twelve long notes put the
+    // render tens of seconds out, which no plausible queue delay outlasts. The
+    // cancel below stops every one of them within a chunk, so the suite pays
+    // for the seconds before it, not for the render.
+    for (int i = 0; i < 12; i++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "status-synth-%d", i);
+        Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, name);
+        CHECK(LockedAddTrack(win, project, t));
+    }
 
     // The remembered choices are pinned first: by this point in the suite an
     // earlier test has left "Loop range" selected, and a loop-range bounce of
@@ -4949,9 +4957,13 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     b.AddRef("directory", &dir);
     b.AddString("name", "haiku_daw_ui_status_b.wav");
     win->PostMessage(&b);
+    // 30 s, not 5: the refusal is set the moment the request is DEQUEUED, and
+    // while the first render is saturating the VM the window's queue drains
+    // slowly (that is what the fixture above is sized for). The message itself
+    // then stands for its own 4-second hold, so the poll below cannot miss it.
     const bool refused = WaitFor([&] {
         return TransportStatus(win) == "A render is already running";
-    }, 5000000);
+    }, 30000000);
     // A failure here has two very different shapes (the message never set, or
     // the message set and not read), and which one it is decides whether the
     // app or the test is at fault: print the row and the windows.
@@ -4977,16 +4989,25 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
 
     // The hold is 4 s (kStatusHoldUs) and the deadline is checked by the 2 Hz
-    // title poll, so the row is back to the transport state inside a second of
-    // it. A message left standing forever was the defect; the bound here is
-    // generous on purpose (a slow VM does not fail a timing check).
-    const bool stateBack = WaitFor([&] {
-        return TransportStatus(win) == "Stopped";
+    // title poll, so the job message is gone inside a second of it.
+    //
+    // What comes back is the TRANSPORT'S STATE, and that is not always
+    // "Stopped": with input monitoring live (a track left armed with its I
+    // lamp, which this suite has by now) the state line is "Monitoring input",
+    // and the row saying so is the app working, not the app failing (the run
+    // that failed printed exactly that, and the message had never been set
+    // because the refusal never happened -- see the fixture above). The
+    // promise this check owns is the one the finding made: a job message does
+    // not stand longer than its hold.
+    const bool jobMessageGone = WaitFor([&] {
+        const std::string s = TransportStatus(win);
+        return s.find("Export") == std::string::npos
+            && s != "A render is already running";
     }, 20000000);
-    if (!stateBack)
+    if (!jobMessageGone)
         std::printf("  DIAG the row after the hold: \"%s\"\n",
                     TransportStatus(win).c_str());
-    CHECK(stateBack);
+    CHECK(jobMessageGone);
 
     std::remove(pathA);
     std::remove(pathB);
