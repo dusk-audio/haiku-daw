@@ -379,7 +379,10 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
     // --- Menu bar ---
     BMenuBar* menuBar = new BMenuBar(BRect(0, 0, bounds.right, 20), "menubar");
     BMenu* fileMenu = new BMenu("File");
-    fileMenu->AddItem(new ThemedMenuItem("New", new BMessage(MSG_NEW_PROJECT), 'N'));
+    // "New" opens the New Project dialog, so it carries the same ellipsis as
+    // Save As…/Preferences… (a menu item that opens a window announces it).
+    fileMenu->AddItem(new ThemedMenuItem("New" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_NEW_PROJECT), 'N'));
     fileMenu->AddItem(new ThemedMenuItem("Open" B_UTF8_ELLIPSIS, new BMessage(MSG_OPEN), 'O'));
     fRecentMenu = new BMenu("Open Recent");
     fileMenu->AddItem(new ThemedMenuItem(fRecentMenu));
@@ -961,6 +964,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // A stock window (a file panel) finished building its views after
             // Show() returned: one more pass over them.
             ThemeStockWindows();
+            break;
+
+        case kMsgPluginNoTrack:
+            // A pick in the dock's Plugins page with no track selected: the
+            // page cannot add an insert to a chain nobody named, so it says
+            // what it needs (see PluginBrowserView::PostChoice).
+            SetTransportStatus("Select a track first");
             break;
 
         case MSG_THEME_MODE:
@@ -2553,17 +2563,26 @@ void MainWindow::SetDockPage(int page) {
             break;
         case kDockPlugins:
             if (fDockPlugins == nullptr)
-                fDockPlugins = new PluginBrowserView(fSelTrack, BMessenger(fInspector));
+                fDockPlugins = new PluginBrowserView(fSelTrack,
+                                                     BMessenger(fInspector),
+                                                     BMessenger(this));
             else
                 fDockPlugins->SetTrack(fSelTrack);
             fEditorPane->GroupLayout()->AddView(fDockPlugins, 1.0f);
             // Name the chain a pick will land in: the page adds to whichever
             // track the inspector is pointed at, and that is not otherwise
-            // visible from the dock.
+            // visible from the dock. With NO track selected the page cannot add
+            // anything -- say what it needs instead of "add to no track
+            // selected", which read as an error about a chain nobody named.
             {
                 Track* t = fProject->FindTrack(fSelTrack);
-                BString title("Plugins \xE2\x80\x94 add to ");
-                title << (t != nullptr ? t->name.c_str() : "no track selected");
+                BString title("Plugins \xE2\x80\x94 ");
+                if (t != nullptr) {
+                    title << "add to ";
+                    title << t->name.c_str();
+                } else {
+                    title << "select a track to add to";
+                }
                 fDockTitle->SetText(title.String());
             }
             fDockPop->SetEnabled(true);

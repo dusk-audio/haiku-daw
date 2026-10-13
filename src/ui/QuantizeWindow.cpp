@@ -45,7 +45,8 @@ BSlider* PercentRow(const char* name, const char* label, int value,
 QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
                                BMessenger apply)
     : BWindow(frame, "Quantize", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
-              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
     BView* root = new ThemedView("root", B_WILL_DRAW);
@@ -78,6 +79,10 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
 
     DawButton* ok = new DawButton("ok", "Quantize", new BMessage(MSG_APPLY));
     ok->MakeDefault(true);
+    // The visible half of the way out Escape takes (B_CLOSE_ON_ESCAPE above):
+    // both are B_QUIT_REQUESTED, so neither quantizes anything.
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(B_QUIT_REQUESTED));
 
     BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(10.0f))
         .SetInsets(Themed(8.0f))
@@ -87,6 +92,7 @@ QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
         .Add(fLengths)
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
+            .Add(cancel)
             .Add(ok)
         .End()
         .End();

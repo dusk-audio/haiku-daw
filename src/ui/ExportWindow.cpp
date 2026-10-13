@@ -68,8 +68,13 @@ int MarkedIndex(BPopUpMenu* menu) {
 
 ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
                            bool stems, BMessenger apply)
-    : BWindow(frame, "Export", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
-              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+    // The title names the action, exactly as the file panel behind it does
+    // ("Export Mix" / "Export Stems"); "Export" alone did not say which of the
+    // two the dialog was about to do.
+    : BWindow(frame, stems ? "Export Stems" : "Export Mix", B_TITLED_WINDOW,
+              B_FLOATING_APP_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fCur(current), fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
     BView* root = new ThemedView("root", B_WILL_DRAW);
@@ -124,7 +129,9 @@ ExportWindow::ExportWindow(BRect frame, const ExportChoices& current,
 
     DawButton* cancel = new DawButton("cx", "Cancel",
                                       new BMessage(B_QUIT_REQUESTED));
-    DawButton* go = new DawButton("ok", stems ? "Export stems" : "Export",
+    // The verb matches the window title and the panel behind it, so "which
+    // export is this?" has one answer everywhere.
+    DawButton* go = new DawButton("ok", stems ? "Export Stems" : "Export Mix",
                                   new BMessage(MSG_GO));
     go->MakeDefault(true);
 
