@@ -3185,6 +3185,43 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         }
         return s;
     };
+    // The sections above end at whatever zoom their last wheel or zoom key
+    // left (TestArrangeFeel finishes with a zoom-out), and a click on the
+    // fixture clip has to land on its BODY — 9 px from an edge is a trim grab,
+    // and the in-place rename needs a strip wide enough to hold a field. Zoom
+    // in until the clip is comfortably wide and put the top of the timeline
+    // back in view, so a click's x is where the clip is drawn. Returns the
+    // zoom it found, so the caller can put it back (the sections after this
+    // one were written at the old scale).
+    auto zoomForBodyClick = [&]() -> double {
+        double fpp = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            fpp = tv->FramesPerPixel();
+            win->Unlock();
+        }
+        const double was = fpp;
+        for (int i = 0; i < 10 && fpp > 128.0; i++) {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                tv->ZoomBy(0.5);
+                fpp = tv->FramesPerPixel();
+                win->Unlock();
+            }
+        }
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->ScrollToFrame(0);
+            win->Unlock();
+        }
+        snooze(100000);
+        return was;
+    };
+    auto restoreZoom = [&](double was) {
+        double now = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            now = tv->FramesPerPixel();
+            if (was > 0.0 && now > 0.0 && was != now) tv->ZoomBy(was / now);
+            win->Unlock();
+        }
+    };
     // The Edit menu, by walking the bar (FindMenu exists only on BMenu).
     auto editMenu = [&]() -> BMenu* {
         BMenu* out = nullptr;
@@ -3405,6 +3442,46 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         }));
     }
 
+    // --- 6b. Delete acts on the thing the user touched LAST (item C) -------
+    // The range used to win whenever one existed, even after a click on a
+    // clip: the Delete key then removed a time range the user had stopped
+    // looking at. The two selections are mutually exclusive now — the clip
+    // click drops the range — so Delete takes the clip.
+    std::printf("  depth: delete acts on the newest selection\n");
+    double zoomWas = 0.0;
+    {
+        zoomWas = zoomForBodyClick();
+        const float xMid = (frameX(48000) + frameX(96000)) * 0.5f;  // clip's middle
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTimeRange(60000, 72000);
+            win->Unlock();
+        }
+        Frame ra = -1, rb = -1;
+        CHECK(WaitFor([&] { return range(&ra, &rb); }));
+
+        click(xMid, laneMidA);               // on the clip: selects it...
+        CHECK(WaitFor([&] {                  // ...and drops the range
+            Frame a = -1, b = -1;
+            return !range(&a, &b);
+        }));
+        bool sel = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            sel = tv->SelectionCount() > 0;
+            win->Unlock();
+        }
+        CHECK(sel);
+        CHECK(clips(ta.id) == 1);            // the click changed nothing else
+
+        win->PostMessage(MSG_EDIT_DELETE);   // Edit > Delete / the Delete key
+        CHECK(WaitFor([&] { return clips(ta.id) == 0; }));
+        CHECK(undoName() == "Delete Clips");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clips(ta.id) == 1; }));
+        CHECK(clipOf(ta.id, ac.id).lengthFrames == 48000);   // whole clip back
+        // The range is gone, not merely hidden: none of the clip was cut away.
+        CHECK(clipOf(ta.id, ac.id).startFrame == 48000);
+    }
+
     // --- 7. Insert Silence ripples everything from the range start --------
     std::printf("  depth: insert silence\n");
     {
@@ -3574,6 +3651,57 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         Shot("depth-clip-colour");
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).colorIndex == 0; }));
+    }
+
+    // --- 10b. Rename a clip IN PLACE, in its name strip (package 50) -------
+    // The double-click used to open RenameWindow at the raw click point, which
+    // can hang off the screen; the field lives on the clip now, and the keys
+    // (Enter commits, Esc cancels) are the track rename's own.
+    std::printf("  depth: clip rename in place\n");
+    {
+        const float xc = (frameX(48000) + frameX(96000)) * 0.5f;   // clip's middle
+        BPoint screen(xc, laneMidA);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(BPoint(xc, laneMidA));
+            win->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 2);
+            m.AddInt32("modifiers", 0);
+            m.AddPoint("where", BPoint(xc, laneMidA));
+            m.AddPoint("screen_where", screen);
+            BMessenger(tv).SendMessage(&m);
+        }
+        CHECK(WaitFor([&] {
+            bool on = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                on = tv->RenamingInPlace() && tv->RenamingClip() == ac.id;
+                win->Unlock();
+            }
+            return on;
+        }));
+        Shot("depth-clip-rename-field");      // the open field, on the strip
+        for (int i = 0; i < 5; i++) sendKey("\x08");   // clear "Verse"
+        sendKey("C"); sendKey("h"); sendKey("1");
+        sendKey("\n");                        // Enter commits
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name == "Ch1"; }));
+        CHECK(undoName() == "Rename Clip");
+        CHECK(WaitFor([&] {
+            bool done = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                done = !tv->RenamingInPlace();
+                win->Unlock();
+            }
+            return done;
+        }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name == "Verse"; }));
+        // The zoom the sections above were written at (10b's click needed the
+        // clip wide enough to hold the field).
+        restoreZoom(zoomWas);
     }
 
     // --- 11. Fade shapes (M2.5) -------------------------------------------
@@ -4174,13 +4302,54 @@ static void TestArrangeTracks(MainWindow* win, Project& project,
             return ph == mkFrame && drawn == mkFrame;
         }));
 
-        // Right-clicking the flag removes it -- one undoable step.
-        postMouseTo(tv, B_MOUSE_DOWN, BPoint(xAt, yMarker), 0, 2, 1);
-        postMouseTo(tv, B_MOUSE_UP,   BPoint(xAt, yMarker), 0, 0, 1);
-        CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
-        CHECK(undoName() == "Remove Marker");
-        win->PostMessage(MSG_EDIT_UNDO);
-        CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+        // Dragging the flag MOVES the marker (package 50, ux-timeline): the
+        // release lands it snapped on the grid, and the whole gesture is ONE
+        // undo step (Move Marker).
+        {
+            float xTo = 0.0f;
+            lock([&] { xTo = tv->FrameToX(180000); });
+            postMouseTo(tv, B_MOUSE_DOWN,  BPoint(xAt, yMarker), 0, 1, 1);
+            postMouseTo(tv, B_MOUSE_MOVED, BPoint(xTo, yMarker), 0, 1, 1);
+            postMouseTo(tv, B_MOUSE_UP,    BPoint(xTo, yMarker), 0, 0, 1);
+            CHECK(WaitFor([&] {
+                Frame f = -1;
+                lock([&] {
+                    if (!project.markers.empty())
+                        f = project.markers.back().frame;
+                });
+                return f == 180000;
+            }));
+            CHECK(markerCount() == markersBefore + 1);   // moved, not copied
+            CHECK(undoName() == "Move Marker");
+            Shot("markers-lane-moved");
+            win->PostMessage(MSG_EDIT_UNDO);
+            CHECK(WaitFor([&] {
+                Frame f = -1;
+                lock([&] {
+                    if (!project.markers.empty())
+                        f = project.markers.back().frame;
+                });
+                return f == mkFrame;                     // back where it was
+            }));
+        }
+
+        // The flag's right-click opens a menu now (Rename… / Delete) instead
+        // of deleting the marker outright. A popup cannot be driven by the
+        // suite -- and posting the click would sit in the popup's Go() -- so
+        // the DELETE its menu entry runs is called directly: the established
+        // pattern (a popup needs eyes; docs/UI_GUIDELINES.md §1).
+        {
+            std::string mkName;
+            lock([&] {
+                if (!project.markers.empty())
+                    mkName = project.markers.back().name;
+            });
+            lock([&] { tv->RemoveMarkerAt(mkFrame, mkName); });
+            CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
+            CHECK(undoName() == "Remove Marker");
+            win->PostMessage(MSG_EDIT_UNDO);
+            CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+        }
 
         // ...and the playhead-seek from a marker is what the markers window
         // uses too (checked in section 9).
@@ -5523,11 +5692,52 @@ static void TestKeyMap(MainWindow* win, Project& project, CommandStack& stack) {
     }));
 
     // L: loop on, then off. (It needs no loop range: the marker-span rule may
-    // set one, and the flag is what the key owns.)
+    // set one, the bar rule always can, and the flag is what the key owns.)
     sendKey("l");
     CHECK(WaitFor([&] { return loopOn() != loopBefore; }));
     sendKey("l");
     CHECK(WaitFor([&] { return loopOn() == loopBefore; }));
+
+    // L with nothing at all to adopt leaves a range the engine can walk — the
+    // BAR around the playhead (package 50, item D). Before this the flag lit
+    // while the engine ignored a zero-length loop: the lamp and the status
+    // line claimed looping and nothing looped. Markers would win the adoption
+    // order (they are tried first), so this case starts with none.
+    {
+        std::vector<Marker> markersWere;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            markersWere = project.markers;      // the marker rule is tried first
+            project.markers.clear();            // ...so this is the "nothing" case
+            project.transport.loopEnabled = false;
+            project.transport.loopStart  = 0;
+            project.transport.loopEnd    = 0;
+            win->Unlock();
+        }
+        setPlayhead(120000);                    // inside bar 2 (96000..192000)
+        sendKey("l");
+        daw::Frame lo = -1, hi = -1;
+        CHECK(WaitFor([&] {
+            bool on = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                on = project.transport.loopEnabled;
+                lo = project.transport.loopStart;
+                hi = project.transport.loopEnd;
+                win->Unlock();
+            }
+            return on && hi > lo;
+        }));
+        CHECK(lo == 96000);                     // the bar containing the playhead
+        CHECK(hi == 192000);
+        sendKey("l");                           // and off again
+        CHECK(WaitFor([&] { return !loopOn(); }));
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            project.markers = markersWere;      // put the session back
+            project.transport.loopStart = 0;
+            project.transport.loopEnd   = 0;
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+    }
 
     // C: the click. The window's own state is the observable.
     const bool clickBefore = win->MetronomeOn();

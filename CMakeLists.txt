@@ -447,6 +447,14 @@ add_executable(range_edit_tests tests/range_edit_tests.cpp)
 target_link_libraries(range_edit_tests PRIVATE daw_model)
 add_test(NAME range_edit_tests COMMAND range_edit_tests)
 
+# The arrangement view's kit-free rules (package 50-ux-timeline,
+# src/model/ArrangeLogic.h): the draw-order hit rule, the loop range the L key
+# adopts, the scrollbar step maths, which selection Delete acts on — plus the
+# marker move command the marker lane's drag runs.
+add_executable(arrange_logic_tests tests/arrange_logic_tests.cpp)
+target_link_libraries(arrange_logic_tests PRIVATE daw_model)
+add_test(NAME arrange_logic_tests COMMAND arrange_logic_tests)
+
 # The M2.6 model work: duplicating a whole track (fresh clip ids) and folding
 # a lane.
 add_executable(track_depth_tests tests/track_depth_tests.cpp)

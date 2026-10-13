@@ -1341,6 +1341,35 @@ void RenameMarkerCommand::Undo(Project& p) {
         p.markers[fIndex].name = fOld;
 }
 
+// The marker lane's drag: one undo step for the whole gesture. Remove and
+// re-insert, because a move across another marker has to leave the vector
+// sorted (every reader assumes it is: JumpToMarker walks it in order).
+bool MoveMarkerCommand::Do(Project& p) {
+    for (std::size_t i = 0; i < p.markers.size(); ++i) {
+        if (p.markers[i].frame != fOldFrame) continue;
+        // The name tells two markers on one frame apart; with none given, the
+        // first at that frame is the one (RemoveMarkerCommand's rule).
+        if (!fName.empty() && p.markers[i].name != fName) continue;
+        fMoved    = p.markers[i];       // the old frame and name, for Undo
+        fOldIndex = (int)i;
+        p.markers.erase(p.markers.begin() + (std::ptrdiff_t)i);
+        break;
+    }
+    if (fOldIndex < 0) return false;
+    std::size_t at = 0;
+    while (at < p.markers.size() && p.markers[at].frame < fNewFrame) ++at;
+    p.markers.insert(p.markers.begin() + (std::ptrdiff_t)at,
+                     Marker{fNewFrame, fMoved.name});
+    fNewIndex = (int)at;
+    return true;
+}
+void MoveMarkerCommand::Undo(Project& p) {
+    if (fNewIndex < 0 || fNewIndex >= (int)p.markers.size()) return;
+    p.markers.erase(p.markers.begin() + (std::ptrdiff_t)fNewIndex);
+    if (fOldIndex >= 0 && fOldIndex <= (int)p.markers.size())
+        p.markers.insert(p.markers.begin() + (std::ptrdiff_t)fOldIndex, fMoved);
+}
+
 // --- SetTrackInputCommand ---------------------------------------------
 
 bool SetTrackInputCommand::Do(Project& p) {
