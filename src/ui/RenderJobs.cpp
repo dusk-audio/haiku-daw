@@ -22,7 +22,11 @@ namespace daw {
 void RenderJobs::StartExport(const char* path, bool stems) {
 
     if (!path || !path[0]) return;
-    if (fExportThread.joinable()) return;   // one at a time (a bar is up)
+    // One job at a time, whichever kind -- the same rule StartRegionJob
+    // applies. Without the region half of the test an export could start on
+    // top of a running Freeze: two progress windows on one protocol, and one
+    // Cancel (which raises both flags) stopping both jobs.
+    if (fExportThread.joinable() || fRegionThread.joinable()) return;
 
     fWin->fTransportCtl.StopPlayback();
     fWin->FlushFxEditors();
@@ -231,6 +235,32 @@ void RenderJobs::StartRegionJob(RegionOp op, TrackId track, ClipId clip) {
         fRegionRunning.store(false, std::memory_order_release);
     });
     fWin->UpdatePulse();
+}
+
+void RenderJobs::Stop() {
+    // Both workers, export first (it is the one that can hold the device).
+    if (fExportThread.joinable()) {
+        fExportCancel.store(true);
+        fExportThread.join();
+    }
+    if (fRegionThread.joinable()) {
+        fRegionCancel.store(true);
+        fRegionThread.join();
+    }
+    // A joined region job is finished as far as the pulse is concerned: the
+    // window may be gone before anything drains it, and applying the result
+    // now -- or reporting it -- is not wanted.
+    fRegionHandled = true;
+    fExportHandled = true;
+}
+
+void RenderJobs::CancelRegionJob() {
+    if (!fRegionThread.joinable()) return;
+    fRegionCancel.store(true);
+    fRegionThread.join();
+    // The pulse's FinishRegionJob still runs (the bar has to go), and its
+    // cancelled branch leaves the model alone -- which is the point: the
+    // project it was rendering is not the one on screen any more.
 }
 
 void RenderJobs::FinishRegionJob() {

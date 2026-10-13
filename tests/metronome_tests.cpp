@@ -104,9 +104,15 @@ int main() {
                 if (std::fabs(a[i] - b[i]) > 1e-3f) return true;
             return false;
         };
-        CHECK(differ(ticks[0], ticks[1]));
-        CHECK(differ(ticks[0], ticks[2]));
-        CHECK(differ(ticks[1], ticks[2]));
+        // kMetronomeSoundCount is three today; a fourth sound would need pairs
+        // added, not an out-of-bounds read (which is undefined behaviour, not a
+        // failing check).
+        CHECK(ticks.size() >= 3);
+        if (ticks.size() >= 3) {
+            CHECK(differ(ticks[0], ticks[1]));
+            CHECK(differ(ticks[0], ticks[2]));
+            CHECK(differ(ticks[1], ticks[2]));
+        }
 
         // An index no build knows is the default click, not silence.
         std::vector<float> odd(1440 * 2, 0.0f);

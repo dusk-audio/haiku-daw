@@ -45,6 +45,20 @@ public:
 
     std::string RenderPath(const std::string& tag) const;
 
+    // Stop every worker and wait for it: the export and the region job both
+    // take a snapshot on the looper and touch nothing else, so cancelling and
+    // joining is all teardown needs. The window's destructor calls this --
+    // a joinable std::thread left alive at destruction terminates the process,
+    // and a worker outliving the window would write through a dead `this`.
+    void Stop();
+
+    // The same, for the region job alone: called when the PROJECT is about to
+    // be replaced (Open, New). Re-finding a track by id protects against edits
+    // inside one session, but a loaded project reuses ids from 1 -- a freeze
+    // that finished after File > Open would otherwise apply its render to the
+    // new project's track 1.
+    void CancelRegionJob();
+
     // Public members on purpose (pure move; the pulse reads the atomics).
     std::unique_ptr<Project>  fExportSnapshot;   // what the worker renders
     std::thread               fExportThread;

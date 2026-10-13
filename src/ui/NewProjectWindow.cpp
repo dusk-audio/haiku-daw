@@ -14,7 +14,7 @@ namespace daw {
 
 namespace {
 
-enum { MSG_CREATE = 'npcr' };
+enum { MSG_CREATE = 'npcr', MSG_TEMPLATE_PICKED = 'nptp' };
 
 // A text line in this dialog. A BStringView caches the view colour it was made
 // with, so a theme switch re-takes it (T1); the kit controls do this
@@ -67,7 +67,12 @@ NewProjectWindow::NewProjectWindow(std::vector<TemplateInfo> templates,
 
     BMenu* menu = new BPopUpMenu("tpl");
     for (const TemplateInfo& t : fTemplates)
-        menu->AddItem(new ThemedMenuItem(t.name.c_str(), nullptr));
+        // Each row carries its own message: a null one leaves DawMenuField
+        // able to mark the choice but with nothing to send, so the description
+        // under the menu kept describing whichever template the dialog opened
+        // with (Empty, always) while the Create button made another one.
+        menu->AddItem(new ThemedMenuItem(t.name.c_str(),
+                                         new BMessage(MSG_TEMPLATE_PICKED)));
     menu->ItemAt(0)->SetMarked(true);
     fTemplate = new DawMenuField("tf", "Template:", menu);
 
@@ -190,6 +195,9 @@ void NewProjectWindow::MessageReceived(BMessage* msg) {
             return;
         case MSG_CREATE:
             PostChosen();
+            return;
+        case MSG_TEMPLATE_PICKED:
+            UpdateDescription();   // the row the user just chose
             return;
         case kMsgNewProjectActivate:
             Activate(true);

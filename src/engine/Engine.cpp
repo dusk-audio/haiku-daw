@@ -1601,6 +1601,11 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
             // (M3.1): graphs come and go, the figure the transport shows does
             // not reset with one.
             s->SetXrunCounter(&fXruns);
+            // The track's trim and polarity belong to the STREAM, not to the
+            // pulse: UpdateMix re-pushes them, but a freshly published graph
+            // plays until the next 60 Hz tick -- up to a block of unity trim,
+            // and a polarity flip that clicks on every in-place rebuild.
+            s->SetTrimPhase(t.trim, t.phaseInvert);
             nStreams++;
             // Sources are resampled to the output rate on their disk thread.
             if (s->EndFrame() > g.fEndFrame)
@@ -1730,6 +1735,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         float mgl, mgr; EqualPowerGains(t.gain, t.pan, &mgl, &mgr);
         b.midiGainL.store(mgl, std::memory_order_relaxed);
         b.midiGainR.store(mgr, std::memory_order_relaxed);
+        // Same reason as the clip streams above: the node's own trim and
+        // polarity, set before the graph is published.
+        b.trim.store(t.trim, std::memory_order_relaxed);
+        b.phaseInv.store(t.phaseInvert, std::memory_order_relaxed);
         g.fBuses.push_back(std::move(b));
     }
 
@@ -1744,6 +1753,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         float bgl, bgr; EqualPowerGains(t.gain, t.pan, &bgl, &bgr);
         b.busGainL.store(bgl, std::memory_order_relaxed);
         b.busGainR.store(bgr, std::memory_order_relaxed);
+        b.trim.store(t.trim, std::memory_order_relaxed);
+        b.phaseInv.store(t.phaseInvert, std::memory_order_relaxed);
         g.fBuses.push_back(std::move(b));
     }
 

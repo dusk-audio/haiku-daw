@@ -123,6 +123,7 @@ void TransportTimeView::MouseDown(BPoint where) {
     if (fEditing) {   // a single click while editing ends the gesture
         fEditing = false;
         fTyped.clear();
+        MakeFocus(false);   // ... and gives the keyboard back (see KeyDown)
         Invalidate();
         return;
     }
@@ -146,12 +147,18 @@ void TransportTimeView::KeyDown(const char* bytes, int32 numBytes) {
             if (Window()) Window()->PostMessage(&m);
             fEditing = false;
             fTyped.clear();
+            // Hand the keyboard back: the window routes a key to the timeline
+            // unless something else holds the focus, and a view that keeps it
+            // after the entry is over swallows R, L, C, Home and the arrows
+            // until the user clicks the timeline again.
+            MakeFocus(false);
             Invalidate();
             return;
         }
         if (c == B_ESCAPE) {
             fEditing = false;
             fTyped.clear();
+            MakeFocus(false);
             Invalidate();
             return;
         }

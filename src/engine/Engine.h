@@ -441,6 +441,8 @@ public:
                   midiGainR(o.midiGainR.load(std::memory_order_relaxed)),
                   busGainL(o.busGainL.load(std::memory_order_relaxed)),
                   busGainR(o.busGainR.load(std::memory_order_relaxed)),
+                  trim(o.trim.load(std::memory_order_relaxed)),
+                  phaseInv(o.phaseInv.load(std::memory_order_relaxed)),
                   isBus(o.isBus),
                   audible(o.audible.load(std::memory_order_relaxed)),
                   liveMonitor(o.liveMonitor),
@@ -473,6 +475,10 @@ public:
                 midiGainR.store(o.midiGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 busGainL.store(o.busGainL.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 busGainR.store(o.busGainR.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                // The M3.4 pair rides these hand-written moves too: a bus moved
+                // after its trim was set would otherwise come back at unity.
+                trim.store(o.trim.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                phaseInv.store(o.phaseInv.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 isBus = o.isBus;
                 audible.store(o.audible.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 liveMonitor = o.liveMonitor;

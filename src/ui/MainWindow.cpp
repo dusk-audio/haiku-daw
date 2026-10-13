@@ -711,14 +711,12 @@ MainWindow::~MainWindow() {
     // The peak loader only touches files and its own list, but it must not
     // outlive the window that drains it (M4.4).
     fPeakLoader.Stop();
-    // The export worker renders a snapshot taken on this thread, so it has to
-    // stop before anything it touches goes away. The cancel flag is polled
-    // between blocks, so this waits at most one block (and none at all when
-    // nothing is running).
-    if (fRender.fExportThread.joinable()) {
-        fRender.fExportCancel.store(true);
-        fRender.fExportThread.join();
-    }
+    // The export AND region workers render a snapshot taken on this thread,
+    // so both have to stop before anything they touch goes away. The cancel
+    // flags are polled between blocks, so this waits at most one block (and
+    // none at all when nothing is running); a joinable thread left behind
+    // would terminate the process at destruction.
+    fRender.Stop();
     delete fPulse;
     delete fAutosave;
     delete fTitlePoll;
@@ -3098,6 +3096,10 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
     // Cancel must leave the session exactly as it was. (The Save answer goes
     // through SaveTo, which flushes the editors itself.)
     if (!ConfirmDiscardChanges()) return;
+    // A render that outlives the project it was rendering must not land in the
+    // next one: track and clip ids restart at 1 in a loaded file, so a freeze
+    // finishing after this point would find the new project's track 1.
+    fRender.CancelRegionJob();
     fTransportCtl.StopPlayback();
     fRecCtl.StopRecording();
     // The editors that are open belong to the project being replaced: their
@@ -3351,6 +3353,9 @@ void MainWindow::ShowNewProjectWindow() {
 void MainWindow::NewProjectFrom(const std::string& templateId,
                                 const std::string& templatePath) {
     if (!ConfirmDiscardChanges()) return;
+    // Same rule as LoadFrom: the project this could render into is about to be
+    // replaced, and a new template's ids start over.
+    fRender.CancelRegionJob();
     fTransportCtl.StopPlayback();
     fRecCtl.StopRecording();
     FlushFxEditors();

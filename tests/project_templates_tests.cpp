@@ -130,13 +130,13 @@ int main() {
         const std::string src = std::string(DAW_SOURCE_DIR) + "/data/templates";
         const std::vector<TemplateInfo> rows = ScanTemplates(src);
         CHECK(rows.size() >= 3);
-        if (rows.size() < 3) {
-            std::printf("  (checked out of a source tree? %s)\n", src.c_str());
-        } else {
+        // Everything below indexes rows[0..2]: below three rows this is not a
+        // failing check but an out-of-bounds read, so the whole section is
+        // under the guard rather than just the id checks.
+        if (rows.size() >= 3) {
             CHECK(rows[0].id == "empty");
             CHECK(rows[1].id == "band");
             CHECK(rows[2].id == "producer");
-        }
 
         // Empty: a real project, and nothing in it.
         {
@@ -206,6 +206,9 @@ int main() {
                 if (t.type == TrackType::Midi && t.instrument.synth.waveform != 0)
                     nonDefault++;
             CHECK(nonDefault == 1);
+        }
+        } else {
+            std::printf("  (checked out of a source tree? %s)\n", src.c_str());
         }
     }
 
