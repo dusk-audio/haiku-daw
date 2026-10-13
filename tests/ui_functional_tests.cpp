@@ -88,6 +88,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 static int g_checks = 0, g_fails = 0;
@@ -6682,6 +6683,23 @@ static std::string WriteMeterWav(const char* path, double amp, double hz,
 // this is one project for the whole run and earlier tests leave clips on it,
 // so anything else still audible would land in the master meter's sum (the
 // first cut of this test read a peak that was partly someone else's audio).
+// What PlayMeterFixture changed, so the caller can put it back: id + the
+// muted/soloed pair each track had BEFORE the fixture silenced the session.
+static std::vector<std::tuple<uint64_t, bool, bool>> gMeterSaved;
+
+static void RestoreMeterFixture(MainWindow* win, Project& project) {
+    if (win->LockWithTimeout(2000000) != B_OK) return;
+    for (const auto& e : gMeterSaved) {
+        if (Track* t = project.FindTrack((TrackId)std::get<0>(e))) {
+            t->muted  = std::get<1>(e);
+            t->soloed = std::get<2>(e);
+        }
+    }
+    gMeterSaved.clear();
+    win->Unlock();
+    win->PostMessage(kMsgUiRefresh);
+}
+
 static bool PlayMeterFixture(MainWindow* win, Project& project,
                              const std::string& wav, float gain,
                              TrackId* outTrack) {
@@ -6698,13 +6716,23 @@ static bool PlayMeterFixture(MainWindow* win, Project& project,
     t.clips.push_back(c);
     if (!LockedAddTrack(win, project, t)) return false;
     if (outTrack) *outTrack = t.id;
+    // Silencing the rest is what isolates the meter -- but it is also state
+    // the NEXT test inherits, and the tests after this one share the project:
+    // every later render or playback then finds its material muted out. (That
+    // leak went unnoticed for months and made a render-feedback fixture look
+    // like it rendered impossibly fast -- its material was simply inaudible.)
+    // What is changed is recorded here so RestoreMeterFixture undoes it
+    // exactly, rather than assuming what the values were.
     if (win->LockWithTimeout(1000000) == B_OK) {
+        gMeterSaved.clear();
         for (Track& other : project.Tracks()) {
+            gMeterSaved.push_back({ other.id, other.muted, other.soloed });
             if (other.id == t.id) continue;
             other.soloed = false;
             other.muted  = true;
         }
         if (Track* mine = project.FindTrack(t.id)) mine->soloed = true;
+        gMeterSaved.push_back({ t.id, false, true });   // what t holds now
         project.transport.playhead = 0;
         win->Unlock();
     }
@@ -6846,6 +6874,16 @@ static void TestMetering(MainWindow* win, Project& project, CommandStack& stack)
     win->PostMessage(MSG_STOP);
     CHECK(WaitFor([&] { return !win->IsPlaying(); }));
     CHECK(meter->ClipLatched());   // the latch outlives the transport
+
+    // Put the session back: the fixture muted every other track to isolate the
+    // meter, and the tests after this one share the project. Leaving them
+    // muted is a silent cross-test leak -- the material is there, it just does
+    // not sound, which is exactly the kind of thing that reads as a fast
+    // renderer or a broken engine somewhere else.
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    RestoreMeterFixture(win, project);
+    CHECK(WaitQuiet());
 
     (void)stack;
 }
