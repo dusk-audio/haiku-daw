@@ -332,3 +332,43 @@ spelling as the six (and as `MarkersWindow`, which already had it right):
 The VM re-run is the orchestrator's; the three VM mutations this pass must
 now catch are #4/#5/#6 in the table above under the new spellings, plus the
 toggle-value check that caught root cause 1 in the first place.
+
+## Reopened again: the render-feedback failures (fixed in `8140cc4`)
+
+The integration run reported six failures inside `TestRenderFeedback`. Two
+test faults of mine, and the run's own failure list is what proves each.
+
+**1. The test's own pinning message leaves a file panel up.** `kMsgExportOptions`
+answers with the panel (that is how the export options message works — every
+other export flow in the suite posts it and then hides what it opened). The
+test captured `windowsBefore` after posting it and never hid the panel, so
+every window count in it was off by one. The proof is in the reported pair:
+`VisibleWindows() == windowsBefore` PASSED while `WaitQuiet()` (which is
+`VisibleWindows() == 1`) FAILED — both can only hold if a window that is not
+the main one was already up when `windowsBefore` was taken and never went
+away. Fixed: `MaybeHidePanels(win)` after the pinning message, and a
+`WaitQuiet()` before anything is counted.
+
+**2. The first export was not long enough to be refused.** `pathB` existed at
+the end (`!FileExists(pathB)` failed), which means the SECOND export started —
+and it can only start when the first has finished (or never began). No refusal
+was ever set (`4928`), so there was nothing on the row to cancel (`4936`). A
+whole-project bounce of this suite's project is not a long render: most of its
+material is silent, and the exporter walks it in well under the time the test
+takes to look at a window. Fixed: the fixture is one 120-second note, so the
+render walks the project's end frame and cannot finish in the microseconds
+between the two requests; the cancel stops it within a 64k-frame chunk, so the
+suite pays for one chunk.
+
+**3. `Stopped` after the hold (`4947`)** is the one the six lines did not pin
+down. The expiry machinery in the merged tree is intact — the 2 Hz
+`MSG_TITLE` case runs `UpdateTitle(); ExpireTransportStatus(); RefreshRolls();
+` with `kStatusHoldUs` at 4 s, `ExpireTransportStatus` is byte-identical to
+this branch's, and no other code calls `TransportBar::SetStatus` — and the
+test *before* this one reads the same row successfully (its "Cannot read …"
+check passed). So the most likely reading is that it failed because the row
+still held a job message from the previous step, which (2) explains. Every
+failure in this test now prints the row's text and the window counts, so a
+next run names the state instead of leaving it to be inferred from the plan.
+Look for `DIAG no refusal`, `DIAG no cancel message`, `DIAG no export bar` or
+`DIAG the row after the hold` in the log.

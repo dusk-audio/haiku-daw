@@ -4885,16 +4885,28 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
     std::printf("ux shell: render feedback ...\n");
 
-    // Long enough that the render is still going when the second request lands
-    // (the same fixture TestExportCancel uses).
-    Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 8 } }, "status-synth");
+    // The fixture must be LONG. Two things depend on the first export still
+    // running when the second request is handled: the refusal, and the cancel
+    // that follows it. A whole-project bounce of the suite's project is NOT
+    // long enough to rely on -- most of its material is silent, and the
+    // exporter rendered it in well under the time the test takes to look at a
+    // window (the run that failed proved it: the second export started, wrote
+    // its file and finished). One long note makes the render minutes long (the
+    // renderer walks the project's end frame), and the cancel below stops it
+    // within a chunk, so the suite pays for none of it.
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, "status-synth");
     CHECK(LockedAddTrack(win, project, t));
 
     // The remembered choices are pinned first: by this point in the suite an
     // earlier test has left "Loop range" selected, and a loop-range bounce of
-    // one second can finish before the second request is even handled -- which
-    // would make the refusal check pass or fail on timing rather than on the
-    // behaviour. Whole project, plain WAV: a long render, deliberately.
+    // one second is not the fixture this test wants. Whole project, plain WAV.
+    //
+    // The pinning message ANSWERS WITH ITS FILE PANEL (that is how the export
+    // options message works -- every export flow in this suite posts it and
+    // then hides what it opens), so the panel is put away again before
+    // anything here is COUNTED: a panel left up is one extra visible window,
+    // and every count below (windowsBefore, the "bar appeared" wait, WaitQuiet
+    // at the end) is about the quiet screen.
     {
         BMessage opts(kMsgExportOptions);
         opts.AddInt32("container", (int32)AudioFileFormat::Wav);
@@ -4902,8 +4914,9 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
         opts.AddInt32("range", 0);
         opts.AddInt32("stems", 0);
         win->PostMessage(&opts);
-        snooze(200000);
+        MaybeHidePanels(win);   // the panel is up: hide it, and wait it out
     }
+    CHECK(WaitQuiet());
 
     const char* pathA = "/tmp/haiku_daw_ui_status_a.wav";
     const char* pathB = "/tmp/haiku_daw_ui_status_b.wav";
@@ -4917,7 +4930,18 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     a.AddRef("directory", &dir);
     a.AddString("name", "haiku_daw_ui_status_a.wav");
     win->PostMessage(&a);
-    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore + 1; }));
+    // The bar means the first render STARTED (StartExport raises it before the
+    // worker is given anything). If it never appears, the export was refused
+    // before it began -- a leftover job from the test before this one -- and
+    // the status line names whichever it was.
+    const bool barUp = WaitFor([&] {
+        return VisibleWindows() == windowsBefore + 1;
+    });
+    if (!barUp)
+        std::printf("  DIAG no export bar: windows %d (base %d), status \"%s\"\n",
+                    (int)VisibleWindows(), (int)windowsBefore,
+                    TransportStatus(win).c_str());
+    CHECK(barUp);
 
     // The second export is refused -- and SAYS so (it used to return in
     // silence, so choosing Export again looked like a dead menu item).
@@ -4925,17 +4949,29 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     b.AddRef("directory", &dir);
     b.AddString("name", "haiku_daw_ui_status_b.wav");
     win->PostMessage(&b);
-    CHECK(WaitFor([&] {
+    const bool refused = WaitFor([&] {
         return TransportStatus(win) == "A render is already running";
-    }, 5000000));
+    }, 5000000);
+    // A failure here has two very different shapes (the message never set, or
+    // the message set and not read), and which one it is decides whether the
+    // app or the test is at fault: print the row and the windows.
+    if (!refused)
+        std::printf("  DIAG no refusal: status \"%s\", windows %d (base %d)\n",
+                    TransportStatus(win).c_str(), (int)VisibleWindows(),
+                    (int)windowsBefore);
+    CHECK(refused);
     // No second progress bar, and nothing started for the refused path.
     CHECK(VisibleWindows() == windowsBefore + 1);
 
     // Cancel the long one: the message on the row changes to the cancel.
     win->PostMessage(kMsgExportCancel);
-    CHECK(WaitFor([&] {
+    const bool cancelled = WaitFor([&] {
         return TransportStatus(win) == "Export cancelled";
-    }, 60000000));
+    }, 60000000);
+    if (!cancelled)
+        std::printf("  DIAG no cancel message: status \"%s\", windows %d\n",
+                    TransportStatus(win).c_str(), (int)VisibleWindows());
+    CHECK(cancelled);
     CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; }, 60000000));
     CHECK(!FileExists(pathB));   // the refused render wrote nothing
     CHECK(WaitQuiet());
@@ -4944,7 +4980,13 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     // title poll, so the row is back to the transport state inside a second of
     // it. A message left standing forever was the defect; the bound here is
     // generous on purpose (a slow VM does not fail a timing check).
-    CHECK(WaitFor([&] { return TransportStatus(win) == "Stopped"; }, 20000000));
+    const bool stateBack = WaitFor([&] {
+        return TransportStatus(win) == "Stopped";
+    }, 20000000);
+    if (!stateBack)
+        std::printf("  DIAG the row after the hold: \"%s\"\n",
+                    TransportStatus(win).c_str());
+    CHECK(stateBack);
 
     std::remove(pathA);
     std::remove(pathB);
