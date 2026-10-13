@@ -5150,7 +5150,12 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     //  * the view centres itself on the playhead when one falls inside the
     //    region, so the transport is parked at 0 first and the scroll is printed
     //    and checked: a frame-derived x is only meaningful once it is known.
-    Track t = MakeMidiTrack(project, { { 90, 100, 0, 4800 },
+    // The notes sit on the TOP rows (92-95, plus the audition key at 96): the
+    // usable band is [the toolbar, the velocity lane), and the pane's height is
+    // persisted in the settings file -- the VM has had 200, 236 and 260 px
+    // panes across runs. The top rows are inside the band for anything taller
+    // than ~150 px, and the row CHECKs below say so with the height printed.
+    Track t = MakeMidiTrack(project, { { 95, 100, 0, 4800 },
                                        { 94, 100, 6000, 3000 } }, "sync-roll");
     const TrackId tid = t.id;
     const ClipId  cid = t.midiClips.front().id;
@@ -5210,11 +5215,11 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         return in;
     };
     CHECK(scroll0 == 0);                                        // the park worked
-    CHECK(rowY(96) > Themed(30.0f) && rowY(96) < laneTop);      // the row set
+    CHECK(rowY(96) > Themed(30.0f) && rowY(96) < laneTop);   // the audition key
+    CHECK(rowY(95) > Themed(30.0f) && rowY(95) < laneTop);   // the notes' rows
     CHECK(rowY(94) > Themed(30.0f) && rowY(94) < laneTop);
-    CHECK(rowY(93) > Themed(30.0f) && rowY(93) < laneTop);
-    CHECK(rowY(90) > Themed(30.0f) && rowY(90) < laneTop);
-    CHECK(rowY(89) > Themed(30.0f) && rowY(89) < laneTop);
+    CHECK(rowY(93) > Themed(30.0f) && rowY(93) < laneTop);   // the drawn ones
+    CHECK(rowY(92) > Themed(30.0f) && rowY(92) < laneTop);
 
     // A key event for the window's FOCUS view. The token matters: a message
     // posted with the window's own token is not a "focus message"
@@ -5286,17 +5291,42 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         CHECK(len == origLen);
     }
 
+    // The note the interactions grab: the WIDEST one, so its middle is far from
+    // both of its edges whatever the zoom. Clicking near a note's head is a
+    // different gesture (the left-edge resize) and a note one frame long cannot
+    // be grabbed at all -- both are how this test's first cut turned its moves
+    // into resizes and its toggles into new notes.
+    auto widestNote = [&](int* idxOut) {
+        MidiNote best{};
+        int bestI = -1;
+        Frame bestLen = -1;
+        if (win->LockWithTimeout(1000000) != B_OK) return best;
+        for (int i = 0; i < roll->NoteCount(); i++) {
+            const MidiNote n = roll->NoteForTest(i);
+            if (n.lengthFrames > bestLen) {
+                bestLen = n.lengthFrames;
+                best = n;
+                bestI = i;
+            }
+        }
+        win->Unlock();
+        if (idxOut) *idxOut = bestI;
+        return best;
+    };
+
     // A click-drag on a note body MOVES it, and the commit lands in the model.
     // (The roll's own snapshot is what it commits, so the two agreeing after a
     // drag is not the point — the point is what happens on an undo below.)
-    // Aimed at note `idx`'s OWN row and start, moved by `dFrames` worth of x.
+    // Aimed at `idx`'s own row and at the MIDDLE of its body, moved by
+    // `dFrames` worth of x: the middle is a move, the edges would be resizes.
     auto dragNote = [&](int idx, Frame dFrames) {
         float x = 0.0f, x2 = 0.0f, y = 0.0f;
         if (win->LockWithTimeout(1000000) != B_OK) return;
-        if (idx >= roll->NoteCount()) { win->Unlock(); return; }
+        if (idx < 0 || idx >= roll->NoteCount()) { win->Unlock(); return; }
         const MidiNote n = roll->NoteForTest(idx);
-        x  = roll->XForFrameForTest(n.startFrame + 100);
-        x2 = roll->XForFrameForTest(n.startFrame + 100 + dFrames);
+        const Frame mid = n.startFrame + std::max<Frame>(1, n.lengthFrames) / 2;
+        x  = roll->XForFrameForTest(mid);
+        x2 = roll->XForFrameForTest(mid + dFrames);
         y  = rowY(n.pitch);
         win->Unlock();
         CHECK(aimOk(x, y));
@@ -5307,7 +5337,13 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         snooze(150000);
     };
 
-    dragNote(0, 7000);   // ~one 16th to the right, snapped by the roll
+    int grabIdx = -1;
+    {
+        const MidiNote wide = widestNote(&grabIdx);
+        std::printf("  grabbing note %d (pitch %d, %lld frames)\n",
+                    grabIdx, wide.pitch, (long long)wide.lengthFrames);
+    }
+    dragNote(grabIdx, 7000);   // ~one 16th to the right, snapped by the roll
     MidiClip now;
     CHECK(WaitFor([&] {
         MidiClip c;
@@ -5407,8 +5443,8 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     const Frame want4 = SnapClipRelative(project.tempoMap, drawFrame, clipStart,
                                          SnapGrid{ SnapKind::Quarter, false });
     CHECK(want4 != want16);          // the two grids really do differ here
-    drawAt(drawFrame, 89);           // a new pitch row: a NEW note's frame
-    CHECK(waitForNoteAt(89, want4));
+    drawAt(drawFrame, 92);           // a new pitch row: a NEW note's frame
+    CHECK(waitForNoteAt(92, want4));
     Shot("roll-grid-quarter");
     {
         if (win->LockWithTimeout(1000000) == B_OK) {
@@ -5566,7 +5602,9 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     // length, which is what the bug restored.
     {
         const std::vector<MidiNote> beforeDrag = rollNotes();
-        dragNote(0, 7000);
+        int idx = -1;
+        widestNote(&idx);
+        dragNote(idx, 7000);
         CHECK(WaitFor([&] {
             MidiClip c2;
             if (!modelClip(&c2)) return false;
@@ -5574,10 +5612,21 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         }));   // the gesture landed
         MidiClip c;
         modelClip(&c);
-        std::printf("  after the split gesture: len %lld (half %lld, was %lld)\n",
+        // The region must cover its OWN notes and nothing else. The bug grew it
+        // back over the notes the split had taken away (and over the length the
+        // region had before the split), so a length that exceeds the end of
+        // every note it now holds is the signature to catch -- a length that
+        // merely grew to cover a note's tail is the notes command's documented
+        // "only ever grows" rule and is allowed.
+        Frame ownEnd = 0;
+        for (const MidiNote& n : c.notes)
+            ownEnd = std::max(ownEnd, n.startFrame
+                                       + std::max<Frame>(1, n.lengthFrames));
+        std::printf("  after the split gesture: len %lld (half %lld, own notes "
+                    "end %lld, was %lld)\n",
                     (long long)c.lengthFrames, (long long)halfLen,
-                    (long long)preSplitLen);
-        CHECK(c.lengthFrames < preSplitLen);
+                    (long long)ownEnd, (long long)preSplitLen);
+        CHECK(c.lengthFrames <= std::max(ownEnd, halfLen));
         CHECK(c.startFrame == newStart);
     }
     Shot("roll-after-split");
@@ -5687,12 +5736,17 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         auto postMouse = [&](uint32 what, BPoint p, uint32 mods) {
             click(what, p, mods, what == B_MOUSE_UP ? 0 : 1);
         };
-        // Aimed at note 0's own row and start, like every other click here.
+        // Aimed at the widest note's own row and its MIDDLE, like every other
+        // click here (an edge would be a resize; a one-frame note cannot be
+        // grabbed at all).
+        int altIdx = -1;
+        const MidiNote altNote = widestNote(&altIdx);
         float nx = 0.0f, ny = 0.0f;
         if (win->LockWithTimeout(1000000) == B_OK) {
-            const MidiNote n0 = roll->NoteForTest(0);
-            nx = roll->XForFrameForTest(n0.startFrame + 100);
-            ny = rowY(n0.pitch);
+            const Frame mid = altNote.startFrame
+                            + std::max<Frame>(1, altNote.lengthFrames) / 2;
+            nx = roll->XForFrameForTest(mid);
+            ny = rowY(altNote.pitch);
             roll->SelectAll();
             win->Unlock();
         }

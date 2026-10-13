@@ -376,6 +376,40 @@ arrangement, which would leave the editor's tools, its grid menu, the nudge and
 Delete dead while docked. Keys the roll does not use (Space, `R`, Home ...) are
 untouched.
 
+## Reopen, second round — five failures left, one root cause
+
+The next VM run printed what the first fix's diagnostics were there for:
+`roll view: 900x200 at scroll 0` and `AIM MISS: (54.8, 106.0) view 900x200
+laneTop 136`. The miss was on the **x**, not the y: the test aimed at a note's
+`start + 100` frames, which for a note at frame 0 is 0.8 px right of the
+keyboard column -- inside the note, but inside its five-pixel LEFT-EDGE grab
+zone, so the "move" became a start-resize (leaving a one-frame note). The Alt
+checks fell over on the same aim from the other side: a one-frame note cannot
+be hit at all, so the Alt-click fell through to the pencil and drew a note
+instead of toggling the selection.
+
+Fixed, all in the test:
+
+- every interaction grabs the **widest** note at the **middle** of its body
+  (`widestNote()` + `start + length/2`), which is far from both edge zones at
+  any zoom; the grab is printed;
+- the test's rows moved to the TOP of the usable band (pitches 92-95, the
+  audition key at 96), because the pane's height is persisted in the settings
+  file and the VM has had 200, 236 and 260 px panes across runs. The top rows
+  are inside `[toolbar, velocity lane)` for any pane taller than ~150 px and the
+  row CHECKs print the height if one is not -- the test reads the pane it
+  actually has rather than assuming a height (and does not write to the user's
+  settings to force one);
+- the post-split check stopped comparing against the pre-split length (a drawn
+  note's tail can legitimately reach it again, which is the notes command's
+  documented "only ever grows" rule) and asserts the invariant the bug actually
+  broke: **the region covers its own notes and nothing else**.
+
+The pane's own numbers, worked through for the failing run's 200 px pane:
+rows 34/46/58/70/82 (all < `laneTop` 136), the two drag aims at x 72.8 and
+194.6 with both note edges > 5 px away, and the CC aim's y at 178.6 inside the
+lane -- every one inside the pane and in the intended zone.
+
 ## Shots to look for (the orchestrator's screenshot pass)
 
 `ui_functional_tests` under `DAW_UI_SHOTS`, both theme modes, and a 150 % run
