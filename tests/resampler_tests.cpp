@@ -36,6 +36,43 @@ int main() {
         CHECK(allEq);
     }
 
+    // 1b. Identity with a VARYING signal: the output must be the input, frame
+    // for frame. A constant signal cannot see it, but the interpolation loop
+    // this used to run emitted the first frame twice and dropped the chunk's
+    // last one -- so every clip at the project's own rate played one frame late
+    // and one frame short. Found by the M7.2 and M4.5 branches independently.
+    {
+        Resampler r(48000, 48000);
+        std::vector<float> in;
+        for (size_t i = 0; i < 64; i++) { in.push_back((float)i); in.push_back(-(float)i); }
+        std::vector<float> out;
+        r.Process(in.data(), 64, out);
+        CHECK(out.size() == in.size());
+        bool same = out.size() == in.size();
+        for (size_t i = 0; same && i < in.size(); i++)
+            if (out[i] != in[i]) same = false;
+        CHECK(same);
+    }
+
+    // 1c. Identity across a chunk boundary, including a Reset() in between (a
+    // seek): every output frame is still the input frame it came from -- no
+    // carried interpolation edge, because there is none to carry at ratio 1.
+    {
+        Resampler r(48000, 48000);
+        std::vector<float> out;
+        float a[8] = { 1, -1, 2, -2, 3, -3, 4, -4 };
+        r.Process(a, 4, out);
+        CHECK(out.size() == 8);
+        r.Reset();
+        float b[8] = { 5, -5, 6, -6, 7, -7, 8, -8 };
+        r.Process(b, 4, out);
+        CHECK(out.size() == 16);
+        bool same = out.size() == 16;
+        for (size_t i = 0; same && i < 8; i++) if (out[i] != a[i]) same = false;
+        for (size_t i = 0; same && i < 8; i++) if (out[8 + i] != b[i]) same = false;
+        CHECK(same);
+    }
+
     // 2. Downsample 96k -> 48k: ~half the frames.
     {
         Resampler r(96000, 48000);

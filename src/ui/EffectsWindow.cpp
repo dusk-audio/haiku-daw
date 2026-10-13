@@ -4,6 +4,7 @@
 #include "../dsp/Eq.h"
 #include "../dsp/Delay.h"   // Delay::DivisionName / kDivisionCount (sync selector)
 #include "../dsp/SidechainKey.h"   // kExtKeySlot (the picker writes it)
+#include "../dsp/EffectFactory.h"  // EffectTakesSidechain: who gets a Key row
 #include "../plugin/PluginHost.h"
 #include "../plugin/Lv2PortMap.h"   // ClampLv2Param: one definition of a port's domain
 #include "PluginBrowser.h"
@@ -292,7 +293,7 @@ float EffectsView::PanelHeight(const EffectDesc& d) const {
         h += kGraphH;
     if (d.type == EffectType::Reverb || d.type == EffectType::Delay)
         h += kSelH;   // type / sync selector row
-    if (EffectSupportsSidechain(d.type))
+    if (EffectTakesSidechain(d))
         h += kSelH;   // "Key:" external-sidechain source row
     h += kKnobH;   // one knob row (all built-ins have <= 5 knobs)
     return h + 8;
@@ -820,7 +821,7 @@ void EffectsView::Draw(BRect) {
         // matches first) and its panel would show the height without the row.
         // The label is accent-coloured when a key is routed; with no source
         // picked the insert detects its own input as it always has.
-        if (EffectSupportsSidechain(d.type)) {
+        if (EffectTakesSidechain(d)) {
             BRect sel(panel.left + 6, knobTop + 2, panel.right - 6, knobTop + 22);
             SetHighColor(ColHeaderHi()); FillRect(sel);
             SetHighColor(ColGrid());     StrokeRect(sel);
@@ -989,7 +990,7 @@ EffectDesc MakeInsertDesc(EffectType type, const std::string& pluginId) {
 void EffectsView::PickKeySource(int effect, BPoint where) {
     if (effect < 0 || effect >= (int)fChain.size()) return;
     EffectDesc& d = fChain[(size_t)effect];
-    if (!EffectSupportsSidechain(d.type)) return;
+    if (!EffectTakesSidechain(d)) return;
 
     BPopUpMenu* menu = new BPopUpMenu("key", false, false);
     BMenuItem* none = new BMenuItem("None", nullptr);

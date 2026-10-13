@@ -34,6 +34,30 @@ Streaming WSOLA on the disk thread: `DiskLoop` gains a stretch stage between dec
      - If the source has a hard end (offset + span already reaching the file end), stretching must not read past it — clamp the span to what the file actually holds before dividing, so the ratio stays finite and the stretch does not run off the end.
 7. **Docs**: one paragraph in `docs/ARCHITECTURE.md` on the stretch stage position in the signal chain and the determinism invariant.
 
+## Amended during implementation (2026-10-12) — the seek-determinism clause
+
+Item 2/3 above asks `Reset(sourcePos)` to reproduce the *exact* synthesis phase
+continuous playback would have. Implemented literally, that forces each frame's
+similarity correction to be a pure function of the frame index (the alignment
+target becomes the previous frame's **nominal** position), and it is audibly
+wrong: measured on a 440 Hz sine the overlap regions cancel — window RMS 0.306
+at ratio 0.8, 0.250 at 2.0, 0.214 at 0.5, against the source's 0.354 — with the
+zero-crossing frequency reading 39 cents low, a wobble at the hop rate.
+
+What shipped instead is the chained correction every working WSOLA uses: each
+frame aligns to what the previous frame **actually** read. The invariants kept
+are the ones the timeline depends on, and they are what `stretch_tests` pins:
+
+- the output index a reset lands on is exactly `round(sourcePos * ratio)` — no
+  drift against the timeline;
+- every frame reads within the search radius (±10 ms) of its nominal position;
+- a run resumed from `Reset(sourcePos)` matches continuous playback at a lag
+  within 2R (correlation 1.000 in the test);
+- a run from the clip origin — the exporter's and the engine's common case — is
+  bit-identical, so live and bounce still agree sample for sample.
+
+Record: `06-timestretch-PR.md`.
+
 ## Definition of done
 
 - New ctest targets: `stretch_tests` — output length within one hop of `in * ratio` across ratios {0.5, 0.8, 1.0 (bit-exact passthrough — ratio 1 must bypass), 1.25, 2.0}; sine input keeps its frequency within a few cents (zero-crossing count); determinism: full render == chunked push-model render == render started from `Reset(midPos)` for the overlapping region. `exporter_stretch_tests` — a stretched clip bounces to the expected timeline length and content; unstretched projects bit-identical to before your change (regression guard).

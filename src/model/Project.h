@@ -42,6 +42,15 @@ struct Clip {
     int         colorIndex    = 0;
     bool        muted         = false;
     FadeShape   fadeShape     = FadeShape::Linear;
+    // Time-stretch (M7.2). `stretchRatio` is an OUTPUT DURATION multiplier:
+    // 1.0 = play as recorded, 2.0 = twice as long (half speed), 0.5 = twice as
+    // fast; pitch is unchanged. `lengthFrames` above stays the TIMELINE length,
+    // so the source frames consumed are lengthFrames / stretchRatio (see
+    // model/ClipStretch.h for the pinned convention and the range clamp).
+    // `pitchSemis` was serialized with the ratio from the start so the format
+    // is stable, but v1 does not shift pitch (see docs/PLAN_1.0.md M7.2).
+    double      stretchRatio  = 1.0;
+    int         pitchSemis    = 0;
 };
 
 // A single MIDI note. Its position is in frames RELATIVE to the containing
@@ -119,13 +128,20 @@ inline void RebaseMidiContent(MidiClip& c, Frame delta) {
 // The input a track records from. A MIDI track records from a MIDI endpoint,
 // matched by *name* (e.g. "/dev/midi/usb/0-0") so the assignment survives the
 // endpoint-id reassignment that happens across sessions/reboots. An audio track
-// records from an input device + channel (channel selection is for multichannel
-// interfaces; v1 audio uses the system default). kNone = armed to nothing.
+// records from an input DEVICE, also matched by name, and from a channel pair
+// on it (M5): an 8-channel interface can therefore feed eight mono tracks, one
+// device channel each. kNone = armed to nothing.
 struct InputSource {
     enum Kind { kNone = 0, kAudioDefault = 1, kMidi = 2 };
     int         kind    = kNone;
     std::string name;          // MIDI endpoint name; "" for the default input
-    int         channel = 0;   // audio channel / MIDI channel filter (0 = all)
+    int         channel = 0;   // MIDI channel filter (0 = all). Audio: the
+                               // pre-M5 field, kept for older files; the audio
+                               // address is device/channelL/channelR below.
+    // --- multichannel audio addressing (M5) ---------------------------------
+    std::string device;        // audio input node name; "" = system default
+    int         channelL = 0;  // 0-based device channel: left, or the only one
+    int         channelR = 1;  // 0-based device channel: right (stereo tracks)
 };
 
 // An aux send: taps a track's signal and adds `level` * signal into `dest`
@@ -178,6 +194,11 @@ inline std::vector<MidiNote> FlattenMidiClip(const MidiClip& c) {
     return out;
 }
 
+// A track's channel width (M5). Stereo is the default so every project written
+// before this field existed keeps behaving exactly as it did; a mono track
+// records one device channel into a 1-channel take and pans as a mono source.
+enum class TrackChannels { Mono = 0, Stereo = 1 };
+
 struct Track {
     TrackId           id    = kInvalidTrackId;
     TrackType         type  = TrackType::Audio;
@@ -228,6 +249,14 @@ struct Track {
     float                   freezeGain = 1.0f;  // pre-freeze fader
     float                   freezePan  = 0.0f;  // pre-freeze pan
     TrackType               freezeType = TrackType::Audio;  // pre-freeze type
+
+    // M5: how wide this track's audio is. Mono takes the single device channel
+    // `input.channelL`; stereo takes `channelL`/`channelR` as a pair. Kept at
+    // the end of the data members on purpose (Project.h is edited by several
+    // packages at once); serialized as `trackchans` and written only for mono,
+    // so a file without the line loads as stereo -- what every earlier build
+    // did with every take.
+    TrackChannels           channels = TrackChannels::Stereo;
 
     Clip*       FindClip(ClipId id);
     const Clip* FindClip(ClipId id) const;

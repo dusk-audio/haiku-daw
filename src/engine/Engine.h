@@ -67,6 +67,7 @@
 #include "../model/Sustain.h"         // SustainLatch (CC64, live form)
 #include "../dsp/IEffect.h"
 #include "../dsp/Loudness.h"
+#include "../dsp/Stretch.h"     // the disk thread's WSOLA stage (M7.2)
 #include "../dsp/MeterMath.h"   // StereoMeter + the clip flag bits (M3.3)
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
@@ -94,13 +95,19 @@ public:
     // startFrame/lengthFrames/seekProjectDelta are in output (timeline) frames;
     // sourceOffset is in source frames. The stream resamples the source to
     // outputRate on its disk thread, so the ring is at the output rate.
+    // `stretchRatio` is the clip's output-duration multiplier (1.0 = play as
+    // recorded): the disk thread then runs the decoded, rate-matched audio
+    // through a Stretcher before the ring, and the source the pass consumes is
+    // that much shorter or longer. The ring stays 1 output frame per timeline
+    // frame, so nothing on the RT side knows (see model/ClipStretch.h).
     TrackStream(TrackId track, const std::string& path, Frame startFrame,
                 Frame lengthFrames, Frame sourceOffset, float gain, float pan,
                 bool audible, Frame seekProjectDelta, float outputRate,
                 Frame fadeIn, Frame fadeOut, float clipGain = 1.0f,
                 FadeShape fadeInShape = FadeShape::Linear,
                 FadeShape fadeOutShape = FadeShape::Linear,
-                StreamLoopRange loop = StreamLoopRange{});
+                StreamLoopRange loop = StreamLoopRange{},
+                double stretchRatio = 1.0);
     ~TrackStream();
 
     // Open the clip's file, set up the pass cursor and seek the source. No
@@ -212,6 +219,10 @@ private:
     // Seek the source to the start of the pass the cursor now holds, and drop
     // the resampler's carried state. Disk thread only.
     void SeekToPass();
+    // One stretched pass's worth of progress: feed the resampled source (capped
+    // at the pass's span) through the stretcher and push what it produces into
+    // the ring. Disk thread only; `remaining` is the pass's output frames left.
+    bool FillStretched(Frame remaining);
 
     TrackId     fTrackId;
     std::string fPath;
@@ -270,6 +281,23 @@ private:
     std::unique_ptr<Resampler> fResampler;   // source rate -> output rate
     std::vector<float>         fResampled;    // disk-thread scratch buffer
     RingBuffer  fRing;
+
+    // --- the stretch stage (M7.2) -------------------------------------
+    // Null — and every field below unused — unless the clip's ratio is
+    // something other than 1.0, so an unstretched clip's disk path is exactly
+    // the decode -> resample -> ring it always was.
+    double      fStretchRatio = 1.0;
+    std::unique_ptr<Stretcher> fStretcher;   // built once, in Open()
+    std::vector<float> fStretchIn;       // resampled source not yet taken
+    size_t      fStretchInOff    = 0;    // frames into fStretchIn
+    size_t      fStretchInFrames = 0;
+    std::vector<float> fStretchOut;      // stretcher output not yet pushed
+    size_t      fStretchOutOff    = 0;
+    size_t      fStretchOutFrames = 0;
+    int64_t     fStretchFed    = 0;      // source frames fed this pass
+    int64_t     fStretchSpan   = 0;      // source frames this pass may take
+    int64_t     fStretchDrop   = 0;      // output frames to drop (warm start)
+    bool        fStretchFlushed = false;
 };
 
 class Engine {
@@ -827,6 +855,27 @@ public:
     // delay locked to note divisions). Off-RT; call at Load + on tempo change.
     void SetFxTempo(double bpm);
 
+    // Has any live insert's effect moved its own latency? (M4.6)
+    //
+    // An LV2 plugin may publish a new latency at any time (4K EQ 2 was
+    // measured 0 -> 27 -> 0), and the delay lines that compensate it were
+    // sized once, from the value the graph was BUILT with. Comparing each
+    // effect's ObservedLatencySamples() with its committed LatencySamples()
+    // decides whether the graph has to be re-solved.
+    //
+    // OFF the RT thread (the UI pulse calls it): it pins the active graph and
+    // reads atomics the RT thread publishes — no locks, no plugin calls. A
+    // true answer means "rebuild in place", which re-settles every effect
+    // (LatencyProbe.h) so the new PDC solve and the new delay lines use the
+    // value the plugin is really running with, and GraphSwap publishes them
+    // at a block boundary.
+    //
+    // Asking twice about the same unchanged value answers false the second
+    // time: the record of what a rebuild was already requested for is what
+    // stops a plugin whose report never matches a fresh instance's settle from
+    // asking for a rebuild on every pulse.
+    bool FxLatencyMoved();
+
     // Pull every live insert's own state (IEffect::SaveState) into the matching
     // descriptor of `project` — what a save, an export snapshot or an autosave
     // calls first, so the file (and the render) holds the patch the engine is
@@ -1249,6 +1298,12 @@ private:
     // Off-RT users of the active graph (GraphPin). The reclaimer waits for this
     // to be zero as well. Mutable: the meter readers are const.
     mutable std::atomic<int> fGraphUsers{0};
+    // A latency re-solve already asked for, per insert (M4.6): the identity
+    // hash the graph stores for the insert and the observed latency the
+    // rebuild was requested with. Touched only by FxLatencyMoved(), which the
+    // UI pulse calls on one thread — no lock, and no RT access.
+    struct LatencyAsked { uint64_t identity; int observed; };
+    std::vector<LatencyAsked> fLatencyAsked;
     std::atomic<float> fLufsM{Loudness::kSilenceLufs};
     std::atomic<float> fLufsS{Loudness::kSilenceLufs};
     std::atomic<float> fTpDb{Loudness::kSilenceDb};

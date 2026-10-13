@@ -3,6 +3,8 @@
 #include "WavSource.h"
 #include "IAudioSink.h"
 #include "Resampler.h"
+#include "../dsp/SincResampler.h"
+#include "../dsp/LatencyProbe.h"
 #include "FrameDelay.h"
 #include "InsertSlot.h"
 #include "../synth/IInstrument.h"
@@ -16,6 +18,8 @@
 #include "../model/MidiControl.h"
 #include "../model/MidiExpression.h"
 #include "../model/Crossfade.h"
+#include "../model/ClipStretch.h"
+#include "../dsp/Stretch.h"
 
 #include <algorithm>
 #include <cmath>
@@ -78,7 +82,12 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
     if (c.sourceOffset > 0)
         src.Seek(c.sourceOffset);
 
-    Resampler rs(src.FrameRate(), outRate);
+    // The OFFLINE resampler: a windowed-sinc (M4.5) rather than the linear one,
+    // because what comes out of here is the file that leaves the app, and the
+    // linear interpolator's images fold back at only -10..-20 dB while this one
+    // holds its stopband ~90 dB down. Same interface, so nothing else changes.
+    // The live monitor path keeps the linear one (Engine).
+    SincResampler rs(src.FrameRate(), outRate);
     const float* chunk = nullptr;
     size_t frames = 0;
     while (src.ReadChunk(&chunk, &frames)) {
@@ -86,6 +95,63 @@ size_t DecodeClip(const Clip& c, double outRate, std::vector<float>& out,
         if (maxOutFrames > 0 && (int64_t)(out.size() / 2) >= maxOutFrames)
             break;   // enough decoded to cover the clip window
     }
+    return out.size() / 2;
+}
+
+// The clip's material at the output rate, ready to place: frame i is what the
+// clip's timeline frame i plays.
+//
+// Unstretched, this is the decode, straight through — no stretcher is
+// constructed at all, which is what keeps an unstretched bounce byte-identical
+// to the pre-M7.2 exporter. Stretched, the decode is the clip's source SPAN
+// (lengthFrames / ratio, exactly — never more: a clip is a window into its
+// file, and the material a trim cut away must not be pulled back in) and that
+// span goes through the SAME Stretcher the live engine runs on its disk thread,
+// with the same grid, so a bounce and playback agree.
+//
+// Fewer than `outFrames` frames come back when the source runs out first; the
+// caller places what there is, as it did before (the rest of the clip's window
+// is silence).
+size_t ClipMaterial(const Clip& c, double outRate, int64_t outFrames,
+                    std::vector<float>& out) {
+    out.clear();
+    if (!ClipIsStretched(c)) {
+        DecodeClip(c, outRate, out, outFrames + 64);
+        return out.size() / 2;
+    }
+
+    const double ratio = ClipStretchRatio(c);
+    const int64_t spanSrc = (int64_t)std::llround((double)outFrames / ratio);
+    std::vector<float> src;
+    DecodeClip(c, outRate, src, spanSrc + 1);
+    // The stretch stage consumes the span and nothing past it. (The decoder
+    // reads in chunks, so its buffer can hold a few frames more than the span;
+    // they are material the clip does not reference, and they stay out.)
+    if (src.size() > (size_t)spanSrc * 2)
+        src.resize((size_t)spanSrc * 2);
+
+    Stretcher st;
+    st.Prepare(outRate, 2, ratio);
+    st.Reset(0);
+
+    const size_t inFrames = src.size() / 2;
+    std::vector<float> buf((size_t)st.HopFrames() * 2 * 4);
+    size_t pos = 0;
+    bool flushed = false;
+    while ((int64_t)(out.size() / 2) < outFrames) {
+        const size_t want = std::min<size_t>(32768, inFrames - pos);
+        Stretcher::Result r = st.Process(
+            want > 0 ? src.data() + pos * 2 : nullptr, (int)want,
+            buf.data(), (int)(buf.size() / 2));
+        pos += (size_t)r.inConsumed;
+        if (r.outProduced > 0)
+            out.insert(out.end(), buf.begin(),
+                       buf.begin() + (size_t)r.outProduced * 2);
+        if (pos >= inFrames && !flushed) { st.Flush(); flushed = true; }
+        if (flushed && r.inConsumed == 0 && r.outProduced == 0) break;
+    }
+    if (out.size() / 2 > (size_t)outFrames)
+        out.resize((size_t)outFrames * 2);
     return out.size() / 2;
 }
 
@@ -110,9 +176,11 @@ void PlaceClip(const Clip& c, double scale, Frame winStart, double outRate,
         return;
 
     std::vector<float> decoded;
-    // Only decode enough source to cover the clip window (+ a small resampler
-    // slack) rather than the entire source file.
-    const size_t decodedFrames = DecodeClip(c, outRate, decoded, lengthOut + 64);
+    // Only the clip's own window's worth of source — never the entire file —
+    // and, when the clip is stretched, through the stretch stage (see
+    // ClipMaterial). A stretch consumes lengthOut/ratio source frames and
+    // produces the timeline's lengthOut output frames.
+    const size_t decodedFrames = ClipMaterial(c, outRate, lengthOut, decoded);
     if (decodedFrames == 0)
         return;
 
@@ -253,7 +321,7 @@ bool ExportWav(const Project& project, const std::string& outPath,
     // "source feeds its own detector" has no order in which it can be read.
     for (const Track& t : tracks)
         for (const EffectDesc& d : t.fx)
-            if (EffectSupportsSidechain(d.type)
+            if (EffectTakesSidechain(d)
                 && d.sidechainSource != kInvalidTrackId
                 && d.sidechainSource != t.id)
                 edges.push_back({d.sidechainSource, t.id});
@@ -280,7 +348,15 @@ bool ExportWav(const Project& project, const std::string& outPath,
         int lat = 0;
         for (const EffectDesc& d : fxDescs) {
             auto e = MakeEffect(d, outRate);
-            if (e) { e->Prepare(outRate); lat += e->LatencySamples(); }
+            if (!e) continue;
+            e->Prepare(outRate);
+            // M4.6: the exporter's re-latch after its pre-roll. A plugin
+            // publishes its latency during run(), so the value readable
+            // straight after activation is not necessarily the one it works
+            // with; SettleLatency runs it briefly and adopts what it reports,
+            // and EVERY delay below -- the PDC solve, the pad that gets
+            // trimmed, the per-insert dry lines -- is sized from that number.
+            lat += SettleLatency(*e);
         }
         return lat;
     };
@@ -374,7 +450,9 @@ bool ExportWav(const Project& project, const std::string& outPath,
     const bool keysSolvable = routingOk && pdcOk;
     auto addKeyRoute = [&](const EffectDesc& d, TrackId consumer, int* out) {
         *out = -1;
-        if (!keysSolvable || !EffectSupportsSidechain(d.type)) return;
+        // The same predicate the engine routes with: a built-in dynamics
+        // insert, or an LV2 plugin whose topology has a sidechain pair.
+        if (!keysSolvable || !EffectTakesSidechain(d)) return;
         if (d.sidechainSource == kInvalidTrackId) return;          // none
         if (consumer != kRoutingMaster && d.sidechainSource == consumer)
             return;   // self-key: no order can read a node's own output first
@@ -475,7 +553,13 @@ bool ExportWav(const Project& project, const std::string& outPath,
         std::vector<char>       bypassed(chain.size(), 0);
         for (size_t i = 0; i < chain.size(); i++) {
             if (!chain[i]) continue;   // unavailable plugin: nothing to run
-            const int lat = chain[i]->LatencySamples();
+            // The same settle chainLatency measured with, so the line this
+            // sizes agrees with the PDC solve that decided `pad` (M4.6). The
+            // pre-roll also primes the plugin's own delay line with silence,
+            // which is what makes the rendered signal come out delayed by
+            // exactly its latency -- and therefore aligned once `pad` is
+            // trimmed off.
+            const int lat = SettleLatency(*chain[i]);
             mixes[i]    = ClampFxMix(fxDescs[i].mix);
             bypassed[i] = fxDescs[i].bypassed ? 1 : 0;
             dryDelay[i].Prepare(lat > 0 ? (size_t)lat : 0);

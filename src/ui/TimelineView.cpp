@@ -13,6 +13,7 @@
 #include "../engine/Recorder.h" // live capture waveform envelope
 #include "../model/Crossfade.h" // effective (auto-crossfade) clip fades
 #include "../model/RangeEdit.h" // ExtractRange (the M2.4 range operations)
+#include "../model/ClipStretch.h" // the stretch drag's ratio policy (M7.2)
 #include "Widgets.h"            // shared pan knob draw
 
 #include <Bitmap.h>
@@ -1130,7 +1131,14 @@ void TimelineView::UpdateHover(BPoint where, uint32 mods, uint32 transit) {
                 default:
                     switch (fHover.zone) {
                         case Zone::TrimLeft:  tip = "Trim the clip start"; break;
-                        case Zone::TrimRight: tip = "Trim the clip end"; break;
+                        // Cmd/Alt on this edge stretches instead of trimming
+                        // (M7.2): say so while the modifier is down, or the
+                        // gesture is undiscoverable.
+                        case Zone::TrimRight:
+                            tip = (mods & (B_COMMAND_KEY | B_OPTION_KEY))
+                                ? "Stretch the clip to fit (the audio keeps its pitch)"
+                                : "Trim the clip end (Cmd-drag: stretch to fit)";
+                            break;
                         case Zone::FadeIn:    tip = "Fade in"; break;
                         case Zone::FadeOut:   tip = "Fade out"; break;
                         case Zone::Gain:      tip = "Clip gain (drag up/down)"; break;
@@ -2783,6 +2791,13 @@ void TimelineView::MouseDown(BPoint where) {
                 fDrag = Drag::ClipFadeIn;      // top-left corner = fade in
             } else if (zone == Zone::FadeOut) {
                 fDrag = Drag::ClipFadeOut;     // top-right corner = fade out
+            } else if (zone == Zone::TrimRight
+                       && (mods & (B_COMMAND_KEY | B_OPTION_KEY))) {
+                // Cmd/Alt on the right edge stretches the clip to fit instead of
+                // trimming it: the audio plays slower or faster and the clip
+                // covers the length the drag gives it (M7.2).
+                fDrag = Drag::ClipStretch;
+                fDragRatioOrig = c.stretchRatio;
             } else if (zone == Zone::TrimRight) {
                 fDrag = Drag::ClipResize;
             } else if (zone == Zone::TrimLeft) {
@@ -2927,10 +2942,18 @@ void TimelineView::SetTrackColour(TrackId track, int colorIndex) {
 
 void TimelineView::SetTrackInput(TrackId track, InputSource input) {
     if (!fProject || !fStack) return;
-    if (!fProject->FindTrack(track)) return;
+    const Track* t = fProject->FindTrack(track);
+    if (!t) return;
+    // A channel choice carries its width too (M5): naming one channel means a
+    // mono take, naming a pair stereo. One gesture, two undoable edits.
+    const TrackChannels width = WidthOfChoice(input);
+    const bool setWidth = (width != t->channels);
     if (fStack->Execute(std::make_unique<SetTrackInputCommand>(track,
                                                               std::move(input)),
                         *fProject)) {
+        if (setWidth)
+            fStack->Execute(std::make_unique<SetTrackChannelsCommand>(track, width),
+                            *fProject);
         Invalidate();
         // A changed input re-evaluates idle monitoring (the same message the
         // inspector's picker posts), and repaints the panes.
@@ -3082,8 +3105,7 @@ void TimelineView::OpenInputPicker(TrackId track, BPoint where) {
     for (size_t i = 0; i < choices.size(); i++) {
         BMenuItem* it = new ThemedMenuItem(
             InputChoiceLabel(choices[i]).c_str(), nullptr);
-        if (choices[i].kind == t->input.kind
-            && choices[i].name == t->input.name)
+        if (SameInput(choices[i], t->input))
             it->SetMarked(true);
         menu->AddItem(it);
     }
@@ -3311,6 +3333,40 @@ void TimelineView::PreviewDrag(BPoint where) {
             c->lengthFrames = endFrame - start;
             const Frame off = fDragClipSrcOrig + delta;
             c->sourceOffset = off > 0 ? off : 0;
+        }
+    } else if (fDrag == Drag::ClipStretch) {
+        // Cmd/Alt right-edge drag: the clip covers the dragged timeline length
+        // and its material is stretched to fill it, so the audio keeps its
+        // pitch and the clip fits the bars.
+        Clip* c = t->FindClip(fDragClip);
+        if (c && !fDragIsMidiClip) {
+            Frame len = Snapped(XToFrame(where.x)) - c->startFrame;
+            if (len < 1) len = 1;
+            // The ratio comes from the span the clip referenced when the drag
+            // STARTED (the pre-drag length and ratio), never from the file's
+            // length and never from the preview the last motion event wrote:
+            // a clip is a window into its file, and a trimmed loop must stretch
+            // the material it shows.
+            Clip base = *c;
+            base.lengthFrames = fDragClipOrigLen;
+            base.stretchRatio = fDragRatioOrig;
+            // The source's own length (from the peak cache, which already knows
+            // it) clamps the span to the material that exists; 0 = unknown, and
+            // then the derived ratio simply stands.
+            Frame fileFrames = 0;
+            double srcRate = fProject ? fProject->sampleRate : 48000.0;
+            if (fPeaks) {
+                auto it = fPeaks->find(c->sourcePath);
+                if (it != fPeaks->end() && it->second.IsValid()) {
+                    fileFrames = it->second.TotalFrames();
+                    if (it->second.SampleRate() > 0.0f)
+                        srcRate = it->second.SampleRate();
+                }
+            }
+            c->lengthFrames = len;
+            c->stretchRatio = StretchRatioForDrag(
+                base, len, fileFrames, srcRate,
+                fProject ? fProject->sampleRate : 48000.0);
         }
     } else if (fDrag == Drag::ClipResize && fDragIsMidiClip) {
         MidiClip* c = t->FindMidiClip(fDragClip);
@@ -3645,6 +3701,19 @@ void TimelineView::MouseUp(BPoint where) {
                 if (v != fDragClipOrigLen)
                     cmd = std::make_unique<ResizeClipCommand>(fDragTrack, fDragClip, v);
             }
+        } else if (fDrag == Drag::ClipStretch) {
+            // Restore the pre-drag geometry AND ratio, then commit the whole
+            // gesture as one Stretch Clip step (a drag is one clean undo).
+            if (Clip* c = t->FindClip(fDragClip)) {
+                const Frame  v = c->lengthFrames;
+                const double r = c->stretchRatio;
+                c->lengthFrames = fDragClipOrigLen;
+                c->stretchRatio = fDragRatioOrig;
+                if (v != fDragClipOrigLen
+                    || std::fabs(r - fDragRatioOrig) > kStretchEpsilon)
+                    cmd = std::make_unique<SetClipStretchCommand>(
+                            fDragTrack, fDragClip, v, r, c->pitchSemis);
+            }
         } else if (fDrag == Drag::Slip) {
             // Restore the pre-drag offset, then commit the whole gesture as one
             // SlipClipCommand carrying the dragged value.
@@ -3711,6 +3780,7 @@ void TimelineView::SetRecording(bool active, Frame start, Frame length) {
     if (!active) {                 // take finished: drop live content
         fLiveNotes.clear();
         fLiveRec = nullptr;
+        fLiveTake.clear();
     }
     Invalidate();   // simplest; the region grows every poll anyway
 }
@@ -3740,8 +3810,14 @@ void TimelineView::DrawLiveMidi(BRect region, TrackId track) {
     }
 }
 
-void TimelineView::DrawLiveAudio(BRect region) {
-    const size_t count = fLiveRec->EnvCount();
+void TimelineView::DrawLiveAudio(BRect region, TrackId track) {
+    // The take that BELONGS to this lane: one capture writes one file per
+    // armed track (M5), so drawing take 0 on every lane would show another
+    // track's channels here.
+    const auto ti = fLiveTake.find(track);
+    if (ti == fLiveTake.end() || ti->second < 0) return;
+    const size_t take = (size_t)ti->second;
+    const size_t count = fLiveRec->EnvCount(take);
     const float  recRate = fLiveRec->SampleRate();
     if (count == 0 || recRate <= 0.0f) return;
     const double ratio = fLiveProjRate / recRate;         // timeline / source frames
@@ -3757,7 +3833,8 @@ void TimelineView::DrawLiveAudio(BRect region) {
         // Peak over the buckets this column spans (so striding loses nothing).
         float lo = 0.0f, hi = 0.0f;
         for (size_t j = i; j < i + step && j < count; j++) {
-            const float mn = fLiveRec->EnvMin(j), mx = fLiveRec->EnvMax(j);
+            const float mn = fLiveRec->EnvMin(take, j);
+            const float mx = fLiveRec->EnvMax(take, j);
             if (mn < lo) lo = mn;
             if (mx > hi) hi = mx;
         }
@@ -4191,7 +4268,7 @@ void TimelineView::DrawLanes(BRect update) {
                 if (t.type == TrackType::Midi && fLiveNotes.count(t.id))
                     DrawLiveMidi(rb, t.id);
                 else if (t.type == TrackType::Audio && fLiveRec)
-                    DrawLiveAudio(rb);
+                    DrawLiveAudio(rb, t.id);
                 SetHighColor(ColText());
                 DrawString("\xE2\x97\x8F REC", BPoint(rb.left + Themed(4), rb.top + Themed(14)));
             }
@@ -4718,6 +4795,22 @@ void TimelineView::DrawClip(const Clip& c, BRect lane, rgb_color base,
             DrawString("M", BPoint(strip.right - Themed(11),
                                    strip.top + Themed(11)));
         }
+        // Stretch badge (M7.2): the clip does not play 1:1 — the ratio the
+        // stretch drag set, so the reason the waveform no longer lines up with
+        // the source is on the clip rather than in the user's memory. Right-
+        // aligned like the mute badge, and left of it when both show.
+        if (ClipIsStretched(c) && strip.Width() > Themed(44)) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "\xC3\x97%.2f",
+                          ClipStretchRatio(c));        // UTF-8 multiplication sign
+            const float w = StringWidth(label);
+            const float x = strip.right - Themed(4) - w
+                            - (c.muted ? Themed(12) : 0.0f);
+            if (x > strip.left + Themed(2)) {
+                SetHighColor(Rgb(255, 226, 150));
+                DrawString(label, BPoint(x, strip.top + Themed(11)));
+            }
+        }
     }
 
     // Fade grips: small triangles at the top corners (drag left corner for
@@ -4897,10 +4990,13 @@ void TimelineView::DrawClipWave(const Clip& c, BRect block, BRect update,
 
     // Timeline frames are at the project rate; the envelope indexes source
     // frames. Scale by source/project rate so the waveform tracks the audio
-    // regardless of the file's sample rate.
+    // regardless of the file's sample rate — and by the clip's stretch, which
+    // walks the source that much faster or slower (M7.2), so a stretched clip
+    // draws the material it actually plays.
     const double projRate = fProject->sampleRate;
     const double srcRate  = pc.SampleRate();
-    const double toSrc = (srcRate > 0 && projRate > 0) ? srcRate / projRate : 1.0;
+    const double toSrc = ((srcRate > 0 && projRate > 0) ? srcRate / projRate : 1.0)
+                         / ClipStretchRatio(c);
 
     // Haiku's line array carries the colour per line (SetHighColor does not
     // apply inside BeginLineArray/EndLineArray).

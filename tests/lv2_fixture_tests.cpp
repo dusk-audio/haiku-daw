@@ -45,11 +45,14 @@ namespace {
 const char* kMonoGain    = "urn:haiku-daw:test:mono-gain";
 const char* kTwoUi       = "urn:haiku-daw:test:two-ui";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
+const char* kLatencyStep  = "urn:haiku-daw:test:latency-step";
+const char* kSidechainGain= "urn:haiku-daw:test:sidechain-gain";
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
 const char* kCvPort      = "urn:haiku-daw:test:cv-port";
 
 constexpr int kLatentFrames = 64;   // must match the fixture
+constexpr int kStepFrames   = 128;  // latency-step's settled latency
 
 bool Near(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
 
@@ -94,12 +97,15 @@ int main() {
         return 1;
     }
 
-    // Seven fixtures: four hostable (mono gain, stereo latent, the two-UI one,
-    // and the stateful one), three deliberately refused.
-    CHECK(mineHosted == 4);
+    // Nine fixtures: six hostable (mono gain, stereo latent, latency step,
+    // sidechain gain, the two-UI one, and the stateful one), three deliberately
+    // refused.
+    CHECK(mineHosted == 6);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
+    CHECK(host.Find(kLatencyStep) != nullptr);
+    CHECK(host.Find(kSidechainGain) != nullptr);
 
     // --- Rejection, deterministically ------------------------------------
     {
@@ -163,6 +169,16 @@ int main() {
                 CHECK(p->params[1].isInteger);
             }
         }
+        // Which plugins take a sidechain key (M7.1 tail): the flag the hosts
+        // and the editor route on, read from a real bundle's port properties.
+        if (const Lv2PluginInfo* k = host.Find(kSidechainGain)) {
+            CHECK(k->sidechain);          // two connectionOptional audio inputs
+            CHECK(!k->monoDual);          // 2 in / 2 out stays one instance
+            CHECK(k->params.size() == 1); // gain; the key ports are not controls
+        }
+        if (const Lv2PluginInfo* l = host.Find(kStereoLatent))
+            CHECK(!l->sidechain);         // no optional inputs, so no key
+
         const Lv2PluginInfo* m = host.Find(kMonoGain);
         CHECK(m != nullptr);
         if (m) {
@@ -268,23 +284,88 @@ int main() {
                 quietAfter &= Near(buf[(size_t)i * 2], 0.0f);
             CHECK(quietAfter);
 
-            // THE assertion this fixture exists for. From its second run the
-            // plugin reports 999 while still delaying 64. The host must keep
-            // returning the value it latched at Prepare: a graph whose delay
-            // lines were sized for 64 cannot survive the number moving under it,
-            // and re-reading the port would misalign both soft bypass and the
-            // wet/dry blend with nothing to notice.
+            // The committed value holds across further runs: nothing in
+            // Process() may move it, because every delay line sized from it
+            // belongs to the running graph. (A plugin whose latency really
+            // MOVES is `latency-step` below, and the adopting call is
+            // RelatchLatency -- never a side effect of running.)
             buf.assign(buf.size(), 0.0f);
             fx->Process(buf.data(), N);
             CHECK(fx->LatencySamples() == kLatentFrames);
             fx->Process(buf.data(), N);
+            fx->Process(buf.data(), N);
             CHECK(fx->LatencySamples() == kLatentFrames);
+            CHECK(fx->ObservedLatencySamples() == kLatentFrames);  // it agrees
 
-            // Reset() mid-playback must not adopt it either.
+            // Reset() mid-playback must not move it either.
             fx->Reset();
             CHECK(fx->LatencySamples() == kLatentFrames);
             fx->Process(buf.data(), N);
             CHECK(fx->LatencySamples() == kLatentFrames);
+        }
+    }
+
+    // --- A latency that MOVES: observe it, then adopt it -------------------
+    // `latency-step` reports and applies 0 frames on its first run, then 128.
+    // This block is the M4.6 contract end to end, and it is what the engine's
+    // off-RT poll and the hosts' builds are built on:
+    //   - what the graph was BUILT with (LatencySamples) does not move by
+    //     itself, under Process() or under Reset();
+    //   - the host can SEE the move without touching the plugin
+    //     (ObservedLatencySamples, published by the audio thread);
+    //   - the host can ADOPT it, off the RT thread, before sizing the next
+    //     graph (RelatchLatency) -- and once adopted, the audio really is that
+    //     late.
+    {
+        std::unique_ptr<IEffect> fx = host.Create(kLatencyStep, 48000.0);
+        CHECK(fx != nullptr);
+        if (fx) {
+            fx->Prepare(48000.0);
+            CHECK(fx->LatencySamples() == 0);          // activated at zero
+            CHECK(fx->ObservedLatencySamples() == 0);
+
+            const int N = 256;
+            std::vector<float> buf((size_t)N * 2, 0.0f);
+            fx->Process(buf.data(), N);                // run 1: still zero
+            CHECK(fx->ObservedLatencySamples() == 0);
+            CHECK(fx->LatencySamples() == 0);
+
+            fx->Process(buf.data(), N);                // run 2: the step
+            CHECK(fx->ObservedLatencySamples() == kStepFrames);
+            CHECK(fx->LatencySamples() == 0);          // seen, NOT adopted
+
+            // The adopting call — what the engine's build and the exporter's
+            // pre-roll make (dsp/LatencyProbe.h). What the host does with the
+            // answer: LatencySamples() is now the value every delay line of the
+            // NEXT graph is sized from.
+            CHECK(fx->RelatchLatency() == kStepFrames);
+            CHECK(fx->LatencySamples() == kStepFrames);
+
+            // ...and the plugin really is that late, so the number the host
+            // just committed is the number it has to compensate. A ramp in,
+            // out[i] must equal in[i - kStepFrames].
+            const int M = kStepFrames * 3;
+            std::vector<float> ramp((size_t)M * 2, 0.0f);
+            for (int i = 0; i < M; i++) {
+                ramp[(size_t)i * 2 + 0] = (float)i;
+                ramp[(size_t)i * 2 + 1] = (float)i;
+            }
+            fx->Process(ramp.data(), M);
+            bool delayed = true;
+            for (int i = kStepFrames; i < M; i++)
+                delayed &= Near(ramp[(size_t)i * 2], (float)(i - kStepFrames),
+                                0.01f);
+            CHECK(delayed);
+
+            // Reset() is a seek, not a re-solve: it must not adopt anything by
+            // itself, whatever the plugin now reports. (The plugin's own Reset
+            // state is zero latency again, so the committed 128 is now stale —
+            // which the poll sees as a move BACK, exactly as it should.)
+            fx->Reset();
+            CHECK(fx->LatencySamples() == kStepFrames);
+            fx->Process(buf.data(), N);
+            CHECK(fx->ObservedLatencySamples() == 0);  // the move back down
+            CHECK(fx->LatencySamples() == kStepFrames);
         }
     }
 

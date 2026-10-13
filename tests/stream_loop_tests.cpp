@@ -198,6 +198,18 @@ static void TestPassSourceFrame() {
     // frame apart.
     CHECK(PassSourceFrame(0, 0, 3, 44100.0, 48000.0)
           == (int64_t)(3.0 * 44100.0 / 48000.0 + 0.5));
+
+    // Time-stretch (M7.2): the timeline distance is divided by the ratio before
+    // it becomes source frames — a clip stretched to twice the timeline length
+    // walks its source at half speed, so a seek lands on half the material.
+    CHECK(PassSourceFrame(0, 0, 3000, 48000.0, 48000.0, 2.0) == 1500);
+    CHECK(PassSourceFrame(0, 0, 3000, 48000.0, 48000.0, 0.5) == 6000);
+    // The ratio composes with a rate mismatch, in the order the disk thread
+    // uses it: (timeline - clipStart) * srcRate/outRate / ratio.
+    CHECK(PassSourceFrame(100, 0, 4800, 96000.0, 48000.0, 2.0) == 100 + 4800);
+    // A defaulted / nonsense ratio is 1.0, never a division by zero.
+    CHECK(PassSourceFrame(0, 0, 3000, 48000.0, 48000.0) == 3000);
+    CHECK(PassSourceFrame(0, 0, 3000, 48000.0, 48000.0, 0.0) == 3000);
 }
 
 // --- the loop-aware in-place join -------------------------------------------

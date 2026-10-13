@@ -2191,12 +2191,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
                 fTransportCtl.fEngine->UpdateMix(*fProject);
+                if (fTransportCtl.fEngine->FxLatencyMoved())
+                    fTransportCtl.ReloadActiveEngine();   // M4.6, see below
                 PushMeter(false);
                 PushTrackPeaks();
                 break;
             }
             if (fTransportCtl.fEngine && (fTransportCtl.fPlaying || fRecCtl.fRecMode)) {
                 fTransportCtl.fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
+                // M4.6: an insert whose plugin moved its own latency port (a
+                // 4K EQ 2 toggling oversampling) needs PDC re-solved, because
+                // the delay lines that align it were sized from the value the
+                // graph was built with. The poll runs here -- off the RT thread
+                // -- and a true answer rebuilds IN PLACE: the graph keeps
+                // playing while the builder re-settles every effect and solves
+                // the new delays, and the swap lands at a block boundary. The
+                // pulse is the right place because it is the only periodic
+                // caller, and it already touches the engine's atomics.
+                if (fTransportCtl.fEngine->FxLatencyMoved())
+                    fTransportCtl.ReloadActiveEngine();
                 const Frame ph = fTransportCtl.fEngine->Playhead();
                 const Transport& tr = fProject->transport;
 
@@ -2263,7 +2276,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         // Growing recording region + its live content.
                         fTimeline->SetRecording(true, fRecCtl.fRecStart, ph - fRecCtl.fRecStart);
                         if (capturing)
-                            fTimeline->SetLiveAudio(fRecCtl.fRecorder.get(), fProject->sampleRate);
+                            fTimeline->SetLiveAudio(fRecCtl.fRecorder.get(),
+                                                    fProject->sampleRate,
+                                                    fRecCtl.fLiveTakeFor);
                         if (midiCap) {
                             std::map<TrackId, std::vector<MidiNote>> live;
                             for (TrackId id : fRecCtl.fMidiRecTracks)
@@ -3705,6 +3720,7 @@ void MainWindow::LoadSettings() {
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
+    s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
     if (!s.Deserialize(text)) return;
 
     // The panes (M1.4). The width goes on as the inspector's preferred size
@@ -3732,6 +3748,8 @@ void MainWindow::LoadSettings() {
 
     fTransportCtl.fBufferFrames = (size_t)s.bufferFrames;
     fRecCtl.fCountInBars  = s.countInBars;
+    fRecCtl.fTakeFormat   = s.takeFormat;   // take depth (M5); the recorder
+                                            // clamps an unknown value itself
     fTransportCtl.fMetronome    = s.metronome;
     fTransportCtl.fMonitorInput = s.monitorInput;
     if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
@@ -3815,6 +3833,7 @@ void MainWindow::SaveSettings() {
     s.exportRange     = fExportChoices.range;
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
+    s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
     // The Preferences window's keys (M3.5).
     s.defaultSampleRate = fPrefsSampleRate;
     s.metronomeSound    = fTransportCtl.fMetronomeSound;

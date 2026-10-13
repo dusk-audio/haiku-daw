@@ -1,7 +1,9 @@
 #include "Engine.h"
 
 #include "../dsp/EffectFactory.h"
+#include "../dsp/LatencyProbe.h"
 #include "../model/Crossfade.h"
+#include "../model/ClipStretch.h"
 #include "../model/MidiControl.h"
 
 #include <MediaDefs.h>
@@ -118,12 +120,13 @@ TrackStream::TrackStream(TrackId track, const std::string& path,
                          bool audible, Frame seekProjectDelta, float outputRate,
                          Frame fadeIn, Frame fadeOut, float clipGain,
                          FadeShape fadeInShape, FadeShape fadeOutShape,
-                         StreamLoopRange loop)
+                         StreamLoopRange loop, double stretchRatio)
     : fTrackId(track), fPath(path), fStart(startFrame), fLength(lengthFrames),
       fSourceOffset(sourceOffset), fSeekDelta(seekProjectDelta),
       fOutputRate(outputRate), fFadeIn(fadeIn), fFadeOut(fadeOut),
       fFadeInShape(fadeInShape), fFadeOutShape(fadeOutShape),
-      fClipGain(clipGain), fLoop(loop), fRing(kRingFloats) {
+      fClipGain(clipGain), fLoop(loop), fRing(kRingFloats),
+      fStretchRatio(stretchRatio > 0.0 ? stretchRatio : 1.0) {
     float gl, gr;
     EqualPowerGains(gain, pan, &gl, &gr);
     fGainL.store(gl);
@@ -163,6 +166,18 @@ status_t TrackStream::Open() {
 
     const float srcRate = fSource->FrameRate();
     fResampler.reset(new Resampler(srcRate, fOutputRate));
+
+    // The stretch stage, when the clip is stretched. Built here, once, off the
+    // audio thread — the stretcher allocates its window and its input history
+    // in Prepare and never again, so the disk thread only does arithmetic (and
+    // the RT callback never runs any of it: the ring still holds one output
+    // frame per timeline frame).
+    if (fStretchRatio != 1.0) {
+        fStretcher.reset(new Stretcher);
+        fStretcher->Prepare((double)fOutputRate, 2, fStretchRatio);
+        fStretchIn.reserve(16384 * 2);
+        fStretchOut.resize((size_t)fStretcher->HopFrames() * 2 * 4);
+    }
 
     // The passes this stream produces, in playback order (StreamLoop.h): the
     // first from where this graph's playback begins (the clip's own seek
@@ -230,6 +245,8 @@ bool TrackStream::FillStep() {
         SeekToPass();
         return true;                    // a new pass began
     }
+    if (fStretcher)
+        return FillStretched(remaining);   // decode -> stretch -> ring
     if (fChunkFloats == 0) {
         const float* src = nullptr;
         size_t frames = 0;
@@ -262,12 +279,135 @@ bool TrackStream::FillStep() {
     return pushed > 0;
 }
 
+// One stretched pass's worth of progress. The chain is decode -> resample ->
+// stretch -> ring, all on this stream's fill worker, so the ring still holds
+// one output frame per timeline frame and the RT side is untouched. `remaining`
+// is the pass's output frames still to produce.
+//
+// The source consumed is capped at the pass's span (lengthFrames / ratio, the
+// same arithmetic the exporter uses), and the read past the end of it — or past
+// the end of the file — is silence: the clip plays the material it references,
+// and a clip longer than its source still fills its window, as it did before.
+bool TrackStream::FillStretched(Frame remaining) {
+    if (fStretchOutFrames == 0) {
+        // (Re)fill the output staging: feed the stretcher until it produces.
+        for (;;) {
+            if (!fStretchFlushed && fStretchFed >= fStretchSpan) {
+                fStretcher->Flush();      // the pass's span is exhausted
+                fStretchFlushed = true;
+            }
+            if (!fStretchFlushed && fStretchInOff >= fStretchInFrames) {
+                const float* src = nullptr;
+                size_t frames = 0;
+                if (!fSource->ReadChunk(&src, &frames)) {
+                    fSourceEof.store(true, std::memory_order_relaxed);
+                    fStretcher->Flush();  // the file ended: the rest is silence
+                    fStretchFlushed = true;
+                } else {
+                    fResampled.clear();
+                    fResampler->Process(src, frames, fResampled);
+                    size_t n = fResampled.size() / 2;
+                    const int64_t left = fStretchSpan - fStretchFed;
+                    if ((int64_t)n > left) n = (size_t)left;   // never past the span
+                    fStretchIn.swap(fResampled);
+                    fStretchInOff    = 0;
+                    fStretchInFrames = n;
+                }
+            }
+            const size_t inLeft = fStretchInFrames > fStretchInOff
+                                ? fStretchInFrames - fStretchInOff : 0;
+            Stretcher::Result r = fStretcher->Process(
+                inLeft > 0 ? fStretchIn.data() + fStretchInOff * 2 : nullptr,
+                (int)inLeft, fStretchOut.data(), (int)(fStretchOut.size() / 2));
+            fStretchInOff += (size_t)r.inConsumed;
+            fStretchFed   += r.inConsumed;
+            if (r.outProduced > 0) {
+                fStretchOutOff    = 0;
+                fStretchOutFrames = (size_t)r.outProduced;
+                break;
+            }
+            if (fStretchFlushed && inLeft == 0) {
+                // Nothing to read and nothing left to produce, with the pass
+                // still owing frames: the FILE ended before the pass's material
+                // did (a clip longer than its source). That is the same latch
+                // the unstretched path sets on EOF, set for the same reason —
+                // NeedsFilling() must stop a builder waiting on audio that does
+                // not exist — and it is reached only here, because a pass whose
+                // output is complete is advanced before the stretch stage is
+                // entered at all.
+                fSourceEof.store(true, std::memory_order_relaxed);
+                return false;
+            }
+        }
+    }
+
+    // Drop the warm-up: its frames are BEFORE the pass's first output frame, so
+    // the ring's origin stays the pass's own first frame (1:1 with the timeline,
+    // which is what Mix and RebaseTo assume).
+    if (fStretchDrop > 0) {
+        const size_t n = std::min<size_t>((size_t)fStretchDrop, fStretchOutFrames);
+        fStretchOutOff += n;
+        fStretchOutFrames -= n;
+        fStretchDrop -= (int64_t)n;
+        if (fStretchOutFrames == 0)
+            return true;             // progress: the warm-up is behind us
+    }
+
+    size_t floats = fStretchOutFrames * 2;
+    const size_t limit = (size_t)remaining * 2;
+    if (floats > limit) floats = limit;    // never past the pass's end
+    const size_t pushed = fRing.Write(fStretchOut.data() + fStretchOutOff * 2,
+                                      floats);
+    const size_t pushedFrames = pushed / 2;
+    fStretchOutOff    += pushedFrames;
+    fStretchOutFrames -= pushedFrames;
+    fPassWritten += (Frame)pushedFrames;
+    return pushed > 0;
+}
+
 // Seek the source to the frame the cursor's current pass starts at, and drop
 // the resampler's carried state — the audio before this frame (or before the
 // loop's own start) is not what plays next, so an interpolated remnant of it
 // would be a click at the seam.
 void TrackStream::SeekToPass() {
     if (!fSource) return;
+    if (fStretcher) {
+        // Stretched: the pass's first output frame is clip-relative
+        // `(lo - fStart)`, and the source that plays there is that divided by
+        // the ratio. Start one warm-up earlier when the clip's own material
+        // reaches back that far, so the stretcher also builds the frame BEFORE
+        // the pass's first — its overlap-add tail — and the pass resumes at
+        // full level instead of ramping in over 25 ms. The frames the warm-up
+        // produces are ahead of the pass's first output frame and get dropped
+        // (fStretchDrop below), and quiet: this is a seek, the audio before it
+        // is gone either way.
+        const Frame want = fCursor.lo - fStart;              // clip-relative frame
+        const Frame warm = fStretcher->WarmupFrames();
+        const Frame from = want > warm ? want - warm : 0;
+        const int64_t p = (int64_t)std::llround((double)from / fStretchRatio);
+        fSource->Seek(PassSourceFrame(fSourceOffset, fStart, fStart + from,
+                                      fSource->FrameRate(), fOutputRate,
+                                      fStretchRatio));
+        fResampler->Reset();
+        fStretcher->Reset(p);
+        fStretchDrop = want - fStretcher->OutputIndex();
+        if (fStretchDrop < 0) fStretchDrop = 0;
+        // The source this pass may consume, in output-rate frames: from the
+        // reset point (a little before the pass) to the pass's last frame. The
+        // stretcher reads silence past it, so a stretched clip plays the
+        // material it references and nothing a trim cut away — the same span
+        // the exporter consumes, which is what keeps a bounce and playback
+        // agreeing about a clip's content.
+        const Frame outEnd = fCursor.lo + fCursor.Frames() - fStart;
+        fStretchSpan = (int64_t)std::llround((double)outEnd / fStretchRatio) - p;
+        if (fStretchSpan < 0) fStretchSpan = 0;
+        fStretchFed    = 0;
+        fStretchFlushed = false;
+        fStretchInOff = fStretchInFrames = 0;
+        fStretchOutOff = fStretchOutFrames = 0;
+        fChunkFloats = fChunkOffset = 0;
+        return;
+    }
     fSource->Seek(PassSourceFrame(fSourceOffset, fStart, fCursor.lo,
                                   fSource->FrameRate(), fOutputRate));
     if (fResampler) fResampler->Reset();
@@ -1434,6 +1574,56 @@ bool Engine::SyncFx(const Project& project) {
     return allMatched;
 }
 
+bool Engine::FxLatencyMoved() {
+    // The M4.6 poll. Off the RT thread by construction -- the UI pulse calls it
+    // beside UpdateMix() -- and it reads only atomics the RT thread publishes
+    // (Lv2Effect::Process keeps ObservedLatencySamples() current), so no plugin
+    // is ever touched from here. The pin is what makes walking the graph legal
+    // while the callback renders it: the reclaimer cannot free a pinned graph.
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
+    if (!g) return false;   // a rebuild is in flight; the next pulse re-checks
+
+    bool moved = false;
+    auto forget = [&](uint64_t key) {
+        for (size_t a = 0; a < fLatencyAsked.size(); ) {
+            if (fLatencyAsked[a].identity == key)
+                fLatencyAsked.erase(fLatencyAsked.begin() + (long)a);
+            else
+                a++;
+        }
+    };
+    auto check = [&](const std::vector<std::unique_ptr<IEffect>>& fx,
+                     const std::vector<uint64_t>& identity) {
+        for (size_t i = 0; i < fx.size(); i++) {
+            if (!fx[i]) continue;          // an unavailable plugin has no latency
+            // The identity hash is what the graph already records for SyncFx:
+            // two inserts of the same plugin share it, which makes this guard
+            // coarser than the slot it guards. That is deliberate -- it can
+            // only ever suppress a repeat ask for a plugin that has already
+            // been re-solved once, never route a key or size a line wrong.
+            const uint64_t key = i < identity.size() ? identity[i] : 0;
+            const int observed = fx[i]->ObservedLatencySamples();
+            if (observed == fx[i]->LatencySamples()) {
+                forget(key);               // agreed: a later move asks afresh
+                continue;
+            }
+            bool alreadyAsked = false;
+            for (const LatencyAsked& q : fLatencyAsked)
+                if (q.identity == key && q.observed == observed) {
+                    alreadyAsked = true;
+                    break;
+                }
+            if (alreadyAsked) continue;    // the rebuild for this did not stick
+            fLatencyAsked.push_back({key, observed});
+            moved = true;
+        }
+    };
+    for (const Graph::Bus& b : g->fBuses) check(b.fx, b.fxIdentity);
+    check(g->fMasterFx, g->fMasterFxIdentity);
+    return moved;
+}
+
 void Engine::CaptureFxStates(Project& project) {
     // One insert: ask the live instance for its own state and store it on the
     // descriptor it came from. An insert the engine could not build (no
@@ -1591,7 +1781,8 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
                 t.id, c.sourcePath, c.startFrame, c.lengthFrames,
                 c.sourceOffset, t.gain, t.pan, audible, seekDelta,
                 g.fOutputRate, fades[ci].fadeIn, fades[ci].fadeOut, c.gain,
-                fades[ci].inShape, fades[ci].outShape, streamLoop);
+                fades[ci].inShape, fades[ci].outShape, streamLoop,
+                ClipStretchRatio(c));
             if (s->Open() != B_OK || !s->Valid()) {
                 fprintf(stderr, "Engine: skipping clip '%s'\n",
                         c.sourcePath.c_str());
@@ -1767,7 +1958,10 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
     std::vector<std::pair<TrackId, TrackId>> keyEdges;
     std::vector<TrackId>                     keySrcIds;   // deduped, for nodes
     auto addKey = [&](const EffectDesc& d, TrackId consumer) {
-        if (!EffectSupportsSidechain(d.type)) return;
+        // EffectTakesSidechain, not the model's type test: an LV2 insert takes
+        // a key when its PLUGIN has a sidechain pair (M7.1 tail), and the
+        // plugin layer answers that through the factory's probe.
+        if (!EffectTakesSidechain(d)) return;
         const TrackId src = d.sidechainSource;
         if (src == kInvalidTrackId || src == consumer) return;
         keyEdges.push_back({src, consumer});
@@ -1852,7 +2046,17 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // fxAuto's fxIndex addresses the right effect. Process skips nulls.
         for (const EffectDesc& d : t->fx) {
             auto fx = MakeEffect(d, g.fOutputRate);
-            if (fx) { fx->Prepare(g.fOutputRate); fx->SetTempo(project.tempoBPM); }
+            if (fx) {
+                fx->Prepare(g.fOutputRate);
+                fx->SetTempo(project.tempoBPM);
+                // M4.6: run it briefly before anything is sized from its
+                // latency -- a plugin publishes that value during run(), so the
+                // activation-time reading is not necessarily what it is working
+                // with. This is also what makes a latency-triggered rebuild
+                // converge: the fresh instance settles on the same value the
+                // old one reported.
+                SettleLatency(*fx);
+            }
             b.fx.push_back(std::move(fx));
             b.fxTypes.push_back(d.type);
             b.fxIdentity.push_back(FxIdentity(d));
@@ -2031,6 +2235,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         if (!fx) continue;
         fx->Prepare(g.fOutputRate);
         fx->SetTempo(project.tempoBPM);
+        SettleLatency(*fx);            // M4.6 pre-roll + re-latch, as above
         const int lat = fx->LatencySamples();   // fixed once Prepare has run
         g.fMasterFxDelay.emplace_back();
         g.fMasterFxDelay.back().Prepare(lat > 0 ? (size_t)lat : 0);
@@ -2042,7 +2247,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // puts the key on the same timeline as the mix it is ducking. (The key
         // is a TRACK even here: nothing keys the master.)
         long keyNode = -1;
-        if (pdcKnown && sidechainSolvable && EffectSupportsSidechain(d.type)
+        if (pdcKnown && sidechainSolvable && EffectTakesSidechain(d)
             && d.sidechainSource != kInvalidTrackId
             && project.FindTrack(d.sidechainSource)) {
             keyNode = nodeIndexOf(d.sidechainSource);

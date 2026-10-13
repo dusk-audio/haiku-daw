@@ -36,6 +36,7 @@ int main() {
     a.inspectorWidth     = 240.0f;
     a.bottomVisible      = true;
     a.bottomHeight       = 300.0f;
+    a.takeFormat         = 2;          // 32-bit float takes (M5)
 
     AppSettings b;
     CHECK(b.Deserialize(a.Serialize()));
@@ -63,6 +64,14 @@ int main() {
     CHECK(std::fabs(b.inspectorWidth - 240.0f) < 1e-3);
     CHECK(b.bottomVisible == true);
     CHECK(std::fabs(b.bottomHeight - 300.0f) < 1e-3);
+    // The take sample format (M5), and the pre-M5 default for a file that has
+    // no key at all: 24-bit PCM.
+    CHECK(b.takeFormat == 2);
+    {
+        AppSettings legacy;
+        CHECK(legacy.Deserialize("buffer 512\n"));
+        CHECK(legacy.takeFormat == 1);
+    }
 
     // The dock's page (T2).
     {

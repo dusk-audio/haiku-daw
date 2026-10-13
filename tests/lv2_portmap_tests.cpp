@@ -103,10 +103,11 @@ int main() {
     // in, 2 out) is hostable as a plain stereo insert. Counting all four inputs
     // would reject a perfectly usable compressor.
     //
-    // The unrouted pair is connected to SILENCE, not left at NULL. The spec
-    // permits NULL, but JUCE-generated plugins memmove every audio port they
-    // declare without checking, and segfault on the first run() — which is
-    // precisely how this was found. Silence is equally legal and survivable.
+    // The pair is not left at NULL (the spec permits it, but JUCE-generated
+    // plugins memmove every audio port they declare without checking, and
+    // segfault on the first run() — precisely how this was found): the first two
+    // optional inputs ARE the sidechain pair, and the host connects them to the
+    // insert's resolved key, which is silence when nothing is routed.
     {
         std::vector<Lv2PortSpec> ports = {
             Port(0, Lv2PortRole::AudioIn),
@@ -122,10 +123,47 @@ int main() {
         CHECK(L.topology == Lv2Topology::Stereo);
         CHECK(L.audioIn.size() == 2);              // only the required pair
         CHECK(L.audioOut.size() == 2);
-        CHECK(L.silencePorts.size() == 2);
-        CHECK(L.silencePorts[0] == 2 && L.silencePorts[1] == 3);
+        // The two optional INPUTS are the key pair, in port order (M7.1 tail).
+        CHECK(L.sidechainPorts.size() == 2);
+        CHECK(L.sidechainPorts[0] == 2 && L.sidechainPorts[1] == 3);
+        CHECK(L.silencePorts.empty());             // both were consumed by the pair
         CHECK(L.discardPorts.size() == 1 && L.discardPorts[0] == 6);
         CHECK(L.nullPorts.empty());                // no audio port is ever NULL
+    }
+
+    // --- The key pair is at most two ports; further optional inputs are not
+    // part of it. A plugin may declare several optional audio inputs for its
+    // own reasons, and feeding the third one a key would be a signal the
+    // plugin never asked for.
+    {
+        std::vector<Lv2PortSpec> ports = {
+            Port(0, Lv2PortRole::AudioIn),
+            Port(1, Lv2PortRole::AudioIn),
+            Port(2, Lv2PortRole::AudioIn, true),   // key L
+            Port(3, Lv2PortRole::AudioIn, true),   // key R
+            Port(4, Lv2PortRole::AudioIn, true),   // some other optional input
+            Port(5, Lv2PortRole::AudioOut),
+            Port(6, Lv2PortRole::AudioOut),
+        };
+        Lv2PortLayout L = BuildLv2PortLayout(ports);
+        CHECK(L.topology == Lv2Topology::Stereo);
+        CHECK(L.sidechainPorts.size() == 2);
+        CHECK(L.sidechainPorts[0] == 2 && L.sidechainPorts[1] == 3);
+        CHECK(L.silencePorts.size() == 1 && L.silencePorts[0] == 4);
+    }
+
+    // A MonoDual plugin (1 in / 1 out, two instances) with one optional input:
+    // that input is instance k's own (mono) key, not a stereo pair.
+    {
+        std::vector<Lv2PortSpec> ports = {
+            Port(0, Lv2PortRole::AudioIn),
+            Port(1, Lv2PortRole::AudioIn, true),   // the key
+            Port(2, Lv2PortRole::AudioOut),
+        };
+        Lv2PortLayout L = BuildLv2PortLayout(ports);
+        CHECK(L.topology == Lv2Topology::MonoDual);
+        CHECK(L.sidechainPorts.size() == 1 && L.sidechainPorts[0] == 1);
+        CHECK(L.silencePorts.empty());
     }
 
     // --- A required port we cannot size is fatal; an optional one is not --

@@ -68,7 +68,9 @@ add_library(daw_model
     src/dsp/Saturator.cpp       # kit-free tape saturation (tape-echo port)
     src/dsp/Gate.cpp            # kit-free noise gate / expander
     src/dsp/Widener.cpp         # kit-free M/S stereo widener
+    src/dsp/Stretch.cpp         # kit-free WSOLA time-stretch (M7.2)
     src/dsp/EffectFactory.cpp   # EffectDesc -> IEffect
+    src/dsp/SincResampler.cpp   # kit-free windowed-sinc SRC for the offline path
     src/synth/Synth.cpp         # kit-free polyphonic sine synth
     src/synth/SampleBank.cpp    # kit-free loaded-soundfont store + cache
     src/synth/SfzParser.cpp     # kit-free SFZ -> LoadedInstrument
@@ -207,6 +209,12 @@ add_executable(takenames_tests tests/takenames_tests.cpp)
 target_link_libraries(takenames_tests PRIVATE daw_model)
 add_test(NAME takenames_tests COMMAND takenames_tests)
 
+# Multichannel capture addressing (M5): which device channel a take reads, the
+# take sample format, and the de-interleave out of the shared capture block.
+add_executable(channelsplit_tests tests/channelsplit_tests.cpp)
+target_link_libraries(channelsplit_tests PRIVATE daw_model)
+add_test(NAME channelsplit_tests COMMAND channelsplit_tests)
+
 add_executable(wav_tests tests/wav_tests.cpp)
 target_link_libraries(wav_tests PRIVATE daw_model)
 add_test(NAME wav_tests COMMAND wav_tests)
@@ -229,6 +237,12 @@ add_test(NAME wavwriter_tests COMMAND wavwriter_tests)
 add_executable(resampler_tests tests/resampler_tests.cpp)
 target_link_libraries(resampler_tests PRIVATE daw_model)
 add_test(NAME resampler_tests COMMAND resampler_tests)
+
+# The offline resampler (M4.5): aliasing rejection and passband flatness
+# measured against the linear one, plus the streaming/identity contract.
+add_executable(sinc_resampler_tests tests/sinc_resampler_tests.cpp)
+target_link_libraries(sinc_resampler_tests PRIVATE daw_model)
+add_test(NAME sinc_resampler_tests COMMAND sinc_resampler_tests)
 
 add_executable(effect_tests tests/effect_tests.cpp)
 target_link_libraries(effect_tests PRIVATE daw_model)
@@ -443,9 +457,23 @@ add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
 add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)
 
+# The WSOLA time-stretcher (M7.2) itself, plus the model-side stretch policy
+# (the ratio a stretch-to-fit drag derives from a trimmed clip's own span).
+add_executable(stretch_tests tests/stretch_tests.cpp)
+target_link_libraries(stretch_tests PRIVATE daw_model)
+add_test(NAME stretch_tests COMMAND stretch_tests)
+
 add_executable(exporter_tests tests/exporter_tests.cpp)
 target_link_libraries(exporter_tests PRIVATE daw_model)
 add_test(NAME exporter_tests COMMAND exporter_tests)
+
+# The stretch stage on the exporter's clip path: a stretched clip bounces to
+# the expected timeline length and content, and a trimmed clip consumes exactly
+# its referenced span of source — checked against a source whose later material
+# is a marker that must never sound.
+add_executable(exporter_stretch_tests tests/exporter_stretch_tests.cpp)
+target_link_libraries(exporter_stretch_tests PRIVATE daw_model)
+add_test(NAME exporter_stretch_tests COMMAND exporter_stretch_tests)
 
 # The export job surface: format (bit depth + dither), the timeline range,
 # progress, cancellation, and the temp+rename write.

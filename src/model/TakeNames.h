@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <string>
 #include <sys/stat.h>
+#include <vector>
 
 namespace daw {
 
@@ -31,6 +32,28 @@ inline std::string NextFreeWavPath(const std::string& dir,
             return path;   // free (missing is the only answer we act on)
     }
     return std::string();   // a directory with a million takes: give up loudly
+}
+
+// The first `count` free names of the same family, in order (M5: one capture
+// writes one take PER armed track, and those names have to be picked TOGETHER
+// -- the first pick's file does not exist yet, so a second scan from scratch
+// would hand out a name already promised to the first). Returns fewer names
+// than asked only in the give-up case above, never duplicates.
+inline std::vector<std::string> NextFreeWavPaths(const std::string& dir,
+                                                 const std::string& prefix,
+                                                 int count) {
+    std::vector<std::string> out;
+    if (count <= 0) return out;
+    const std::string base = (dir.empty() ? std::string() : dir + "/") + prefix;
+    for (int n = 1; n < 1000000 && (int)out.size() < count; ++n) {
+        char suffix[32];
+        std::snprintf(suffix, sizeof(suffix), "-%d.wav", n);
+        const std::string path = base + suffix;
+        struct stat st;
+        if (::stat(path.c_str(), &st) != 0)
+            out.push_back(path);
+    }
+    return out;
 }
 
 } // namespace daw

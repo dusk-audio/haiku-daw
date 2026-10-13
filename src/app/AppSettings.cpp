@@ -85,6 +85,7 @@ std::string AppSettings::Serialize() const {
       << "exprange "  << exportRange << "\n"
       << "expstems "  << exportStems << "\n"
       << "theme "     << ThemeModeToString(themeMode) << "\n"
+      << "takefmt "   << takeFormat << "\n"
       // The Preferences window's own keys (M3.5). Optional on load like every
       // line here: a file written by an older build simply has none of them
       // and keeps the defaults.
@@ -156,6 +157,7 @@ bool AppSettings::Deserialize(const std::string& text) {
             // file must not be able to leave the app in a look it cannot draw.
             if (ls >> v) themeMode = ThemeModeFromString(v.c_str());
         }
+        else if (kw == "takefmt") { int v; if (ls >> v) takeFormat = v; }
         else if (kw == "defrate")   { int v; if (ls >> v) defaultSampleRate = v; }
         else if (kw == "metsnd")    { int v; if (ls >> v) metronomeSound = v; }
         else if (kw == "metlvl")    { float v; if (ls >> v) metronomeLevel = v; }

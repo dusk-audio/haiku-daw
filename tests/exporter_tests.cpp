@@ -5,6 +5,8 @@
 
 #include "../src/engine/Exporter.h"
 #include "../src/engine/WavSource.h"
+#include "../src/engine/WavWriter.h"
+#include "../src/engine/Resampler.h"
 #include "../src/dsp/Loudness.h"
 #include "../src/model/Project.h"
 #include "../src/model/MidiExpression.h"
@@ -818,6 +820,99 @@ int main() {
         const size_t kPeriod = (size_t)(SR / kModWheelVibratoHz);
         CHECK(std::abs(crossings(wheel, 1000, 1000 + kPeriod)
                        - crossings(flat, 1000, 1000 + kPeriod)) <= 1);
+    }
+
+    // --- Time-stretch (M7.2): an UNSTRETCHED clip's bounce is byte-for-byte
+    // what the pre-stretch exporter wrote. The reference is the clip path as it
+    // was — decode the source at the output rate, place it at the clip's
+    // timeline position — and the comparison is bit-for-bit, so anything the
+    // stretch stage does to a clip whose ratio is 1.0 (routing it through the
+    // stretcher, windowing its head, shifting it a frame, changing the decode
+    // bound) fails here. A ratio that is 1.0 while OTHER clips in the same
+    // project are stretched is the same guard on the path the whole feature
+    // must leave alone.
+    {
+        const std::string src = "/tmp/haiku_daw_stretch_reg.wav";
+        const std::string outp = "/tmp/haiku_daw_stretch_reg_out.wav";
+        // A short source with real content (a ramp-then-tone, so a frame shift
+        // or a windowed head is visible immediately).
+        std::vector<float> smp((size_t)(SR / 4) * 2, 0.0f);
+        for (size_t i = 0; i < smp.size() / 2; i++) {
+            const float v = std::sin(2.0 * M_PI * 220.0 * (double)i / SR) * 0.5f;
+            smp[i * 2 + 0] = v; smp[i * 2 + 1] = v;
+        }
+        {
+            WavWriter w;
+            CHECK(w.OpenFormat(src, (int)SR, 2, 32, /*floatOut=*/true));
+            CHECK(w.WriteFloat(smp.data(), smp.size(), /*dither=*/false));
+            CHECK(w.Close());
+        }
+
+        auto bounceClip = [&](double ratio, double otherRatio,
+                              std::vector<float>& gotFrames) -> bool {
+            Project pr;
+            pr.sampleRate = SR;
+            pr.masterGain = 1.0f;
+            Track t;
+            t.id = pr.NextTrackId(); t.type = TrackType::Audio;
+            t.gain = 1.0f; t.pan = -1.0f;      // hard left: L is the material
+            Clip c;
+            c.startFrame = 0; c.lengthFrames = (Frame)(SR / 4);
+            c.sourcePath = src; c.stretchRatio = ratio;
+            t.clips.push_back(c);
+            if (otherRatio != 0.0) {           // a stretched sibling clip
+                Clip d = c;
+                d.startFrame = (Frame)(SR / 4);
+                d.lengthFrames = (Frame)(SR / 8);
+                d.sourceOffset = 0;
+                d.stretchRatio = otherRatio;
+                t.clips.push_back(d);
+            }
+            pr.AddTrack(t);
+            std::remove(outp.c_str());
+            ExportOptions o;
+            o.format.bitDepth = 32;
+            o.format.dither   = false;
+            if (!ExportWav(pr, outp, SR, o)) return false;
+            WavSource s;
+            if (!s.Open(outp)) return false;
+            gotFrames.clear();
+            const float* chunk = nullptr;
+            size_t n = 0;
+            while (s.ReadChunk(&chunk, &n))
+                for (size_t i = 0; i < n * 2; i++) gotFrames.push_back(chunk[i]);
+            std::remove(outp.c_str());
+            return true;
+        };
+
+        std::vector<float> plain, sibling;
+        CHECK(bounceClip(1.0, 0.0, plain));
+        CHECK(bounceClip(1.0, 1.5, sibling));
+
+        // The reference: WavSource -> Resampler -> place (what the exporter's
+        // clip path is, for an unstretched clip), for the clip's own window.
+        std::vector<float> want;
+        {
+            WavSource s; CHECK(s.Open(src));
+            Resampler rs(s.FrameRate(), SR);
+            const float* chunk = nullptr; size_t n = 0;
+            while (s.ReadChunk(&chunk, &n)) rs.Process(chunk, n, want);
+        }
+        const size_t clipFrames = (size_t)(SR / 4);
+        CHECK(plain.size() >= clipFrames * 2);
+        int diff = 0;
+        for (size_t i = 0; i < clipFrames && i * 2 + 1 < want.size(); i++)
+            if (plain[i * 2] != want[i * 2]) diff++;
+        CHECK(diff == 0);
+        // ...and a stretched sibling later in the project changes nothing about
+        // this clip (the file is longer because the sibling extends the
+        // timeline; the clip's own window is untouched, bit for bit).
+        CHECK(sibling.size() > plain.size());
+        bool same = sibling.size() > plain.size();
+        for (size_t i = 0; same && i < clipFrames * 2; i++)
+            if (plain[i] != sibling[i]) same = false;
+        CHECK(same);
+        std::remove(src.c_str());
     }
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);

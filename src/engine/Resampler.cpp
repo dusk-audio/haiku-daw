@@ -24,6 +24,28 @@ void Resampler::Process(const float* in, size_t inFrames,
 
     const int ch = fChannels;   // 1 or 2; index each frame as in[i*ch + c]
 
+    // Equal rates: pass the chunk through, as this class' contract says
+    // ("a ratio of 1 passes samples through unchanged").
+    //
+    // The interpolation loop below cannot express that: it seeds its left edge
+    // with in[0] and then emits at fPos 0, so the first frame is emitted twice
+    // and the chunk's LAST frame never is -- a 1:1 decode came out one frame
+    // late and one frame short, at the right total length. Only a varying
+    // signal shows it (a constant one reads the same either way, which is why
+    // tests/resampler_tests' constant-frame case passed over it). Found
+    // independently by the M7.2 and M4.5 branches; every clip at the project's
+    // own rate took this path.
+    //
+    // fStep is fixed at construction, so an equal-rate instance stays
+    // equal-rate: there is no later chunk to hand the carried edge to.
+    if (fStep == 1.0) {
+        out.insert(out.end(), in, in + inFrames * (size_t)ch);
+        for (int c = 0; c < ch; c++) fPrev[c] = in[(inFrames - 1) * (size_t)ch + c];
+        fHavePrev = true;
+        fPos = 0.0;
+        return;
+    }
+
     // Seed the interpolation edge on the very first frame ever seen.
     if (!fHavePrev) {
         for (int c = 0; c < ch; c++) fPrev[c] = in[c];

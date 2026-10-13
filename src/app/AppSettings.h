@@ -39,6 +39,11 @@ struct AppSettings {
     std::string lastDir;                 // last Open/Save/Import directory
     float winL = 80, winT = 80, winR = 1280, winB = 820;   // window frame
 
+    // Take sample format for recording (M5): 0 = 16-bit PCM, 1 = 24-bit PCM
+    // (default), 2 = 32-bit float. The Preferences window belongs to another
+    // package -- this is the key it sets; the recorder reads it.
+    int   takeFormat = 1;
+
     // The last few projects saved or opened, most recent first (the File
     // menu's Open Recent). At most kMaxRecent; plain paths, one `recent` line
     // each so a path with spaces survives.

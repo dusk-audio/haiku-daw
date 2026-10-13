@@ -102,11 +102,10 @@ enum class Lv2Topology { Unsupported, Stereo, MonoDual };
 
 // Classify from the count of REQUIRED audio ports — ports the plugin marked
 // lv2:connectionOptional do not count, because the spec lets a host leave them
-// connected to NULL. That is what makes a stereo compressor with an optional
-// stereo sidechain (Multi-Comp: 4 audio in, 2 out) hostable as a plain stereo
-// insert today — its sidechain pair is optional, so it classifies as Stereo and
-// those two ports get NULL. Feeding them a real signal is the sidechain
-// package's job; this rule is what leaves the door open for it.
+// unconnected. That is what makes a stereo compressor with an optional stereo
+// sidechain (Multi-Comp: 4 audio in, 2 out) hostable as a plain stereo insert.
+// Its sidechain pair lands in `sidechainPorts` (an optional audio input is one
+// by declaration), and the host feeds it the insert's resolved key signal.
 inline Lv2Topology ClassifyLv2Topology(int requiredIn, int requiredOut) {
     if (requiredIn == 2 && requiredOut == 2) return Lv2Topology::Stereo;
     if (requiredIn == 1 && requiredOut == 1) return Lv2Topology::MonoDual;
@@ -137,8 +136,20 @@ struct Lv2PortLayout {
 
     // Optional audio ports we are not routing: fed a silent buffer / given a
     // scratch buffer to write into, rather than left at NULL. See below.
+    //
+    // `silencePorts` holds optional audio INPUTS that are not the key pair —
+    // an optional output is never a key, so every one of those is in
+    // `discardPorts`.
     std::vector<uint32_t> silencePorts;
     std::vector<uint32_t> discardPorts;
+
+    // The plugin's external KEY inputs: the first two optional audio inputs, in
+    // port order (one is a mono key). LV2 has no sidechain designation, so the
+    // declaration "I can run without this input" IS the sidechain declaration,
+    // and the host feeds these the key signal the engine/Exporter resolved —
+    // silence when nothing is routed, which is what they used to be connected
+    // to permanently.
+    std::vector<uint32_t> sidechainPorts;
 
     std::vector<uint32_t> nullPorts;  // optional ports of an unknown class
 
@@ -171,12 +182,23 @@ inline Lv2PortLayout BuildLv2PortLayout(const std::vector<Lv2PortSpec>& ports) {
             // world, and the compressor this was found on) memmove every audio
             // port they declare into their internal layout without checking for
             // NULL, and segfault on the first run(). Connecting an unrouted
-            // input to silence and an unrouted output to scratch is equally
+            // input to a buffer and an unrouted output to scratch is equally
             // spec-legal, costs two buffers, and is what "nothing is plugged
-            // into the sidechain" should mean anyway — which is exactly what
-            // the sidechain package will later replace with a real signal.
+            // into the sidechain" should mean anyway.
+            //
+            // For an INPUT that buffer is the key: the first two optional audio
+            // inputs are the stereo sidechain pair, fed whatever the hosts
+            // resolved for this insert (silence when nothing is routed). Any
+            // further optional input is not part of the pair and keeps the
+            // plain silence buffer.
             case Lv2PortRole::AudioIn:
-                (p.optional ? L.silencePorts : L.audioIn).push_back(p.index);
+                if (!p.optional) {
+                    L.audioIn.push_back(p.index);
+                } else if (L.sidechainPorts.size() < 2) {
+                    L.sidechainPorts.push_back(p.index);
+                } else {
+                    L.silencePorts.push_back(p.index);
+                }
                 break;
             case Lv2PortRole::AudioOut:
                 (p.optional ? L.discardPorts : L.audioOut).push_back(p.index);

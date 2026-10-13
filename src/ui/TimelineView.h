@@ -337,9 +337,11 @@ public:
     void SetLiveMidiNotes(std::map<TrackId, std::vector<MidiNote>> perTrack) {
         fLiveNotes = std::move(perTrack);
     }
-    void SetLiveAudio(const Recorder* rec, double projectRate) {
+    void SetLiveAudio(const Recorder* rec, double projectRate,
+                      std::map<TrackId, int> takeFor) {
         fLiveRec      = rec;
         fLiveProjRate = projectRate;
+        fLiveTake     = std::move(takeFor);
     }
 
 private:
@@ -352,7 +354,7 @@ private:
     void DrawTrackHeaderCompact(const Track& t, BRect lane);  // collapsed lane
     void DrawNameField(const Track& t, BRect lane);   // the in-place rename box
     void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
-    void DrawLiveAudio(BRect region);  // in-progress waveform while recording
+    void DrawLiveAudio(BRect region, TrackId track);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
     // `ef` holds the EFFECTIVE fades (the clip's own combined with any
     // auto-crossfade from overlapping a neighbour) AND the shape each one
@@ -472,7 +474,8 @@ private:
     enum class Drag { None, Gain, Pan, Clip, ClipResize, ClipResizeLeft,
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
-                      RulerPunch, Pencil, Slip, RangeSelect, LaneResize };
+                      RulerPunch, Pencil, Slip, RangeSelect, LaneResize,
+                      ClipStretch };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -490,6 +493,11 @@ private:
     // instead of being trimmed.
     Frame   fDragClipSrcOrig = 0;
     Frame   fDragClipOrigLen = 0;      // clip lengthFrames at drag start
+    // Stretch drag (Cmd/Alt on the right edge, M7.2): the ratio at drag start.
+    // The dragged ratio is derived from the PRE-drag length + ratio (the span
+    // the clip references today), never from the values the preview has already
+    // written into the model — a drag that read its own preview would compound.
+    double  fDragRatioOrig   = 1.0;
     Frame   fDragGrabOffset  = 0;      // grabbed-frame - clip.startFrame
     Frame   fDragFadeInOrig  = 0;      // clip fades at drag start (for undo)
     Frame   fDragFadeOutOrig = 0;
@@ -622,6 +630,10 @@ private:
     std::map<TrackId, std::vector<MidiNote>> fLiveNotes;
     const Recorder*       fLiveRec = nullptr; // non-owning; valid during capture
     double                fLiveProjRate = 48000.0;
+    // Which TAKE of the capture each armed audio track is being recorded into
+    // (M5): one capture writes one file per track, so the waveform drawn on a
+    // lane has to be that track's take, not the capture's first one.
+    std::map<TrackId, int> fLiveTake;
 };
 
 } // namespace daw

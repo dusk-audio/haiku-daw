@@ -40,17 +40,19 @@ namespace {
 // number.
 constexpr int kLatentFrames = 64;
 
-// After its first run(), the latent plugin starts REPORTING this instead, while
-// still delaying by kLatentFrames. It is lying on purpose.
+// How much of a latency MOVE the `latency-step` plugin makes, from its second
+// run onward: it starts at zero latency (and reports zero) so that a host
+// latching at activation is demonstrably wrong, then reports AND applies this.
 //
 // Real plugins do exactly this: 4K EQ 2 was measured reporting 0 at activate,
-// 27 after one run, then 0 again once it decided its EQ was flat. IEffect
-// requires LatencySamples() to be constant for a whole Prepare/Process lifetime,
-// because PDC and RunInsertSlot's per-insert dry-delay line are both sized from
-// it once. Without a plugin that MOVES the value, "the host latches it and never
-// re-reads" is untestable — every assertion passes trivially against a plugin
-// that always reports the same number. This is what gives that rule teeth.
-constexpr int kLatentLieFrames = 999;
+// 27 after one run, then 0 again once it decided its EQ was flat. Since M4.6
+// the host OBSERVES such a move off the RT thread and re-solves the delay
+// lines at the next graph build, so the fixture is honest — it reports what it
+// applies, in both states — and the tests assert the host notices and adopts
+// it. (stereo-latent used to report 999 while delaying 64, which was the right
+// fixture for "latch once and never re-read"; under the new policy that plugin
+// is simply lying, and believing the port is the policy.)
+constexpr int kStepFrames = 128;
 
 // ---------------------------------------------------------------------------
 // urn:haiku-daw:test:mono-gain — 1 in, 1 out. Hosted as TWO instances, one per
@@ -95,9 +97,8 @@ void MonoGainCleanup(LV2_Handle handle) { delete static_cast<MonoGain*>(handle);
 // kLatentFrames and reports exactly that through an output control port carrying
 // `lv2:designation lv2:latency`.
 //
-// It also writes the latency port on every run(), not just at activate, so it
-// exercises the host's "latch it once and never let it move" rule against a
-// plugin that keeps re-publishing the value.
+// It also writes the latency port on every run(), not just at activate, so a
+// host that re-read it mid-run would see the value it has always been given.
 // ---------------------------------------------------------------------------
 struct StereoLatent {
     const float* in[2]   = {nullptr, nullptr};
@@ -107,7 +108,6 @@ struct StereoLatent {
     float*       latency = nullptr;
     std::vector<float> ring[2];
     size_t             pos = 0;
-    bool               hasRun = false;
 };
 
 LV2_Handle StereoLatentInstantiate(const LV2_Descriptor*, double,
@@ -136,23 +136,18 @@ void StereoLatentActivate(LV2_Handle handle) {
     for (int c = 0; c < 2; c++)
         std::memset(self->ring[c].data(), 0, self->ring[c].size() * sizeof(float));
     self->pos = 0;
-    self->hasRun = false;
-    // Published at activate, which is where the host latches it. Note that
-    // deactivate/activate (the host's Reset) puts the truthful value back, so a
-    // host that re-latched on Reset would silently look correct again -- the
-    // test therefore checks latency AFTER a Process, not only after Reset.
+    // Published at activate, which is where a host latches it; re-published on
+    // every run below. Reset() (host-side deactivate/activate) therefore puts
+    // the truthful value back, which is what keeps a committed latency valid
+    // across a seek.
     if (self->latency) *self->latency = (float)kLatentFrames;
 }
 
 void StereoLatentRun(LV2_Handle handle, uint32_t frames) {
     StereoLatent* self = static_cast<StereoLatent*>(handle);
-    // From the second run onward, report a value that is flatly wrong while the
-    // actual delay stays kLatentFrames. Any host that re-reads this port after
-    // Prepare will pick up the lie and be caught.
-    if (self->latency)
-        *self->latency = self->hasRun ? (float)kLatentLieFrames
-                                      : (float)kLatentFrames;
-    self->hasRun = true;
+    // Re-published every run: this is what the RT thread observes (M4.6), and
+    // it never moves.
+    if (self->latency) *self->latency = (float)kLatentFrames;
     if (!self->in[0] || !self->in[1] || !self->out[0] || !self->out[1]) return;
 
     const float g = self->gain ? *self->gain : 1.0f;
@@ -168,6 +163,141 @@ void StereoLatentRun(LV2_Handle handle, uint32_t frames) {
 }
 
 void StereoLatentCleanup(LV2_Handle h) { delete static_cast<StereoLatent*>(h); }
+
+// ---------------------------------------------------------------------------
+// urn:haiku-daw:test:latency-step — a plugin whose latency MOVES (M4.6).
+//
+// Its first run reports and applies 0 frames; from its second run on it
+// reports and applies kStepFrames. Both halves matter: a host that reads the
+// port straight after activation (or worse, keeps what it read there) sizes
+// every delay line from a value the plugin is not using, while a host that
+// observes the move and re-latches before the next build is exactly right.
+//
+// Honest in both states: the reported number is the delay actually applied.
+// The transition itself is deliberately sharp — run 1 passes its input
+// through while filling the ring, run 2 emits the ring, so 128 frames of the
+// pre-transition input appear twice. Nothing in a steady-state test can see
+// that, and it is what a plugin deciding "now I need 128 frames of lookahead"
+// between two blocks really looks like.
+// ---------------------------------------------------------------------------
+struct LatencyStep {
+    const float* in[2]   = {nullptr, nullptr};
+    float*       out[2]  = {nullptr, nullptr};
+    const float* gain    = nullptr;
+    float*       latency = nullptr;
+    std::vector<float> ring[2];
+    size_t             pos     = 0;
+    bool               engaged = false;   // has the step happened yet?
+};
+
+LV2_Handle LatencyStepInstantiate(const LV2_Descriptor*, double,
+                                  const char*, const LV2_Feature* const*) {
+    LatencyStep* self = new LatencyStep();
+    for (int c = 0; c < 2; c++) self->ring[c].assign((size_t)kStepFrames, 0.0f);
+    return self;
+}
+
+void LatencyStepConnect(LV2_Handle handle, uint32_t port, void* data) {
+    LatencyStep* self = static_cast<LatencyStep*>(handle);
+    switch (port) {
+        case 0: self->in[0]   = static_cast<const float*>(data); break;
+        case 1: self->in[1]   = static_cast<const float*>(data); break;
+        case 2: self->out[0]  = static_cast<float*>(data);       break;
+        case 3: self->out[1]  = static_cast<float*>(data);       break;
+        case 4: self->gain    = static_cast<const float*>(data); break;
+        case 5: self->latency = static_cast<float*>(data);       break;
+        default: break;
+    }
+}
+
+void LatencyStepActivate(LV2_Handle handle) {
+    LatencyStep* self = static_cast<LatencyStep*>(handle);
+    for (int c = 0; c < 2; c++)
+        std::memset(self->ring[c].data(), 0, self->ring[c].size() * sizeof(float));
+    self->pos     = 0;
+    self->engaged = false;
+    if (self->latency) *self->latency = 0.0f;
+}
+
+void LatencyStepRun(LV2_Handle handle, uint32_t frames) {
+    LatencyStep* self = static_cast<LatencyStep*>(handle);
+    if (self->latency)
+        *self->latency = self->engaged ? (float)kStepFrames : 0.0f;
+    if (!self->in[0] || !self->in[1] || !self->out[0] || !self->out[1]) return;
+
+    const float g = self->gain ? *self->gain : 1.0f;
+    for (uint32_t i = 0; i < frames; i++) {
+        const size_t p = self->pos;
+        for (int c = 0; c < 2; c++) {
+            const float held = self->ring[c][p];
+            self->ring[c][p] = self->in[c][i];
+            // Run 1 is a passthrough that fills the ring; from run 2 the ring
+            // IS the signal, kStepFrames late — which is what the port now
+            // says.
+            self->out[c][i] = (self->engaged ? held : self->in[c][i]) * g;
+        }
+        self->pos = (p + 1) % (size_t)kStepFrames;
+    }
+    self->engaged = true;   // from the NEXT run on, and it says so
+}
+
+void LatencyStepCleanup(LV2_Handle h) { delete static_cast<LatencyStep*>(h); }
+
+// ---------------------------------------------------------------------------
+// urn:haiku-daw:test:sidechain-gain — out = in * key: a keyed VCA.
+//
+// 2 required in / 2 required out plus a TWO-PORT OPTIONAL key pair, which is
+// how LV2 spells "sidechain": the host may leave a connectionOptional input
+// unconnected, so it is exactly the port a host may or may not feed a key.
+// The DSP is one multiply, so a test can assert the key really arrived, on the
+// right channel and at the right time — and with no key routed the key buffers
+// are silence, which makes the output silence (the fail-soft this fixture
+// demonstrates).
+//
+// A NULL key port would be the old host behaviour (optional ports were left
+// unconnected before package 05's place for a signal existed). The guard below
+// keeps that a clean silence rather than a crash, so the test reports a wrong
+// value instead of taking the suite down.
+// ---------------------------------------------------------------------------
+struct SidechainGain {
+    const float* in[2]  = {nullptr, nullptr};
+    float*       out[2] = {nullptr, nullptr};
+    const float* key[2] = {nullptr, nullptr};
+    const float* gain   = nullptr;
+};
+
+LV2_Handle SidechainGainInstantiate(const LV2_Descriptor*, double,
+                                    const char*, const LV2_Feature* const*) {
+    return new SidechainGain();
+}
+
+void SidechainGainConnect(LV2_Handle handle, uint32_t port, void* data) {
+    SidechainGain* self = static_cast<SidechainGain*>(handle);
+    switch (port) {
+        case 0: self->in[0]  = static_cast<const float*>(data); break;
+        case 1: self->in[1]  = static_cast<const float*>(data); break;
+        case 2: self->out[0] = static_cast<float*>(data);       break;
+        case 3: self->out[1] = static_cast<float*>(data);       break;
+        case 4: self->key[0] = static_cast<const float*>(data); break;
+        case 5: self->key[1] = static_cast<const float*>(data); break;
+        case 6: self->gain   = static_cast<const float*>(data); break;
+        default: break;
+    }
+}
+
+void SidechainGainRun(LV2_Handle handle, uint32_t frames) {
+    SidechainGain* self = static_cast<SidechainGain*>(handle);
+    if (!self->in[0] || !self->in[1] || !self->out[0] || !self->out[1]) return;
+    const float g = self->gain ? *self->gain : 1.0f;
+    for (uint32_t i = 0; i < frames; i++) {
+        for (int c = 0; c < 2; c++) {
+            const float k = self->key[c] ? self->key[c][i] : 0.0f;
+            self->out[c][i] = self->in[c][i] * k * g;
+        }
+    }
+}
+
+void SidechainGainCleanup(LV2_Handle h) { delete static_cast<SidechainGain*>(h); }
 
 // ---------------------------------------------------------------------------
 // Two plugins that MUST be refused, so the rejection paths are tested without
@@ -330,6 +460,12 @@ const LV2_Descriptor kDescriptors[] = {
     { "urn:haiku-daw:test:stereo-latent",
       StereoLatentInstantiate, StereoLatentConnect, StereoLatentActivate,
       StereoLatentRun, nullptr, StereoLatentCleanup, nullptr },
+    { "urn:haiku-daw:test:latency-step",
+      LatencyStepInstantiate, LatencyStepConnect, LatencyStepActivate,
+      LatencyStepRun, nullptr, LatencyStepCleanup, nullptr },
+    { "urn:haiku-daw:test:sidechain-gain",
+      SidechainGainInstantiate, SidechainGainConnect, nullptr,
+      SidechainGainRun, nullptr, SidechainGainCleanup, nullptr },
     { "urn:haiku-daw:test:bad-topology",
       InertInstantiate, InertConnect, nullptr,
       InertRun, nullptr, InertCleanup, nullptr },

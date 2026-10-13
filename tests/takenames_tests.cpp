@@ -99,6 +99,29 @@ int main() {
     // Renders scan the same way, under their own prefix.
     CHECK(NextFreeWavPath(kDir, "frozen") == InDir("frozen-1.wav"));
 
+    // A whole capture's names in one pass (M5: one take per armed track). They
+    // have to be distinct even though NONE of them exists yet -- a second
+    // NextFreeWavPath call would hand out the first name again, and the two
+    // takes would race for one file.
+    {
+        const std::vector<std::string> four = NextFreeWavPaths(kDir, "take", 4);
+        CHECK(four.size() == 4);
+        // 1, 2 and the session file 3 exist, and 7 does too: the batch starts
+        // at the first gap and STEPS OVER the taken 7 rather than promising it.
+        CHECK(four[0] == InDir("take-4.wav"));
+        CHECK(four[1] == InDir("take-5.wav"));
+        CHECK(four[2] == InDir("take-6.wav"));
+        CHECK(four[3] == InDir("take-8.wav"));
+        CHECK(four[0] != four[1] && four[1] != four[2] && four[2] != four[3]);
+        CHECK(!Exists(four[0]) && !Exists(four[1]) && !Exists(four[2])
+              && !Exists(four[3]));
+        // Asking for none is not an error, and asking again before any of them
+        // exists still yields the same names.
+        CHECK(NextFreeWavPaths(kDir, "take", 0).empty());
+        const std::vector<std::string> again = NextFreeWavPaths(kDir, "take", 4);
+        CHECK(again == four);
+    }
+
     // WavWriter's backstop: an exclusive open on an existing file fails AND
     // leaves the file byte-for-byte intact.
     const std::string guard = InDir("guard.wav");

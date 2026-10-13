@@ -50,6 +50,12 @@ struct Lv2PluginInfo {
     // Needed by presets: a state document addresses control ports by SYMBOL.
     std::vector<std::string> paramSymbols;
     bool monoDual = false;               // hosted as 2 instances, one per channel
+    // The plugin's audio topology has optional inputs, i.e. a sidechain the
+    // hosts can feed a key (EffectFactory's Lv2SidechainProbeFn answers from
+    // this). A plugin without one is never handed a key: routing an insert a
+    // key moves graph edges and PDC, and doing that for a plugin that ignores
+    // the signal would misalign the mix for nothing.
+    bool sidechain = false;
 };
 
 // One preset offered for a plugin: the label to show, the state document to

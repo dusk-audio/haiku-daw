@@ -17,6 +17,7 @@
 #include <lv2/urid/urid.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>   // setenv, for the Haiku bundle search path
 #include <cstring>
 #include <mutex>
@@ -167,6 +168,13 @@ public:
             fSilence.resize(kMaxLv2BlockFrames, 0.0f);
         if (!fLayout.discardPorts.empty())
             fDiscard.resize(kMaxLv2BlockFrames, 0.0f);
+        // The plugin's sidechain pair, when it has one (M7.1 tail). Allocated
+        // once here and CONNECTED once in ConnectPorts: only the CONTENTS
+        // change block by block, so nothing ever calls connect_port from the
+        // audio thread.
+        if (!fLayout.sidechainPorts.empty())
+            for (int ch = 0; ch < 2; ch++)
+                fKey[ch].resize(kMaxLv2BlockFrames, 0.0f);
 
         Instantiate(sampleRate);
         // The insert's stored state, restored into the instance the caller is
@@ -212,6 +220,24 @@ public:
             if (!fSilence.empty())
                 std::memset(fSilence.data(), 0, (size_t)n * sizeof(float));
 
+            // This chunk of the external key, deinterleaved into the buffers
+            // the sidechain ports are connected to (M7.1 tail). No key routed
+            // -- or an insert whose host never calls SetSidechain -- leaves
+            // them zeroed: "nothing is plugged into the sidechain" is silence,
+            // never the previous block's key.
+            if (!fKey[0].empty()) {
+                if (fSidechain) {
+                    const float* key = fSidechain + (size_t)done * 2;
+                    for (int i = 0; i < n; i++) {
+                        fKey[0][(size_t)i] = key[(size_t)i * 2 + 0];
+                        fKey[1][(size_t)i] = key[(size_t)i * 2 + 1];
+                    }
+                } else {
+                    std::memset(fKey[0].data(), 0, (size_t)n * sizeof(float));
+                    std::memset(fKey[1].data(), 0, (size_t)n * sizeof(float));
+                }
+            }
+
             for (Inst& inst : fInstances) {
                 for (std::vector<uint64_t>& b : inst.atomIn)
                     ResetAtomSequence(b.data(), fSequenceType, false);
@@ -219,6 +245,15 @@ public:
                     ResetAtomSequence(b.data(), fSequenceType, true);
                 lilv_instance_run(inst.handle, (uint32_t)n);
             }
+
+            // Publish what the plugin now says its latency is (M4.6). A float
+            // load out of host memory the plugin writes, a guard, and an atomic
+            // store: no lock, no allocation, no call into the plugin, so this
+            // is legal on the audio thread. LatencySamples() itself is NOT
+            // changed here -- the delay lines sized from it belong to the
+            // running graph -- the off-RT poll reads THIS and asks for a
+            // rebuild when it differs from what the graph was built with.
+            fLatencyLive.store(ReadLatencyPort(), std::memory_order_relaxed);
 
             for (int i = 0; i < n; i++) {
                 block[(size_t)i * 2]     = fOut[0][(size_t)i];
@@ -231,9 +266,10 @@ public:
     // Deactivate/activate is LV2's documented way to return a plugin to its
     // initial state. It must NOT re-read the latency port: the engine calls
     // Reset() mid-playback on a seek, and IEffect requires LatencySamples() to
-    // stay constant for the whole Prepare()/Process() lifetime — every delay
+    // stay constant for as long as the graph built from it lives — every delay
     // line sized from it (PDC, and RunInsertSlot's per-insert dry delay) has
-    // already been built.
+    // already been built. A plugin whose latency has moved is picked up by the
+    // poll and a rebuild instead (ObservedLatencySamples/RelatchLatency).
     void Reset() override {
         for (Inst& inst : fInstances) {
             lilv_instance_deactivate(inst.handle);
@@ -267,8 +303,34 @@ public:
         return n;
     }
 
+    // The block's external key (IEffect's contract: valid only until the next
+    // Process returns; null means "no key this block"). Stored as a pointer and
+    // deinterleaved inside Process -- RT-safe, and no port is reconnected.
+    void SetSidechain(const float* stereo, int frames) override {
+        if (fKey[0].empty()) return;      // this plugin has no sidechain ports
+        fSidechain = (stereo && frames > 0) ? stereo : nullptr;
+    }
+
     int LatencySamples() const override { return fLatency; }
     const char* Name() const override { return fName.c_str(); }
+
+    // What the plugin reports RIGHT NOW, as published by the RT thread above.
+    // Read by the engine's off-RT latency poll; never touches the plugin.
+    int ObservedLatencySamples() const override {
+        return fLatencyLive.load(std::memory_order_relaxed);
+    }
+
+    // Adopt the value the plugin is reporting now (M4.6) as this Prepare
+    // lifetime's committed one. Called off the RT thread on an instance the
+    // caller owns exclusively -- the engine's build and the exporter both do
+    // it right after a pre-roll (dsp/LatencyProbe.h), when nothing else can be
+    // running the plugin. Reading the port here directly is therefore safe,
+    // and it is the freshest reading available.
+    int RelatchLatency() override {
+        fLatency = ReadLatencyPort();
+        fLatencyLive.store(fLatency, std::memory_order_relaxed);
+        return fLatency;
+    }
 
     // The plugin's own state, through its state:interface, as a lilv document.
     //
@@ -442,11 +504,25 @@ private:
             lilv_instance_connect_port(h, fLayout.audioIn[1],  fIn[1].data());
             lilv_instance_connect_port(h, fLayout.audioOut[0], fOut[0].data());
             lilv_instance_connect_port(h, fLayout.audioOut[1], fOut[1].data());
+            // The key pair: one port per channel, connected to the buffers
+            // Process fills (with the resolved key, or silence).
+            for (size_t i = 0; i < fLayout.sidechainPorts.size() && i < 2; i++)
+                lilv_instance_connect_port(h, fLayout.sidechainPorts[i],
+                                           fKey[i].data());
         } else {
             // MonoDual: instance k IS channel k, so it reads and writes only
-            // that channel's scratch.
+            // that channel's scratch — and its optional input, if it has one,
+            // is that channel's key. A second optional input (there is no
+            // stereo pair on a mono instance) is not part of a key and keeps
+            // the silence buffer.
             lilv_instance_connect_port(h, fLayout.audioIn[0],  fIn[k].data());
             lilv_instance_connect_port(h, fLayout.audioOut[0], fOut[k].data());
+            if (!fLayout.sidechainPorts.empty())
+                lilv_instance_connect_port(h, fLayout.sidechainPorts[0],
+                                           fKey[k].data());
+            for (size_t i = 1; i < fLayout.sidechainPorts.size(); i++)
+                lilv_instance_connect_port(h, fLayout.sidechainPorts[i],
+                                           fSilence.data());
         }
 
         for (size_t i = 0; i < fLayout.atomIn.size(); i++)
@@ -468,21 +544,29 @@ private:
             lilv_instance_connect_port(h, idx, nullptr);
     }
 
-    // Read the latency port ONCE, after activate, and keep that number for the
-    // rest of this Prepare lifetime. A plugin that moves its latency port at
-    // runtime is thereby ignored on purpose: the value has already been baked
-    // into the PDC solve and into RunInsertSlot's dry-delay line, and letting it
-    // drift would misalign soft bypass and the wet/dry blend with no way for
-    // either to notice.
-    void LatchLatency() {
-        fLatency = 0;
-        if (fLayout.latencyOut < 0) return;
-        if ((size_t)fLayout.latencyOut >= fControlOut.size()) return;
+    // The latency the plugin is reporting at this instant, validated: 0 when
+    // there is no port, or the value is NaN or non-positive; clamped to
+    // kMaxLatencyFrames. Plain arithmetic over a host-side float the plugin
+    // writes -- never a call into the plugin, so it is safe from the audio
+    // thread (Process publishes it) and from an off-RT relatch alike.
+    int ReadLatencyPort() const {
+        if (fLayout.latencyOut < 0) return 0;
+        if ((size_t)fLayout.latencyOut >= fControlOut.size()) return 0;
 
         const float v = fControlOut[(size_t)fLayout.latencyOut];
-        if (!(v == v) || v <= 0.0f) return;                  // NaN or none
-        if (v > (float)kMaxLatencyFrames) { fLatency = kMaxLatencyFrames; return; }
-        fLatency = (int)(v + 0.5f);
+        if (!(v == v) || v <= 0.0f) return 0;                // NaN or none
+        if (v > (float)kMaxLatencyFrames) return kMaxLatencyFrames;
+        return (int)(v + 0.5f);
+    }
+
+    // Commit the port's value as this Prepare lifetime's latency: called at
+    // activate (where it is the plugin's own published value) and from
+    // RelatchLatency (after a pre-roll, where it is the value the plugin is
+    // actually working with). The two must agree, so both go through the same
+    // reader and both keep fLatencyLive in step.
+    void LatchLatency() {
+        fLatency = ReadLatencyPort();
+        fLatencyLive.store(fLatency, std::memory_order_relaxed);
     }
 
     // A sane ceiling on a self-reported number that sizes host-side delay lines.
@@ -508,9 +592,18 @@ private:
     std::vector<float> fControlIn, fControlOut;
     std::vector<float> fIn[2], fOut[2];
     std::vector<float> fSilence, fDiscard;   // unrouted optional audio ports
+    // The external sidechain key, deinterleaved for this block (empty when the
+    // plugin declares no optional inputs) and the pointer SetSidechain stored
+    // for the call that follows.
+    std::vector<float> fKey[2];
+    const float*       fSidechain = nullptr;
 
     double fRate      = 0.0;
     int    fLatency   = 0;
+    // What Process last saw on the latency port. The committed fLatency above
+    // is what every delay line was built from; this is only ever a REQUEST for
+    // the next graph (M4.6), published by the RT thread and read by the poll.
+    std::atomic<int> fLatencyLive{0};
     bool   fActivated = false;   // guards deactivate(); see Teardown
 
     LV2_URID fSequenceType = 0;
@@ -583,6 +676,15 @@ namespace {
 // caller on return — MakeEffect wraps the raw pointer immediately.
 IEffect* Lv2Trampoline(const EffectDesc& desc, double sampleRate) {
     return Lv2Host::Instance().Create(desc.pluginName, sampleRate).release();
+}
+
+// The same shape for the sidechain probe: does this URI's plugin have optional
+// audio inputs the hosts can feed a key? A URI we do not know (an uninstalled
+// plugin, a project from another machine) answers no, which leaves the insert
+// with no key and no extra PDC — the fail-soft direction.
+bool Lv2SidechainTrampoline(const std::string& uri) {
+    const Lv2PluginInfo* info = Lv2Host::Instance().Find(uri);
+    return info != nullptr && info->sidechain;
 }
 
 // Read one node as a float, reporting whether it was there at all.
@@ -788,9 +890,10 @@ void Lv2Host::ScanAll() {
         }
 
         Lv2PluginInfo info;
-        info.name     = name;
-        info.uri      = uri;
-        info.monoDual = layout.topology == Lv2Topology::MonoDual;
+        info.name      = name;
+        info.uri       = uri;
+        info.monoDual  = layout.topology == Lv2Topology::MonoDual;
+        info.sidechain = !layout.sidechainPorts.empty();
         for (const Lv2PortSpec& s : specs)
             if (s.role == Lv2PortRole::ControlIn) {
                 info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger,
@@ -809,10 +912,14 @@ void Lv2Host::ScanAll() {
     lilv_node_free(nLatency);   lilv_node_free(nInteger);
     lilv_node_free(nToggled);   lilv_node_free(nEnum);
 
-    // Install the hook even when nothing was found, so an Lv2 descriptor always
-    // takes the same code path (and still degrades to a null effect) whether the
-    // machine has plugins or not.
+    // Install the hooks even when nothing was found, so an Lv2 descriptor
+    // always takes the same code path (and still degrades to a null effect)
+    // whether the machine has plugins or not. The sidechain probe is the
+    // second half of "who takes a key": the kit-free hosts and the editor ask
+    // EffectTakesSidechain(), and this is where the answer for an LV2 URI comes
+    // from.
     SetLv2Factory(&Lv2Trampoline);
+    SetLv2SidechainProbe(&Lv2SidechainTrampoline);
 }
 
 bool Lv2Host::UiRequiresInstanceAccess(const std::string& uri) {
