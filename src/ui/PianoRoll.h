@@ -309,7 +309,7 @@ private:
     Frame XToFrame(float x) const;
     float PitchToY(int pitch) const;
     int   YToPitch(float y) const;
-    Frame Snapped(Frame f) const;
+    Frame Snapped(Frame f) const;   // reads EventMods(): Shift = free placement
     int   NoteAt(BPoint where) const;   // -1 none
     float VelLaneTop() const;           // y where the bottom lane begins
     void  DrawKeyboard(float velTop);   // the piano column
@@ -342,6 +342,15 @@ private:
     // 3 MIDI, -1 none. One switch for the click, the hover highlight and the
     // tooltip, so they cannot disagree about where a button is.
     int   ToolbarButtonAt(BPoint where) const;
+
+    // The EVENT's own modifiers, not the live keyboard. The kit's global
+    // modifiers() asks the input server what is held RIGHT NOW, which is not
+    // what a gesture was made with -- and it is the one input a posted message
+    // cannot set, so a synthetic Alt/Shift gesture could never arm these
+    // handlers. Every other view in this app reads the event
+    // (UiMetrics.h: EventModifiers), which is also how the arrangement's own
+    // Alt gestures are driven and tested.
+    uint32 EventMods() const;
 
     // --- the pointer's own feedback (item H) -------------------------------
     // The roll had no BCursor at all: a 5 px resize zone nobody can see. Same
