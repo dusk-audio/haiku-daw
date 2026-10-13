@@ -79,15 +79,16 @@ pitch-bend and the mod wheel are audible, live and on playback.
 ## Editing
 
 - **Clips:** drag to move, drag an edge to trim, drag the top corners to set
-  fades. **Alt**-drag (or **Cmd**-drag) inside a clip *slips* it — the audio
-  moves under the clip's window and the clip stays put. **Cmd**-drag (or
-  **Alt**-drag) the right edge to *stretch* the clip — time-stretch, pitch
-  kept, with the ratio drawn on the clip. Double-click a clip to rename it in
-  place on its name strip (Enter commits, Esc cancels). Right-click for
-  Copy / Delete / Split here / Rename / Mute / Fade Shape / Normalize /
-  Reverse / Strip Silence / Clear Fades. Overlapping clips crossfade
-  automatically, and **Shift** bypasses the grid for free placement. In a
-  crossfade the click always takes the clip drawn on top.
+  fades. **Alt**-drag (or **Cmd**-drag) *through a clip's middle* slips it —
+  the audio moves under the clip's window and the clip stays put (the edges and
+  corners keep their own gestures). **Cmd**-drag (or **Alt**-drag) the right
+  edge to *stretch* the clip — time-stretch, pitch kept, with the ratio drawn
+  on the clip. Double-click a clip to rename it in place on its name strip
+  (Enter commits, Esc cancels). Right-click for Copy / Delete / Split here /
+  Rename / Mute / Fade Shape / Normalize / Reverse / Strip Silence / Clear
+  Fades. Overlapping clips crossfade automatically, and **Shift** bypasses the
+  grid for free placement. In a crossfade the click always takes the clip drawn
+  on top.
 - **Multi-select:** rubber-band or Cmd-click, then move/delete/duplicate as a
   group. Drag on empty lane area for a time range independent of the clips,
   then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence. A range and a clip
