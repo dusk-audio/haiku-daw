@@ -790,23 +790,39 @@ if(HAIKU)
     # the app in the MIME database -- the roster reads the attributes, not the
     # resources, so without it a build-tree `daw` is a launch-flagless stranger:
     # `open project.dawproj` would not find it (or would start a second one).
-    # rc/xres/mimeset ship with the system; a build without them is left alone
-    # rather than broken.
+    # All three ship with Haiku, so a build that cannot find one of them would
+    # produce a silently un-signed, un-versioned, un-typed binary -- a packaging
+    # bug, not a configuration choice. Fail the configure and name what is
+    # missing. (This whole block is inside if(HAIKU): a kit-free host build
+    # never builds the app target and is unaffected.)
     find_program(DAW_RC rc)
     find_program(DAW_XRES xres)
     find_program(DAW_MIMESET mimeset)
-    if(DAW_RC AND DAW_XRES AND DAW_MIMESET)
-        add_custom_command(TARGET daw POST_BUILD
-            COMMAND ${DAW_RC} -o ${CMAKE_BINARY_DIR}/generated/daw.rsrc
-                    ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef
-            COMMAND ${DAW_XRES} -o $<TARGET_FILE:daw>
-                    ${CMAKE_BINARY_DIR}/generated/daw.rsrc
-            COMMAND ${DAW_MIMESET} -A $<TARGET_FILE:daw>
-            COMMENT "Attaching the app resource (signature, version, types)")
-    else()
-        message(STATUS "rc/xres/mimeset not found - the binary gets no app "
-                       "resource and no MIME registration")
+    set(_daw_missing_tools "")
+    if(NOT DAW_RC)
+        list(APPEND _daw_missing_tools rc)
     endif()
+    if(NOT DAW_XRES)
+        list(APPEND _daw_missing_tools xres)
+    endif()
+    if(NOT DAW_MIMESET)
+        list(APPEND _daw_missing_tools mimeset)
+    endif()
+    if(_daw_missing_tools)
+        message(FATAL_ERROR
+            "Cannot attach the app resource: ${_daw_missing_tools} not found. "
+            "rc, xres and mimeset are part of Haiku (/boot/system/bin) and the "
+            "build needs all three -- without them the binary has no signature, "
+            "no version and no file types, and Tracker cannot hand it a "
+            ".dawproj. Install them, or fix PATH, and configure again.")
+    endif()
+    add_custom_command(TARGET daw POST_BUILD
+        COMMAND ${DAW_RC} -o ${CMAKE_BINARY_DIR}/generated/daw.rsrc
+                ${CMAKE_BINARY_DIR}/generated/haiku-daw.rdef
+        COMMAND ${DAW_XRES} -o $<TARGET_FILE:daw>
+                ${CMAKE_BINARY_DIR}/generated/daw.rsrc
+        COMMAND ${DAW_MIMESET} -A $<TARGET_FILE:daw>
+        COMMENT "Attaching the app resource (signature, version, types)")
 
     # Functional tests for the UI: a BApplication, the real windows, and
     # messages posted the way the widgets post them. Needs a reachable
