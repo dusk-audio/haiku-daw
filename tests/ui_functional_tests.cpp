@@ -4617,6 +4617,43 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     CHECK(rowY(90) > Themed(30.0f) && rowY(90) < laneTop);
     CHECK(rowY(89) > Themed(30.0f) && rowY(89) < laneTop);
 
+    // A key event for the window's FOCUS view. The token matters: a message
+    // posted with the window's own token is not a "focus message"
+    // (BWindow::_IsFocusMessage requires B_PREFERRED_TOKEN), so the menu's
+    // shortcut path never runs and the key lands in BWindow::MessageReceived,
+    // which does not handle keys -- the natural BMessenger(win) spelling sends
+    // a key nowhere at all. A null handler gives the preferred token, whose
+    // target the window keeps equal to the focus view.
+    auto postKey = [&](const char* bytes, uint32 mods) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", mods);
+        BMessenger((const BHandler*)nullptr, win).SendMessage(&key);
+    };
+
+    // A synthetic click, in VIEW coordinates. The message has to carry
+    // screen_where: BWindow::DispatchMessage converts a mouse message's SCREEN
+    // point into the view-local be:view_where that the kit's BView::
+    // MessageReceived actually reads, and a message carrying only "where" is
+    // not converted at all -- the view then sees (0, 0), the click lands in the
+    // toolbar's corner, and every interaction in this test silently does
+    // nothing. (The suite's older click helpers post screen_where for exactly
+    // this reason; this test was written without it and paid for it.)
+    auto click = [&](uint32 what, BPoint viewPt, uint32 mods, int32 buttons) {
+        BPoint screen(viewPt);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = roll->ConvertToScreen(viewPt);
+            win->Unlock();
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", buttons);
+        m.AddInt32("clicks", 1);
+        m.AddInt32("modifiers", mods);
+        m.AddPoint("where", viewPt);
+        m.AddPoint("screen_where", screen);
+        BMessenger(roll).SendMessage(&m);
+    };
+
     // Reading the ROLL's own state, and the model's, under the window lock.
     auto rollNotes = [&]() -> std::vector<MidiNote> {
         std::vector<MidiNote> out;
@@ -4665,21 +4702,9 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         win->Unlock();
         CHECK(aimOk(x, y));
         CHECK(aimOk(x2, y));
-        const uint32 down = B_MOUSE_DOWN, up = B_MOUSE_UP, mv = B_MOUSE_MOVED;
-        BMessage d(down);
-        d.AddInt32("buttons", 1);
-        d.AddInt32("clicks", 1);
-        d.AddPoint("where", BPoint(x, y));
-        BMessenger(roll).SendMessage(&d);
-        BMessage m(mv);
-        m.AddInt32("buttons", 1);
-        m.AddPoint("where", BPoint(x2, y));
-        BMessenger(roll).SendMessage(&m);
-        BMessage u(up);
-        u.AddInt32("buttons", 0);
-        u.AddInt32("clicks", 1);
-        u.AddPoint("where", BPoint(x2, y));
-        BMessenger(roll).SendMessage(&u);
+        click(B_MOUSE_DOWN,  BPoint(x, y),  0, 1);
+        click(B_MOUSE_MOVED, BPoint(x2, y), 0, 1);
+        click(B_MOUSE_UP,    BPoint(x2, y), 0, 0);
         snooze(150000);
     };
 
@@ -4725,24 +4750,24 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     // 16th, so triplet and swing parts could not be drawn at all.
     auto drawAt = [&](Frame f, int pitch) {
         float x = 0.0f;
+        bool focused = false;
         if (win->LockWithTimeout(1000000) == B_OK) {
             x = roll->XForFrameForTest(f);
-            roll->KeyDown("2", 1);   // the Pencil tool
+            focused = roll->IsFocus();
             win->Unlock();
         }
+        // The drags above clicked the roll, so it holds the focus -- and the
+        // Pencil tool is picked by posting the key to the WINDOW, the way a
+        // keyboard sends it. The roll's editor keys are outside the arrange's
+        // map, so this is also the check that the window hands them to the
+        // docked editor rather than letting the map take them.
+        CHECK(focused);
+        postKey("2", 0);
+        snooze(80000);
         const float y = rowY(pitch);
         CHECK(aimOk(x, y));
-        const uint32 down = B_MOUSE_DOWN, up = B_MOUSE_UP;
-        BMessage d(down);
-        d.AddInt32("buttons", 1);
-        d.AddInt32("clicks", 1);
-        d.AddPoint("where", BPoint(x, y));
-        BMessenger(roll).SendMessage(&d);
-        BMessage u(up);
-        u.AddInt32("buttons", 0);
-        u.AddInt32("clicks", 1);
-        u.AddPoint("where", BPoint(x, y));
-        BMessenger(roll).SendMessage(&u);
+        click(B_MOUSE_DOWN, BPoint(x, y), 0, 1);
+        click(B_MOUSE_UP,   BPoint(x, y), 0, 0);
         snooze(150000);
     };
     auto waitForNoteAt = [&](int pitch, Frame want) {
@@ -4841,20 +4866,9 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         CHECK(x0 >= Themed(58.0f) && x0 <= viewW);
         CHECK(x1 >= Themed(58.0f) && x1 <= viewW);
         CHECK(y0 > laneTop && y0 <= viewH);          // inside the lane
-        BMessage d(B_MOUSE_DOWN);
-        d.AddInt32("buttons", 1);
-        d.AddInt32("clicks", 1);
-        d.AddPoint("where", BPoint(x0, y0));
-        BMessenger(roll).SendMessage(&d);
-        BMessage mv(B_MOUSE_MOVED);
-        mv.AddInt32("buttons", 1);
-        mv.AddPoint("where", BPoint(x1, y1));
-        BMessenger(roll).SendMessage(&mv);
-        BMessage u(B_MOUSE_UP);
-        u.AddInt32("buttons", 0);
-        u.AddInt32("clicks", 1);
-        u.AddPoint("where", BPoint(x1, y1));
-        BMessenger(roll).SendMessage(&u);
+        click(B_MOUSE_DOWN,  BPoint(x0, y0), 0, 1);
+        click(B_MOUSE_MOVED, BPoint(x1, y1), 0, 1);
+        click(B_MOUSE_UP,    BPoint(x1, y1), 0, 0);
         snooze(150000);
 
         // Wait for the dragged point to be at a frame that is NEITHER of the
@@ -5037,14 +5051,10 @@ static void TestRollModelSync(MainWindow* win, Project& project,
             win->Unlock();
         }
         CHECK(copyEnabled);
-        // The key itself: posted to the window, exactly as the keyboard sends
-        // it (the focus is the docked roll -- the drags above clicked it).
-        {
-            BMessage key(B_KEY_DOWN);
-            key.AddString("bytes", "c");
-            key.AddInt32("modifiers", B_COMMAND_KEY);
-            win->PostMessage(&key);
-        }
+        // The key itself, through the focus view's token (see postKey): the
+        // menu bar's shortcut is what delivers it, which is why the item's
+        // enabled state above is the gate the user meets too.
+        postKey("c", B_COMMAND_KEY);
         bool haveClip = false;
         CHECK(WaitFor([&] {
             if (win->LockWithTimeout(1000000) != B_OK) return false;
@@ -5055,12 +5065,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         // Paste it: the model gains notes (the undo below is the proof the
         // commit went through the stack, not around it).
         const int notesBefore = (int)rollNotes().size();
-        {
-            BMessage key(B_KEY_DOWN);
-            key.AddString("bytes", "v");
-            key.AddInt32("modifiers", B_COMMAND_KEY);
-            win->PostMessage(&key);
-        }
+        postKey("v", B_COMMAND_KEY);
         CHECK(WaitFor([&] {
             MidiClip c;
             if (!modelClip(&c)) return false;
@@ -5081,12 +5086,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     // the pointer moves.
     {
         auto postMouse = [&](uint32 what, BPoint p, uint32 mods) {
-            BMessage m(what);
-            m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
-            m.AddInt32("clicks", 1);
-            m.AddInt32("modifiers", mods);
-            m.AddPoint("where", p);
-            BMessenger(roll).SendMessage(&m);
+            click(what, p, mods, what == B_MOUSE_UP ? 0 : 1);
         };
         // Aimed at note 0's own row and start, like every other click here.
         float nx = 0.0f, ny = 0.0f;
@@ -5161,17 +5161,9 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         const uint64_t before = win->AuditionNotesRendered();
         const float kx = Themed(20.0f);            // inside the keyboard column
         const float ky = rowY(96);                 // a row the pane can show
-        BMessage d(B_MOUSE_DOWN);
-        d.AddInt32("buttons", 1);
-        d.AddInt32("clicks", 1);
-        d.AddPoint("where", BPoint(kx, ky));
-        BMessenger(roll).SendMessage(&d);
+        click(B_MOUSE_DOWN, BPoint(kx, ky), 0, 1);
         snooze(120000);
-        BMessage u(B_MOUSE_UP);
-        u.AddInt32("buttons", 0);
-        u.AddInt32("clicks", 1);
-        u.AddPoint("where", BPoint(kx, ky));
-        BMessenger(roll).SendMessage(&u);
+        click(B_MOUSE_UP,   BPoint(kx, ky), 0, 0);
         CHECK(WaitFor([&] {
             return win->AuditionNotesRendered() > before;
         }));
