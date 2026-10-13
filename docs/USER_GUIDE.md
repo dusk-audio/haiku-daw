@@ -7,10 +7,21 @@ authoritative key list.
 ## The window
 
 One window: a transport bar across the top, a **track inspector** down the left,
-and the **timeline** filling the rest.
+and the **timeline** filling the rest — with a docked pane along the bottom
+(`J`) for the piano roll and the browsers.
 
-- **Transport** — Play/Stop, the time readout (bars:beats and mm:ss), the
-  master fader, the loudness/true-peak readout, and the master meter.
+- **Transport bar** — two rows. Row one: return-to-zero, rewind and
+  fast-forward (one bar each), Play, Stop, Record, Loop, Click (the metronome)
+  and Punch, then the zoom pair. Every button shows its own state, and the
+  whole row behaves exactly like the keys below the buttons' names. Then the
+  large **position display**: click it to cycle bars:beats → min:sec → samples
+  → timecode; double-click it to type a position (Enter seeks; anything it
+  cannot read is reported in the status line and nothing moves). Beside it:
+  tempo and meter, the master volume, the master meter and the loudness
+  readout. Row two is the **status line** — what just happened on the left
+  ("Playing", "Recording take-3.wav", an error) and the readouts on the right:
+  `DSP`, the peak time one audio callback took against the buffer's duration,
+  and `XR`, the underrun count since the engine started.
 - **Timeline** — one lane per track. The left gutter holds the track name,
   `M` mute, `S` solo, `R` record-arm, `I` input monitor, pan, the gain fader,
   and the track's meter. Right of it: the ruler, the clips and the playhead.
@@ -18,11 +29,19 @@ and the **timeline** filling the rest.
   automation selectors, pan, fader, record/monitor and mute/solo, in signal
   order.
 
-Menus: **File** (Open, Save, Import Audio/MIDI, Export WAV/Stems/MIDI),
-**Edit** (Undo, Redo, Paste), **Track** (New Audio Track, New MIDI Track, New
-Bus), **View** (Mixer, Metronome, Master Effects, Monitor Dim/Mono, Zoom to
-Fit, Follow Playhead, Keyboard Shortcuts, Sample Browser), **Audio** (buffer
-size, count-in, monitor input), **Help** (About).
+Menus: **File** (New, Open, Open Recent, Save, Save As, Import Audio/MIDI,
+Export WAV/Stems/MIDI, Project Settings…, Preferences…, Close, Quit), **Edit**
+(Undo, Redo, Cut/Copy/Paste/Delete, Select All, Duplicate, Insert Silence),
+**Track** (New Audio Track, New MIDI Track, New Bus, Duplicate Track),
+**View** (Mixer, Markers, Master Effects, Monitor Dim/Mono, Inspector,
+Editor & Browsers, Zoom to Fit, Follow Playhead, Marker Lane, Keyboard
+Shortcuts, Sample Browser), **Audio** (Metronome), **Help** (About).
+
+The keys worth knowing: **Space** plays and stops, **Home** or **Enter**
+returns to zero, **R** records, **L** loops the ruler's loop range, **C**
+toggles the click, **S** splits at the playhead, **M** drops a marker, **F**
+zooms to fit, **G** opens the grid menu, `1`–`6` pick the tools, and `,` `.`
+nudge the selection by the grid step.
 
 ## Getting audio in
 
@@ -33,59 +52,106 @@ comes from the file's header, not its extension, so a renamed file still opens.
 
 **Record:** click `R` on a track to arm it (and `I` to hear it while
 monitoring, if your input would otherwise be silent), then the Record button in
-the transport. Count-in bars are in the Audio menu; **drag on the ruler** to
-set the loop, and **Ctrl-drag** there to set a punch range (a bare click in the
-ruler clears the punch). Recording inside an enabled loop stacks takes you can
-comp from — right-click a take for **Next Take**.
+the transport. Count-in bars are in **Preferences** now (the Audio menu keeps
+the metronome toggle); **drag on the ruler** to set the loop, and **Ctrl-drag**
+there to set a punch range (a bare click in the ruler clears the punch).
+Recording inside an enabled loop stacks takes you can comp from — right-click a
+take for **Next Take**.
 
-Recorded takes are written next to the project as WAV files, and the project
-refers to them by relative path — move the project and its takes together and
-they still load.
+**Choose the input:** a track's `In` field lists what the system reports —
+`None`, `Default Input`, then each live device with its channels. One channel
+makes the track mono, a pair makes it stereo, and the choice is stored by
+device *name*, so it survives a reboot or a renumbered node. Two armed tracks
+pointing at two channels of the same interface record two takes in one pass,
+each holding only its channel; a device that has gone away falls back to the
+system default and says so on stderr rather than failing the take. Takes are
+written as 24-bit by default (16-bit or float in Preferences), next to the
+project, and the project refers to them by relative path — move the project and
+its takes together and they still load.
 
 **MIDI:** arm a MIDI track and pick its input in the inspector (the endpoint is
 stored by *name*, so it survives a reboot). The track's instrument — a synth or
-an SFZ/SF2 soundfont — is set in the instrument editor.
+an SFZ/SF2 soundfont — is set in the instrument editor. Sustain (CC64),
+pitch-bend and the mod wheel are audible, live and on playback.
 
 ## Editing
 
 - **Clips:** drag to move, drag an edge to trim, drag the top corners to set
-  fades. Right-click for Copy / Delete / Split here / Normalize / Reverse /
-  Strip Silence / Clear Fades. Overlapping clips crossfade automatically, and
-  **Shift** bypasses the grid for free placement.
+  fades. **Cmd**-drag (or **Alt**-drag) the right edge to *stretch* the clip —
+  time-stretch, pitch kept, with the ratio drawn on the clip. Right-click for
+  Copy / Delete / Split here / Normalize / Reverse / Strip Silence / Clear
+  Fades. Overlapping clips crossfade automatically, and **Shift** bypasses the
+  grid for free placement.
 - **Multi-select:** rubber-band or Cmd-click, then move/delete/duplicate as a
-  group.
+  group. Drag on empty lane area for a time range independent of the clips,
+  then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence.
 - **Notes:** double-click a MIDI region to open the **piano roll**. Its tool
   palette (keys `1`–`7`) picks pointer, pencil, brush, eraser, scissors, glue
-  and velocity; the bottom lane shows velocity or a controller (Vel/Vol/Expr/
-  Pan). The **MIDI** button has the transforms — quantize (with grid, strength,
-  swing and note ends), humanize, legato, transpose, velocity — and `q`
-  re-runs the last quantize. Each transform is one undo step.
+  and velocity; the bottom lane shows velocity or *any* controller — pick the
+  number, and the caption names it where the name is known. The **MIDI** button
+  has the transforms — quantize (with grid, strength, swing and note ends),
+  humanize, legato, transpose, velocity — and `q` re-runs the last quantize.
+  Each transform is one undo step.
+- **Normalize, Reverse, Strip Silence and Freeze** run in the background: the
+  progress bar appears with a **Cancel**, the window stays usable while they
+  work, and a cancelled job changes nothing.
 - **Undo** is per gesture, everywhere, including mixing moves.
 
 ## Mixing
 
 - **Faders and pans** are on the track headers and, in more detail, in the
-  **Mixer** window.
+  **Mixer** window. Each strip has the inserts, the send levels, an input
+  **trim** knob with its value in dB, the phase `Ø` button, the `G` solo-group
+  box, and **dB entry** — double-click a fader or its value to type a level.
+  A send level takes effect on the next Play (the engine builds its send tables
+  with the graph).
 - **Buses and sends:** create a bus (Track ▸ New Bus), then give tracks an
   output or a send in the inspector. Pre-fader sends tap before the fader and
-  its effects.
+  its effects. Solo groups: put the same number in several tracks' `G` boxes
+  and soloing one solos the group.
 - **Inserts:** the inspector's insert slots. Click an empty slot to add a
   built-in effect, a native add-on, or an LV2 plugin; click a filled row to
   edit it (an LV2 plugin with its own interface opens *that*, and it drives the
   sound while you play). Each insert has a bypass dot and a wet/dry control.
+  The compressor and gate — and an LV2 plugin with sidechain inputs — take a
+  **Key** from any other track.
 - **Automation:** cycle a track's `Auto` box to the parameter you want, then
   click the lane to add points and drag them. Volume, pan and any effect
   parameter can be automated.
 - The master strip has a BS.1770 loudness meter (momentary, short-term, true
   peak) so you can see what an export will measure.
 
+## Preferences and Project Settings
+
+**File ▸ Preferences…** is where the session-shaping choices live: buffer size
+(taking effect at the next Play), default sample rate for *new* projects,
+count-in bars, the metronome's sound and level, monitor input, dark mode, the
+UI scale (applied at once; window sizes settle at the next launch), the folder
+a first Save starts in, and the autosave interval (0 turns it off). Audio
+output still goes to the system default device — the row for it is disabled
+until output-device selection lands.
+
+**File ▸ Project Settings…** edits the project itself: its sample rate (with
+**Resample the media to the new rate**, which writes a converted copy of every
+distinct source beside the original and repoints the clips), tempo, meter and
+free-text notes. Apply turns whatever you changed into **one** Edit ▸ Undo step
+called "Project Settings" — a rate change is a whole-timeline rescale, so it
+had better be one.
+
+**File ▸ New** offers the templates shipped with the app: **Empty**, **Band**
+(eight audio tracks with the drums routed to a bus) and **Producer** (two MIDI
+tracks with instruments, three audio tracks, and a reverb bus the vocal and
+drums send to). A new session starts at the default sample rate from
+Preferences; the template brings tracks, names, routing and tempo.
+
 ## Exporting
 
 File ▸ Export WAV… opens the export dialog: the format (WAV at 16/24-bit PCM or
 32-bit float, FLAC, or Ogg Vorbis — whichever formats this build can write),
 sample rate, dither, loudness normalization (target LUFS, true-peak ceiling,
-limiter), the range (whole project or the loop), and mixdown or stems.
-The choices are remembered.
+limiter), the range (whole project or the loop), and mixdown or stems. Export
+at another rate and the resample is a windowed-sinc filter, so nothing folds
+back into the audible band. The choices are remembered.
 
 The render runs on its own thread with a progress bar and a **Cancel** — the
 window stays usable while it works, and a cancelled export leaves nothing
@@ -96,19 +162,23 @@ File ▸ Export MIDI… writes the MIDI tracks as a Standard MIDI File.
 ## Projects and safety
 
 - **File ▸ Save** writes one `.dawproj` text file; media paths inside it are
-  relative to it.
-- **Autosave** writes a recovery copy every 30 seconds (never during a take)
-  and offers it back if a session ends badly. The recovery file is removed on a
-  clean quit.
-- **Preferences** (window layout, buffer size, audio settings, the export
-  dialog's last choices) live in `~/config/settings/HaikuDAW/settings`.
+  relative to it. **Save As** moves it, **Open Recent** remembers the last ten,
+  and Close/Quit/Open all prompt Save / Discard / Cancel when there is unsaved
+  work — the title's `*` says when there is.
+- **Autosave** writes a recovery copy every 30 seconds by default (never
+  during a take) and offers it back if a session ends badly. The recovery file
+  is removed on a clean quit, and preferences live in
+  `~/config/settings/HaikuDAW/settings`.
 
 ## When something sounds wrong
 
-- **Buffer size** (Audio ▸ Buffer Size) is the first knob: smaller is lower
-  latency, larger is more forgiving of a busy machine.
+- **The DSP readout** in the transport bar is the first thing to look at: if
+  it sits near 100 %, raise the buffer size in Preferences (applied at the next
+  Play) and watch the xrun count stop climbing.
 - **A plugin that changes its reported latency while running** (some
-  oversampling EQs do) cannot be compensated exactly; the audible effect is a
-  tiny timing offset while it works, not a glitch.
+  oversampling EQs do) is compensated: the host notices the move, re-latches
+  and re-solves. The audible cost is one brief re-alignment when it changes,
+  not a lasting offset or a click.
 - **Freeze** a track (right-click its name) to render it, effects and all, to
-  audio when a session gets heavy.
+  audio when a session gets heavy; it happens in the background with a progress
+  bar.

@@ -24,10 +24,14 @@ and unit-tested on any host; only the engine and the UI need Haiku.
 - Clips with drag, move, trim, split, slip-edit and nudge; fades drawn by
   dragging the top corners, with equal-power crossfades applied automatically
   where clips overlap. Per-clip name, colour, gain, mute.
+- Stretch to fit: **Cmd**-drag (or **Alt**-drag) a clip's right edge and it
+  time-stretches (WSOLA), keeping its pitch, with the ratio drawn on the clip.
 - Multi-select (rubber-band or Cmd-click) with group move, delete and
   duplicate; a time range that is independent of the clips, with Cut, Copy,
   Paste, Delete and Insert Silence.
-- Region operations — normalize, reverse, strip silence, clear fades.
+- Region operations — normalize, reverse, strip silence, clear fades — and
+  track freeze render on a worker thread with progress and a Cancel, so a long
+  decode never blocks the window.
 - Tempo and meter map with ramps; the grid, ruler, snap, metronome and piano
   roll all follow it. Markers, a marker lane, loop and punch regions.
 - Undo and redo for every edit: the command stack is the only way the model
@@ -36,6 +40,10 @@ and unit-tested on any host; only the engine and the UI need Haiku.
 **Recording**
 - Audio takes at the device's native rate, resampled to the project: count-in,
   overdub, punch-in/out, loop recording with take comping, input monitoring.
+- Multichannel input: a track is mono or stereo and takes an input device and
+  channel pair from the inputs the system reports — two armed tracks can record
+  two different channels of one interface in the same pass, one take each.
+  Takes are written as 16-bit, 24-bit or 32-bit float.
 - Round-trip latency compensated from what the Media Kit reports for the
   device. Takes are never overwritten — each new one takes the next free name.
 
@@ -43,6 +51,9 @@ and unit-tested on any host; only the engine and the UI need Haiku.
 - A piano roll with velocity and CC lanes and a tool palette (pointer, pencil,
   brush, eraser, scissors, glue, velocity).
 - An instrument per track: an internal synth, or an SFZ/SF2 soundfont sampler.
+- Sustain (CC64) latches notes while the pedal is down; pitch-bend and the mod
+  wheel modulate the synth and the sampler, live and on playback. The CC lane
+  offers any of the 128 controllers, labelled where the name is known.
 - External MIDI input from any published Midi Kit 2 producer, assigned per
   track; SMF import and export.
 - Transforms: quantize (grid, strength, swing, note ends), humanize, legato,
@@ -51,31 +62,53 @@ and unit-tested on any host; only the engine and the UI need Haiku.
 **Mixing and routing**
 - Per-track fader, pan, mute, solo, mute groups, solo-safe; buses; aux sends
   with pre- or post-fader taps; master bus effects; monitor dim and mono.
+- Mixer strips: insert slots, send levels, input trim and phase invert, solo
+  groups, and dB entry by double-clicking the fader or its value.
 - Per-track meters and a BS.1770 loudness meter (momentary and short-term
   LUFS, true peak).
 - Automation for volume, pan and every effect parameter, drawn on the
   timeline.
-- Plugin delay compensation in the engine and in the offline renderer; gain
-  staging includes track freeze.
+- Plugin delay compensation in the engine and in the offline renderer,
+  including a plugin whose reported latency *changes* while it runs: the host
+  observes the port, re-latches and re-solves compensation without stopping
+  playback (the documented cost is one brief re-alignment when it moves).
+  Gain staging includes track freeze.
 
 **Effects and plugins**
 - Built-ins: 5-band parametric EQ with a spectrum display, biquad filter,
   compressor, gate, reverb, delay, saturator, stereo widener and a look-ahead
-  limiter. The compressor and gate take a sidechain key from any other track.
+  limiter. The compressor and gate take a sidechain key from any other track,
+  and an LV2 plugin with sidechain inputs is keyed the same way.
 - Insert slots with bypass and wet/dry per slot.
 - A native add-on ABI for Haiku shared objects ([src/plugin/](src/plugin/)), plus
-  **LV2** hosting through lilv: a plugin browser, and a plugin's own editor
-  opened in a window and driving the playing insert.
+  **LV2** hosting through lilv: a plugin browser, plugin state saved into the
+  project, presets from the insert slot, and a plugin's own editor opened in a
+  window and driving the playing insert.
 
 **Export**
 - Mixdown or stems; the whole project or the loop range.
 - WAV (16/24-bit PCM, 32-bit float), FLAC (16/24-bit) and Ogg Vorbis; TPDF
   dither for 16-bit; loudness normalization to a target LUFS with a true-peak
   ceiling and an optional look-ahead limiter.
+- Exporting at another sample rate resamples through a windowed-sinc filter
+  (Kaiser, 192 taps): aliases and images more than 100 dB down, the passband
+  flat to a hundredth of a dB. Import sniffs the format from the header, so
+  WAV, AIFF, FLAC and Ogg all open the same way.
 - Rendered on a worker thread with a progress bar you can cancel; a cancelled
   export leaves nothing behind. Separate SMF export for MIDI.
 
 **Files and the application**
+- A transport bar with the full button row — return-to-zero, rewind,
+  fast-forward, play, stop, record, loop, click and punch, each showing its
+  state — a large time display that cycles bars:beats, min:sec, samples and
+  timecode and accepts a typed position, tempo and meter, a DSP-load peak hold
+  with an xrun counter, and a status line.
+- A **Preferences** window (buffer size, default sample rate, count-in,
+  metronome sound and level, monitor input, dark mode, UI scale, default
+  project folder, autosave interval) and **Project Settings** (sample rate with
+  an optional resample of the media, tempo, meter, notes).
+- **File ▸ New** offers templates — Empty, Band and Producer — from `.dawproj`
+  files installed with the app.
 - One text `.dawproj` file with media paths relative to it, so a project and
   its takes move together. The type is registered with the MIME database, so
   Tracker double-click and drag-onto-the-app both open it; the app is
@@ -84,9 +117,9 @@ and unit-tested on any host; only the engine and the UI need Haiku.
   whenever unsaved work is at risk.
 - An inspector pane (`I`) and a dockable editor/browser pane (`J`); a sample
   browser over BFS attributes and live queries; a keyboard-shortcuts window.
-- Native Haiku look by default, or the DAW's own dark palette (View ▸ Dark
-  Mode) applied to its own windows. It never changes the operating system's
-  appearance.
+- Native Haiku look by default, or the DAW's own dark palette (Preferences ▸
+  Dark Mode) applied to its own windows. It never changes the operating
+  system's appearance.
 
 ## Requirements
 
@@ -139,11 +172,11 @@ ctest --test-dir build-host
 
 ## Testing
 
-- **Host suite** — `ctest --test-dir build-host`: 68 test binaries covering
+- **Host suite** — `ctest --test-dir build-host`: 75 test binaries covering
   the model, undo, project I/O, WAV/AIFF/FLAC/Ogg readers and writers,
-  resampling, tempo map, DSP, effects, sampler, MIDI, routing, PDC, export,
-  and fuzz corpora for the parsers. No display, no audio device, about two
-  seconds.
+  resampling (linear and windowed sinc), tempo map, DSP, effects, sidechain,
+  sampler, MIDI, routing, PDC, time-stretch, export, and fuzz corpora for the
+  parsers. No display, no audio device, about two seconds.
 - **On Haiku** — `ctest --test-dir build` adds the engine, Midi Kit and UI
   suites. `ui_functional_tests` drives the real windows by posted messages and
   **skips (exit 77)** where there is no app_server rather than passing a
@@ -187,25 +220,34 @@ prototypes/    standalone spikes, not part of the app
 
 ## Status
 
-**1.0.0, unreleased.** The engine, DSP, plugin hosting, export and editing
-layers are in; what remains is the polish plan in
-[docs/PLAN_1.0.md](docs/PLAN_1.0.md) — commercial-grade window behaviour,
-interaction feedback and responsiveness. Releases are tagged once that plan
-lands; until then the version string says 1.0.0 and the changelog heading says
-unreleased.
+**1.0.0, unreleased.** The 1.0 plan has landed — the UI foundation, the
+arrange-window work, the transport/mixer/preferences layer, multichannel input,
+the compressed formats, time-stretch, sidechain and the engine-responsiveness
+items are all in ([docs/PLAN_1.0.md](docs/PLAN_1.0.md) carries the per-item
+status). What is left before the tag is the release itself: the packaging pass,
+Marc's hardware pass over
+[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md), and the tag. Until then
+the version string says 1.0.0 and the changelog heading says unreleased.
 
 ## Known limitations
 
-- **A plugin whose reported latency changes while it runs** cannot be
-  compensated exactly: the host latches the value when the plugin is
-  activated, so compensation can be off by the amount it moved. Re-solving
-  delay compensation for that case is planned.
-- **No time-stretch or pitch-shift.** Rate-match resampling keeps any source
-  rate at the right pitch; elastic audio is not implemented.
+- **No pitch-shift.** Time-stretch is in (Cmd-drag a clip's right edge, or
+  Alt-drag); it keeps the recorded pitch, and the last few milliseconds of a
+  stretched clip that ends mid-file are windowed down rather than continued
+  into the material after it.
+- **Of the 128 MIDI controllers, six are audible** — CC1 (mod wheel), CC7,
+  CC10, CC11, CC64 (sustain) and pitch-bend. Any other controller can be
+  recorded, drawn, saved and exported, but nothing listens to it yet, and live
+  controller moves are engine-wide rather than per input device.
 - **VST is not supported**, by design — LV2 is the plugin format here.
 - **AIFF is read-only**; writing is WAV, FLAC and Ogg Vorbis.
-- **Audio input is the system default device.** MIDI inputs are enumerated and
-  assigned per track; the audio input picker offers the default only.
+- **Output device selection is not in this release.** Audio goes to the system
+  default output, and the Preferences row for it is disabled; the plan item for
+  it (`docs/PLAN_1.0.md`, M5.3) did not land.
+- **One capture comes from one audio device.** Track inputs are enumerated and
+  assigned per track by name, mono or stereo, but a recording pass reads the
+  devices' channels from a single input node; recording two interfaces at once
+  is not supported.
 - **USB audio interfaces**: support is whatever Haiku's Media Kit drives. The
   HD Audio driver is what this is developed and tested against, and Haiku's
   `usb_audio` driver supports USB audio class 1 only (as of R1/beta6).
