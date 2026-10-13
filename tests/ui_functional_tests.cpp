@@ -7521,6 +7521,16 @@ static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) 
     // There was no focus and no KeyDown at all: a mixer could only be mixed
     // with a mouse. A click on the strip's NAME bar (never a control that opens
     // a popup -- that would wedge the run) makes it current and focuses the view.
+    //
+    // THE KEYS ARE POSTED TO THE LOOPER'S PREFERRED HANDLER (a null BHandler),
+    // not to the window. That is not a detail: Haiku only routes a key to the
+    // FOCUS VIEW when the message is a "focus message", i.e. its header target
+    // is B_PREFERRED_TOKEN (BWindow::task_looper -> _DetermineTarget ->
+    // CurrentFocus, and BWindow::_IsFocusMessage, which bails out otherwise).
+    // A key posted with the WINDOW's own token -- window->PostMessage, or
+    // BMessenger(window) -- is not one, so BWindow::MessageReceived simply
+    // drops it. Real events from the app_server carry the preferred token,
+    // which is what makes this the faithful way to drive them.
     {
         BPoint click(50.0f, 0.0f);        // on the strip's NAME bar
         BPoint screen = click;
@@ -7543,14 +7553,26 @@ static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) 
         BMessenger(strips).SendMessage(&mu);
         snooze(100000);
 
+        // Where the keys will land, and whether the rack took the focus at all.
+        // Printed on EVERY run: "the keys do nothing" and "the view never took
+        // focus" are different bugs, and this is the line that tells them apart.
+        BHandler* focus = nullptr;
         int cur = -1;
         if (mixer->LockWithTimeout(1000000) == B_OK) {
             cur = strips->CurrentStrip();
+            focus = mixer->CurrentFocus();
             mixer->Unlock();
         }
-        std::printf("  mixer keyboard: current strip %d of %zu\n", cur,
-                    stripCount());
+        const char* focusName = "(none)";
+        if (focus != nullptr && focus->Name() != nullptr)
+            focusName = focus->Name();
+        std::printf("  mixer keyboard: current strip %d of %zu, focus '%s'\n",
+                    cur, stripCount(), focusName);
         CHECK(cur == 0);
+        CHECK(focus == strips);   // the view took the focus (B_NAVIGABLE + MakeFocus)
+
+        BMessenger toFocus((const BHandler*)nullptr, (const BLooper*)mixer);
+        CHECK(toFocus.IsValid());
 
         // Down-arrow nudges the strip's gain by 0.5 dB, through the same
         // message path a mouse drag takes (so it is one undoable edit).
@@ -7567,32 +7589,40 @@ static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) 
         const char down = (char)B_DOWN_ARROW;
         key.AddString("bytes", std::string(1, down).c_str());
         key.AddInt32("modifiers", 0);
-        BMessenger(mixer).SendMessage(&key);
-        CHECK(WaitFor([&] {
+        toFocus.SendMessage(&key);
+        const bool nudged = WaitFor([&] {
             if (win->LockWithTimeout(1000000) != B_OK) return false;
             const Track* t = project.FindTrack(firstId);
             const bool ok = t && t->gain < wasGain - 1e-3f;
-            float now = wasGain;
-            if (t) now = t->gain;
             win->Unlock();
-            if (ok)
-                std::printf("  mixer keyboard: gain %.4f -> %.4f\n", wasGain, now);
             return ok;
-        }));
+        });
+        float nowGain = wasGain;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* t = project.FindTrack(firstId)) nowGain = t->gain;
+            win->Unlock();
+        }
+        // Printed either way: a key that changed nothing is a fact the next
+        // reader needs, and the success printf alone hides it.
+        std::printf("  mixer keyboard: gain %.4f -> %.4f (%s)\n", wasGain,
+                    nowGain, nudged ? "arrow" : "NO CHANGE");
+        CHECK(nudged);
         // 'm' toggles the current strip's mute, through kMsgApplyMix.
         BMessage mk(B_KEY_DOWN);
         mk.AddString("bytes", "m");
         mk.AddInt32("modifiers", 0);
-        BMessenger(mixer).SendMessage(&mk);
-        CHECK(WaitFor([&] {
+        toFocus.SendMessage(&mk);
+        const bool muted = WaitFor([&] {
             if (win->LockWithTimeout(1000000) != B_OK) return false;
             const Track* t = project.FindTrack(firstId);
             const bool ok = t && t->muted;
             win->Unlock();
             return ok;
-        }));
+        });
+        std::printf("  mixer keyboard: 'm' %s\n", muted ? "muted" : "NO CHANGE");
+        CHECK(muted);
         // ... and put it back, so the fixture is as it was.
-        BMessenger(mixer).SendMessage(&mk);
+        toFocus.SendMessage(&mk);
         CHECK(WaitFor([&] {
             if (win->LockWithTimeout(1000000) != B_OK) return false;
             const Track* t = project.FindTrack(firstId);
