@@ -316,6 +316,33 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   `laneTop + Themed(56)`; the arrange-tracks package moved the fader and left
   an input picker on that pixel. Tests must ask the view for a control's own
   rect (`HeaderRectFor`, `HeaderControlAt`) instead of computing one.
+- **A posted mouse message needs `screen_where`, or the view sees (0, 0).**
+  `BWindow::DispatchMessage` converts a mouse message's SCREEN point into the
+  view-local `be:view_where` that the kit's `BView::MessageReceived` actually
+  reads, and a message carrying only `"where"` is not converted at all — the
+  view's `MouseDown` gets (0, 0), which lands on whatever sits in the corner
+  (usually the toolbar) and the gesture "does nothing" while every later check
+  in the test fails for reasons of its own. Post both points, converting with
+  `BView::ConvertToScreen`; `TestPianoRollCcLane`'s `clickLane` is the working
+  precedent, and package 51's `TestRollModelSync` lost three rounds to it.
+- **A posted key needs the FOCUS token, not the window's.**
+  `BWindow::_IsFocusMessage` requires `B_PREFERRED_TOKEN`, so
+  `BMessenger(window).SendMessage(key)` never runs the menu's shortcut path and
+  the key dies in `BWindow::MessageReceived` — which does not handle keys, so
+  the shortcut "does nothing" and the check can never pass. Post through the
+  preferred handler (`BMessenger((const BHandler*)nullptr, window)`), which is
+  what a real app-server event carries; `TestRollModelSync`'s `postKey` is the
+  precedent. (For a view's own KeyDown, posting to the VIEW works too — that is
+  `BMessenger(view)` and `BView::MessageReceived` translates it.)
+- **A gesture's modifiers belong on the EVENT — never `BView::modifiers()`.**
+  The kit's global `modifiers()` asks the input server what is held *right
+  now*: it is neither the modifiers the gesture was made with (a Shift released
+  mid-drag changes it) nor anything a posted message can set, so a synthetic
+  Alt- or Ctrl-drag reports none and the handler takes its plain-click path —
+  the gesture is unreachable, and only real fingers could ever drive it. Read
+  the event with the app's own `EventModifiers(Window()->CurrentMessage())`
+  (`src/ui/UiMetrics.h`), as the arrangement's gestures already did;
+  `PianoRollView::EventMods` is the precedent.
 - **Two agents share this VM, and so do its scratch paths.** `refs/heads/_vmwt`
   (the HANDOFF's own throwaway-ref recipe), `~/haiku-daw`, its `build/` dir and
   `/tmp/ui.log` are common state: a sync left in an earlier `flock` hold is
