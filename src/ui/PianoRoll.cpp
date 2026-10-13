@@ -455,10 +455,14 @@ void PianoRollView::ZoomAnchoredAt(double factor, float x) {
     Invalidate();
 }
 
+uint32 PianoRollView::EventMods() const {
+    return EventModifiers(Window() ? Window()->CurrentMessage() : nullptr);
+}
+
 // Snap in the song's grid, in the region's own space (RollEdit.h): the grid
 // the toolbar's field selects (item E), not a welded 1/16.
 Frame PianoRollView::Snapped(Frame f) const {   // f is clip-relative
-    if (modifiers() & B_SHIFT_KEY) return f < 0 ? 0 : f;
+    if (EventMods() & B_SHIFT_KEY) return f < 0 ? 0 : f;   // Shift: place freely
     return SnapClipRelative(fTempo, f, fClipStart, fSnap);
 }
 
@@ -1395,7 +1399,7 @@ void PianoRollView::MouseDown(BPoint where) {
     // Alt means "duplicate under the pointer" (item H). BOTH bits: Haiku maps
     // the PC's Alt to B_COMMAND_KEY and the Option/Windows key to B_OPTION_KEY
     // (the arrangement's own Alt gestures accept both, TimelineView.cpp:2340).
-    const bool altDup = (modifiers() & (B_OPTION_KEY | B_COMMAND_KEY)) != 0;
+    const bool altDup = (EventMods() & (B_OPTION_KEY | B_COMMAND_KEY)) != 0;
 
     const int hit = NoteAt(where);
     fDownPoint = where;
@@ -1477,7 +1481,7 @@ void PianoRollView::MouseDown(BPoint where) {
         fDragNote = grab;
         CaptureDragOrigin();
         const Zone zone = ZoneOf(n, where);
-        if (modifiers() & B_CONTROL_KEY) { fDrag = Drag::Velocity; fVelLaneDrag = false; }
+        if (EventMods() & B_CONTROL_KEY) { fDrag = Drag::Velocity; fVelLaneDrag = false; }
         else if (zone == Zone::LeftEdge)   fDrag = Drag::ResizeLeft;
         else if (zone == Zone::RightEdge)  fDrag = Drag::Resize;
         else {
@@ -1797,7 +1801,7 @@ void PianoRollView::MessageReceived(BMessage* msg) {
 void PianoRollView::KeyDown(const char* bytes, int32 numBytes) {
     if (numBytes < 1) { BView::KeyDown(bytes, numBytes); return; }
     const Frame page = (Frame)((Bounds().Width() - KbdW()) * fFramesPerPixel);
-    const bool cmd = (modifiers() & B_COMMAND_KEY) != 0;
+    const bool cmd = (EventMods() & B_COMMAND_KEY) != 0;
     // The nudge step is the ACTIVE grid's own line spacing (item E): with
     // triplets selected, one press moves a triplet step.
     auto gridStep = [&]() -> Frame {
