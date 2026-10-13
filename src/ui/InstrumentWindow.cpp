@@ -71,7 +71,12 @@ std::string LeafOf(const std::string& p) {
 
 InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
                                    TrackId track, BMessenger apply)
-    : BWindow(frame, "Instrument", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+    // Look and feel as separate arguments (see ExportWindow): the
+    // (window_type, flags, workspace) overload would take
+    // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, <flags>) and swallow the
+    // flags -- this window was zoomable and horizontally locked instead of
+    // not-zoomable.
+    : BWindow(frame, "Instrument", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fDesc(std::move(inst)), fTrack(track), fApply(apply) {
     BGroupView* root = new ThemedGroupView("root", B_VERTICAL, Themed(6.0f));
