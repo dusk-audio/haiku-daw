@@ -751,17 +751,24 @@ TimelineView::Hit TimelineView::HitTest(BPoint where, uint32 mods) const {
         const bool wide = (x1 - x0) > 2 * EdgeGrab();
         const bool topBand = where.y <= lane.top + Themed(topBandH);
         if (withGain && (mods & B_CONTROL_KEY)) return Zone::Gain;
-        // Alt-drag slips the audio. Both Alt bits are accepted, like every
-        // other Alt gesture here (the range drag, the stretch drag, exclusive
-        // solo): Haiku maps a PC keyboard's Alt to B_COMMAND_KEY and the
-        // Option/Windows key to B_OPTION_KEY, so testing only B_OPTION_KEY made
-        // the slip edit unreachable for anyone whose Alt is the PC's.
-        if (withGain && !midi && (mods & (B_OPTION_KEY | B_COMMAND_KEY)))
-            return Zone::Slip;
+        // The GRIPS come next, and the order is load-bearing. Alt-drag slips
+        // the audio, and both Alt bits are accepted, like every other Alt
+        // gesture here (the range drag, the stretch drag, exclusive solo):
+        // Haiku maps a PC keyboard's Alt to B_COMMAND_KEY and the Option/
+        // Windows key to B_OPTION_KEY, so testing only B_OPTION_KEY made the
+        // slip edit unreachable for anyone whose Alt is the PC's. But
+        // B_COMMAND_KEY is ALSO the edge/corner modifier (Cmd on the right edge
+        // stretches, Cmd on a top corner sets the fade): a slip zone tested
+        // before the geometry swallows those gestures whole, which is exactly
+        // what the VM's TestClipStretch caught — the Cmd-drag on the right edge
+        // slipped instead of stretching. So the grips win where they are, and
+        // Alt means slip in the BODY.
         if (topBand && where.x <= x0 + Themed(cornerW)) return Zone::FadeIn;
         if (topBand && where.x >= x1 - Themed(cornerW)) return Zone::FadeOut;
         if (wide && where.x >= x1 - EdgeGrab()) return Zone::TrimRight;
         if (wide && where.x <= x0 + EdgeGrab()) return Zone::TrimLeft;
+        if (withGain && !midi && (mods & (B_OPTION_KEY | B_COMMAND_KEY)))
+            return Zone::Slip;
         return Zone::Body;
     };
     // An inactive take is hidden: not a hit target, and not the block the
