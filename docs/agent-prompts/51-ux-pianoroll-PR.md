@@ -36,17 +36,23 @@ split grew the half back to the old length.
   selection survives a move made in the arrangement); the region is gone →
   Close (the dock empties, the popped-out window quits); otherwise Keep.
 - **The commit gate.** Every commit names the stack serial it was based on
-  (`base`); a commit the window does not consider current is refused and the
-  roll is re-read instead of applying it. `RollCommitGate` also covers the
-  batching case the first cut missed: two gestures posted inside one turn of
-  the window's loop both name the same base (the push that would raise it is
-  sent while the first is handled), so a commit is allowed while the stack is
-  still exactly where the roll's own last accepted commit left it. Any other
-  change (an undo, another view's edit) ends that grace and the gate is strict
-  again — found by writing the rule's tests, before the VM ever saw it.
-- A roll that was never pushed (only tests build one) carries no `base` and
-  keeps the pre-51 behaviour; the app's rolls are always pushed at open.
-
+  (`base`), and a commit is applied only when `RollCommitAllowed` says the
+  model is still the state the roll saw. Three ways that can be true:
+  1. the base IS the stack's serial;
+  2. the stack is still exactly where the roll's own last accepted commit left
+     it — two gestures posted inside one turn of the window's loop both name
+     the same base (the push that would raise it is sent while the first is
+     handled), and refusing the second would drop the user's gesture;
+  3. the region's own fingerprint (`RollRegionSignature`, FNV-1a over start,
+     length, notes and events) still matches what the window last pushed to
+     that roll. An edit ELSEWHERE (a fader drag, a track rename, a freeze job,
+     a region edit the timeline commits without posting anything) moves the
+     serial and leaves this region untouched; refusing the user's note for that
+     would be a false refusal, and this is exactly the case the 2 Hz poll
+     cannot close in time.
+  Anything else — the region really did change under the roll — is refused, and
+  the refusal's push is what re-reads it. A roll that was never pushed (only
+  tests build one) carries no `base` and keeps the pre-51 behaviour.
 ### C — follow-playhead
 
 `PianoRollView::SetFollow` replaces the hard-coded `fFollow = true`;
@@ -171,13 +177,14 @@ What did NOT work was what Cmd-Z did to the roll's snapshot: that is item A.
    `tests/ui_functional_tests.cpp` and everything else compile clean under the
    Haiku headers.
 
-`tests/rolledit_tests.cpp` — **145 checks**: the sync decision (Keep/Repoint/
+`tests/rolledit_tests.cpp` — **172 checks**: the sync decision (Keep/Repoint/
 Reload/Close and the ordering between them), the commit gate (fresh, batched,
-broken by an undo, re-synced), the region window rule, snap-in-region (16ths,
-triplets, Off, an off-grid region head, the clamp at the head), the lane
-addressing (bend included), the lane fraction round trip, the CC hit/move/
-absorb/clear rules, nudge from a captured origin, copy/append selection, and
-the toolbar layout.
+region-keyed, broken by an undo, re-synced), the region fingerprint (every
+field it covers), the region window rule, snap-in-region (16ths, triplets, Off,
+an off-grid region head, the clamp at the head), the lane addressing (bend
+included), the lane fraction round trip, the CC hit/move/absorb/clear rules
+(including a drag that absorbs a point and keeps hold of its own), nudge from a
+captured origin, copy/append selection, and the toolbar layout.
 
 ## Mutation checks (break it, watch it fail, restore)
 
@@ -196,6 +203,10 @@ the toolbar layout.
 | The toolbar layout always keeps MIDI wide | 369 (3) |
 | `EventInLane` stops matching bend events | 205 (7) |
 | `CopySelection` ignores its offset | 343 (2) |
+| `RollRegionSignature` ignores the notes | 151 (1) |
+| `RollRegionSignature` ignores the length | 150 (1) |
+| `RollCommitAllowed` drops the region identity | 134 (2) |
+| `CcPointMove` does not report the shifted index | 318 (5) |
 
 
 One of these was a REAL bug found while writing the tests, not a deliberate
@@ -253,9 +264,60 @@ and helpers; the refactor's equivalence with the old `UpdateLiveVoices` body
 (ordering, the CC64 path, the note-off match, the bend phase, the reap rules);
 and voice lifetime in both render paths.
 
-One design change came out of writing the gate's own tests rather than the
-review: `RollCommitGate` (above) — the first cut refused a second gesture posted
-inside one turn of the window's loop.
+The sync-protocol review found eight more, all fixed:
+
+1. **Only one popped-out editor was tracked, and a second pop-out did not close
+   the first** — the orphan kept its own stale base, so every commit it made
+   after the first was refused and silently dropped. Opening a pop-out quits
+   the one registered before it (the fresh-messenger rule the other
+   single-instance windows use).
+2. **Cmd-C/V/X/D did nothing in the docked editor.** Haiku skips the shortcut
+   of a *disabled* menu item but still swallows the key
+   (`Window.cpp:3810-3847`), and `UpdateEditMenu` enabled the Edit items only
+   from the arrangement's selection. It counts the focused roll's selection and
+   clipboard now — `Cancel`/rubber bands in the arrangement are unaffected.
+3. **The same keys did nothing in the popped-out window**, whose `KeyDown`
+   never sees them: `BWindow::_HandleKeyDown` ends with "we always eat the event
+   if the command key was pressed". `PianoRoll::DispatchMessage` intercepts
+   them, the path Cmd-Z already used. (This corrects the speculation in the
+   Cmd-Z paragraph above: the win's Cmd-Z works because of the forwarding, not
+   because its `KeyDown` runs.)
+4. **A stale base meant losing the user's gesture**, and the window's own
+   `fStack->Execute` sites (the master slider's per-tick message, renames, the
+   sends/instrument/fx paths, autosave's `FlushFxEditors`, the timeline's
+   context-menu region Delete/Split, the region jobs) bump the serial with no
+   push at all — up to the 500 ms poll of false refusals. The region
+   fingerprint (above) makes the refusal *exact*: only a change to this region
+   refuses a commit.
+5. **A CC drag onto a neighbour's frame left the drag holding the wrong index**
+   (the absorbed point shifts the vector): the next mouse-move dragged the
+   neighbour, or ran off the end and froze. `CcPointMove` hands the new index
+   back; the host test now calls it twice on the same drag.
+6. **Alt-drag did not duplicate** — the Alt bits were this view's additive-
+   select modifier, and on a PC keyboard Alt *is* `B_COMMAND_KEY`. Alt on a
+   note now resolves by what the pointer does: a drag duplicates (the copies
+   are made on the first real movement), a click toggles the selection. Both
+   documented gestures, on any keyboard.
+7. **A bare click on a note committed an unchanged list** — an "Undo Edit
+   Notes" step that undid to the same notes, one per click. A gesture that
+   changed nothing no longer commits (the pencil's new note still does, even
+   when the drag sizes nothing).
+8. **`ClearDockedEditor` deleted the docked view without releasing a key it was
+   holding** (and zeroing the shared held-note counter could under-count a key
+   the pop-out still held). The view releases it on the way out.
+
+One design change came out of writing the gate's own tests rather than either
+review: `RollCommitGate` — the first cut refused a second gesture posted inside
+one turn of the window's loop.
+
+## New keys and gestures (documented in the header and USER_GUIDE)
+
+`1`–`7` tools · `q` quantize · `g` the grid menu · `f` fit the region ·
+`+`/`-` zoom about the playhead · arrows nudge a selection (or scroll) ·
+Up/Down transpose · `Del`/`Backspace` delete · Cmd-A select all ·
+Cmd-C/X/V/D clipboard · Shift = free placement (no snapping) ·
+Alt-click toggles a note in the selection · Alt-drag duplicates it under the
+pointer · `=`/`-` (and the toolbar's field) as the arrangement uses them.
 
 ## Shots to look for (the orchestrator's screenshot pass)
 
@@ -268,6 +330,9 @@ inside one turn of the window's loop.
   "Piano Roll — <track>".
 - **`roll-after-undo`** — the note sits at its pre-drag position in the grid
   AND in the region's row of the timeline behind it.
+- **`roll-clipboard`** — after Cmd-C/Cmd-V in the docked editor the pasted note
+  is visible next to the playhead; the Edit menu's Copy must read ENABLED with
+  a note selected in the editor and nothing selected in the arrangement.
 - **`roll-grid-16th` / `roll-grid-quarter`** — the grid field's label reads
   "1/16" then "1/4", and the new notes land on different x.
 - **`roll-cc-lane` / `roll-cc-drag`** — the lane's staircase and handles, the
@@ -282,6 +347,9 @@ inside one turn of the window's loop.
 - The keyboard column, the region edges and the dimmed notes in dark mode: the
   keys stay white/black by design (they are the instrument, like the velocity
   heat map); everything around them is a token.
+- **`roll-audition`** — the shot comes after a keyboard-column click that the
+  engine actually rendered; the pump/keyboard must look pressed-and-drawn
+  rather than blank.
 
 ## What is left undone, and what could not be verified
 
@@ -311,6 +379,12 @@ inside one turn of the window's loop.
   view reads a token.
 - `fClipboard` is per-view (a popped-out roll and a docked one do not share
   notes); the arrangement's clipboard is clips and stays separate on purpose.
+- The `kMsgRollOpened` rule is "one popped-out editor": popping a second region
+  out closes the first window. Nothing in the UI offers two side by side (the
+  dock hosts the other one).
+- The Edit menu's Cmd-C/V/X/D routing is per-FOCUSED-view: with the docked
+  editor focused the notes win, with the timeline focused the clips do. The
+  transition is a click away (each view takes the focus on a click).
 - Region **pitch bend audition**: the bend lane edits the model and sounds on
   the next render, but clicking in the bend lane does not audition anything (the
   audition is a note, not a controller move) — noted rather than faked.
