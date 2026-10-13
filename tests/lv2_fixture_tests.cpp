@@ -25,6 +25,7 @@
 #include "../src/plugin/Lv2PortMap.h"
 #include "../src/dsp/EffectFactory.h"
 #include "../src/model/Effect.h"
+#include "../src/model/ParamDisplay.h"   // ParamValueText / ParamUnitFromName
 
 #include <cmath>
 #include <cstdio>
@@ -47,6 +48,7 @@ const char* kTwoUi       = "urn:haiku-daw:test:two-ui";
 const char* kStereoLatent= "urn:haiku-daw:test:stereo-latent";
 const char* kLatencyStep  = "urn:haiku-daw:test:latency-step";
 const char* kSidechainGain= "urn:haiku-daw:test:sidechain-gain";
+const char* kFilterUnit   = "urn:haiku-daw:test:filter-unit";   // enum labels + unit
 const char* kBadTopology = "urn:haiku-daw:test:bad-topology";
 const char* kNeedsFeature= "urn:haiku-daw:test:needs-feature";
 const char* kCvPort      = "urn:haiku-daw:test:cv-port";
@@ -97,15 +99,47 @@ int main() {
         return 1;
     }
 
-    // Nine fixtures: six hostable (mono gain, stereo latent, latency step,
-    // sidechain gain, the two-UI one, and the stateful one), three deliberately
-    // refused.
-    CHECK(mineHosted == 6);
+    // Ten fixtures: seven hostable (mono gain, stereo latent, latency step,
+    // sidechain gain, the two-UI one, the stateful one, and the enumeration
+    // one), three deliberately refused.
+    CHECK(mineHosted == 7);
     CHECK(mineRejected == 3);
     CHECK(host.Find(kMonoGain) != nullptr);
     CHECK(host.Find(kStereoLatent) != nullptr);
     CHECK(host.Find(kLatencyStep) != nullptr);
     CHECK(host.Find(kSidechainGain) != nullptr);
+
+    // --- An enumeration's labels, and a port name's declared unit ---------
+    // The two things that make a generic parameter row readable, and the only
+    // place they can come from: the value of an lv2:enumeration port is an
+    // INDEX, so "2" means nothing without the scale point's rdfs:label; and a
+    // unit lives in the port name's brackets ("Frequency (Hz)") -- LV2 has no
+    // other slot for it.
+    if (const Lv2PluginInfo* fu = host.Find(kFilterUnit)) {
+        CHECK(fu->params.size() >= 2);
+        if (fu->params.size() >= 2) {
+            const Lv2ParamInfo& type = fu->params[0];
+            CHECK(type.isInteger);
+            CHECK(type.scalePoints == std::vector<float>({ 0.0f, 1.0f, 2.0f }));
+            CHECK(type.scalePointNames
+                  == std::vector<std::string>({ "Lowpass", "Highpass", "Bandpass" }));
+            // The readout the panel draws: the name on a point, the number
+            // elsewhere, the unit only ever on a number.
+            CHECK(ParamValueText(2.0f, type.isInteger, type.mn, type.mx, "",
+                                 &type.scalePoints, &type.scalePointNames)
+                  == "Bandpass");
+            CHECK(ParamValueText(1.0f, type.isInteger, type.mn, type.mx, "",
+                                 &type.scalePoints, &type.scalePointNames)
+                  == "Highpass");
+            CHECK(fu->params[1].name == "Frequency (Hz)");
+            const std::string unit = ParamUnitFromName(fu->params[1].name);
+            CHECK(unit == "Hz");
+            CHECK(ParamValueText(440.0f, false, 20.0f, 20000.0f, unit,
+                                 nullptr, nullptr) == "440 Hz");
+        }
+    } else {
+        std::printf("  FAIL fixture %s not found\n", kFilterUnit);
+    }
 
     // --- Rejection, deterministically ------------------------------------
     {

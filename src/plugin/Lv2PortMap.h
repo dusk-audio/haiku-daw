@@ -87,6 +87,12 @@ struct Lv2PortSpec {
     bool  isInteger = false;
     bool  isToggled = false;
     std::vector<float> scalePoints;   // lv2:enumeration values, if declared
+    // Parallel to scalePoints: each point's rdfs:label, the name the plugin's
+    // own UI prints for that value. Kept here (not only in the public listing)
+    // so the scan's pairs stay together -- see the enumeration branch of the
+    // port walk, where sorting the values alone would reorder one list and not
+    // the other.
+    std::vector<std::string> scalePointNames;
 
     std::string name;      // lv2:name, the human label
     std::string symbol;    // lv2:symbol, the machine name (state documents use it)
