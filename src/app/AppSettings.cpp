@@ -93,7 +93,8 @@ std::string AppSettings::Serialize() const {
       << "metsnd "    << metronomeSound << "\n"
       << "metlvl "    << metronomeLevel << "\n"
       << "uiscale "   << uiScale << "\n"
-      << "autosv "    << autosaveSeconds << "\n";
+      << "autosv "    << autosaveSeconds << "\n"
+      << "audprev "   << (previewNotes ? 1 : 0) << "\n";
     // The default project folder (M3.5) may contain spaces -> rest of the
     // line, like lastdir below.
     o << "projdir " << projectDir << "\n";
@@ -163,6 +164,7 @@ bool AppSettings::Deserialize(const std::string& text) {
         else if (kw == "metlvl")    { float v; if (ls >> v) metronomeLevel = v; }
         else if (kw == "uiscale")   { float v; if (ls >> v) uiScale = v; }
         else if (kw == "autosv")    { int v; if (ls >> v) autosaveSeconds = v; }
+        else if (kw == "audprev")   { int v; if (ls >> v) previewNotes = (v != 0); }
         else if (kw == "projdir") {
             std::string rest;
             std::getline(ls, rest);

@@ -30,6 +30,7 @@
 #include "../src/ui/widgets/DawKnob.h"
 #include "../src/ui/widgets/DawSlider.h"
 #include "../src/model/MidiOps.h"       // QuantGrid
+#include "../src/model/RollEdit.h"   // the roll's kit-free rules (package 51)
 #include "../src/model/MidiExpression.h"  // the lane's path into a voice
 #include "../src/synth/Synth.h"           // ...rendered, to prove it arrives
 #include "../src/model/Project.h"
@@ -120,6 +121,12 @@ using namespace daw;
 #endif
 #ifndef MSG_UNDO_TEST
 #define MSG_UNDO_TEST 'undo'  // Edit > Undo (MainWindow's MSG_UNDO)
+#endif
+#ifndef MSG_FOLLOW_TEST
+#define MSG_FOLLOW_TEST 'folw'   // View > Follow Playhead (package 51)
+#endif
+#ifndef MSG_AUDITION_IDLE_TEST
+#define MSG_AUDITION_IDLE_TEST 'auid'   // the audition's idle stopper (package 51)
 #endif
 #ifndef MSG_MIXER_TEST
 #define MSG_MIXER_TEST 'mixr'   // View > Mixer (MainWindow's MSG_MIXER)
@@ -5017,6 +5024,602 @@ static void TestDockedEditor(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
 }
 
+// Package 51: the roll's snapshot against the model — the stale-list bug and
+// the region moving under an open editor — plus the grid the toolbar's field
+// selects and the CC lane's point drag. All of it runs on the DOCKED editor,
+// because that is where the main window's pushes and the Edit menu's routing
+// live; the view's own looper does the message handling, so every touch of the
+// view is under the window's lock (docs/HANDOFF.md: a view method off the
+// window thread trips the kit's assertion).
+static void TestRollModelSync(MainWindow* win, Project& project,
+                              CommandStack* stack) {
+    std::printf("piano roll: model sync, grid, lane drag (package 51)\n");
+    Track t = MakeMidiTrack(project, { { 60, 100, 0, 4800 },
+                                       { 64, 100, 6000, 3000 } }, "sync-roll");
+    const TrackId tid = t.id;
+    const ClipId  cid = t.midiClips.front().id;
+    const Frame   origLen = t.midiClips.front().lengthFrames;
+    CHECK(LockedAddTrack(win, project, t));
+
+    BMessage open(kMsgOpenEditor);
+    open.AddInt64("track", (int64)tid);
+    open.AddInt64("clip", (int64)cid);
+    win->PostMessage(&open);
+
+    PianoRollView* roll = nullptr;
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        roll = dynamic_cast<PianoRollView*>(win->FindView("roll"));
+        win->Unlock();
+        return roll != nullptr;
+    }));
+    if (roll == nullptr) return;
+
+    // Reading the ROLL's own state, and the model's, under the window lock.
+    auto rollNotes = [&]() -> std::vector<MidiNote> {
+        std::vector<MidiNote> out;
+        if (win->LockWithTimeout(1000000) != B_OK) return out;
+        for (int i = 0; i < roll->NoteCount(); i++) out.push_back(roll->NoteForTest(i));
+        win->Unlock();
+        return out;
+    };
+    auto modelClip = [&](MidiClip* out) -> bool {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const Track* tr = project.FindTrack(tid);
+        const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
+        if (c) *out = *c;
+        win->Unlock();
+        return c != nullptr;
+    };
+
+    // The docked editor is a view the main window HOSTS, so it opens synced:
+    // that is what every later commit's base comes from.
+    {
+        bool synced = false;
+        Frame start = -1, len = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            synced = roll->Synced();
+            start  = roll->RegionStart();
+            len    = roll->RegionLength();
+            win->Unlock();
+        }
+        CHECK(synced);
+        CHECK(start == 0);
+        CHECK(len == origLen);
+    }
+
+    // A click-drag on a note body MOVES it, and the commit lands in the model.
+    // (The roll's own snapshot is what it commits, so the two agreeing after a
+    // drag is not the point — the point is what happens on an undo below.)
+    auto dragNote = [&](Frame pickAtFrame, float dx, float dy) {
+        float x = 0.0f, y = 0.0f;
+        if (win->LockWithTimeout(1000000) != B_OK) return;
+        x = roll->XForFrameForTest(pickAtFrame);
+        y = 0.0f;   // set below: the note's pitch row
+        win->Unlock();
+        // The pitch row of the note at `pickAtFrame`: 12 px per semitone in
+        // design pixels, the roll's own scale.
+        y = Themed(28.0f) + (float)(96 - 60) * Themed(12.0f) + Themed(6.0f);
+        const BPoint from(x, y), to(x + dx, y + dy);
+        const uint32 down = B_MOUSE_DOWN, up = B_MOUSE_UP, mv = B_MOUSE_MOVED;
+        BMessage d(down);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", from);
+        BMessenger(roll).SendMessage(&d);
+        BMessage m(mv);
+        m.AddInt32("buttons", 1);
+        m.AddPoint("where", to);
+        BMessenger(roll).SendMessage(&m);
+        BMessage u(up);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", to);
+        BMessenger(roll).SendMessage(&u);
+        snooze(150000);
+    };
+
+    dragNote(1000, 60.0f, 0.0f);   // one grid step to the right
+    MidiClip now;
+    CHECK(WaitFor([&] {
+        MidiClip c;
+        if (!modelClip(&c)) return false;
+        now = c;
+        return c.notes.size() == 2 && c.notes[0].startFrame != 0;
+    }));
+    const Frame movedTo = now.notes[0].startFrame;
+    CHECK(movedTo > 0);
+
+    // --- A. Undo: the model reverts, and the ROLL reverts with it -----------
+    // Before package 51 the roll kept showing the move, and the next gesture
+    // committed that stale list as a fresh edit — the model was silently
+    // rewritten. The roll must now be re-read by the window's push.
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        MidiClip c;
+        if (!modelClip(&c)) return false;
+        if (c.notes[0].startFrame != 0) return false;
+        const std::vector<MidiNote> shown = rollNotes();
+        return shown.size() == 2 && shown[0].startFrame == 0;
+    }));
+    {
+        const std::vector<MidiNote> shown = rollNotes();
+        MidiClip c;
+        modelClip(&c);
+        CHECK(shown.size() == c.notes.size());
+        CHECK(shown.size() == 2 && shown[0].startFrame == c.notes[0].startFrame);
+    }
+    Shot("roll-after-undo");
+
+    // --- E. The grid the toolbar's field selects ----------------------------
+    // Draw a note at a fixed x with the default 1/16 grid, then with 1/4: the
+    // start must be the frame the kit-free snap says it is (the roll used to be
+    // welded to the 16th, so triplets and swing parts could not be drawn).
+    auto drawNoteAt = [&](float x) {
+        const float y = Themed(28.0f) + (float)(96 - 72) * Themed(12.0f)
+                      + Themed(6.0f);
+        {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                roll->KeyDown("2", 1);   // the Pencil tool
+                win->Unlock();
+            }
+        }
+        const uint32 down = B_MOUSE_DOWN, up = B_MOUSE_UP;
+        BMessage d(down);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", BPoint(x, y));
+        BMessenger(roll).SendMessage(&d);
+        BMessage u(up);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", BPoint(x, y));
+        BMessenger(roll).SendMessage(&u);
+        snooze(150000);
+    };
+    auto waitForNoteAt = [&](int pitch, Frame want) {
+        return WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            for (const MidiNote& n : c.notes)
+                if (n.pitch == pitch && n.startFrame == want) return true;
+            return false;
+        });
+    };
+    const float drawX = 400.0f;
+    Frame frameAtX = 0, clipStart = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        frameAtX  = roll->FrameAtXForTest(drawX);
+        clipStart = roll->RegionStart();
+        win->Unlock();
+    }
+    const Frame want16 = SnapClipRelative(project.tempoMap, frameAtX, clipStart,
+                                          SnapGrid{ SnapKind::Sixteenth, false });
+    drawNoteAt(drawX);
+    CHECK(waitForNoteAt(72, want16));
+    Shot("roll-grid-16th");
+
+    // The same gesture on the quarter grid lands on a different frame: 1/4 is
+    // coarser, so the two cannot agree unless the grid is ignored.
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetSnapGrid(SnapGrid{ SnapKind::Quarter, false });
+            win->Unlock();
+        }
+        bool snapOk = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            snapOk = roll->Snap().kind == SnapKind::Quarter && roll->Snap().On();
+            win->Unlock();
+        }
+        CHECK(snapOk);
+    }
+    const Frame want4 = SnapClipRelative(project.tempoMap, frameAtX, clipStart,
+                                         SnapGrid{ SnapKind::Quarter, false });
+    CHECK(want4 != want16);          // the two grids really do differ here
+    // A new pitch row, so the check is about a NEW note, not the last one.
+    {
+        const float y = Themed(28.0f) + (float)(96 - 67) * Themed(12.0f)
+                      + Themed(6.0f);
+        const uint32 down = B_MOUSE_DOWN, up = B_MOUSE_UP;
+        BMessage d(down);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", BPoint(drawX, y));
+        BMessenger(roll).SendMessage(&d);
+        BMessage u(up);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", BPoint(drawX, y));
+        BMessenger(roll).SendMessage(&u);
+    }
+    CHECK(waitForNoteAt(67, want4));
+    Shot("roll-grid-quarter");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetSnapGrid(SnapGrid{ SnapKind::Sixteenth, false });
+            win->Unlock();
+        }
+    }
+
+    // --- F. A CC point drags; it does not paint a staircase -----------------
+    // Two points of the same controller, then a drag that STARTS on the first
+    // one: the count must not change (the old code wrote a new point at every
+    // new x and left the grabbed one behind).
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetLaneCc(1);
+            win->Unlock();
+        }
+        {
+            std::vector<MidiClipEvent> ev;
+            for (int i = 0; i < 2; i++) {
+                MidiClipEvent e;
+                e.type = MidiClipEvent::CC;
+                e.data = 1;
+                e.startFrame = 3000 + i * 6000;   // clip-relative
+                e.value = 40 + i * 60;
+                ev.push_back(e);
+            }
+            win->LockWithTimeout(1000000);
+            stack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                               tid, cid, std::move(ev)), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgReloadEngine);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = roll->EventCount() == 2
+                         && roll->Lane() == 1;
+            win->Unlock();
+            return ok;
+        }));
+        Shot("roll-cc-lane");
+
+        float x0 = 0, y0 = 0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            x0 = roll->XForFrameForTest(3000);
+            y0 = roll->LaneValueYForTest(40);
+            win->Unlock();
+        }
+        const float x1 = x0 + 90.0f;
+        const float y1 = y0 + 12.0f;
+        BMessage d(B_MOUSE_DOWN);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", BPoint(x0, y0));
+        BMessenger(roll).SendMessage(&d);
+        BMessage mv(B_MOUSE_MOVED);
+        mv.AddInt32("buttons", 1);
+        mv.AddPoint("where", BPoint(x1, y1));
+        BMessenger(roll).SendMessage(&mv);
+        BMessage u(B_MOUSE_UP);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", BPoint(x1, y1));
+        BMessenger(roll).SendMessage(&u);
+
+        // Wait for the dragged point to be at a frame that is NEITHER of the
+        // two the model started with: that is the commit landing.
+        std::vector<MidiClipEvent> after;
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            for (const MidiClipEvent& e : c.events)
+                if (e.type == MidiClipEvent::CC && e.data == 1
+                    && e.startFrame != 3000 && e.startFrame != 9000) {
+                    after = c.events;
+                    return true;
+                }
+            return false;
+        }));
+        int points = 0;
+        Frame movedPre = -1;
+        for (const MidiClipEvent& e : after)
+            if (e.type == MidiClipEvent::CC && e.data == 1) {
+                points++;
+                if (e.startFrame != 9000) movedPre = e.startFrame;
+            }
+        CHECK(points == 2);              // no staircase of new points
+        CHECK(movedPre > 3000);          // the grabbed point moved, in time
+        Shot("roll-cc-drag");
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetLaneCc(-1);
+            win->Unlock();
+        }
+    }
+
+    // --- B. The region moves under the roll --------------------------------
+    // The timeline drags a MIDI region with MoveMidiClipCommand (the id stays,
+    // only startFrame moves) and posts kMsgReloadEngine. The roll must re-point
+    // (its notes are clip-relative) and its next gesture must not write the old
+    // absolute position back into the model.
+    const Frame newStart = 48000;
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<MoveMidiClipCommand>(tid, cid, newStart),
+                       project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = roll->RegionStart() == newStart;
+        win->Unlock();
+        return ok;
+    }));
+    {
+        MidiClip c;
+        modelClip(&c);
+        const std::vector<MidiNote> shown = rollNotes();
+        CHECK(shown.size() == c.notes.size());   // still this region's notes
+    }
+    Shot("roll-region-moved");
+
+    // --- B2. A split trims the half; the roll must not grow it back ---------
+    const Frame halfLen = 24000;
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<SplitMidiClipCommand>(tid, cid,
+                                                              newStart + halfLen),
+                       project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = roll->RegionLength() == halfLen;
+        win->Unlock();
+        return ok;
+    }));
+    // A gesture inside the half: the region's length must stay the half's (the
+    // bug grew it back to the region's old length, swallowing the split).
+    dragNote(1000, 60.0f, 0.0f);
+    {
+        MidiClip c;
+        CHECK(WaitFor([&] {
+            MidiClip m2;
+            if (!modelClip(&m2)) return false;
+            c = m2;
+            return m2.notes.size() == 2 && m2.notes[0].startFrame != 0;
+        }));   // the gesture landed
+        CHECK(c.lengthFrames == halfLen);
+        CHECK(c.startFrame == newStart);
+    }
+    Shot("roll-after-split");
+
+    // --- C. Follow is the View menu's policy, both ways ---------------------
+    auto followOf = [&]() -> int {
+        int v = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            v = roll->Follow() ? 1 : 0;
+            win->Unlock();
+        }
+        return v;
+    };
+    auto followMarked = [&]() -> int {
+        int v = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "View") == 0 && it->Submenu())
+                            for (int32 j = 0; j < it->Submenu()->CountItems(); j++)
+                                if (BMenuItem* vi = it->Submenu()->ItemAt(j)) {
+                                    const char* vl = vi->Label();
+                                    if (vl && std::strcmp(vl, "Follow Playhead") == 0)
+                                        v = vi->IsMarked() ? 1 : 0;
+                                }
+                    }
+            win->Unlock();
+        }
+        return v;
+    };
+    CHECK(followOf() == 1);                  // opens following, like the menu
+    win->PostMessage(MSG_FOLLOW_TEST);
+    CHECK(WaitFor([&] { return followOf() == 0; }));
+    CHECK(followMarked() == 0);              // the mark agrees with the roll
+    win->PostMessage(MSG_FOLLOW_TEST);
+    CHECK(WaitFor([&] { return followOf() == 1; }));
+    CHECK(followMarked() == 1);
+
+    // --- H. The clipboard, from the docked editor ---------------------------
+    // The docked roll is a VIEW of the main window, so the menu bar claims
+    // Cmd-C first. Haiku skips the shortcut of a DISABLED item but still
+    // swallows the key, so there are two halves to check: the Edit menu's Copy
+    // is enabled when the EDITOR has a selection (not only when the arrangement
+    // has one), and the key then reaches the roll's clipboard and pastes back
+    // as a model edit.
+    {
+        // One note, selected, in the roll.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SelectAll();
+            win->Unlock();
+        }
+        bool copyEnabled = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "Edit") == 0 && it->Submenu())
+                            for (int32 j = 0; j < it->Submenu()->CountItems(); j++)
+                                if (BMenuItem* ei = it->Submenu()->ItemAt(j)) {
+                                    const char* el = ei->Label();
+                                    if (el && std::strcmp(el, "Copy") == 0)
+                                        copyEnabled = ei->IsEnabled();
+                                }
+                    }
+            win->Unlock();
+        }
+        CHECK(copyEnabled);
+        // The key itself: posted to the window, exactly as the keyboard sends
+        // it (the focus is the docked roll from WaitFor above).
+        {
+            BMessage key(B_KEY_DOWN);
+            key.AddString("bytes", "c");
+            key.AddInt32("modifiers", B_COMMAND_KEY);
+            win->PostMessage(&key);
+        }
+        bool haveClip = false;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            haveClip = !roll->ClipboardEmpty();
+            win->Unlock();
+            return haveClip;
+        }));
+        // Paste it: the model gains a note (the undo step is the proof the
+        // commit went through the stack, not around it).
+        const int notesBefore = (int)rollNotes().size();
+        {
+            BMessage key(B_KEY_DOWN);
+            key.AddString("bytes", "v");
+            key.AddInt32("modifiers", B_COMMAND_KEY);
+            win->PostMessage(&key);
+        }
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() > notesBefore;
+        }));
+        Shot("roll-clipboard");
+        win->PostMessage(MSG_UNDO_TEST);   // leave the region as it was
+        snooze(150000);
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() == notesBefore;
+        }));
+    }
+
+    // --- H2. Alt: a click toggles the selection, a DRAG duplicates ----------
+    // Both gestures share the Alt bits (on a PC keyboard Alt IS B_COMMAND_KEY,
+    // which used to mean only "toggle"), and which one it is depends on whether
+    // the pointer moves.
+    {
+        auto postMouse = [&](uint32 what, BPoint p, uint32 mods) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+            m.AddInt32("clicks", 1);
+            m.AddInt32("modifiers", mods);
+            m.AddPoint("where", p);
+            BMessenger(roll).SendMessage(&m);
+        };
+        // The Alt-click toggle: selected -> not selected, nothing committed.
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+        int selBefore = -1, notesBefore = 0;
+        MidiClip c0;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            selBefore = roll->SelectedCountForTest();
+            win->Unlock();
+            modelClip(&c0);
+            notesBefore = (int)c0.notes.size();
+            return selBefore > 0;
+        }));
+        float nx = 0.0f, ny = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const MidiNote n0 = roll->NoteForTest(0);
+            nx = roll->XForFrameForTest(n0.startFrame + 100);
+            ny = Themed(28.0f) + (float)(96 - n0.pitch) * Themed(12.0f)
+               + Themed(6.0f);
+            win->Unlock();
+        }
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const int s2 = roll->SelectedCountForTest();
+            win->Unlock();
+            return s2 == selBefore - 1;
+        }));
+        {
+            MidiClip c1;
+            modelClip(&c1);
+            CHECK((int)c1.notes.size() == notesBefore);   // a toggle is not an edit
+        }
+        Shot("roll-alt-click");
+
+        // The Alt-drag duplicate: the model gains a copy (and one undo takes it
+        // back, so it went through the stack).
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_MOVED, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            MidiClip c2;
+            if (!modelClip(&c2)) return false;
+            return (int)c2.notes.size() > notesBefore;
+        }));
+        Shot("roll-alt-drag");
+        win->PostMessage(MSG_UNDO_TEST);
+        CHECK(WaitFor([&] {
+            MidiClip c3;
+            if (!modelClip(&c3)) return false;
+            return (int)c3.notes.size() == notesBefore;
+        }));
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+    }
+
+    // --- D. Audition: a click on the keyboard column sounds -----------------
+    // The engine side cannot be heard by a test, so the engine counts the
+    // audition notes its callback actually RENDERS (Engine::
+    // AuditionNotesRendered). That is the end-to-end proof of the path the
+    // click takes: the view's post, MainWindow's engine, the graph's bus for
+    // the region's track, and the instrument render. It is also the regression
+    // check for the bug this test would have caught: Bus's hand-written move
+    // constructor dropped the reserved audition list, so the graph's bus had
+    // capacity 0 and every click was silently dropped.
+    {
+        const uint64_t before = win->AuditionNotesRendered();
+        const float kx = Themed(20.0f);            // inside the keyboard column
+        const float ky = Themed(28.0f) + (float)(96 - 60) * Themed(12.0f)
+                       + Themed(6.0f);             // pitch 60's row
+        BMessage d(B_MOUSE_DOWN);
+        d.AddInt32("buttons", 1);
+        d.AddInt32("clicks", 1);
+        d.AddPoint("where", BPoint(kx, ky));
+        BMessenger(roll).SendMessage(&d);
+        snooze(120000);
+        BMessage u(B_MOUSE_UP);
+        u.AddInt32("buttons", 0);
+        u.AddInt32("clicks", 1);
+        u.AddPoint("where", BPoint(kx, ky));
+        BMessenger(roll).SendMessage(&u);
+        CHECK(WaitFor([&] {
+            return win->AuditionNotesRendered() > before;
+        }));
+        std::printf("  audition: %llu notes rendered\n",
+                    (unsigned long long)win->AuditionNotesRendered());
+        Shot("roll-audition");
+        // Put the idle engine away (the test's own click raised it).
+        win->PostMessage(MSG_AUDITION_IDLE_TEST);
+        CHECK(WaitFor([&] { return !win->AuditionEngineUp(); }));
+    }
+
+    // --- The region is gone: the editor closes -----------------------------
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<RemoveMidiClipCommand>(tid, cid), project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool gone = win->FindView("roll") == nullptr;
+        win->Unlock();
+        return gone;
+    }));
+    Shot("roll-region-gone");
+
+    // Leave the project as the test found it (the region is already gone).
+    win->PostMessage(MSG_TOGGLE_DOCK);
+    snooze(150000);
+}
+
 // M7.1's sidechain picker (package 05). The picker is a BPopUpMenu, which is
 // modal and cannot be driven by a posted message, so what is driven here is
 // what its selection POSTS: the kMsgApplyFx snapshot, which must carry the
@@ -8615,6 +9218,7 @@ static int32 TestThread(void*) {
     TestWidgetKit(win);
     TestDialogVocabulary(win, project);   // the UX-shell dialog vocabulary
     TestDockedEditor(win, project, &stack);
+    TestRollModelSync(win, project, &stack);   // package 51: the roll vs the model
     TestShortcutsWindow(win);
     TestPreferences(win, project);   // M3.5: opens and puts itself away
     TestProjectSettings(win, project, stack);   // M3.6: applies and undoes

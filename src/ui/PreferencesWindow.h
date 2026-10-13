@@ -44,6 +44,7 @@ struct PrefsView {
     int         metronomeSound    = 0;      // 0 click, 1 beep, 2 wood block
     float       metronomeLevel    = 0.30f;  // 0..1
     bool        monitorInput      = false;
+    bool        previewNotes      = true;   // the MIDI editor's audition (51)
     bool        darkMode          = false;
     float       uiScale           = 0.0f;   // 0 = follow the system font
     std::string projectDir;
@@ -87,6 +88,7 @@ public:
     BMenuField*   SoundField()    const { return fSound; }
     BSlider*      LevelSlider()   const { return fLevel; }
     BCheckBox*    MonitorCheck()  const { return fMonitor; }
+    BCheckBox*    PreviewCheck()  const { return fPreview; }
     BCheckBox*    DarkCheck()     const { return fDark; }
     BMenuField*   ScaleField()    const { return fScale; }
     BTextControl* DirField()      const { return fDir; }
@@ -107,6 +109,7 @@ private:
     BSlider*      fLevel     = nullptr;
     BStringView*  fLevelText = nullptr;
     BCheckBox*    fMonitor   = nullptr;
+    BCheckBox*    fPreview   = nullptr;   // preview notes while editing
     BCheckBox*    fDark      = nullptr;
     BMenuField*   fScale     = nullptr;
     BTextControl* fDir       = nullptr;

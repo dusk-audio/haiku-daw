@@ -95,11 +95,26 @@ pitch-bend and the mod wheel are audible, live and on playback.
   on.
 - **Notes:** double-click a MIDI region to open the **piano roll**. Its tool
   palette (keys `1`–`7`) picks pointer, pencil, brush, eraser, scissors, glue
-  and velocity; the bottom lane shows velocity or *any* controller — pick the
-  number, and the caption names it where the name is known. The **MIDI** button
-  has the transforms — quantize (with grid, strength, swing and note ends),
-  humanize, legato, transpose, velocity — and `q` re-runs the last quantize.
-  Each transform is one undo step.
+  and velocity; the bottom lane shows velocity, **pitch bend**, or *any*
+  controller — pick the number, and the menu spells out what each one does
+  (the lanes a voice acts on today: mod wheel, volume, expression, pan, sustain;
+  the rest say "no effect yet"). Drag a point to move it; right-click one to
+  delete it, or use **Clear lane**. The **MIDI** button has the transforms —
+  quantize (with grid, strength, swing and note ends), humanize, legato,
+  transpose, velocity — and `q` re-runs the last quantize. Each transform is
+  one undo step.
+- **Piano-roll editing:** the grid field (key `g`) switches what edits snap to
+  — bar, 1/2 … 1/32, triplets, or Off; **Shift** is still free placement.
+  **Cmd-C/X/V/D** copy, cut, paste and duplicate notes (**Alt**-drag duplicates
+  under the pointer too), the arrows nudge a selection by a grid step, `+`/`-`
+  zoom about the playhead and `f` fits the region. The region's start and end
+  are drawn, and notes the region does not play are dimmed — widening the
+  region (drag its edge in the arrangement) brings them back. Clicking a key on
+  the keyboard column, drawing a note, or clicking a velocity lollipop
+  **sounds** the note through the track's instrument
+  (Preferences ▸ "Preview notes when editing MIDI" turns that off). The roll
+  follows the same playhead chase the arrangement does: View ▸ Follow Playhead
+  drives both.
 - **Normalize, Reverse, Strip Silence and Freeze** run in the background: the
   progress bar appears with a **Cancel**, the window stays usable while they
   work, and a cancelled job changes nothing.
@@ -159,9 +174,10 @@ pitch-bend and the mod wheel are audible, live and on playback.
 
 **File ▸ Preferences…** is where the session-shaping choices live: buffer size
 (taking effect at the next Play), default sample rate for *new* projects,
-count-in bars, the metronome's sound and level, monitor input, dark mode, the
-UI scale (applied at once; window sizes settle at the next launch), the folder
-a first Save starts in, and the autosave interval (0 turns it off). Audio
+count-in bars, the metronome's sound and level, monitor input, **preview notes
+while editing MIDI** (the piano roll's audition), dark mode, the UI scale
+(applied at once; window sizes settle at the next launch), the folder a first
+Save starts in, and the autosave interval (0 turns it off). Audio
 output still goes to the system default device — the row for it is disabled
 until output-device selection lands.
 

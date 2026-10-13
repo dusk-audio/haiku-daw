@@ -436,6 +436,14 @@ add_executable(snapgrid_tests tests/snapgrid_tests.cpp)
 target_link_libraries(snapgrid_tests PRIVATE daw_model)
 add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
 
+# Package 51: the piano roll's kit-free rules — the model-⇄-roll sync decision
+# (the stale-list bug), the commit gate, the region window, snapping in the
+# region's own space, the lane addressing (bend included), the CC lane's point
+# editing and the toolbar's layout.
+add_executable(rolledit_tests tests/rolledit_tests.cpp)
+target_link_libraries(rolledit_tests PRIVATE daw_model)
+add_test(NAME rolledit_tests COMMAND rolledit_tests)
+
 # The arrange editing commands M2.1-2.3 add: Glue's two joins, the slip edit.
 add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
 target_link_libraries(arrange_cmd_tests PRIVATE daw_model)

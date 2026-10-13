@@ -245,6 +245,22 @@ inline rgb_color MeterColor(float level) {
     return Rgb(52, 199, 89);                            // green #34c759
 }
 
+// A note's fill colour in the piano roll: cool (blue) when soft, hot (red)
+// when loud — the velocity IS the note's colour, which is information, not
+// chrome, so like MeterColor it is the same in both modes. Here rather than in
+// PianoRoll.cpp so the one place that maps data to colour also holds this one.
+inline rgb_color VelHeat(int vel) {
+    float t = vel / 127.0f;
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    float r, g, b;
+    if (t < 0.25f)      { float u = t / 0.25f;          r = 40;           g = 120 + 90 * u;  b = 235; }
+    else if (t < 0.5f)  { float u = (t - 0.25f) / 0.25f; r = 40;          g = 210;           b = 235 - 175 * u; }
+    else if (t < 0.75f) { float u = (t - 0.5f) / 0.25f;  r = 40 + 215 * u; g = 210;           b = 60; }
+    else                { float u = (t - 0.75f) / 0.25f; r = 255;         g = 210 - 155 * u; b = 60 - 20 * u; }
+    return Rgb((uint8)r, (uint8)g, (uint8)b);
+}
+
 // --- tokens --------------------------------------------------------------
 // The names every call site already uses. What they return is the active
 // theme's value for that role.

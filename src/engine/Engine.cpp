@@ -527,7 +527,7 @@ VoiceExpression Engine::Graph::LiveExpression() const {
 
 void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames) {
     fLiveNotes.clear();
-    for (Bus& b : fBuses) b.liveNotes.clear();
+    for (Bus& b : fBuses) { b.liveNotes.clear(); b.auditionNotes.clear(); }
 
     // Advance the live bend phase by the block just elapsed, at the ratio it was
     // rendered with. A note-on below is then stamped with this value and the
@@ -537,11 +537,67 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames)
     fLiveBendPhase += ((double)fLiveBendRatio - 1.0) * (double)frames;
 
     IMidiInput* in = e.fLiveMidi.load(std::memory_order_relaxed);
-    if (!in) {                       // monitoring off: release every voice
-        for (LiveVoice& v : fVoices) v.active = false;
-        return;
+    if (!in) {                       // monitoring off: release the LIVE voices
+        // (An audition voice is not the keyboard's: the roll's clicks keep
+        // sounding while nothing is armed, so only non-audition voices die.)
+        for (LiveVoice& v : fVoices)
+            if (!v.audition) v.active = false;
+    } else {
+        DrainLiveInput(in, blockStart);
     }
+    // The roll's clicks ride their own ring (package 51), so they are drained
+    // whether or not a keyboard is monitoring.
+    DrainAudition(e, blockStart);
 
+    // Rebuild the note list: a held voice sustains (huge length); a releasing
+    // voice ends at its note-off so the Synth rings out its release tail. Free
+    // voices whose tail is long past (a generous fixed window; the pool is small).
+    const Frame kHeld = (Frame)(3600.0f * fOutputRate);   // "still down"
+    const Frame kTail = (Frame)(4.0f * fOutputRate);      // release lingers <= 4 s
+    for (LiveVoice& v : fVoices) {
+        if (!v.active) continue;
+        // Reap a released voice once its tail has passed. `blockStart < v.off`
+        // means the playhead jumped backward (loop) — reap it too so it can't
+        // linger forever.
+        if (v.releasing && (blockStart < v.off || blockStart - v.off > kTail)) {
+            v.active = false; continue;
+        }
+        Frame len = v.releasing ? (v.off - v.start) : kHeld;
+        if (len < 1) len = 1;
+        MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
+        // The bend phase this voice was born with: the render subtracts it from
+        // the block's, so the wheel moves the note from where it is.
+        note.bendPhaseFrames = v.bend;
+        fLiveNotes.push_back(note);
+        if (v.audition) {
+            // An audition voice belongs to ONE bus: the region's own track, as
+            // THIS graph was built for it. No route matching, and no armed
+            // track needed.
+            for (Bus& b : fBuses)
+                if (b.id == fAuditionTrack
+                    && b.auditionNotes.size() < b.auditionNotes.capacity())
+                    b.auditionNotes.push_back(note);
+            continue;
+        }
+        // Hand the voice to each monitored bus whose route accepts it, so two
+        // keyboards drive two tracks instead of both tracks hearing everything.
+        // Reserved at build, so these push_backs never allocate on the RT thread.
+        MidiEvent probe;
+        probe.channel = v.channel;
+        probe.source  = v.source;
+        for (Bus& b : fBuses) {
+            if (!b.liveMonitor) continue;
+            if (!RouteAccepts(b.inEndpoint.load(std::memory_order_relaxed),
+                              b.inChannel.load(std::memory_order_relaxed), probe))
+                continue;
+            if (b.liveNotes.size() < b.liveNotes.capacity())
+                b.liveNotes.push_back(note);
+        }
+    }
+}
+
+// The live keyboard's drain: one event at a time, straight into the voice pool.
+void Engine::Graph::DrainLiveInput(IMidiInput* in, Frame blockStart) {
     // Drain events (RT-safe: stack buffer, lock-free ring). A note-on takes a
     // free voice (or steals the oldest); a note-off starts that voice's release;
     // CC64 defers that release instead, and the wheel/pedal reach the voices
@@ -578,75 +634,85 @@ void Engine::Graph::UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames)
                             v.releasing = true;
                             v.off       = blockStart;
                         }
-                int slot = -1;
-                for (int k = 0; k < kMaxLiveVoices; k++)
-                    if (!fVoices[k].active) { slot = k; break; }
-                if (slot < 0) {                       // steal the oldest voice
-                    slot = 0;
-                    for (int k = 1; k < kMaxLiveVoices; k++)
-                        if (fVoices[k].start < fVoices[slot].start) slot = k;
-                }
-                fVoices[slot] = LiveVoice{ true, false, false, evt.data1, evt.data2,
-                                           evt.channel, blockStart, 0, evt.source,
-                                           fLiveBendPhase };
+                TakeVoice(evt.data1, evt.data2, evt.channel, evt.source, blockStart,
+                          false);
             } else if (evt.IsNoteOff()) {
                 // Match the source too: the same key on a second keyboard is a
                 // different voice, and letting its note-off close this one would
                 // cut the first keyboard's note short.
-                for (int k = 0; k < kMaxLiveVoices; k++)
-                    if (fVoices[k].active && !fVoices[k].releasing
-                        && fVoices[k].pitch == evt.data1
-                        && fVoices[k].channel == evt.channel
-                        && fVoices[k].source == evt.source) {
-                        // CC64 down takes the release instead of the key: the
-                        // pedal decides when this note stops (Sustain.h).
-                        if (fSustain.DeferNoteOff(VoiceKey(evt.channel, evt.data1)))
-                            fVoices[k].sustained = true;
-                        else {
-                            fVoices[k].releasing = true;
-                            fVoices[k].off       = blockStart;
-                        }
-                        break;
+                ReleaseVoice(evt.data1, evt.channel, evt.source, blockStart);
+            }
+        }
+    }
+}
+
+// The roll's clicks (package 51): the same voice pool, but the note-on names
+// the bus it renders through instead of a source endpoint.
+void Engine::Graph::DrainAudition(Engine& e, Frame blockStart) {
+    MidiEvent ev[16];
+    std::size_t n;
+    while ((n = e.fAuditionRing.Read(ev, 16)) > 0) {
+        for (std::size_t i = 0; i < n; i++) {
+            const MidiEvent& evt = ev[i];
+            if (evt.IsNoteOn()) {
+                // A re-strike of the same key is a fresh voice, not a doubling:
+                // a click repeated on the same pitch must not stack voices.
+                for (LiveVoice& v : fVoices)
+                    if (v.active && !v.releasing && v.audition
+                        && v.pitch == evt.data1) {
+                        v.releasing = true;
+                        v.off       = blockStart;
+                    }
+                TakeVoice(evt.data1, evt.data2, 0, 0, blockStart, true);
+            } else if (evt.IsNoteOff()) {
+                for (LiveVoice& v : fVoices)
+                    if (v.active && !v.releasing && v.audition
+                        && v.pitch == evt.data1) {
+                        v.releasing = true;
+                        v.off       = blockStart;
                     }
             }
         }
     }
+}
 
-    // Rebuild the note list: a held voice sustains (huge length); a releasing
-    // voice ends at its note-off so the Synth rings out its release tail. Free
-    // voices whose tail is long past (a generous fixed window; the pool is small).
-    const Frame kHeld = (Frame)(3600.0f * fOutputRate);   // "still down"
-    const Frame kTail = (Frame)(4.0f * fOutputRate);      // release lingers <= 4 s
-    for (LiveVoice& v : fVoices) {
-        if (!v.active) continue;
-        // Reap a released voice once its tail has passed. `blockStart < v.off`
-        // means the playhead jumped backward (loop) — reap it too so it can't
-        // linger forever.
-        if (v.releasing && (blockStart < v.off || blockStart - v.off > kTail)) {
-            v.active = false; continue;
-        }
-        Frame len = v.releasing ? (v.off - v.start) : kHeld;
-        if (len < 1) len = 1;
-        MidiNote note{ (int)v.pitch, (int)v.vel, v.start, len };
-        // The bend phase this voice was born with: the render subtracts it from
-        // the block's, so the wheel moves the note from where it is.
-        note.bendPhaseFrames = v.bend;
-        fLiveNotes.push_back(note);
-        // Hand the voice to each monitored bus whose route accepts it, so two
-        // keyboards drive two tracks instead of both tracks hearing everything.
-        // Reserved at build, so these push_backs never allocate on the RT thread.
-        MidiEvent probe;
-        probe.channel = v.channel;
-        probe.source  = v.source;
-        for (Bus& b : fBuses) {
-            if (!b.liveMonitor) continue;
-            if (!RouteAccepts(b.inEndpoint.load(std::memory_order_relaxed),
-                              b.inChannel.load(std::memory_order_relaxed), probe))
-                continue;
-            if (b.liveNotes.size() < b.liveNotes.capacity())
-                b.liveNotes.push_back(note);
-        }
+// Claim a free voice for a note-on (or steal the oldest). One place, so the
+// live keyboard's and the audition's note-ons cannot drift apart.
+void Engine::Graph::TakeVoice(int pitch, int velocity, int channel, int32_t source,
+                              Frame blockStart, bool audition) {
+    int slot = -1;
+    for (int k = 0; k < kMaxLiveVoices; k++)
+        if (!fVoices[k].active) { slot = k; break; }
+    if (slot < 0) {                       // steal the oldest voice
+        slot = 0;
+        for (int k = 1; k < kMaxLiveVoices; k++)
+            if (fVoices[k].start < fVoices[slot].start) slot = k;
     }
+    fVoices[slot] = LiveVoice{ true, false, false, (uint8_t)pitch, (uint8_t)velocity,
+                               (uint8_t)channel, blockStart, 0, source,
+                               fLiveBendPhase, audition };
+}
+
+// Match the source too: the same key on a second keyboard is a different voice,
+// and letting its note-off close this one would cut the first keyboard's note
+// short.
+void Engine::Graph::ReleaseVoice(int pitch, int channel, int32_t source,
+                                 Frame blockStart) {
+    for (int k = 0; k < kMaxLiveVoices; k++)
+        if (fVoices[k].active && !fVoices[k].releasing
+            && fVoices[k].pitch == pitch
+            && fVoices[k].channel == channel
+            && fVoices[k].source == source) {
+            // CC64 down takes the release instead of the key: the pedal decides
+            // when this note stops (Sustain.h).
+            if (fSustain.DeferNoteOff(VoiceKey(channel, pitch)))
+                fVoices[k].sustained = true;
+            else {
+                fVoices[k].releasing = true;
+                fVoices[k].off       = blockStart;
+            }
+            break;
+        }
 }
 
 // Monitor-only: render just the live keyboard voices through each armed MIDI
@@ -664,11 +730,21 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
     float pl = 0.0f, pr = 0.0f;
     for (size_t idx = 0; idx < fBuses.size(); idx++) {
         Bus& b = fBuses[idx];
-        if (!b.liveMonitor || b.liveNotes.empty()) continue;
+        const bool live = b.liveMonitor && !b.liveNotes.empty();
+        const bool aud  = !b.auditionNotes.empty();   // the roll's clicks (51)
+        if (!live && !aud) continue;
         float* nb = fNodeBufs[idx].data();
         std::memset(nb, 0, nfloats * sizeof(float));
-        if (b.instrument)
-            b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f, liveExpr);
+        if (b.instrument) {
+            if (live)
+                b.instrument->Render(b.liveNotes, nb, frames, bs, 1.0f, liveExpr);
+            if (aud) {
+                b.instrument->Render(b.auditionNotes, nb, frames, bs, 1.0f,
+                                     liveExpr);
+                e.fAuditionRendered.fetch_add(b.auditionNotes.size(),
+                                              std::memory_order_relaxed);
+            }
+        }
         const float mgl = b.midiGainL.load(std::memory_order_relaxed);
         const float mgr = b.midiGainR.load(std::memory_order_relaxed);
         for (size_t i = 0; i < frames; i++) {
@@ -832,7 +908,8 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
         for (TrackStream* s : b.streams)    // audio leaves (fader is per-stream)
             s->Mix(mb, frames, blockStart, wraps);
         const bool live = b.liveMonitor && !b.liveNotes.empty();
-        if (!b.notes.empty() || live) {     // MIDI: render dry then fader
+        const bool aud  = !b.auditionNotes.empty();   // the roll's clicks (51)
+        if (!b.notes.empty() || live || aud) {   // MIDI: render dry then fader
             if (!b.notes.empty()) {
                 // CC7 (volume) x CC11 (expression) channel gain, placed by the
                 // CC10 pan, per block. Live-monitor notes below stay centered at
@@ -856,14 +933,23 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
                 b.chanL = cgl;
                 b.chanR = cgr;
             }
-            if (live) {                      // live keyboard through this voice
+            if (live || aud) {               // live keyboard / audition clicks
                 // Live notes carry the expression from the keyboard: the same
                 // path a recorded lane takes, built from what arrived instead of
-                // from the event list.
+                // from the event list. The audition's clicks are the same kind
+                // of note (a key pressed right now), so they take it too.
                 const VoiceExpression liveExpr = LiveExpression();
-                if (b.instrument)
-                    b.instrument->Render(b.liveNotes, mb, frames, blockStart, 1.0f,
-                                         liveExpr);
+                if (b.instrument) {
+                    if (live)
+                        b.instrument->Render(b.liveNotes, mb, frames, blockStart,
+                                             1.0f, liveExpr);
+                    if (aud) {
+                        b.instrument->Render(b.auditionNotes, mb, frames,
+                                             blockStart, 1.0f, liveExpr);
+                        e.fAuditionRendered.fetch_add(b.auditionNotes.size(),
+                                                      std::memory_order_relaxed);
+                    }
+                }
             }
             // The node's own trim/polarity ride along with its fader (M3.4).
             const float tp = b.trim.load(std::memory_order_relaxed)
@@ -1199,6 +1285,7 @@ void Engine::RequestLoad(const Project& project, Frame startFrame,
     req->minEndFrame   = minEndFrame;
     req->mode          = mode;
     req->monitorOnly   = fMonitorOnly.load(std::memory_order_relaxed);
+    req->auditionTrack = fAuditionTrack.load(std::memory_order_relaxed);
     req->gen           = gen;
     req->outputRate    = fOutputRate;
     req->playerBufferBytes = fPlayerBufferBytes;
@@ -1297,6 +1384,17 @@ void Engine::DetachGraph() {
     fRetireGen.store(fCallbackGen.load(std::memory_order_acquire),
                      std::memory_order_relaxed);
     fGraphs->Detach();
+}
+
+// The piano roll's audition (package 51). UI thread -> RT ring, exactly like
+// the live input's handoff: no lock, no allocation, and a full ring drops the
+// event rather than blocking the window thread.
+void Engine::AuditionNote(int pitch, int velocity, bool on) {
+    if (pitch < 0 || pitch > 127) return;
+    MidiEvent e = on ? MidiEvent::NoteOn(0, (uint8_t)pitch,
+                                         (uint8_t)std::clamp(velocity, 1, 127))
+                     : MidiEvent::NoteOff(0, (uint8_t)pitch, 0);
+    fAuditionRing.Push(e);
 }
 
 void Engine::Start() {
@@ -1917,8 +2015,15 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // voices need no sustain logic of their own. Absolute-timeline frames.
         std::vector<MidiNote> notes = t.CollectPlaybackNotes();
         const bool monitor = t.armed || t.inputMonitor;   // live input synth
+        // The roll's audition target (package 51) gets a bus even when its
+        // region is empty or silent: a click on a bar with no notes yet has to
+        // sound through the same instrument the notes will.
+        const bool audition = (req.auditionTrack == t.id);
+        if (audition) g.fAuditionTrack = t.id;   // what the RT routing reads
         const bool audible = !t.muted && (!anySolo || t.soloed || t.soloSafe);
-        if ((notes.empty() && !monitor) || (!audible && !monitor))
+        if (!audible && !monitor)
+            continue;   // a muted track stays silent, clicks included
+        if (notes.empty() && !monitor && !audition)
             continue;
         Graph::Bus b;
         b.id    = t.id;
@@ -1941,6 +2046,7 @@ std::unique_ptr<Engine::Graph> Engine::BuildGraph(const BuildRequest& req,
         // UpdateLiveVoices fills it on the RT thread every block and must never
         // allocate there.
         b.liveNotes.reserve(Graph::kMaxLiveVoices);
+        b.auditionNotes.reserve(Graph::kMaxLiveVoices);   // the roll's clicks (51)
         b.audible.store(audible || monitor, std::memory_order_relaxed);  // monitor overrides mute/solo
         float mgl, mgr; EqualPowerGains(t.gain, t.pan, &mgl, &mgr);
         b.midiGainL.store(mgl, std::memory_order_relaxed);

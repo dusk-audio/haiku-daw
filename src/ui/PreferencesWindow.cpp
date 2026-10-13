@@ -192,6 +192,12 @@ void PreferencesWindow::BuildRows(BView* root) {
 
     fMonitor = new DawCheckBox("mi", "Monitor the input while recording",
                                nullptr);
+    // The MIDI editor's audition (package 51). The roll always asks for it;
+    // MainWindow is where this decides (EnsureAuditionEngine), so the switch
+    // silences the clicks without the editor having to know. Like every other
+    // row here it carries no message: a setting until Apply.
+    fPreview = new DawCheckBox("pn", "Preview notes when editing MIDI",
+                               nullptr);
     fDark    = new DawCheckBox("dm", "Dark mode (this app's windows only)",
                                nullptr);
     fScale   = new DawMenuField("us", "UI scale:", scaleMenu);
@@ -235,6 +241,7 @@ void PreferencesWindow::BuildRows(BView* root) {
             .Add(fLevelText)
         .End()
         .Add(fMonitor)
+        .Add(fPreview)
         .Add(fDark)
         .Add(fScale)
         // The scale IS applied now (the whole process re-lays out at it); what
@@ -270,6 +277,7 @@ PrefsView PreferencesWindow::Values() const {
                                    kMetronomeSoundCount);
     v.metronomeLevel = fLevel ? (float)fLevel->Value() / 100.0f : 0.30f;
     v.monitorInput = fMonitor != nullptr && fMonitor->Value() == B_CONTROL_ON;
+    v.previewNotes = fPreview != nullptr && fPreview->Value() == B_CONTROL_ON;
     v.darkMode     = fDark != nullptr && fDark->Value() == B_CONTROL_ON;
     v.uiScale = kUiScaleChoices[
         MarkedIndex(fScale ? fScale->Menu() : nullptr, kUiScaleChoiceCount)];
@@ -307,6 +315,8 @@ void PreferencesWindow::SetValues(const PrefsView& v) {
     }
     if (fMonitor) fMonitor->SetValue(v.monitorInput ? B_CONTROL_ON
                                                     : B_CONTROL_OFF);
+    if (fPreview) fPreview->SetValue(v.previewNotes ? B_CONTROL_ON
+                                                    : B_CONTROL_OFF);
     if (fDark)    fDark->SetValue(v.darkMode ? B_CONTROL_ON : B_CONTROL_OFF);
     if (fScale) mark(fScale->Menu(), IndexInFloatSet(v.uiScale,
                                                      kUiScaleChoices,
@@ -340,6 +350,7 @@ void PreferencesWindow::NotifyChanged() {
     m.AddInt32("metsnd", v.metronomeSound);
     m.AddFloat("metlvl", v.metronomeLevel);
     m.AddBool("monin", v.monitorInput);
+    m.AddBool("preview", v.previewNotes);
     m.AddBool("dark", v.darkMode);
     m.AddFloat("uiscale", v.uiScale);
     m.AddString("projdir", v.projectDir.c_str());

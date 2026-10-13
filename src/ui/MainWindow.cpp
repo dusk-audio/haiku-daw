@@ -297,24 +297,9 @@ static void AddMixerStripsPayload(BMessage& m, const Project& p,
     m.AddFloat("mg", p.masterGain);
 }
 
-// Decode a posted note list (PianoRoll -> here). kMsgApplyNotes and
-// kMsgApplyMidiOp carry the same np/nv/ns/nl shape; missing fields fall back to
-// the defaults the roll always writes, and the frames stay clip-relative.
-static std::vector<MidiNote> ParseNoteList(const BMessage* msg) {
-    std::vector<MidiNote> notes;
-    int32 pitch = 0;
-    for (int32 i = 0; msg->FindInt32("np", i, &pitch) == B_OK; i++) {
-        MidiNote n;
-        int32 vel = 100; int64 st = 0, len = 1;
-        msg->FindInt32("nv", i, &vel);
-        msg->FindInt64("ns", i, &st);
-        msg->FindInt64("nl", i, &len);
-        n.pitch = pitch; n.velocity = vel;
-        n.startFrame = (Frame)st; n.lengthFrames = (Frame)len;
-        notes.push_back(n);
-    }
-    return notes;
-}
+// The posted note list (PianoRoll -> here) is decoded by PianoRoll.h's
+// ParseRollNotes: one definition of the wire shape, next to the message ids it
+// belongs to (the roll decodes MainWindow's region push with the same code).
 
 static constexpr float kTransportH = kDesignTransportH;   // design px
 static constexpr bigtime_t kPulseInterval = 16000;   // ~60 Hz, microseconds
@@ -748,6 +733,7 @@ MainWindow::~MainWindow() {
     delete fPulse;
     delete fAutosave;
     delete fTitlePoll;
+    delete fAuditionIdle;   // the audition's idle stopper (package 51)
     delete fSavePanel;
     delete fOpenPanel;
     delete fExportPanel;
@@ -836,6 +822,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // marker edit posts this same message, so one funnel keeps the
             // list honest (a list that misses an edit is stale content).
             PushMarkers();
+            // ... and the MIDI editor: anything that posts a refresh may have
+            // been the model edit a roll's snapshot is now too old to commit
+            // (package 51).
+            RefreshRolls();
             break;
         }
         case kMsgCycleAuto:        // inspector Auto button -> cycle timeline mode
@@ -844,7 +834,25 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case kMsgRollOpened: {     // a piano roll opened; remember it for the playhead
             BMessenger m;
-            if (msg->FindMessenger("m", &m) == B_OK) fRollMsgr = m;
+            if (msg->FindMessenger("m", &m) == B_OK) {
+                // One popped-out editor at a time, the fresh-messenger rule the
+                // other single-instance windows follow: the window that was
+                // registered before this one would stop receiving pushes (only
+                // one messenger is kept) and would then have every later commit
+                // refused, silently. Closing it keeps one roll, always synced.
+                if (fRollMsgr.IsValid() && fRollMsgr != m)
+                    fRollMsgr.SendMessage(B_QUIT_REQUESTED);
+                fRollMsgr = m;
+            }
+            // Which region it opened on: the window names it, because the push
+            // below has to say what the roll is looking at (package 51).
+            int64 tid = 0, cid = 0;
+            if (msg->FindInt64("track", &tid) == B_OK) fRollTrack = (TrackId)tid;
+            if (msg->FindInt64("clip", &cid) == B_OK)  fRollClip  = (ClipId)cid;
+            // A roll that just opened must be told the region's state and the
+            // follow policy before anything else reaches it (package 51).
+            RefreshRolls(true);
+            PushRollFollow();
             break;
         }
         case kMsgSeek:
@@ -1055,6 +1063,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (msg->FindInt32("metsnd", &i)  == B_OK) v.metronomeSound = i;
             if (msg->FindFloat("metlvl", &f)  == B_OK) v.metronomeLevel = f;
             if (msg->FindBool("monin", &b)    == B_OK) v.monitorInput = b;
+            if (msg->FindBool("preview", &b)  == B_OK) v.previewNotes = b;
             if (msg->FindBool("dark", &b)     == B_OK) v.darkMode = b;
             if (msg->FindFloat("uiscale", &f) == B_OK) v.uiScale = f;
             if (msg->FindString("projdir", &s) == B_OK && s) v.projectDir = s;
@@ -1070,6 +1079,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
             const bool on = !(fFollowItem && fFollowItem->IsMarked());
             if (fFollowItem) fFollowItem->SetMarked(on);
             fTimeline->SetFollow(on);
+            // One policy, every view (package 51): the roll's follow used to be
+            // a hard-coded true the menu could not switch off.
+            PushRollFollow();
             break;
         }
         case kMsgTransportToggle:   // spacebar
@@ -1465,15 +1477,34 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgApplyNotes: {
             // A PianoRoll posts one region's edited note list (clip-relative).
             // Undoable via SetMidiClipNotesCommand (one step per gesture).
-            int64 tid = 0, cid = 0;
+            //
+            // Package 51: the message names the stack serial its snapshot was
+            // based on ("base"). A roll that missed a change (an undo landed
+            // while its gesture was in flight) has a snapshot the model no
+            // longer matches, and writing it would silently replace that
+            // change — the stale-list bug. Such a commit is refused, and the
+            // roll is pushed the truth instead (RefreshRolls below).
+            int64 tid = 0, cid = 0, base = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
+            // A hosted roll always names its base (it is pushed the moment it
+            // opens); one that never arrived — a test harness building a view
+            // itself — has none, and keeps the pre-51 behaviour.
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
+                RefreshRolls(true);
+                break;
+            }
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
-                    (TrackId)tid, (ClipId)cid, ParseNoteList(msg)), *fProject);
+                if (fStack->Execute(std::make_unique<SetMidiClipNotesCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollNotes(msg)),
+                        *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
+            RefreshRolls(true);   // the roll re-reads what the model now has
             break;
         }
         case kMsgApplyMidiOp: {
@@ -1481,55 +1512,51 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // transpose / velocity) on its snapshot and posted the result. The
             // command only records it -- see MidiOps.h for why the parameters
             // do not travel -- and names the undo step after the transform.
-            int64 tid = 0, cid = 0; int32 op = 0;
+            int64 tid = 0, cid = 0, base = 0; int32 op = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
             msg->FindInt32("op", &op);
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
+                RefreshRolls(true);   // the same gate as above
+                break;
+            }
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                fStack->Execute(std::make_unique<ApplyMidiOpCommand>(
-                    (TrackId)tid, (ClipId)cid, ParseNoteList(msg),
-                    MidiOpName((MidiOp)op)), *fProject);
+                if (fStack->Execute(std::make_unique<ApplyMidiOpCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollNotes(msg),
+                        MidiOpName((MidiOp)op)), *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
+            RefreshRolls(true);
             break;
         }
         case kMsgApplyEvents: {
-            // The piano roll's CC lane posts one region's controller list.
+            // The piano roll's CC/bend lane posts one region's event list.
             // Undoable via SetMidiClipEventsCommand, which leaves notes alone.
-            int64 tid = 0, cid = 0;
+            int64 tid = 0, cid = 0, base = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
+                RefreshRolls(true);
+                break;
+            }
             Track* tr = fProject->FindTrack((TrackId)tid);
             if (tr && tr->FindMidiClip((ClipId)cid)) {
-                std::vector<MidiClipEvent> events;
-                int32 type = 0;
-                for (int32 i = 0; msg->FindInt32("et", i, &type) == B_OK; i++) {
-                    // Every field must be present and in range. A partial or
-                    // out-of-range event would land as a CC0 at frame 0 — which
-                    // no lane draws, so it would be invisible in the editor yet
-                    // still saved into the project and written to any SMF
-                    // export. Drop it instead of persisting a ghost.
-                    int32 data = 0, val = 0; int64 st = 0;
-                    if (msg->FindInt32("ed", i, &data) != B_OK) continue;
-                    if (msg->FindInt32("ev", i, &val)  != B_OK) continue;
-                    if (msg->FindInt64("es", i, &st)   != B_OK) continue;
-                    if (type < MidiClipEvent::CC
-                        || type > MidiClipEvent::ChannelPressure) continue;
-                    if (data < 0 || data > 127) continue;
-                    const int32 vmax =
-                        (type == MidiClipEvent::PitchBend) ? 16383 : 127;
-                    if (val < 0 || val > vmax) continue;
-                    if (st < 0) continue;      // clip-relative; negative is junk
-                    MidiClipEvent e;
-                    e.type = type; e.data = data; e.value = val;
-                    e.startFrame = (Frame)st;
-                    events.push_back(e);
-                }
-                fStack->Execute(std::make_unique<SetMidiClipEventsCommand>(
-                    (TrackId)tid, (ClipId)cid, std::move(events)), *fProject);
+                // Every field is validated by ParseRollEvents: a partial or
+                // out-of-range event would land as a CC0 at frame 0 — invisible
+                // in the editor yet still saved and exported.
+                if (fStack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                        (TrackId)tid, (ClipId)cid, ParseRollEvents(msg)),
+                        *fProject))
+                    RollCommitAccepted(fRollGate, (uint64_t)base,
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
+            RefreshRolls(true);
             break;
         }
         case kMsgRenameTrack: {
@@ -1659,6 +1686,24 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case kMsgReloadEngine:   // clip/fade edit: rebuild so it takes effect live
             fTransportCtl.ReloadActiveEngine();
+            // A region drag or split posts ONLY this message, so it is also
+            // where an open roll hears that its clip moved or changed shape
+            // (package 51: the roll held the open-time start and length).
+            RefreshRolls(true);
+            break;
+        case kMsgRollAudition:   // the MIDI editor's clicks (package 51)
+            HandleRollAudition(msg);
+            break;
+        case MSG_AUDITION_IDLE:  // the clicks stopped: release the idle engine
+            delete fAuditionIdle;
+            fAuditionIdle = nullptr;
+            if (fAuditionHeld > 0) {
+                // A key is still down in the editor: stopping now would reset
+                // the voice mid-note. Look again later.
+                StartAuditionIdleTimer();
+                break;
+            }
+            StopAuditionEngine();
             break;
         case kMsgFxParamCommit: {
             // A native plugin editor's committed gesture: the values it already
@@ -1932,6 +1977,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_ZOOMFIT:
+            // "Fit" means fit what is focused: with the docked MIDI editor
+            // holding the focus, F fits the REGION (package 51) — the View menu's
+            // shortcut is claimed by the menu bar before any view sees the key.
+            if (PianoRollView* roll = FocusedRoll()) { roll->ZoomToFitRegion(); break; }
             fTimeline->ZoomToFit();
             break;
         case MSG_ABOUT: {
@@ -1977,6 +2026,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_TITLE:
             UpdateTitle();   // cheap; SetTitle only fires on an actual change
             ExpireTransportStatus();   // a job message older than its hold goes
+            // The same 2 Hz poll is the backstop for a roll edit the window
+            // never hears about (the timeline commits straight from a gesture):
+            // with the serial unchanged this is a comparison and nothing else
+            // (package 51). RefreshRolls also carries the follow push, so a
+            // roll opened before the menu item existed still agrees with it.
+            RefreshRolls();
             break;
         case MSG_BROWSER:
             // The docked page is the browser's home now (T2); Pop out in the
@@ -2068,6 +2123,9 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTimeline->Invalidate();
                 UpdateEditMenu();
                 UpdateTitle();
+                // ... and the MIDI editor: the undo rewrote the region its
+                // snapshot shows (package 51 — this was the stale-list bug).
+                RefreshRolls(true);
             }
             break;
         case MSG_EDIT_REDO:
@@ -2080,30 +2138,48 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTimeline->Invalidate();
                 UpdateEditMenu();
                 UpdateTitle();
+                RefreshRolls(true);
             }
             break;
         // The Edit menu (M2.4): the timeline owns the range and the clipboard.
+        // With the DOCKED piano roll focused they belong to the roll instead
+        // (package 51): the roll is a view of this window, so the menu bar's
+        // shortcuts get first refusal, and without this a Cmd-C in the editor
+        // silently copied the arrangement's clips. (A popped-out roll is its
+        // own window with no menu bar: its KeyDown handles them itself.)
         case MSG_EDIT_PASTE:
+            if (PianoRollView* roll = FocusedRoll()) { roll->PasteClipboard(); break; }
             fTimeline->PasteAtPlayhead();
             UpdateEditMenu();
             break;
         case MSG_EDIT_CUT:
+            if (PianoRollView* roll = FocusedRoll()) {
+                roll->CopySelection();
+                roll->DeleteSelection();
+                break;
+            }
             fTimeline->RangeCut();
             UpdateEditMenu();
             break;
         case MSG_EDIT_COPY:
+            if (PianoRollView* roll = FocusedRoll()) { roll->CopySelection(); break; }
             fTimeline->RangeCopy();
             UpdateEditMenu();
             break;
+        // (Edit > Delete carries no shortcut — Del is the view's own key — so
+        // with the docked roll focused the key already reaches the roll and
+        // this handler stays the timeline's.)
         case MSG_EDIT_DELETE:
             fTimeline->RangeDelete();
             UpdateEditMenu();
             break;
         case MSG_EDIT_SELECT_ALL:
+            if (PianoRollView* roll = FocusedRoll()) { roll->SelectAll(); break; }
             fTimeline->SelectAllClips();
             UpdateEditMenu();
             break;
         case MSG_EDIT_DUPLICATE:
+            if (PianoRollView* roll = FocusedRoll()) { roll->DuplicateSelection(); break; }
             fTimeline->DuplicateSelection();
             UpdateEditMenu();
             break;
@@ -2886,6 +2962,10 @@ void MainWindow::OpenDockedEditor(TrackId track, ClipId clip) {
     SetDockShown(true);
     fDockRoll->MakeFocus(true);
     PushRollPlayhead(fProject->transport.playhead);
+    // The new view's snapshot starts from the model, but it still needs the
+    // stack serial it is based on, and the follow policy (package 51).
+    RefreshRolls(true);
+    PushRollFollow();
 }
 
 // Pop out: the page that is showing becomes its own window, and the dock goes
@@ -2925,17 +3005,24 @@ void MainWindow::PopOutEditor() {
     if (c == nullptr) return;
     BPoint sp = ConvertToScreen(BPoint(InspectorWidth() + Themed(40.0f),
                                        Themed(80.0f)));
-    BRect wr(sp.x, sp.y, sp.x + 720, sp.y + 480);
+    // The window opens at the theme's scale (item J): a 150 % session gets a
+    // 150 % editor rather than a fixed 720x480.
+    const float w = Themed(720.0f), hgt = Themed(480.0f);
+    BRect wr(sp.x, sp.y, sp.x + w, sp.y + hgt);
     PianoRoll* roll = new PianoRoll(wr, fDockTrack, fDockClip, c->startFrame,
                                     c->lengthFrames, c->notes, c->events,
                                     fProject->tempoMap, fProject->sampleRate,
                                     fProject->transport.playhead,
-                                    BMessenger(this));
+                                    BMessenger(this), t->name.c_str());
     roll->Show();
     // The window pushes the playhead through a messenger; the docked view was
-    // pushed to directly. Register it the same way the timeline used to.
+    // pushed to directly. Register it the same way the timeline used to, and
+    // name the region it opened on so the window's state push (package 51) can
+    // address it.
     BMessage m(kMsgRollOpened);
     m.AddMessenger("m", BMessenger(roll));
+    m.AddInt64("track", (int64)fDockTrack);
+    m.AddInt64("clip",  (int64)fDockClip);
     PostMessage(&m);
 
     ClearDockedEditor();
@@ -2946,6 +3033,11 @@ void MainWindow::PopOutEditor() {
 // stops naming a region (Pop out has nothing to act on until the next one).
 void MainWindow::ClearDockedEditor() {
     if (fDockRoll != nullptr) {
+        // A key held in the editor goes with it: its note-off would never come,
+        // so the view sends it before it is deleted (the counter decrements
+        // through the same path a real mouse-up takes -- zeroing it here would
+        // under-count a key the POPPED-OUT editor is still holding).
+        fDockRoll->AuditionEnd();
         fDockRoll->RemoveSelf();
         delete fDockRoll;
         fDockRoll = nullptr;
@@ -3522,6 +3614,18 @@ void MainWindow::ShowReplacedProject(Frame playhead) {
     // nothing here, and the new project may reuse it (T2 review).
     SelectTrack(kInvalidTrackId);
     if (fDockRoll != nullptr) ClearDockedEditor();
+    // The popped-out editor holds the old project's ids too, and the new
+    // project's ids RESTART at 1 -- so leaving it open could silently re-point
+    // it at a different region. Close it (package 51: the fresh-messenger rule
+    // the other single-instance windows follow).
+    if (fRollMsgr.IsValid()) {
+        fRollMsgr.SendMessage(B_QUIT_REQUESTED);
+        fRollMsgr = BMessenger();
+    }
+    fRollTrack  = kInvalidTrackId;
+    fRollClip   = kInvalidClipId;
+    fRollSerial = 0;   // a load must not be skipped by a serial comparison
+    StopAuditionEngine();   // ... and the clicks' engine, if it was theirs
     fTimeline->SetProject(fProject);   // same object, new content
     fTimeline->SetPlayhead(playhead);
     UpdateTimeReadout(playhead);
@@ -3562,9 +3666,18 @@ void MainWindow::UpdateEditMenu() {
         fRedoItem->SetLabel(rl.c_str());
         fRedoItem->SetEnabled(!r.empty());
     }
-    const bool hasSel = fTimeline && fTimeline->SelectionCount() > 0;
+    // With the DOCKED MIDI editor holding the focus, its own selection and
+    // clipboard are what these items act on (package 51): Haiku skips the
+    // shortcut of a DISABLED item but still swallows the key, so an item greyed
+    // because the arrangement has nothing selected would make Cmd-C do nothing
+    // at all in the editor.
+    PianoRollView* roll = FocusedRoll();
+    const bool rollSel = roll != nullptr && roll->HasSelection();
+    const bool rollClip = roll != nullptr && !roll->ClipboardEmpty();
+    const bool hasSel = (fTimeline && fTimeline->SelectionCount() > 0) || rollSel;
     const bool hasRange = fTimeline && fTimeline->HasTimeRange();
-    const bool hasClipboard = fTimeline && fTimeline->ClipboardCount() > 0;
+    const bool hasClipboard = (fTimeline && fTimeline->ClipboardCount() > 0)
+                           || rollClip;
     fCutItem->SetEnabled(hasSel || hasRange);
     fCopyItem->SetEnabled(hasSel || hasRange);
     fDeleteItem->SetEnabled(hasSel || hasRange);
@@ -4067,6 +4180,7 @@ void MainWindow::LoadSettings() {
     s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
+    s.previewNotes = fRollPreview;   // the MIDI editor's audition (package 51)
     s.exportContainer = (int)fExportChoices.container;
     s.exportBitDepth  = fExportChoices.bitDepth;
     s.exportVorbisQuality = fExportChoices.vorbisQuality;
@@ -4080,6 +4194,7 @@ void MainWindow::LoadSettings() {
     s.exportStems     = fExportChoices.stems ? 1 : 0;
     s.themeMode       = ActiveThemeMode();
     s.takeFormat      = fRecCtl.fTakeFormat;   // take depth (M5)
+    s.previewNotes    = fRollPreview;          // the MIDI editor's audition (51)
     if (!s.Deserialize(text)) return;
 
     // The panes (M1.4). The width goes on as the inspector's preferred size
@@ -4111,6 +4226,7 @@ void MainWindow::LoadSettings() {
                                             // clamps an unknown value itself
     fTransportCtl.fMetronome    = s.metronome;
     fTransportCtl.fMonitorInput = s.monitorInput;
+    fRollPreview = s.previewNotes;   // the MIDI editor's audition (package 51)
     if (fTimeline) fTimeline->SetMonitorInput(fTransportCtl.fMonitorInput);
     fLastDir      = s.lastDir;
     fDoc.SetRecent(s.recentProjects);
@@ -4442,6 +4558,219 @@ void MainWindow::PushRollPlayhead(Frame ph) {
     fRollMsgr.SendMessage(&m);
 }
 
+// --- the MIDI editor's snapshot sync (package 51, items A/B) ---------------
+
+// The region state ONE push carries. The note and event array shapes are the
+// ones the apply messages use (PianoRoll.h: AddRollNotes/AddRollEvents), so the
+// roll decodes a push with the same code the window decodes a commit with. A
+// region that is gone is sent as "gone": the view cannot tell from an empty
+// note list, and closing the editor is the honest answer (the dock clears, the
+// popped-out window quits).
+void MainWindow::AddRegionPayload(BMessage& m, TrackId track, ClipId clip,
+                                  uint64_t serial) {
+    m.AddInt64("track", (int64)track);
+    m.AddInt64("clip", (int64)clip);
+    m.AddInt64("serial", (int64)serial);
+    const Track* t = fProject->FindTrack(track);
+    const MidiClip* c = t != nullptr ? t->FindMidiClip(clip) : nullptr;
+    if (c == nullptr) {
+        m.AddBool("gone", true);
+        return;
+    }
+    m.AddInt64("start", (int64)c->startFrame);
+    m.AddInt64("len",   (int64)c->lengthFrames);
+    AddRollNotes(&m, c->notes);
+    AddRollEvents(&m, c->events);
+}
+
+// Push the region's CURRENT state to every open roll (the docked view and the
+// popped-out window), so no roll can commit a list the model no longer has.
+// Called after every stack change and from the 2 Hz poll; the serial gate is
+// what keeps the poll free — an unchanged model does not rebuild the message.
+//
+// `force` is for the paths where the serial alone is not the whole story: a
+// roll that just opened, and the refusal path (a stale commit means the roll
+// needs the truth NOW).
+void MainWindow::RefreshRolls(bool force) {
+    if (fDockRoll == nullptr && !fRollMsgr.IsValid()) {
+        fRollSerial = fStack->CurrentSerial();   // remember where we are
+        return;
+    }
+    const uint64_t serial = fStack->CurrentSerial();
+    if (!force && serial == fRollSerial) return;
+    fRollSerial = serial;
+
+    // The docked view is hosted here: a region that is gone empties the pane
+    // (the same treatment every other view holding a dead id gets). A region
+    // that only moved or changed is the view's own business (RollEdit.h
+    // decides), so it is pushed the state and re-reads it.
+    if (fDockRoll != nullptr) {
+        const Track* t = fProject->FindTrack(fDockTrack);
+        const MidiClip* c = t != nullptr ? t->FindMidiClip(fDockClip) : nullptr;
+        if (c == nullptr) {
+            ClearDockedEditor();
+            fDockPushedSig = 0;
+        } else {
+            BMessage m(kMsgRollRegion);
+            AddRegionPayload(m, fDockTrack, fDockClip, serial);
+            fDockPushedSig = RollRegionSignature(c->startFrame, c->lengthFrames,
+                                                 c->notes, c->events);
+            fDockRoll->SyncRegion(fDockTrack, fDockClip, c->startFrame,
+                                  c->lengthFrames, c->notes, c->events, serial,
+                                  false);
+        }
+    }
+    if (fRollMsgr.IsValid()) {
+        const Track* t = fProject->FindTrack(fRollTrack);
+        const MidiClip* c = t != nullptr ? t->FindMidiClip(fRollClip) : nullptr;
+        BMessage m(kMsgRollRegion);
+        AddRegionPayload(m, fRollTrack, fRollClip, serial);
+        fPopPushedSig = c != nullptr
+                            ? RollRegionSignature(c->startFrame, c->lengthFrames,
+                                                  c->notes, c->events)
+                            : 0;
+        fRollMsgr.SendMessage(&m);
+    }
+}
+
+// One roll's commit, checked in one place (the three apply handlers call it):
+// the base must be the model's serial, the roll's own batched transition, or a
+// serial whose movement did not touch THIS region (its fingerprint still
+// matches what the roll was pushed). Anything else means the model changed
+// under the roll, and the commit is refused -- never written on top.
+bool MainWindow::RollCommitOk(const BMessage* msg, TrackId track, ClipId clip) {
+    int64 base = 0;
+    if (msg->FindInt64("base", &base) != B_OK)
+        return true;   // not a hosted roll (a test harness builds its own)
+    const uint64_t now = fStack->CurrentSerial();
+    if (RollCommitAllowed((uint64_t)base, now, track, clip, fRollGate))
+        return true;
+    const Track* t = fProject->FindTrack(track);
+    const MidiClip* c = t != nullptr ? t->FindMidiClip(clip) : nullptr;
+    if (c == nullptr) return false;   // the region is gone: refuse + re-read
+    const uint64_t sig = RollRegionSignature(c->startFrame, c->lengthFrames,
+                                             c->notes, c->events);
+    const uint64_t pushed = (track == fDockTrack && clip == fDockClip)
+                                ? fDockPushedSig : fPopPushedSig;
+    return pushed != 0 && sig == pushed;
+}
+
+PianoRollView* MainWindow::FocusedRoll() const {
+    if (fDockRoll == nullptr) return nullptr;
+    // Only the DOCKED view: a popped-out roll is its own window and never sees
+    // this window's menu bar.
+    return fDockRoll->IsFocus() ? fDockRoll : nullptr;
+}
+
+void MainWindow::PushRollFollow() {
+    const bool on = !fFollowItem || fFollowItem->IsMarked();
+    if (fDockRoll != nullptr) fDockRoll->SetFollow(on);
+    if (!fRollMsgr.IsValid()) return;
+    BMessage m(kMsgRollFollow);
+    m.AddBool("on", on);
+    fRollMsgr.SendMessage(&m);
+}
+
+// --- the audition (package 51, item D) -------------------------------------
+
+// Every click (re)arms the idle timer: the note's release tail has rung out by
+// the time it fires, and a click while it was pending cancels the stop. Notes
+// still HELD keep it re-arming (MSG_AUDITION_IDLE's handler).
+void MainWindow::StartAuditionIdleTimer() {
+    delete fAuditionIdle;
+    // 3 s: long enough that a slow one-finger arpeggio keeps one engine, short
+    // enough that the device is not held by an editor nobody is clicking.
+    fAuditionIdle = new BMessageRunner(BMessenger(this),
+                                       new BMessage(MSG_AUDITION_IDLE),
+                                       3000000, 1);
+}
+
+// The roll asks; this decides. A click sounds through the region's own track:
+// its instrument, fader and FX, which is the note the region will play. The
+// engine has to be RUNNING for that, so an idle transport gets the monitor-only
+// engine the armed-track monitor uses (no clips, no playhead) — and it is put
+// away again a few seconds after the last click, so a session that never plays
+// does not hold the device open for the editor.
+Engine* MainWindow::EnsureAuditionEngine(TrackId track) {
+    if (!fRollPreview || track == kInvalidTrackId) return nullptr;
+    Engine* e = fTransportCtl.EnsureEngine();
+    // A running transport already has the device and a graph: aim the clicks at
+    // the region's track and use it (the bus is there whenever the track has
+    // notes, is armed/monitoring, or is this build's audition target).
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring) {
+        if (e->AuditionTrack() != track) {
+            e->SetAuditionTrack(track);
+            // The monitor graph is the one that needs a rebuild to carry the
+            // bus; a playback graph picks it up on its next rebuild, and until
+            // then the tracks that already carry notes still sound.
+            if (fTransportCtl.fMonitoring && !fTransportCtl.fPlaying
+                && !fRecCtl.fRecMode)
+                fRecCtl.UpdateMidiMonitor();
+        }
+        return e;
+    }
+    if (fAuditionUp && fAuditionTrack == track && e->PlayerRunning())
+        return e;   // already up (a stopped engine would eat the click: the
+                    // ring it drains is only read while the callback runs)
+    e->SetBufferFrames(fTransportCtl.fBufferFrames);
+    e->SetMonitorOnly(true);
+    e->SetAuditionTrack(track);
+    const Frame ph = fProject->transport.playhead;
+    const Frame tenMin = (Frame)(fProject->sampleRate * 600.0);
+    if (e->Load(*fProject, ph, ph + tenMin) != B_OK) {
+        // No device (or nothing to build). The click is silent; an editor that
+        // pops an alert for every click would be worse than a quiet one.
+        e->SetMonitorOnly(false);
+        fAuditionUp = false;
+        return nullptr;
+    }
+    e->Start();
+    fAuditionUp = true;
+    fAuditionTrack = track;
+    return e;
+}
+
+void MainWindow::StopAuditionEngine() {
+    if (fAuditionIdle != nullptr) {   // whatever else, the timer goes
+        delete fAuditionIdle;
+        fAuditionIdle = nullptr;
+    }
+    if (!fAuditionUp) return;
+    const bool wasUp = fAuditionUp;
+    fAuditionUp = false;
+    fAuditionTrack = kInvalidTrackId;
+    fAuditionHeld = 0;
+    if (!wasUp) return;
+    // ONLY an engine the clicks own may be stopped: a play, a take and the
+    // armed-track monitor are all the SAME engine object (M4.1 keeps one
+    // player), and stopping it there would freeze the transport with its lamp
+    // still lit and no way back except a manual Stop.
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring)
+        return;
+    if (fTransportCtl.fEngine) {
+        fTransportCtl.fEngine->Stop();
+        fTransportCtl.fEngine->SetMonitorOnly(false);
+        fTransportCtl.fEngine->SetAuditionTrack(kInvalidTrackId);
+    }
+}
+
+// The clicks themselves: one note-on/note-off at a time, straight into the
+// engine's ring. Nothing here touches the model — an audition is not an edit.
+void MainWindow::HandleRollAudition(const BMessage* msg) {
+    if (!fRollPreview) return;
+    int64 tid = 0; int32 pitch = 0, vel = 100; bool on = true;
+    msg->FindInt64("track", &tid);
+    msg->FindInt32("pitch", &pitch);
+    msg->FindInt32("vel", &vel);
+    msg->FindBool("on", &on);
+    Engine* e = EnsureAuditionEngine((TrackId)tid);
+    if (e == nullptr) return;
+    e->AuditionNote((int)pitch, (int)vel, on);
+    if (on)               fAuditionHeld++;
+    else if (fAuditionHeld > 0) fAuditionHeld--;
+    StartAuditionIdleTimer();
+}
+
 // The master meter's readings for one poll (M3.3).
 //
 // Peaks, RMS and correlation all come from the engine's per-block meter —
@@ -4762,6 +5091,7 @@ PrefsView MainWindow::CurrentPrefs() const {
     v.metronomeSound    = fTransportCtl.fMetronomeSound;
     v.metronomeLevel    = fTransportCtl.fMetronomeGain;
     v.monitorInput      = fTransportCtl.fMonitorInput;
+    v.previewNotes      = fRollPreview;
     v.darkMode          = ActiveThemeMode() == ThemeMode::Dark;
     v.defaultSampleRate = fPrefsSampleRate;
     v.uiScale           = fPrefsUiScale;
@@ -4780,6 +5110,7 @@ void MainWindow::PushPrefsToWindow() {
     m.AddInt32("metsnd", v.metronomeSound);
     m.AddFloat("metlvl", v.metronomeLevel);
     m.AddBool("monin", v.monitorInput);
+    m.AddBool("preview", v.previewNotes);
     m.AddBool("dark", v.darkMode);
     m.AddFloat("uiscale", v.uiScale);
     m.AddString("projdir", v.projectDir.c_str());
@@ -4820,6 +5151,12 @@ void MainWindow::ApplyPrefs(const PrefsView& v) {
         if (fTransportCtl.fEngine)
             fTransportCtl.fEngine->SetInputMonitor(fTransportCtl.fMonitorInput);
     }
+
+    // The MIDI editor's audition (package 51): a preference, not transport
+    // state -- turning it off silences the next click (and stops the engine
+    // the clicks had raised, if it was theirs).
+    fRollPreview = v.previewNotes;
+    if (!fRollPreview) StopAuditionEngine();
 
     // The metronome's sound and level: live on the running engine (a stopped
     // one gets them from EnsureEngine's next build).
