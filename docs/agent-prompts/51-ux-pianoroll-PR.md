@@ -410,6 +410,31 @@ rows 34/46/58/70/82 (all < `laneTop` 136), the two drag aims at x 72.8 and
 194.6 with both note edges > 5 px away, and the CC aim's y at 178.6 inside the
 lane -- every one inside the pane and in the intended zone.
 
+## Reopen, third round — the Alt pair, and the lesson it shares
+
+Two checks left, both Alt gestures. The aim was right by then, so the failure
+was in the gesture itself -- and it was an APP bug of the same family as the two
+test-side ones found before it: **the roll read the wrong modifiers.**
+`BView`'s global `modifiers()` asks the input server what is held *right now*;
+it is neither the modifiers the gesture was made with nor something a posted
+message can set, so a synthetic (and, under load, a real) Alt-press reported no
+Alt: `MouseDown` took the plain-click path (`SelectOnly` collapsed the selection
+to the note clicked) and the duplicate never ran. Every other view here reads
+the *event's* own modifiers for exactly this reason
+(`UiMetrics.h: EventModifiers`, which is what the arrangement's Alt gestures use
+-- and why those are driveable and testable while this one was not).
+`PianoRollView::EventMods()` is now the roll's one reader: the Alt pair, the
+Ctrl-drag velocity gesture, `KeyDown`'s command check and `Snapped()`'s Shift
+free-placement. Real input is unchanged (app-server events carry their own
+modifiers) and an event without the field still falls back to the live value.
+
+This is the third instance of one lesson in this reopen, worth stating plainly
+for the next person writing a test against this UI: **the kit ignores what a
+posted message does not carry.** A mouse message needs `screen_where` (or the
+view sees (0, 0)); a key needs the preferred token (or the focus view never gets
+it); a modifier has to be on the event (or the gesture does not exist). All
+three now have a working precedent in this suite.
+
 ## Shots to look for (the orchestrator's screenshot pass)
 
 `ui_functional_tests` under `DAW_UI_SHOTS`, both theme modes, and a 150 % run
