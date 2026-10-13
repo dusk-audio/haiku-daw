@@ -85,6 +85,30 @@ constexpr uint32 kMsgRollAudition = 'rlau';
 // main window can push the playhead to it during transport.
 constexpr uint32 kMsgRollOpened = 'rlop';
 
+// The keys the EDITOR handles itself: its tool palette (1-7), quantize (q),
+// the grid menu (g), Fit (f), the zoom pair, the nudge arrows and Del. They are
+// deliberately not in the arrange's one key map (model/KeyMap.h says why -- the
+// roll draws its own keyboard), but the DOCKED view is a view of the main
+// window, so the window has to know which keys to hand it while it holds the
+// focus: without this the arrange's own bindings (the palette, the grid menu,
+// the pan arrows, Delete) would take them, and the editor's tools would be
+// dead while docked.
+inline bool RollEditorKey(char c) {
+    switch (c) {
+        case '1': case '2': case '3': case '4': case '5': case '6': case '7':
+        case 'q': case 'Q':
+        case 'g': case 'G':
+        case 'f': case 'F':
+        case '+': case '=': case '-': case '_':
+        case B_LEFT_ARROW: case B_RIGHT_ARROW:
+        case B_UP_ARROW: case B_DOWN_ARROW:
+        case B_DELETE: case B_BACKSPACE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // --- the payload codecs ----------------------------------------------------
 //
 // MainWindow and the roll both speak the note/event array shapes above, so the

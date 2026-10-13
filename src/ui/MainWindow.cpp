@@ -760,6 +760,25 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
                             && bytes != nullptr;
         const bool isTab = haveBytes && bytes[0] == B_TAB;
+        // ... except when the DOCKED MIDI editor holds the focus: the roll is
+        // custom drawn and carries its own editor keys (its tool palette, the
+        // grid menu, the nudge arrows, Del), deliberately OUTSIDE the arrange's
+        // one key map (model/KeyMap.h says why). They go to the roll, exactly
+        // as its Edit-menu shortcuts do (FocusedRoll), and this runs BEFORE the
+        // timeline's rule below -- otherwise the arrange's own bindings for
+        // those keys would take them and the editor's tools would be dead
+        // while docked. Keys the roll does not use (Space, R, Home ...) are
+        // untouched and keep going wherever the map sends them.
+        if (!(mods & B_COMMAND_KEY) && haveBytes) {
+            PianoRollView* docked = FocusedRoll();
+            if (docked != nullptr && RollEditorKey(bytes[0])) {
+                docked->KeyDown(bytes, 1);
+                return;
+            }
+        }
+        // Space needs no special case here: it is bound in the map (the
+        // transport's toggle), so TimelineTakesKey keeps it and the text-field
+        // rule above is the only thing that can hold it back.
         const bool textFocus = dynamic_cast<BTextControl*>(focus) != nullptr
                             || dynamic_cast<BTextView*>(focus) != nullptr;
         const bool mapTakes = haveBytes

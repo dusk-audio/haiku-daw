@@ -327,6 +327,55 @@ Cmd-C/X/V/D clipboard · Shift = free placement (no snapping) ·
 Alt-click toggles a note in the selection · Alt-drag duplicates it under the
 pointer · `=`/`-` (and the toolbar's field) as the arrangement uses them.
 
+## Reopen — the integration run's 15 failures in `TestRollModelSync`
+
+The first integrated VM run reached this test for the first time and 15 of its
+checks failed. All of them were the TEST's, none the app's, and the root cause
+was one line of Haiku behaviour worth writing down:
+
+- **A posted mouse message must carry `screen_where`.** `BWindow::DispatchMessage`
+  converts a mouse message's SCREEN point into the view-local
+  `be:view_where` that `BView::MessageReceived` actually reads
+  (`haiku/src/kits/interface/Window.cpp:3490-3512`); a message carrying only
+  `"where"` is not converted at all, so the view's `MouseDown` receives
+  **(0, 0)** — the toolbar's corner. Every synthetic click in the test landed
+  there: the drag never grabbed a note, the pencil never drew, the CC drag never
+  started, the Alt gestures never fired and the keyboard column never sounded.
+  (The suite's older click helpers post `screen_where` for exactly this reason.)
+  Fixed: one `click()` helper posts both points, converting through
+  `BView::ConvertToScreen`, and every mouse interaction goes through it.
+- **A key posted with the window's own token is not a focus message.**
+  `BWindow::_IsFocusMessage` requires `B_PREFERRED_TOKEN`
+  (`headers/private/app/MessagePrivate.h:131`), so `BMessenger(win)` never runs
+  the menu's shortcut path and the key is dropped in `BWindow::MessageReceived`.
+  The Cmd-C/Cmd-V checks post through the preferred handler now
+  (`BMessenger((const BHandler*)nullptr, win)`), which is what a real key event
+  carries — and that is the path the Edit menu's shortcut actually takes.
+  (Credit: the mixer package root-caused this one and shared it.)
+- **The Edit item's enabled state was read before the 2 Hz poll ran**, so the
+  `copyEnabled` check raced its own setup: the test calls `UpdateEditMenu()`
+  itself now.
+- Two aiming bugs found in the same pass, fixed in the test: the docked pane is
+  ~236 px tall (the split's height persists, and the default is `Themed(260)`),
+  so a pitch row 36 semitones below the toolbar is *below the velocity lane* —
+  the notes now sit high (90/94) and every click is aimed from the view's own
+  metrics (`XForFrameForTest`, `LaneValueYForTest`, the row metric), with each
+  aim CHECKed and printed so a geometry change fails at the aim; and the
+  transport is parked at 0 before the editor opens, because the view centres
+  itself on a playhead inside the region.
+
+One **app** change came out of the same investigation, small and inside this
+package's hosting: the docked editor's own keys. `MainWindow::DispatchMessage`
+hands the roll its editor keys (`PianoRoll.h: RollEditorKey` — the palette 1-7,
+`q`, `g`, `f`, the zoom pair, the nudge arrows, Del) while it holds the focus,
+before the timeline's key rule. The roll draws its own keyboard and its keys are
+deliberately NOT in the arrange's one map (`model/KeyMap.h` says so), but the
+docked roll is a view of the main window — and the integration's new routing
+(`TimelineTakesKey`) otherwise hands 1-6, `g`, the arrows and Delete to the
+arrangement, which would leave the editor's tools, its grid menu, the nudge and
+Delete dead while docked. Keys the roll does not use (Space, `R`, Home ...) are
+untouched.
+
 ## Shots to look for (the orchestrator's screenshot pass)
 
 `ui_functional_tests` under `DAW_UI_SHOTS`, both theme modes, and a 150 % run
