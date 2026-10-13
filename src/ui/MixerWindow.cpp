@@ -456,6 +456,9 @@ void MixerStripsView::BeginLevelEntry(int strip) {
         fLevelField->SetDivider(0.0f);
         fLevelField->SetTarget(this);
         AddChild(fLevelField);
+        // Born hidden: it appears over the strip it is editing, and only while
+        // that edit is open.
+        fLevelField->Hide();
     } else {
         fLevelField->MoveTo(r.left, r.top);
         fLevelField->ResizeTo(r.Width(), r.Height());
@@ -467,7 +470,10 @@ void MixerStripsView::BeginLevelEntry(int strip) {
     else             std::snprintf(db, sizeof(db), "%.1f", d);
     fLevelStrip = strip;
     fLevelField->SetText(db);
-    fLevelField->Show();
+    // Show() and Hide() adjust a show LEVEL, so calling Show() twice and
+    // Hide() once leaves the field on screen: the pair is balanced here, and
+    // only ever moves when the state actually changes.
+    if (fLevelField->IsHidden()) fLevelField->Show();
     fLevelField->MakeFocus(true);
     // Select what is there, so typing replaces the old figure instead of
     // appending to it.
@@ -494,7 +500,9 @@ void MixerStripsView::CommitLevelEntry() {
 
 void MixerStripsView::CancelLevelEntry() {
     fLevelStrip = -1;
-    if (fLevelField != nullptr) fLevelField->Hide();
+    // Only when it is showing: Hide() on an already hidden view would take the
+    // level below zero and the next Show() would have to climb back.
+    if (fLevelField != nullptr && !fLevelField->IsHidden()) fLevelField->Hide();
     Invalidate();
 }
 

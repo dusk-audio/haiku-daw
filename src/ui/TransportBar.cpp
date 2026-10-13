@@ -97,9 +97,12 @@ void TransportTimeView::SetInfoLine(const char* text) {
 void TransportTimeView::MakeFocus(bool focused) {
     if (!focused && fEditing) {
         // Focus left the view (a click somewhere else): the entry is abandoned,
-        // never applied half-typed.
+        // never applied half-typed. The clear has to reach the screen: without
+        // the invalidate the abandoned digits and the caret stayed drawn until
+        // something else happened to repaint the bar.
         fEditing = false;
         fTyped.clear();
+        Invalidate();
     }
     BView::MakeFocus(focused);
 }

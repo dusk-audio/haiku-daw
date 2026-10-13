@@ -237,7 +237,11 @@ void ProjectSettingsWindow::SetValues(const ProjectSettingsView& v) {
     }
     if (fTempo) {
         char buf[24];
-        std::snprintf(buf, sizeof(buf), "%.4g", v.tempoBPM);
+        // Enough digits that an UNCHANGED Apply writes back the tempo it
+        // showed: at four significant digits a stored 133.33 displayed as
+        // "133.3", and pressing Apply without touching anything moved the
+        // tempo by a third of a beat per minute.
+        std::snprintf(buf, sizeof(buf), "%.10g", v.tempoBPM);
         fTempo->SetText(buf);
     }
     if (fNotes) {
