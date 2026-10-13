@@ -299,15 +299,27 @@ can never come true once the panel is up. It waits for the dialog **by
 pointer** now (as the shot window above it always did), and `FindExportDialog`
 documents that its title lookup is only unambiguous with no panel up.
 
-### The same constructor trap, outside this package (not touched here)
+### The same constructor trap, in three more windows (fixed in `18ba693`)
 
-Three windows still write the five-argument form and so still lose their
-flags: `ExportProgressWindow.cpp:15` (its `B_NOT_CLOSABLE` never applied — the
-progress bar's close box works, which is why Cancel exists), and
-`InstrumentWindow.cpp:74` / `SendsWindow.cpp:34` (their `B_NOT_ZOOMABLE`).
-They are outside this pass's six dialogs, so they are reported rather than
-changed; the fix is the same two-line spelling, with `MarkersWindow` as the
-in-tree example.
+The reopen's report named three windows outside the six that lose their flags
+the same way; the coordinator asked for them in this pass. Same two-line
+spelling as the six (and as `MarkersWindow`, which already had it right):
+
+* `ExportProgressWindow.cpp:15` — `B_NOT_ZOOMABLE | B_NOT_RESIZABLE |
+  B_NOT_CLOSABLE`. The close box and Cmd-W were both live on a bar whose
+  render keeps going behind it; the flag only removes those two (Window.cpp
+  consults it when installing the Cmd-W shortcut and nowhere else), so the
+  app's own `B_QUIT_REQUESTED` still closes the bar and Cancel still stops
+  the render. The one visible change the shot pass should confirm.
+* `InstrumentWindow.cpp:74` and `SendsWindow.cpp:34` — `B_NOT_ZOOMABLE`, and
+  the stray `B_NOT_H_RESIZABLE` (the feel constant that had landed in the
+  flags slot) is gone, so both are resizable in both directions again, as
+  their own flag list says. Nothing in `TestUxMixer` — read from
+  `fix/ux-mixer` — resizes, zooms or assumes the frame of either window: its
+  Sends section only opens, retargets and closes the window and counts them,
+  and the only `ResizeTo` calls in the file are the widget-kit probe's root
+  view and the main window. Look and feel unchanged in all three (titled,
+  normal).
 
 ### Verification after the fixes (this host)
 
