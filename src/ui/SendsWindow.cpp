@@ -31,7 +31,11 @@ static constexpr float kLevelMax = 2.0f;   // sends can exceed unity
 SendsWindow::SendsWindow(BRect frame, std::vector<Send> sends,
                          std::vector<std::pair<TrackId, std::string>> buses,
                          TrackId track, BMessenger apply, const char* trackName)
-    : BWindow(frame, "Sends", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+    // Look and feel as separate arguments (see ExportWindow): the
+    // (window_type, flags, workspace) overload would take
+    // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, <flags>) and swallow the
+    // flags.
+    : BWindow(frame, "Sends", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fSends(std::move(sends)), fBuses(std::move(buses)),
       fTrack(track), fTrackName(trackName ? trackName : ""), fApply(apply) {
