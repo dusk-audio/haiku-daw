@@ -380,14 +380,11 @@ saturates the VM's two vCPUs. The fixture is twelve long notes now (tens of
 seconds of render) and the refusal's wait is 30 s, so the request cannot be
 dequeued after the render is already over.
 
-**The original three-line summary of this item, kept for the reasoning:** The expiry machinery in the merged tree is intact — the 2 Hz
-`MSG_TITLE` case runs `UpdateTitle(); ExpireTransportStatus(); RefreshRolls();
-` with `kStatusHoldUs` at 4 s, `ExpireTransportStatus` is byte-identical to
-this branch's, and no other code calls `TransportBar::SetStatus` — and the
-test *before* this one reads the same row successfully (its "Cannot read …"
-check passed). So the most likely reading is that it failed because the row
-still held a job message from the previous step, which (2) explains. Every
-failure in this test now prints the row's text and the window counts, so a
-next run names the state instead of leaving it to be inferred from the plan.
-Look for `DIAG no refusal`, `DIAG no cancel message`, `DIAG no export bar` or
-`DIAG the row after the hold` in the log.
+The expiry machinery was checked on the way and is intact in the merged tree:
+the 2 Hz `MSG_TITLE` case runs `UpdateTitle(); ExpireTransportStatus();
+RefreshRolls();` with `kStatusHoldUs` at 4 s, `ExpireTransportStatus` is
+byte-identical to this branch's, and no other code calls
+`TransportBar::SetStatus`. Every failure in this test prints the row's text
+and the window counts (`DIAG no export bar`, `DIAG no refusal`,
+`DIAG no cancel message`, `DIAG the row after the hold`), which is how the
+next run answered item 3: those lines are in the log above.
