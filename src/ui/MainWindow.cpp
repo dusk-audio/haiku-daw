@@ -805,7 +805,16 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case kMsgRollOpened: {     // a piano roll opened; remember it for the playhead
             BMessenger m;
-            if (msg->FindMessenger("m", &m) == B_OK) fRollMsgr = m;
+            if (msg->FindMessenger("m", &m) == B_OK) {
+                // One popped-out editor at a time, the fresh-messenger rule the
+                // other single-instance windows follow: the window that was
+                // registered before this one would stop receiving pushes (only
+                // one messenger is kept) and would then have every later commit
+                // refused, silently. Closing it keeps one roll, always synced.
+                if (fRollMsgr.IsValid() && fRollMsgr != m)
+                    fRollMsgr.SendMessage(B_QUIT_REQUESTED);
+                fRollMsgr = m;
+            }
             // Which region it opened on: the window names it, because the push
             // below has to say what the roll is looking at (package 51).
             int64 tid = 0, cid = 0;
@@ -1385,9 +1394,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // A hosted roll always names its base (it is pushed the moment it
             // opens); one that never arrived — a test harness building a view
             // itself — has none, and keeps the pre-51 behaviour.
-            if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
-                                      fRollGate)) {
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
                 RefreshRolls(true);
                 break;
             }
@@ -1397,7 +1404,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         (TrackId)tid, (ClipId)cid, ParseRollNotes(msg)),
                         *fProject))
                     RollCommitAccepted(fRollGate, (uint64_t)base,
-                                       fStack->CurrentSerial());
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);   // the roll re-reads what the model now has
@@ -1412,10 +1420,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
             msg->FindInt32("op", &op);
-            if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
-                                      fRollGate)) {
-                RefreshRolls(true);   // the same stale-base rule as above
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
+                RefreshRolls(true);   // the same gate as above
                 break;
             }
             Track* tr = fProject->FindTrack((TrackId)tid);
@@ -1424,7 +1430,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         (TrackId)tid, (ClipId)cid, ParseRollNotes(msg),
                         MidiOpName((MidiOp)op)), *fProject))
                     RollCommitAccepted(fRollGate, (uint64_t)base,
-                                       fStack->CurrentSerial());
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);
@@ -1436,9 +1443,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0, cid = 0, base = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
-            if (msg->FindInt64("base", &base) == B_OK
-                && !RollCommitAllowed((uint64_t)base, fStack->CurrentSerial(),
-                                      fRollGate)) {
+            if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
                 RefreshRolls(true);
                 break;
             }
@@ -1451,7 +1456,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
                         (TrackId)tid, (ClipId)cid, ParseRollEvents(msg)),
                         *fProject))
                     RollCommitAccepted(fRollGate, (uint64_t)base,
-                                       fStack->CurrentSerial());
+                                       fStack->CurrentSerial(), (TrackId)tid,
+                                       (ClipId)cid);
                 fTimeline->Invalidate();
             }
             RefreshRolls(true);
@@ -2772,8 +2778,10 @@ void MainWindow::PopOutEditor() {
 void MainWindow::ClearDockedEditor() {
     if (fDockRoll != nullptr) {
         // A key held in the editor goes with it: its note-off would never come,
-        // and the audition's idle timer would keep re-arming for ever.
-        fAuditionHeld = 0;
+        // so the view sends it before it is deleted (the counter decrements
+        // through the same path a real mouse-up takes -- zeroing it here would
+        // under-count a key the POPPED-OUT editor is still holding).
+        fDockRoll->AuditionEnd();
         fDockRoll->RemoveSelf();
         delete fDockRoll;
         fDockRoll = nullptr;
@@ -3299,9 +3307,18 @@ void MainWindow::UpdateEditMenu() {
         fRedoItem->SetLabel(rl.c_str());
         fRedoItem->SetEnabled(!r.empty());
     }
-    const bool hasSel = fTimeline && fTimeline->SelectionCount() > 0;
+    // With the DOCKED MIDI editor holding the focus, its own selection and
+    // clipboard are what these items act on (package 51): Haiku skips the
+    // shortcut of a DISABLED item but still swallows the key, so an item greyed
+    // because the arrangement has nothing selected would make Cmd-C do nothing
+    // at all in the editor.
+    PianoRollView* roll = FocusedRoll();
+    const bool rollSel = roll != nullptr && roll->HasSelection();
+    const bool rollClip = roll != nullptr && !roll->ClipboardEmpty();
+    const bool hasSel = (fTimeline && fTimeline->SelectionCount() > 0) || rollSel;
     const bool hasRange = fTimeline && fTimeline->HasTimeRange();
-    const bool hasClipboard = fTimeline && fTimeline->ClipboardCount() > 0;
+    const bool hasClipboard = (fTimeline && fTimeline->ClipboardCount() > 0)
+                           || rollClip;
     fCutItem->SetEnabled(hasSel || hasRange);
     fCopyItem->SetEnabled(hasSel || hasRange);
     fDeleteItem->SetEnabled(hasSel || hasRange);
@@ -4217,19 +4234,50 @@ void MainWindow::RefreshRolls(bool force) {
         const MidiClip* c = t != nullptr ? t->FindMidiClip(fDockClip) : nullptr;
         if (c == nullptr) {
             ClearDockedEditor();
+            fDockPushedSig = 0;
         } else {
             BMessage m(kMsgRollRegion);
             AddRegionPayload(m, fDockTrack, fDockClip, serial);
+            fDockPushedSig = RollRegionSignature(c->startFrame, c->lengthFrames,
+                                                 c->notes, c->events);
             fDockRoll->SyncRegion(fDockTrack, fDockClip, c->startFrame,
                                   c->lengthFrames, c->notes, c->events, serial,
                                   false);
         }
     }
     if (fRollMsgr.IsValid()) {
+        const Track* t = fProject->FindTrack(fRollTrack);
+        const MidiClip* c = t != nullptr ? t->FindMidiClip(fRollClip) : nullptr;
         BMessage m(kMsgRollRegion);
         AddRegionPayload(m, fRollTrack, fRollClip, serial);
+        fPopPushedSig = c != nullptr
+                            ? RollRegionSignature(c->startFrame, c->lengthFrames,
+                                                  c->notes, c->events)
+                            : 0;
         fRollMsgr.SendMessage(&m);
     }
+}
+
+// One roll's commit, checked in one place (the three apply handlers call it):
+// the base must be the model's serial, the roll's own batched transition, or a
+// serial whose movement did not touch THIS region (its fingerprint still
+// matches what the roll was pushed). Anything else means the model changed
+// under the roll, and the commit is refused -- never written on top.
+bool MainWindow::RollCommitOk(const BMessage* msg, TrackId track, ClipId clip) {
+    int64 base = 0;
+    if (msg->FindInt64("base", &base) != B_OK)
+        return true;   // not a hosted roll (a test harness builds its own)
+    const uint64_t now = fStack->CurrentSerial();
+    if (RollCommitAllowed((uint64_t)base, now, track, clip, fRollGate))
+        return true;
+    const Track* t = fProject->FindTrack(track);
+    const MidiClip* c = t != nullptr ? t->FindMidiClip(clip) : nullptr;
+    if (c == nullptr) return false;   // the region is gone: refuse + re-read
+    const uint64_t sig = RollRegionSignature(c->startFrame, c->lengthFrames,
+                                             c->notes, c->events);
+    const uint64_t pushed = (track == fDockTrack && clip == fDockClip)
+                                ? fDockPushedSig : fPopPushedSig;
+    return pushed != 0 && sig == pushed;
 }
 
 PianoRollView* MainWindow::FocusedRoll() const {

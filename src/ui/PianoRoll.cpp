@@ -255,8 +255,8 @@ RollSync PianoRollView::SyncRegion(TrackId track, ClipId clip, Frame start,
         model.clip   = clip;
         model.start  = start;
         model.length = length;
-        model.notes  = notes;
-        model.events = events;
+        model.notes  = std::move(notes);    // by value: take them, do not copy
+        model.events = std::move(events);
     }
     RollRegion mine;
     mine.track  = fTrack;
@@ -917,6 +917,23 @@ void PianoRollView::AuditionBlip(int pitch, int velocity) {
 // Snapshot every note's geometry so a group move/resize applies one delta.
 void PianoRollView::CaptureDragOrigin() {
     fDragOrig = CaptureGeometry(fNotes);   // index-aligned with fNotes
+    fDragCount0 = fNotes.size();
+}
+
+// Whether the gesture changed anything at all (or created a note, which has to
+// be committed even when its geometry ended where it started).
+bool PianoRollView::DragChanged() const {
+    if (fDragMustCommit) return true;
+    if (fNotes.size() != fDragCount0) return true;
+    if (fDragOrig.size() != fNotes.size()) return true;   // no snapshot: assume
+    for (size_t i = 0; i < fNotes.size(); i++) {
+        const MidiNote& n = fNotes[i];
+        const NoteGeometry& o = fDragOrig[i];
+        if (n.startFrame != o.start || n.lengthFrames != o.len
+            || n.pitch != o.pitch || n.velocity != o.velocity)
+            return true;
+    }
+    return false;
 }
 
 void PianoRollView::AddNoteAt(BPoint where, bool resizeDrag) {
@@ -935,6 +952,7 @@ void PianoRollView::AddNoteAt(BPoint where, bool resizeDrag) {
     if (resizeDrag) {   // pencil: drag right to size the new note
         fDragNote = (int)fNotes.size() - 1;
         CaptureDragOrigin();
+        fDragMustCommit = true;   // the note is new even if the drag sizes nothing
         fDrag = Drag::Resize;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     } else {
@@ -943,13 +961,13 @@ void PianoRollView::AddNoteAt(BPoint where, bool resizeDrag) {
     Invalidate();
 }
 
-void PianoRollView::PaintBrush(BPoint where) {
-    if (where.x < KbdW() || where.y < ToolbarH() || where.y >= VelLaneTop()) return;
+int PianoRollView::PaintBrush(BPoint where) {
+    if (where.x < KbdW() || where.y < ToolbarH() || where.y >= VelLaneTop()) return 0;
     Frame start = Snapped(XToFrame(where.x));
     if (start < 0) start = 0;
     const int pitch = std::clamp(YToPitch(where.y), 0, 127);
     for (const MidiNote& n : fNotes)               // skip if a note is already here
-        if (n.pitch == pitch && n.startFrame == start) return;
+        if (n.pitch == pitch && n.startFrame == start) return 0;
     MidiNote n;
     n.startFrame   = start;
     n.pitch        = pitch;
@@ -960,6 +978,7 @@ void PianoRollView::PaintBrush(BPoint where) {
     fSel.assign(fNotes.size(), 0);
     AuditionBlip(n.pitch, n.velocity);   // item D
     Invalidate();   // committed on mouse-up
+    return 1;
 }
 
 void PianoRollView::EraseAt(BPoint where) {
@@ -1168,7 +1187,11 @@ void PianoRollView::MoveCcDrag(BPoint where) {
     if (fLane == kLaneVelocity || fCcDragIndex < 0) return;
     Frame f = Snapped(XToFrame(where.x));
     if (f < 0) f = 0;
-    CcPointMove(fEvents, fLane, fCcDragIndex, f, CcYToValue(where.y));
+    // The index is the drag's identity, and it MOVES when the point absorbs a
+    // neighbour below it: CcPointMove hands the new one back, so the next
+    // mouse-move still holds the point the user grabbed.
+    if (!CcPointMove(fEvents, fLane, &fCcDragIndex, f, CcYToValue(where.y)))
+        fCcDragIndex = -1;   // the point is gone: stop dragging, do not paint
 }
 
 void PianoRollView::EraseCcAt(BPoint where) {
@@ -1290,6 +1313,7 @@ void PianoRollView::ApplyCursor(int which) {
 
 void PianoRollView::MouseDown(BPoint where) {
     MakeFocus(true);   // a click here owns the keyboard (the keys are editor-local)
+    fDragMustCommit = false;
 
     // Tool palette strip (top): pick a tool or one of the buttons.
     if (where.y < ToolbarH()) {
@@ -1368,7 +1392,10 @@ void PianoRollView::MouseDown(BPoint where) {
     if (BMessage* m = Window() ? Window()->CurrentMessage() : nullptr)
         m->FindInt32("buttons", &buttons);
     const bool rightClick = (buttons & B_SECONDARY_MOUSE_BUTTON) != 0;
-    const bool additive   = (modifiers() & B_COMMAND_KEY) != 0;
+    // Alt means "duplicate under the pointer" (item H). BOTH bits: Haiku maps
+    // the PC's Alt to B_COMMAND_KEY and the Option/Windows key to B_OPTION_KEY
+    // (the arrangement's own Alt gestures accept both, TimelineView.cpp:2340).
+    const bool altDup = (modifiers() & (B_OPTION_KEY | B_COMMAND_KEY)) != 0;
 
     const int hit = NoteAt(where);
     fDownPoint = where;
@@ -1396,11 +1423,13 @@ void PianoRollView::MouseDown(BPoint where) {
                 if (hit < 0) { AddNoteAt(where, true); return; }
                 break;   // on a note: fall through to pointer move/resize below
             case Tool::Brush:
+                CaptureDragOrigin();   // so a drag that adds nothing commits nothing
                 fDrag = Drag::Brush;
-                PaintBrush(where);
+                if (PaintBrush(where) > 0) fDragMustCommit = true;
                 SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
                 return;
             case Tool::Eraser:
+                CaptureDragOrigin();
                 if (hit >= 0) EraseAt(where);
                 fDrag = Drag::Erase;
                 SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
@@ -1426,9 +1455,16 @@ void PianoRollView::MouseDown(BPoint where) {
     }
 
     if (hit >= 0) {
-        if (additive) {   // toggle this note in/out of the selection, no drag
-            fSel[(size_t)hit] = fSel[(size_t)hit] ? 0 : 1;
-            Invalidate();
+        // Alt on a note: which gesture it is depends on what the pointer does
+        // next — a drag duplicates, a click toggles the selection. Deciding
+        // here instead would take one of the two away, and they share a key on
+        // a PC keyboard.
+        if (altDup) {
+            fDrag = Drag::AltPending;
+            fDragNote = hit;
+            fDownPoint = where;
+            CaptureDragOrigin();
+            SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
             return;
         }
         // Plain click: if the note isn't already selected, make it the sole
@@ -1436,23 +1472,7 @@ void PianoRollView::MouseDown(BPoint where) {
         if ((size_t)hit >= fSel.size() || !fSel[(size_t)hit])
             SelectOnly(hit);
 
-        // Alt-drag duplicates (item H): the copies are made NOW, selected, and
-        // the drag below carries them — the gesture a DAW user expects.
         int grab = hit;
-        if (modifiers() & B_OPTION_KEY) {
-            int rank = 0;
-            for (int i = 0; i < hit && i < (int)fSel.size(); i++)
-                if (fSel[i]) rank++;
-            const int before = (int)fNotes.size();
-            std::vector<MidiNote> copies =
-                daw::CopySelection(fNotes, fSel, 0);
-            if (AppendSelecting(fNotes, fSel, std::move(copies)) > 0) {
-                grab = before + rank;
-                AuditionBlip(fNotes[(size_t)grab].pitch,
-                             fNotes[(size_t)grab].velocity);
-            }
-        }
-
         const MidiNote& n = fNotes[(size_t)grab];
         fDragNote = grab;
         CaptureDragOrigin();
@@ -1471,11 +1491,13 @@ void PianoRollView::MouseDown(BPoint where) {
     }
 
     // Empty space (Pointer tool): begin a marquee selection. Additive keeps the
-    // prior selection. Creating notes is the Pencil/Brush tools' job.
+    // prior selection (the Alt bits, as they always were here — the note-hit
+    // case above turns them into the click-vs-drag pair instead). Creating
+    // notes is the Pencil/Brush tools' job.
     fDrag = Drag::Marquee;
     fMarqueeCur = where;
-    fPreMarquee = additive ? fSel : std::vector<char>(fNotes.size(), 0);
-    if (!additive) ClearSelection();
+    fPreMarquee = altDup ? fSel : std::vector<char>(fNotes.size(), 0);
+    if (!altDup) ClearSelection();
     SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
     Invalidate();
 }
@@ -1545,6 +1567,35 @@ void PianoRollView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
         }
         ApplyCursor(want);
         return;
+    }
+
+    // Alt on a note: the pointer MOVED, so this is the duplicate-and-drag the
+    // gesture promises. The copies are made now, selected, and the drag below
+    // carries them.
+    if (fDrag == Drag::AltPending) {
+        const float dx = where.x - fDownPoint.x, dy = where.y - fDownPoint.y;
+        if (dx * dx + dy * dy < 9.0f) return;    // still a click, not a drag
+        const int hit = fDragNote;
+        if (hit < 0 || (size_t)hit >= fNotes.size()) { fDrag = Drag::None; return; }
+        if ((size_t)hit >= fSel.size() || !fSel[(size_t)hit]) SelectOnly(hit);
+        int rank = 0;
+        for (int i = 0; i < hit && i < (int)fSel.size(); i++)
+            if (fSel[i]) rank++;
+        const int before = (int)fNotes.size();
+        std::vector<MidiNote> copies = daw::CopySelection(fNotes, fSel, 0);
+        if (AppendSelecting(fNotes, fSel, std::move(copies)) == 0) {
+            fDrag = Drag::None;
+            return;
+        }
+        const int grab = before + rank;
+        fDragNote = grab;
+        CaptureDragOrigin();
+        fDragMustCommit = true;      // the copies are new
+        AuditionBlip(fNotes[(size_t)grab].pitch, fNotes[(size_t)grab].velocity);
+        fDrag = Drag::Move;
+        fGrabOffset  = XToFrame(fDownPoint.x) - fNotes[(size_t)grab].startFrame;
+        fPitchOffset = fNotes[(size_t)grab].pitch - YToPitch(fDownPoint.y);
+        // fall through: this same move already carries the copies
     }
 
     if (fDrag == Drag::Brush) { PaintBrush(where); return; }
@@ -1634,6 +1685,16 @@ void PianoRollView::MouseUp(BPoint) {
     fDragNote = -1;
     fVelLaneDrag = false;
     fCcDragIndex = -1;
+    if (was == Drag::AltPending) {
+        // Alt without a drag: the additive selection toggle (the gesture the
+        // Alt bits mean in the arrangement too).
+        if (fDragNote >= 0 && (size_t)fDragNote < fSel.size()) {
+            fSel[(size_t)fDragNote] = fSel[(size_t)fDragNote] ? 0 : 1;
+            fDragNote = -1;
+            Invalidate();
+        }
+        return;
+    }
     if (fAuditionPitch >= 0) {          // the keyboard column's key goes up
         Audition(fAuditionPitch, 100, false);
         fAuditionPitch = -1;
@@ -1652,7 +1713,12 @@ void PianoRollView::MouseUp(BPoint) {
         Invalidate();
         return;
     }
-    if (was != Drag::None) { Apply(); Invalidate(); }
+    if (was == Drag::None) return;
+    // A gesture that changed nothing is not an edit: committing it pushed an
+    // "Edit Notes" undo step whose undo does nothing (a bare click to select a
+    // note did exactly that).
+    if (DragChanged()) Apply();
+    Invalidate();
 }
 
 void PianoRollView::MessageReceived(BMessage* msg) {
@@ -1845,6 +1911,27 @@ PianoRoll::PianoRoll(BRect frame, TrackId track, ClipId clip,
 void PianoRoll::DispatchMessage(BMessage* m, BHandler* h) {
     if (ForwardUndoRedo(m, fMain)) return;           // Cmd-Z from a child window
     if (ForwardSpaceToTransport(m, fMain)) return;
+    // The clipboard keys have to be intercepted HERE, not left to the view's
+    // KeyDown: BWindow::_HandleKeyDown ends with "we always eat the event if the
+    // command key was pressed", so a Command-modified key-down never reaches the
+    // focus view at all (Cmd-Z worked only because the forwarding above runs
+    // first). The view's own Cmd branches stay as belt and braces; this is the
+    // path that runs.
+    if (m != nullptr && m->what == B_KEY_DOWN && fView != nullptr) {
+        int32 mods = 0;
+        const char* bytes = nullptr;
+        if (m->FindInt32("modifiers", &mods) == B_OK
+            && (mods & B_COMMAND_KEY) != 0
+            && m->FindString("bytes", &bytes) == B_OK && bytes != nullptr) {
+            if (bytes[0] == 'c' || bytes[0] == 'C') { fView->CopySelection(); return; }
+            if (bytes[0] == 'x' || bytes[0] == 'X') {
+                fView->CopySelection(); fView->DeleteSelection(); return;
+            }
+            if (bytes[0] == 'v' || bytes[0] == 'V') { fView->PasteClipboard(); return; }
+            if (bytes[0] == 'd' || bytes[0] == 'D') { fView->DuplicateSelection(); return; }
+            if (bytes[0] == 'a' || bytes[0] == 'A') { fView->SelectAll(); return; }
+        }
+    }
     BWindow::DispatchMessage(m, h);
 }
 

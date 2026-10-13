@@ -472,6 +472,15 @@ private:
     // RollCommitGate), so two gestures posted in one turn of this loop are both
     // applied rather than the second silently dropped.
     RollCommitGate            fRollGate;
+    // The fingerprint of the region each roll was last pushed (RollEdit.h:
+    // RollRegionSignature). A commit whose serial went stale but whose region
+    // still matches this is a commit the model did not invalidate -- an edit
+    // elsewhere moved the serial, and refusing the gesture for it would throw
+    // the user's work away.
+    uint64_t                  fDockPushedSig = 0;
+    uint64_t                  fPopPushedSig  = 0;
+    // The one gate every roll commit goes through (true = apply it).
+    bool RollCommitOk(const class BMessage* msg, TrackId track, ClipId clip);
     // The region the POPPED-OUT roll window shows (the docked one is named by
     // fDockTrack/fDockClip): the push has to name a region even when the model
     // no longer has it, and that is answered by adding its content or "gone".

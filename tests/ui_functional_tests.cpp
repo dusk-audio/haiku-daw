@@ -4928,6 +4928,75 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return followOf() == 1; }));
     CHECK(followMarked() == 1);
 
+    // --- H. The clipboard, from the docked editor ---------------------------
+    // The docked roll is a VIEW of the main window, so the menu bar claims
+    // Cmd-C first. Haiku skips the shortcut of a DISABLED item but still
+    // swallows the key, so there are two halves to check: the Edit menu's Copy
+    // is enabled when the EDITOR has a selection (not only when the arrangement
+    // has one), and the key then reaches the roll's clipboard and pastes back
+    // as a model edit.
+    {
+        // One note, selected, in the roll.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SelectAll();
+            win->Unlock();
+        }
+        bool copyEnabled = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "Edit") == 0 && it->Submenu())
+                            for (int32 j = 0; j < it->Submenu()->CountItems(); j++)
+                                if (BMenuItem* ei = it->Submenu()->ItemAt(j)) {
+                                    const char* el = ei->Label();
+                                    if (el && std::strcmp(el, "Copy") == 0)
+                                        copyEnabled = ei->IsEnabled();
+                                }
+                    }
+            win->Unlock();
+        }
+        CHECK(copyEnabled);
+        // The key itself: posted to the window, exactly as the keyboard sends
+        // it (the focus is the docked roll from WaitFor above).
+        {
+            BMessage key(B_KEY_DOWN);
+            key.AddString("bytes", "c");
+            key.AddInt32("modifiers", B_COMMAND_KEY);
+            win->PostMessage(&key);
+        }
+        bool haveClip = false;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            haveClip = !roll->ClipboardEmpty();
+            win->Unlock();
+            return haveClip;
+        }));
+        // Paste it: the model gains a note (the undo step is the proof the
+        // commit went through the stack, not around it).
+        const int notesBefore = (int)rollNotes().size();
+        {
+            BMessage key(B_KEY_DOWN);
+            key.AddString("bytes", "v");
+            key.AddInt32("modifiers", B_COMMAND_KEY);
+            win->PostMessage(&key);
+        }
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() > notesBefore;
+        }));
+        Shot("roll-clipboard");
+        win->PostMessage(MSG_UNDO_TEST);   // leave the region as it was
+        snooze(150000);
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() == notesBefore;
+        }));
+    }
+
     // --- D. Audition: a click on the keyboard column sounds -----------------
     // The engine side cannot be heard by a test, so the engine counts the
     // audition notes its callback actually RENDERS (Engine::

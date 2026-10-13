@@ -56,13 +56,17 @@ mark, the timeline and every roll read one policy.
 
 ### D — audition
 
-- `Engine::AuditionNote(track-pitched)` — a small lock-free `MidiEventRing` in
-  the Engine, drained on the RT thread into the existing voice pool
+- `Engine::AuditionNote` — a small lock-free `MidiEventRing` in the
+  Engine, drained on the RT thread into the existing voice pool
   (`Graph::TakeVoice`/`ReleaseVoice`/`DrainAudition`), rendered through the
   target track's bus, so a click sounds through that region's instrument, fader
   and FX — not a bare synth blip. An audition voice is marked, so switching
   keyboard monitoring off does not release it, and its bus exists even when the
-  region has no notes (`BuildRequest::auditionTrack`).
+  region has no notes (`BuildRequest::auditionTrack`, snapshotted into the Graph
+  at build so the bus set and the RT routing cannot disagree).
+- `Engine::AuditionNotesRendered()` counts what the callback actually rendered:
+  the path's end-to-end proof, and the regression handle for the bug the review
+  found (see the review section).
 - The roll asks (`kMsgRollAudition`) on a keyboard-column press/release, a
   drawn note (pencil, brush) and a velocity-lollipop click; `MainWindow`
   decides. When the transport is idle and nothing is armed, the window raises
@@ -177,20 +181,22 @@ the toolbar layout.
 
 ## Mutation checks (break it, watch it fail, restore)
 
-| Mutation | Caught by |
+| Mutation | Caught by (rolledit_tests) |
 |---|---|
-| `DecideRollSync` ignores the region length | `rolledit_tests:73,91` |
-| `DecideRollSync` returns Keep on note differences | `rolledit_tests:67,73` (6 checks) |
-| `RollCommitCurrent` accepts any serial | `rolledit_tests:110,111` |
-| `RollCommitAllowed` ignores the own-transition base | `rolledit_tests:128` (`!RollCommitAllowed(6, 8, g)`) |
-| `NoteInRegion` uses `<=` (the end frame sounds) | `rolledit_tests:120,128` |
-| `SnapClipRelative` drops the region's origin | `rolledit_tests:138,139` (10 checks) |
-| `CcPointMove` leaves the frame alone | `rolledit_tests:223,227` (5 checks) |
-| The CC hit test has an unbounded radius | `rolledit_tests:213,214` |
-| `LaneValueAtFraction` does not clamp | `rolledit_tests:202,203` |
-| The toolbar layout always keeps MIDI wide | `rolledit_tests:347,348` |
-| `EventInLane` stops matching bend events | `rolledit_tests:183,190` (7 checks) |
-| `CopySelection` ignores its offset | `rolledit_tests:321,334` |
+| `DecideRollSync` ignores the region length | 73 (2 checks) |
+| `DecideRollSync` returns Keep on note differences | 67 (6) |
+| `RollCommitCurrent` accepts any serial | 110 (6) |
+| `RollCommitAllowed` ignores the own-transition base | 127 (1) |
+| `RollCommitAccepted` records nothing | 124 (2) |
+| `NoteInRegion` uses `<=` (the end frame sounds) | 142 (2) |
+| `SnapClipRelative` drops the region's origin | 160 (10) |
+| `CcPointMove` leaves the frame alone | 245 (5) |
+| The CC hit test has an unbounded radius | 235 (2) |
+| `LaneValueAtFraction` does not clamp | 224 (2) |
+| The toolbar layout always keeps MIDI wide | 369 (3) |
+| `EventInLane` stops matching bend events | 205 (7) |
+| `CopySelection` ignores its offset | 343 (2) |
+
 
 One of these was a REAL bug found while writing the tests, not a deliberate
 mutation: `CcPointMove`'s first cut erased an absorbed point without adjusting
@@ -200,7 +206,7 @@ where it bit).
 
 ## Haiku-only halves (the VM suite), `tests/ui_functional_tests.cpp`
 
-`TestRollModelSync` (package 51, ~90 lines) drives the DOCKED editor through
+`TestRollModelSync` (package 51, ~130 lines) drives the DOCKED editor through
 the real messages: it opens one, drags a note, **undoes** and requires the roll
 to show the model's state again; draws a note on the 1/16 grid and then on the
 quarter grid at the same x and requires each to land where
@@ -209,9 +215,47 @@ exactly two points with one at neither original frame (no staircase); moves the
 region with `MoveMidiClipCommand` + `kMsgReloadEngine` and requires the roll to
 re-point, then splits it and requires the half's length to SURVIVE the next
 gesture; toggles Follow both ways and requires the view and the menu mark to
-agree; and removes the region and requires the editor to be gone. Five shots:
-`roll-after-undo`, `roll-grid-16th`, `roll-grid-quarter`, `roll-cc-lane`,
-`roll-cc-drag`, `roll-region-moved`, `roll-after-split`, `roll-region-gone`.
+agree; clicks the keyboard column and requires the ENGINE to render an
+  audition note (`AuditionNotesRendered`); and removes the region and requires
+  the editor to be gone. Nine shots: `roll-after-undo`, `roll-grid-16th`,
+  `roll-grid-quarter`, `roll-cc-lane`, `roll-cc-drag`, `roll-region-moved`,
+  `roll-after-split`, `roll-audition`, `roll-region-gone`.
+
+## Adversarial review pass (before this record was written)
+
+Two read-only review agents went over the diff — the engine audition path and
+the roll/window sync protocol — because none of this code can be run here. The
+engine review found five real defects, all fixed:
+
+1. **`Bus`'s hand-written move constructor and move-assignment did not carry the
+   new `auditionNotes` member.** The graph build reserves the bus's voice share
+   and then `push_back(std::move(b))` — a move-CONSTRUCT — so the bus arrived
+   with capacity 0, the RT hand-off's `size() < capacity()` guard dropped every
+   note, and the whole feature was silently dead (no crash, no sound). Both
+   moves carry it now, and `AuditionNotesRendered` plus the new VM check exist
+   so this exact class of bug cannot pass again.
+2. **`StopAuditionEngine` stopped the engine unconditionally**, and a play, a
+   take and the armed-track monitor are all the same engine object — unchecking
+   "Preview notes" while the transport rolled would have killed playback with
+   the play lamp still lit. It returns when the transport owns the engine.
+3. **The "already up" test proved a timer existed, not that the player was
+   running**: a click inside the 3 s window after the engine had been stopped
+   elsewhere was swallowed for ever. It asks `Engine::PlayerRunning()` now.
+4. **A key held on the keyboard column longer than the idle timeout** would have
+   had its voice reset mid-note by the idle stop. Held notes are counted; the
+   timer re-arms while one is down, and the views release them when they go.
+5. **The bus set (build-time) and the routing (live atomic) could disagree**,
+   dropping a click on a track whose bus only exists for the audition. The
+   target is snapshotted into the Graph and the RT routes by that.
+
+The engine review also checked and cleared: RT safety of the new ring, vectors
+and helpers; the refactor's equivalence with the old `UpdateLiveVoices` body
+(ordering, the CC64 path, the note-off match, the bend phase, the reap rules);
+and voice lifetime in both render paths.
+
+One design change came out of writing the gate's own tests rather than the
+review: `RollCommitGate` (above) — the first cut refused a second gesture posted
+inside one turn of the window's loop.
 
 ## Shots to look for (the orchestrator's screenshot pass)
 
@@ -244,8 +288,10 @@ agree; and removes the region and requires the editor to be gone. Five shots:
 - **Nothing from A–J is left undone.** G's bend lane landed; D's mute switch is
   in Preferences.
 - **The audition is the least verified piece.** The engine side (the ring, the
-  voice path, the bus rule) compiles under the Haiku headers and was reviewed
-  line by line, but **it was not run**: no VM and no audio device on this host.
+  voice path, the bus rule) compiles under the Haiku headers, was reviewed line
+  by line and now has a check that will run on the VM, but **it was not run
+  here**: no VM and no audio device on this host. The VM check proves the note
+  reaches the instrument render; it cannot prove it reaches the speakers.
   Marc's click list: open a region, click the keyboard column (it must sound
   through that track's instrument — change the track's instrument/FX and hear
   it), draw a note (a short blip), click a velocity lollipop; then Preferences ▸

@@ -113,25 +113,60 @@ int main() {
     }
     {
         // A fresh gate has no own-transition: only an exact match passes.
+        const TrackId T = 7; const ClipId C = 9;
         RollCommitGate g;
-        CHECK(RollCommitAllowed(7, 7, g));
-        CHECK(!RollCommitAllowed(7, 8, g));
+        CHECK(RollCommitAllowed(7, 7, T, C, g));
+        CHECK(!RollCommitAllowed(7, 8, T, C, g));
         // After the roll's own commit (7 -> 8), a SECOND commit posted in the
         // same batch (it still names 7, and no push has reached it) is applied
         // rather than silently dropped -- the model is exactly where that
         // commit left it.
-        RollCommitAccepted(g, 7, 8);
-        CHECK(RollCommitAllowed(7, 8, g));
+        RollCommitAccepted(g, 7, 8, T, C);
+        CHECK(RollCommitAllowed(7, 8, T, C, g));
         // ... but only while it is: an undo (8 -> 9) ends the grace, and the
         // batched commit would then be writing over a state it never saw.
-        CHECK(!RollCommitAllowed(7, 9, g));
-        CHECK(RollCommitAllowed(9, 9, g));   // a re-synced roll is fine again
+        CHECK(!RollCommitAllowed(7, 9, T, C, g));
+        CHECK(RollCommitAllowed(9, 9, T, C, g));   // a re-synced roll is fine
         // A different base is never waved through by the historical transition.
-        CHECK(!RollCommitAllowed(6, 8, g));
+        CHECK(!RollCommitAllowed(6, 8, T, C, g));
+        // Neither is a different REGION: the grace belongs to the region its
+        // commit was on (two rolls can be open on two regions).
+        CHECK(!RollCommitAllowed(7, 8, T, 11, g));
+        CHECK(!RollCommitAllowed(7, 8, 12, C, g));
         // Two accepted commits in a row: the transition moves with them.
-        RollCommitAccepted(g, 9, 10);
-        CHECK(RollCommitAllowed(9, 10, g));
-        CHECK(!RollCommitAllowed(7, 10, g));   // the older base is dead
+        RollCommitAccepted(g, 9, 10, T, C);
+        CHECK(RollCommitAllowed(9, 10, T, C, g));
+        CHECK(!RollCommitAllowed(7, 10, T, C, g));   // the older base is dead
+    }
+
+    // --- the region fingerprint --------------------------------------------
+    {
+        std::vector<MidiNote> notes = { Note(60, 0), Note(64, 6000) };
+        std::vector<MidiClipEvent> events = { Cc(1, 0, 64) };
+        const uint64_t a = RollRegionSignature(0, 96000, notes, events);
+        CHECK(a == RollRegionSignature(0, 96000, notes, events));  // stable
+        // Every field the snapshot is made of moves it.
+        CHECK(a != RollRegionSignature(1, 96000, notes, events));
+        CHECK(a != RollRegionSignature(0, 96001, notes, events));
+        CHECK(a != RollRegionSignature(0, 96000,
+                                       { Note(61, 0), Note(64, 6000) }, events));
+        CHECK(a != RollRegionSignature(0, 96000,
+                                       { Note(60, 0), Note(64, 6001) }, events));
+        CHECK(a != RollRegionSignature(0, 96000,
+                                       { Note(60, 0) }, events));
+        CHECK(a != RollRegionSignature(0, 96000, notes, {}));
+        CHECK(a != RollRegionSignature(0, 96000, notes,
+                                       { Cc(1, 0, 65) }));
+        // Velocity and length are part of the content, not decoration.
+        CHECK(a != RollRegionSignature(0, 96000,
+                                       { Note(60, 0), Note(64, 6000, 1000, 90) },
+                                       events));
+        CHECK(a != RollRegionSignature(0, 96000,
+                                       { Note(60, 0), Note(64, 6000, 900) },
+                                       events));
+        // The RollRegion overload agrees with the field one.
+        RollRegion r = Region(1, 2, 0, 96000, notes, events);
+        CHECK(RollRegionSignature(r) == a);
     }
 
     // --- the region's window ------------------------------------------------
@@ -240,28 +275,34 @@ int main() {
 
         // A drag MOVES the grabbed point: the bug was that the drag wrote a new
         // point at every x and left the old one behind.
-        CHECK(CcPointMove(ev, 1, 0, 2000, 100));
+        int at = 0;
+        CHECK(CcPointMove(ev, 1, &at, 2000, 100));
         CHECK(ev.size() == 3);                     // nothing added
         CHECK(ev[0].startFrame == 2000);
         CHECK(ev[0].value == 100);
-        CHECK(CcPointMove(ev, 1, 0, 4500, 127));   // still the same point
+        CHECK(at == 0);
+        CHECK(CcPointMove(ev, 1, &at, 4500, 127));   // still the same point
         CHECK(ev.size() == 3);
         CHECK(ev[0].startFrame == 4500);
         // Clamps, not corruption.
-        CHECK(CcPointMove(ev, 1, 0, -10, 999));
+        CHECK(CcPointMove(ev, 1, &at, -10, 999));
         CHECK(ev[0].startFrame == 0);
         CHECK(ev[0].value == 127);
         // The index must name a point OF THIS LANE: a wrong lane or a stale
         // index is refused, never silently written to another stream.
-        CHECK(!CcPointMove(ev, 1, 2, 100, 100));       // index 2 is the CC2 point
-        CHECK(!CcPointMove(ev, 1, 99, 100, 100));
-        CHECK(!CcPointMove(ev, kLanePitchBend, 0, 100, 100));
+        int other = 2;                                 // the CC2 point
+        CHECK(!CcPointMove(ev, 1, &other, 100, 100));
+        int bad = 99;
+        CHECK(!CcPointMove(ev, 1, &bad, 100, 100));
+        CHECK(!CcPointMove(ev, kLanePitchBend, &at, 100, 100));
+        CHECK(!CcPointMove(ev, 1, nullptr, 100, 100));
 
         // Moving onto a frame that already holds a point of the same stream
         // absorbs it: one point per stream per frame (the step function's rule).
         {
             std::vector<MidiClipEvent> two = { Cc(1, 1000, 10), Cc(1, 3000, 20) };
-            CHECK(CcPointMove(two, 1, 0, 3000, 30));
+            int i0 = 0;
+            CHECK(CcPointMove(two, 1, &i0, 3000, 30));
             CHECK(two.size() == 1);
             CHECK(two[0].startFrame == 3000);
             CHECK(two[0].value == 30);
@@ -269,10 +310,37 @@ int main() {
         // And the same for a bend moved onto a bend.
         {
             std::vector<MidiClipEvent> b = { Bend(1000, 8192), Bend(3000, 9000) };
-            CHECK(CcPointMove(b, kLanePitchBend, 1, 1000, 4000));
+            int i1 = 1;
+            CHECK(CcPointMove(b, kLanePitchBend, &i1, 1000, 4000));
             CHECK(b.size() == 1);
             CHECK(b[0].startFrame == 1000);
             CHECK(b[0].value == 4000);
+            CHECK(i1 == 0);          // the absorbed point was ABOVE it
+        }
+        // The case a drag actually hits: the grabbed point absorbs a neighbour
+        // BELOW it (a lower index), which shifts it. The caller's next move must
+        // still find the point it grabbed -- keeping the old index would hand it
+        // the neighbour, or run off the end.
+        {
+            std::vector<MidiClipEvent> three = { Cc(1, 1000, 10), Cc(1, 3000, 20),
+                                                 Cc(1, 6000, 30) };
+            int grab = 1;                       // the middle point
+            CHECK(CcPointMove(three, 1, &grab, 1000, 99));   // onto the first
+            CHECK(three.size() == 2);
+            CHECK(grab == 0);                   // it is the first one now
+            CHECK(three[0].startFrame == 1000 && three[0].value == 99);
+            CHECK(three[1].startFrame == 6000 && three[1].value == 30);
+            // A SECOND move, with the updated index, still holds the grabbed
+            // point -- and never the neighbour.
+            CHECK(CcPointMove(three, 1, &grab, 2000, 55));
+            CHECK(three[0].startFrame == 2000 && three[0].value == 55);
+            CHECK(three[1].startFrame == 6000 && three[1].value == 30);
+            // Absorbing the LAST point (a higher index) leaves the dragged
+            // one where it was -- index unchanged, still in range.
+            int last = 0;                       // the point now at 2000
+            CHECK(CcPointMove(three, 1, &last, 6000, 77));
+            CHECK(three.size() == 1 && last == 0);
+            CHECK(three[0].startFrame == 6000 && three[0].value == 77);
         }
 
         // The ramp path: insert, then update in place; a bend keeps its type.

@@ -7,10 +7,12 @@
 // moves/resizes, Pencil/Brush create, Eraser/Scissors/Glue/Velocity act on the
 // note under the cursor. Right-click deletes and Ctrl-drag sets velocity with
 // any tool. Tempo-map-aware grid + snap (the grid the toolbar's field selects,
-// model/SnapGrid.h). Multi-select: Command-click toggles a note, drag on empty
-// space marquee-selects (Pointer), and move/resize/velocity/delete act on the
-// whole selection. Cmd-X/C/V/D cut, copy, paste and duplicate; Alt-drag
-// duplicates under the pointer.
+// model/SnapGrid.h). Multi-select: Alt-click (either Alt bit — a PC's Alt and a
+// Mac's Command/Option share them) toggles a note, drag on empty space
+// marquee-selects (Pointer, Alt from empty space keeps the prior selection),
+// and move/resize/velocity/delete act on the whole selection. Cmd-X/C/V/D cut,
+// copy, paste and duplicate; Alt-DRAG duplicates under the pointer (the same
+// key, told apart by whether the pointer moves).
 //
 // The snapshot is SYNCHRONISED (package 51): the main window pushes the
 // region's current state after every model change (kMsgRollRegion), and every
@@ -233,6 +235,8 @@ public:
     void SelectAll();
     void ZoomToFitRegion();         // 'f': the whole region in view
     bool ClipboardEmpty() const { return fClipboard.empty(); }
+    int  SelectedCount() const;
+    bool HasSelection() const { return SelectedCount() > 0; }
 
     // --- audition (package 51, item D) -------------------------------------
     // Tell the main window to sound (or stop) a note through this region's
@@ -364,14 +368,18 @@ private:
     void  EraseAt(BPoint where);        // eraser
     void  SplitNoteAt(int note, float x);   // scissors
     void  GlueNoteAt(int note);         // glue (merge next same-pitch)
-    void  PaintBrush(BPoint where);     // brush: add along the drag path
+    int   PaintBrush(BPoint where);     // brush: add along the drag path (count)
 
     // Selection helpers (fSel is index-aligned with fNotes).
     void  SelectOnly(int i);
     void  ClearSelection();
-    int   SelectedCount() const;
     void  DeleteSelected();
     void  CaptureDragOrigin();
+    // Did the gesture in progress actually change anything? A bare click on a
+    // note starts a Move drag that goes nowhere, and committing it pushed an
+    // "Edit Notes" undo step that undid to the same notes (the stack has no
+    // no-op detection).
+    bool  DragChanged() const;
 
     std::vector<MidiNote> fNotes;
     std::vector<MidiClipEvent> fEvents;   // the region's controller events
@@ -410,7 +418,13 @@ private:
     bool   fHoverSeen = false;
 
     enum class Drag { None, Move, Resize, ResizeLeft, Velocity, Marquee, Brush,
-                      Erase, Cc, CcMove };
+                      Erase, Cc, CcMove,
+                      // Alt pressed on a note: it becomes a duplicate-and-drag
+                      // only once the pointer MOVES; a click stays the additive
+                      // selection toggle it has always been (the two gestures
+                      // share one key on a PC keyboard, where Alt is
+                      // B_COMMAND_KEY).
+                      AltPending };
     Drag  fDrag = Drag::None;
     int   fDragNote = -1;
     Frame fGrabOffset = 0;
@@ -425,6 +439,9 @@ private:
     // Per-note snapshot captured at drag start so a group move/resize applies
     // one consistent delta to every selected note (no cumulative drift).
     std::vector<NoteGeometry> fDragOrig;   // index-aligned with fNotes
+    size_t fDragCount0 = 0;    // how many notes there were when the drag began
+    bool   fDragMustCommit = false;   // a note was CREATED: commit even if the
+                                      // gesture left its geometry alone
 
     // Marquee (rubber-band) selection.
     BPoint            fMarqueeCur;

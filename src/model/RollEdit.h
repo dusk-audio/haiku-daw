@@ -176,6 +176,44 @@ inline RollSync DecideRollSync(const RollRegion& model, const RollRegion& roll) 
     return RollSync::Keep;
 }
 
+// A cheap fingerprint of a region's own state (the window's copy and the
+// model's compare equal iff nothing about the region moved). 64-bit FNV-1a over
+// the fields a roll's snapshot is made of, so the signature can travel in a
+// message and be recomputed on either side. A collision is ~2^-64 and costs one
+// refused commit, never corruption.
+inline uint64_t RollRegionSignature(Frame start, Frame length,
+                                    const std::vector<MidiNote>& notes,
+                                    const std::vector<MidiClipEvent>& events) {
+    uint64_t h = 1469598103934665603ull;   // FNV offset basis
+    auto mix = [&h](uint64_t v) {
+        for (int i = 0; i < 8; i++) {
+            h ^= (v >> (i * 8)) & 0xffu;
+            h *= 1099511628211ull;         // FNV prime
+        }
+    };
+    mix((uint64_t)start);
+    mix((uint64_t)length);
+    mix((uint64_t)notes.size());
+    for (const MidiNote& n : notes) {
+        mix((uint64_t)(uint32_t)n.pitch);
+        mix((uint64_t)(uint32_t)n.velocity);
+        mix((uint64_t)n.startFrame);
+        mix((uint64_t)n.lengthFrames);
+    }
+    mix((uint64_t)events.size());
+    for (const MidiClipEvent& e : events) {
+        mix((uint64_t)(uint32_t)e.type);
+        mix((uint64_t)(uint32_t)e.data);
+        mix((uint64_t)(uint32_t)e.value);
+        mix((uint64_t)e.startFrame);
+    }
+    return h;
+}
+
+inline uint64_t RollRegionSignature(const RollRegion& r) {
+    return RollRegionSignature(r.start, r.length, r.notes, r.events);
+}
+
 // The commit gate. Every edit the roll posts carries the stack serial it was
 // based on; the main window applies it only while that serial is still the
 // model's. A roll whose base is stale has missed a change (an undo, another
@@ -198,18 +236,24 @@ inline bool RollCommitCurrent(uint64_t baseSerial, uint64_t modelSerial) {
 struct RollCommitGate {
     uint64_t base   = 0;   // the serial the last accepted commit named
     uint64_t result = 0;   // ... and the serial it left the stack at
+    TrackId  track  = kInvalidTrackId;   // the region that transition was on
+    ClipId   clip   = kInvalidClipId;
 };
 
 inline bool RollCommitAllowed(uint64_t baseSerial, uint64_t modelSerial,
+                              TrackId track, ClipId clip,
                               const RollCommitGate& own) {
     if (RollCommitCurrent(baseSerial, modelSerial)) return true;
-    return baseSerial == own.base && modelSerial == own.result;
+    return baseSerial == own.base && modelSerial == own.result
+        && track == own.track && clip == own.clip;
 }
 
 inline void RollCommitAccepted(RollCommitGate& own, uint64_t baseSerial,
-                               uint64_t modelSerial) {
+                               uint64_t modelSerial, TrackId track, ClipId clip) {
     own.base   = baseSerial;
     own.result = modelSerial;
+    own.track  = track;
+    own.clip   = clip;
 }
 
 // --- selection edits (nudge, duplicate, copy) -------------------------------
@@ -321,12 +365,16 @@ inline void CcPointSet(std::vector<MidiClipEvent>& events, int lane, Frame frame
 // Move the point at `index` to a new frame and value. The index IS the drag's
 // identity (the vector is not re-sorted while dragging), so a moved point
 // leaves nothing behind -- the bug the old "write a point at every new x" path
-// had. Another point of the same stream already at `frame` is absorbed.
-// Returns false for an index that names nothing in this lane.
-inline bool CcPointMove(std::vector<MidiClipEvent>& events, int lane, int index,
+// had. Another point of the same stream already at `frame` is absorbed, which
+// SHIFTS the entries after it: the moved point's new index comes back through
+// `index` (in/out), because a drag that kept the old one would hand the next
+// mouse-move to its neighbour -- or run off the end. Returns false for an index
+// that names nothing in this lane.
+inline bool CcPointMove(std::vector<MidiClipEvent>& events, int lane, int* index,
                         Frame frame, int value) {
-    if (index < 0 || (std::size_t)index >= events.size()) return false;
-    if (!EventInLane(events[(std::size_t)index], lane)) return false;
+    if (index == nullptr) return false;
+    if (*index < 0 || (std::size_t)*index >= events.size()) return false;
+    if (!EventInLane(events[(std::size_t)*index], lane)) return false;
     if (frame < 0) frame = 0;
     const int max = LaneValueMax(lane);
     if (value < 0) value = 0;
@@ -336,7 +384,7 @@ inline bool CcPointMove(std::vector<MidiClipEvent>& events, int lane, int index,
     // erased BELOW it cannot shift the write onto the wrong event (the first
     // cut erased without adjusting and wrote out of bounds — the host test
     // caught it).
-    int at = index;
+    int at = *index;
     for (std::size_t i = 0; i < events.size();) {
         if ((int)i != at && EventInLane(events[i], lane)
             && events[i].startFrame == frame) {
@@ -348,6 +396,7 @@ inline bool CcPointMove(std::vector<MidiClipEvent>& events, int lane, int index,
     }
     events[(std::size_t)at].startFrame = frame;
     events[(std::size_t)at].value = value;
+    *index = at;                            // where the point lives NOW
     return true;
 }
 
