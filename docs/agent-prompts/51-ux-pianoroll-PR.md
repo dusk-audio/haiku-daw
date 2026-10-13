@@ -228,9 +228,14 @@ re-point, then splits it and requires the half's length to SURVIVE the next
 gesture; toggles Follow both ways and requires the view and the menu mark to
 agree; clicks the keyboard column and requires the ENGINE to render an
   audition note (`AuditionNotesRendered`); and removes the region and requires
-  the editor to be gone. Nine shots: `roll-after-undo`, `roll-grid-16th`,
-  `roll-grid-quarter`, `roll-cc-lane`, `roll-cc-drag`, `roll-region-moved`,
-  `roll-after-split`, `roll-audition`, `roll-region-gone`.
+  the editor to be gone. It also drives the clipboard keys through the real key
+  path (Cmd-C must copy in the docked editor — the Edit item has to be ENABLED
+  for Haiku to deliver the shortcut at all), and both Alt gestures (a click
+  toggles the selection and commits nothing, a drag duplicates and one undo
+  takes it back). Eleven shots: `roll-after-undo`, `roll-grid-16th`,
+  `roll-grid-quarter`, `roll-cc-lane`, `roll-cc-drag`, `roll-clipboard`,
+  `roll-alt-click`, `roll-alt-drag`, `roll-region-moved`, `roll-after-split`,
+  `roll-audition`, `roll-region-gone`.
 
 ## Adversarial review pass (before this record was written)
 
@@ -293,7 +298,10 @@ The sync-protocol review found eight more, all fixed:
    (the absorbed point shifts the vector): the next mouse-move dragged the
    neighbour, or ran off the end and froze. `CcPointMove` hands the new index
    back; the host test now calls it twice on the same drag.
-6. **Alt-drag did not duplicate** — the Alt bits were this view's additive-
+6. **Alt-drag did not duplicate** (and, after the fix, a re-read of the diff
+   caught the toggle itself firing on an already-cleared index — the two Alt
+   gestures now have VM checks because reading it twice was not enough) — the
+   Alt bits were this view's additive-
    select modifier, and on a PC keyboard Alt *is* `B_COMMAND_KEY`. Alt on a
    note now resolves by what the pointer does: a drag duplicates (the copies
    are made on the first real movement), a click toggles the selection. Both
