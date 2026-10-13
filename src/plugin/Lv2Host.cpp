@@ -842,17 +842,38 @@ void Lv2Host::ScanAll() {
                 // An enumeration's legal values are its scale points, and they
                 // need not be contiguous -- without them "an integer in range"
                 // would accept values the plugin never defined.
+                //
+                // Each point's own label travels beside its value: the VALUE is
+                // an index, so a filter type shown as "2" says nothing, and the
+                // label is what the plugin's own UI would print. Names and
+                // values are collected as PAIRS -- sorting the values alone
+                // would reorder one and not the other, and every name would
+                // then belong to the wrong point.
                 if (isEnum) {
                     if (LilvScalePoints* sp = lilv_port_get_scale_points(p, port)) {
+                        std::vector<std::pair<float, std::string>> points;
                         LILV_FOREACH(scale_points, si, sp) {
                             const LilvScalePoint* pt = lilv_scale_points_get(sp, si);
                             float f = 0.0f;
-                            if (pt && NodeAsFloat(lilv_scale_point_get_value(pt), &f))
-                                s.scalePoints.push_back(f);
+                            if (!pt || !NodeAsFloat(lilv_scale_point_get_value(pt), &f))
+                                continue;
+                            std::string label;
+                            if (const LilvNode* ln = lilv_scale_point_get_label(pt))
+                                if (const char* ls = lilv_node_as_string(ln))
+                                    label = ls;
+                            points.push_back({ f, label });
                         }
                         lilv_scale_points_free(sp);
+                        std::sort(points.begin(), points.end(),
+                                  [](const std::pair<float, std::string>& a,
+                                     const std::pair<float, std::string>& b) {
+                                      return a.first < b.first;
+                                  });
+                        for (const auto& pt : points) {
+                            s.scalePoints.push_back(pt.first);
+                            s.scalePointNames.push_back(pt.second);
+                        }
                     }
-                    std::sort(s.scalePoints.begin(), s.scalePoints.end());
                 }
 
                 if (!isInput) {
@@ -873,8 +894,7 @@ void Lv2Host::ScanAll() {
 
             if (s.role == Lv2PortRole::ControlIn)
                 ctrl.push_back({ s.mn, s.mx, s.def, s.hasMin, s.hasMax,
-                                 s.isInteger, s.isToggled, s.scalePoints });
-            specs.push_back(s);
+                                 s.isInteger, s.isToggled, s.scalePoints });            specs.push_back(s);
         }
 
         Lv2PortLayout layout = BuildLv2PortLayout(specs);
@@ -897,7 +917,8 @@ void Lv2Host::ScanAll() {
         for (const Lv2PortSpec& s : specs)
             if (s.role == Lv2PortRole::ControlIn) {
                 info.params.push_back({ s.name, s.mn, s.mx, s.def, s.isInteger,
-                                        s.isToggled, s.scalePoints });
+                                        s.isToggled, s.scalePoints,
+                                        s.scalePointNames });
                 info.paramSymbols.push_back(s.symbol);
             }
 

@@ -303,6 +303,16 @@ void TimelineView::ZoomToFit() {
     Invalidate();
 }
 
+// Clear one lane meter's clip lamps (package 52). The lamps latch at digital
+// full scale, exactly as the mixer strips' and the master meter's do.
+void TimelineView::ClearClipLamps(TrackId id) {
+    TrackMeterState& ms = fTrackMeter[id];
+    ms.clipL.Reset();
+    ms.clipR.Reset();
+    Invalidate(BRect(HeaderWidth() - HdrMeterW(), 0, HeaderWidth(),
+                     Bounds().bottom));
+}
+
 void TimelineView::CycleAuto(TrackId id) {
     const Track* t = fProject ? fProject->FindTrack(id) : nullptr;
     if (!t) return;
@@ -2602,6 +2612,11 @@ void TimelineView::MouseDown(BPoint where) {
     const Track& t = fProject->Tracks()[idx];
 
     if (where.x < HeaderWidth()) {
+        // A click on the lane's meter clears its clip lamp (the master meter's
+        // own gesture, package 52) and then carries on: the click still selects
+        // the track, which is what it has always done.
+        if (where.x >= HeaderWidth() - HdrMeterW() && !rightClick)
+            ClearClipLamps(t.id);
         // Any header click selects the track (drives the left inspector).
         SetSelectedTrack(t.id);
         // Track name strip: right-click deletes the track, double-click renames
@@ -2645,13 +2660,15 @@ void TimelineView::MouseDown(BPoint where) {
                                              : std::string();
                 delete mm;
                 // Color/height/reorder route through the command stack (undoable).
-                if (pick == "Move Up")
-                    fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, -1),
+                if (pick == "Move Up" || pick == "Move Down") {
+                    fStack->Execute(std::make_unique<MoveTrackCommand>(
+                                        t.id, pick == "Move Up" ? -1 : +1),
                                     *fProject);
-                else if (pick == "Move Down")
-                    fStack->Execute(std::make_unique<MoveTrackCommand>(t.id, +1),
-                                    *fProject);
-                else if (pick == "Next Color") {
+                    // A reorder is a track-LIST edit: the console draws the
+                    // arrangement's order, so an open mixer has to be told or it
+                    // keeps showing the old one (package 52).
+                    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+                } else if (pick == "Next Color") {
                     if (Track* tr = fProject->FindTrack(t.id))
                         fStack->Execute(std::make_unique<SetTrackColorCommand>(
                             t.id, (tr->colorIndex + 1) % kTrackColorCount),
@@ -2696,9 +2713,14 @@ void TimelineView::MouseDown(BPoint where) {
                     BRect wr(sp.x, sp.y, sp.x + 260, sp.y + 74);
                     (new RenameWindow(wr, t.id, t.name.c_str(),
                                       BMessenger(Window())))->Show();
-                } else if (pick == "Delete")
+                } else if (pick == "Delete") {
                     fStack->Execute(std::make_unique<RemoveTrackCommand>(t.id),
                                     *fProject);
+                    // The console's strip for this track has to go with it
+                    // (package 52): left up it looks live and drops every edit
+                    // on the FindTrack guard, silently.
+                    if (BWindow* w = Window()) w->PostMessage(kMsgUiRefresh);
+                }
                 Invalidate();
                 return;
             }
@@ -4852,16 +4874,33 @@ void TimelineView::DrawTrackHeader(const Track& t, BRect lane) {
     if (auto it = fTrackPeaks.find(t.id); it != fTrackPeaks.end()) {
         mPeakL = it->second.first; mPeakR = it->second.second;
     }
+    // The hold + lamp state (package 52), moved here: this draw is what the
+    // meter tick triggers, and PeakHold is a time-based machine (1.5 s of hold,
+    // then 20 dB/s), so it has to see the clock rather than the repaint count.
+    TrackMeterState& ms = fTrackMeter[t.id];
+    {
+        const int64_t now = system_time();
+        ms.holdL.Update(LinToFrac(mPeakL), now);
+        ms.holdR.Update(LinToFrac(mPeakR), now);
+        ms.clipL.Latch(ReachesClipLevel(mPeakL));
+        ms.clipR.Latch(ReachesClipLevel(mPeakR));
+    }
     // dB-scaled, through the shared bar (M3.3): the same maths and the same
     // one threshold set as the master meter, so a level means the same thing
-    // in both places.
+    // in both places. One bar per channel, with its own hold tick and a clip
+    // lamp over the pair.
+    const float lampH = Themed(5.0f);
+    BRect lamp(meterBox.left + Themed(1), meterBox.top,
+               meterBox.right - Themed(1), meterBox.top + lampH);
+    DrawClipLamp(this, lamp, ms.clipL.Clipped() || ms.clipR.Clipped());
+    const float barsTop = lamp.bottom + Themed(2.0f);
     const float bw = (meterBox.Width() - Themed(3)) * 0.5f;
-    auto meterBar = [&](float x0, float level) {
-        DrawMeterBar(this, BRect(x0, meterBox.top, x0 + bw, meterBox.bottom),
-                     level, false);
+    auto meterBar = [&](float x0, float level, float holdFrac) {
+        DrawMeterBar(this, BRect(x0, barsTop, x0 + bw, meterBox.bottom),
+                     level, false, -1.0f, holdFrac);
     };
-    meterBar(meterBox.left + Themed(1), mPeakL);
-    meterBar(meterBox.left + Themed(2) + bw, mPeakR);
+    meterBar(meterBox.left + Themed(1), mPeakL, ms.holdL.Frac());
+    meterBar(meterBox.left + Themed(2) + bw, mPeakR, ms.holdR.Frac());
 
     // Hover highlight (M2.1): the header control the pointer is over -- or the
     // lane's resize edge (M2.6). Drawn last so it is not buried under the

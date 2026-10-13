@@ -38,6 +38,12 @@ struct Lv2ParamInfo {
     bool  isInteger = false;
     bool  isToggled = false;
     std::vector<float> scalePoints;   // lv2:enumeration values, if declared
+    // Parallel to `scalePoints`: each point's own rdfs:label ("Lowpass",
+    // "Highpass"), which is the ONLY thing that makes an enumeration readable
+    // -- the value is an index, so a filter type printed as "2" says nothing.
+    // An empty vector means the plugin declared no labels (or no enumeration);
+    // the caller then prints the number.
+    std::vector<std::string> scalePointNames;
 };
 
 struct Lv2PluginInfo {

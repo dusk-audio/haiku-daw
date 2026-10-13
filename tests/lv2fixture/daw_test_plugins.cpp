@@ -466,6 +466,14 @@ const LV2_Descriptor kDescriptors[] = {
     { "urn:haiku-daw:test:sidechain-gain",
       SidechainGainInstantiate, SidechainGainConnect, nullptr,
       SidechainGainRun, nullptr, SidechainGainCleanup, nullptr },
+    // Shares the mono-gain body: this plugin exists for its RDF -- an
+    // lv2:enumeration whose scale points carry rdfs:labels, and a port name
+    // that declares its unit ("Frequency (Hz)") -- but it still has to
+    // INSTANTIATE, because the listing's whole promise is that every plugin on
+    // it does. Its extra control ports are simply never read.
+    { "urn:haiku-daw:test:filter-unit",
+      MonoGainInstantiate, MonoGainConnect, nullptr,
+      MonoGainRun, nullptr, MonoGainCleanup, nullptr },
     { "urn:haiku-daw:test:bad-topology",
       InertInstantiate, InertConnect, nullptr,
       InertRun, nullptr, InertCleanup, nullptr },

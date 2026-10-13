@@ -53,6 +53,12 @@ constexpr uint32 kMsgApplyFx = 'fxap';
 // the effect responds while you drag; the undoable commit is kMsgApplyFx on
 // mouse-up.
 constexpr uint32 kMsgFxLive = 'fxlv';
+// Live WET/DRY preview during a mix-slider drag: int64 "track", int32 "fx",
+// float "mix". The mix is a per-insert atomic the engine's RT thread reads
+// (not a numbered param slot), so it needs its own message -- and without one
+// the slider was the only control in this panel that stayed silent until the
+// mouse came up (package 52). The commit is still the ordinary kMsgApplyFx.
+constexpr uint32 kMsgFxLiveMix = 'fxlm';
 // A native plugin editor's COMMITTED parameter writes: what kMsgFxLive previewed
 // while the control moved, made permanent in the model once the gesture goes
 // quiet (one undo step per gesture). Sent by Lv2UiWindow on a debounce; fields
@@ -97,6 +103,13 @@ constexpr uint32 kMsgOpenFxEditor = 'fxoe';
 // committed" (sent before a save). Answered with the REPLY message itself, one
 // int32 "slot" and one float "val" per pending change.
 constexpr uint32 kMsgLv2UiFlush   = 'fxfl';
+// MainWindow -> EffectsWindow: "drop the edit you are holding". Sent when the
+// project is about to be REPLACED: the panel flushes a pending wheel edit when
+// it quits, and a commit arriving after the load would carry a track id that
+// now belongs to a different track -- the stale-address write this package
+// exists to stop. Dropping is honest: the edit belongs to the project the user
+// chose to leave.
+constexpr uint32 kMsgFxDropPending = 'fxdp';
 // MainWindow -> EffectsWindow: "hand me the chain you have edited but not yet
 // committed" (sent before a save/export/autosave, next to the editor flush
 // above). This panel folds wheel notches into one undo step behind a 400 ms
@@ -226,6 +239,21 @@ private:
     // control, so the wheel keeps scrolling the panel list.
     bool  WheelAdjust(BPoint where, float dy);
     void  ScheduleCommit();   // debounce wheel notches into one undo step
+    // The absolute x a drag across a track means, with the Shift fine rate:
+    // `atGrab` is where the pointer started, so the value moves by the
+    // pointer's own DELTA (times the rate) instead of jumping to wherever the
+    // gesture is. At the coarse rate (fine == 1) this is exactly the old
+    // absolute mapping, which is what the sliders have always done.
+    static float DragFraction(float x, float left, float width,
+                              float atGrab, float fine) {
+        if (!(width > 0.0f)) return 0.0f;
+        const float t0 = (atGrab - left) / width;
+        const float t1 = (x - left) / width;
+        float t = t0 + (t1 - t0) * fine;
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        return t;
+    }
 
     std::vector<EffectDesc> fChain;
     TrackId    fTrack;
@@ -239,6 +267,13 @@ private:
     // Rebuilt each Draw so hit-testing matches exactly what was drawn.
     mutable std::vector<Hit> fHits;
 
+    // The EQ band whose handle the pointer is over, or -1: the graph prints the
+    // band's freq/gain/Q while it is hovered or dragged (package 52), which is
+    // the only way to read the numbers a 2D drag is setting. The effect index
+    // travels with it: the band NUMBER alone is meaningless in a chain.
+    int fHoverBand = -1;
+    int fHoverEffect = -1;
+
     // Drag state.
     int   fDragEffect = -1;
     int   fDragSlot   = -1;
@@ -246,6 +281,10 @@ private:
     float fDragMin = 0, fDragMax = 1;
     BPoint fDragStart;
     float fDragStartVal = 0;
+    // The EQ handle drags TWO slots (freq by x, gain by y); fDragStartVal holds
+    // the first (freq, for the band index) and this the second, so neither axis
+    // has to re-read a value the other has already written this gesture.
+    float fDragStartValY = 0;
     // The hit rect the drag started on. A knob drag is relative (delta from
     // where it began) so it needs no rect, but a parameter slider is absolute --
     // the value is wherever the pointer sits ALONG THE TRACK -- so the track has

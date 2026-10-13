@@ -210,7 +210,13 @@ static void ShowPanel(BFilePanel* panel, const char* title,
 
 // Snapshot the mixer strip state from the model (used to open the mixer and to
 // refresh it live when the model changes elsewhere).
-static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
+//
+// `tv` is the timeline, asked only for the automation-lane MODE (a view state,
+// not a model one): the strip's Auto button shows and cycles it, and a lamp lit
+// from anything other than the real mode would be a lie. Null is allowed -- the
+// tests build the payload without a timeline -- and then no mode travels.
+static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p,
+                                                    const TimelineView* tv = nullptr) {
     std::vector<MixerStripInfo> strips;
     for (const Track& t : p.Tracks()) {
         MixerStripInfo s{};
@@ -221,6 +227,7 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
         s.armed = t.armed; s.inputMonitor = t.inputMonitor;
         s.colorIndex = t.colorIndex;
         s.type = t.type == TrackType::Midi ? 1 : t.type == TrackType::Bus ? 2 : 0;
+        s.autoMode = tv ? tv->AutoModeFor(t.id) : 0;
         // The strip draws a label and a bypass dot per insert. Naming an insert
         // is done HERE, on the main thread, because EffectDisplayName resolves an
         // LV2 URI through the host -- which the mixer's own looper must not do.
@@ -258,8 +265,9 @@ static std::vector<MixerStripInfo> BuildMixerStrips(const Project& p) {
 // and never wrote a name, a send count or an output label -- so opening the
 // mixer a second time replaced its strips with default ones. Both go through
 // here now, and anything added to MixerStripInfo is added once.
-static void AddMixerStripsPayload(BMessage& m, const Project& p) {
-    for (const MixerStripInfo& s : BuildMixerStrips(p)) {
+static void AddMixerStripsPayload(BMessage& m, const Project& p,
+                                  const TimelineView* tv = nullptr) {
+    for (const MixerStripInfo& s : BuildMixerStrips(p, tv)) {
         m.AddInt64("tid", (int64)s.trackId);
         m.AddString("nm", s.name.c_str());
         m.AddFloat("g", s.gain);  m.AddFloat("p", s.pan);
@@ -284,6 +292,7 @@ static void AddMixerStripsPayload(BMessage& m, const Project& p) {
         m.AddBool("ph", s.phaseInvert);
         m.AddInt32("sg", s.soloGroup);
         m.AddBool("hi", s.hasInput);    m.AddString("ol", s.outLabel.c_str());
+        m.AddInt32("am", s.autoMode);   // the Auto button's lamp
     }
     m.AddFloat("mg", p.masterGain);
 }
@@ -545,6 +554,15 @@ MainWindow::MainWindow(BRect frame, Project* project, CommandStack* stack,
                                     barRect.bottom - Themed(4)),
                               "vollbl", "Vol");
     bar->AddChild(fVolLbl);
+    // NOTE (package 52, item G): this slider does NOT show its value, and it is
+    // the one control in the app that G names which could not be given one. A
+    // BSlider that has value text reserves a text line ABOVE its bar (the bar's
+    // frame moves down by a font height), and this row is 20 px tall in a 54 px
+    // bar whose rows above it are full: the text would push the trough and its
+    // handle out of the view entirely. Widening the bar's rows is the transport
+    // bar's own layout (M3.1/M3.3), not this package's; the mixer's master strip
+    // -- the same fader -- has shown its level in dB since M3.4, and that is
+    // where a master level is read.
     fMaster = new BSlider(BRect(Themed(634), Themed(33), Themed(760),
                                 barRect.bottom - Themed(3)),
                           "master", NULL, new BMessage(MSG_MASTER),
@@ -807,11 +825,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgUiRefresh: {      // a track edit: keep the panes + mixer consistent
             if (fInspector) fInspector->Invalidate();
             if (fTimeline)  fTimeline->Invalidate();
-            if (fMixerMsgr.IsValid()) {   // refresh an open mixer's strip state
-                BMessage m(kMsgMixStrips);
-                AddMixerStripsPayload(m, *fProject);
-                fMixerMsgr.SendMessage(&m);
-            }
+            // A track that was DELETED takes its editors with it: the sends and
+            // instrument windows hold a whole-snapshot copy addressed by track
+            // id, and one left up would post that snapshot back for a track the
+            // model no longer has (dropped), or -- worse, if the id were ever
+            // reused -- for a different track (package 52).
+            CloseEditorsForGoneTracks();
+            PushMixerStrips();     // an open mixer's strip state (one encoder)
             // ... and an open markers window, whose list is model data too. A
             // marker edit posts this same message, so one funnel keeps the
             // list honest (a list that misses an edit is stale content).
@@ -1181,6 +1201,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
                           (int)fProject->Tracks().size() + 1);
             fStack->Execute(std::make_unique<AddTrackCommand>(ty, nm), *fProject);
             fTimeline->Invalidate();
+            // A track-list edit refreshes the console (package 52): a new track
+            // had no strip, so it could not be mixed at all until something else
+            // happened to refresh the rack.
+            PostMessage(kMsgUiRefresh);
             break;
         }
         case MSG_MASTER_FX:
@@ -1194,6 +1218,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindMessenger("msgr", &m);
             fFxMsgr = m;
             fFxTrack = (TrackId)tid;
+            // Which project generation it is addressed to (package 52): the
+            // window is closed when the project is replaced, because its whole
+            // chain is committed by track id and a loaded file reuses those ids.
+            fFxScope = fScope.Current();
             if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMeterFocus((TrackId)tid);
             break;
         }
@@ -1203,18 +1231,17 @@ void MainWindow::MessageReceived(BMessage* msg) {
             if (fFxTrack == (TrackId)tid) {
                 fFxMsgr = BMessenger();
                 fFxTrack = kInvalidTrackId;
+                fFxScope = 0;
                 if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMeterFocus(kInvalidTrackId);
             }
             break;
         }
         case MSG_MIXER: {
-            std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject);
+            std::vector<MixerStripInfo> strips = BuildMixerStrips(*fProject, fTimeline);
             // One mixer (M1.4): asking again brings the open one forward with
             // the current strips rather than stacking a second rack.
             if (fMixerMsgr.IsValid()) {
-                BMessage r(kMsgMixStrips);
-                AddMixerStripsPayload(r, *fProject);
-                if (fMixerMsgr.SendMessage(&r) == B_OK) {
+                if (PushMixerStrips()) {
                     BMessage act(kMsgMixerActivate);   // bring it to the front
                     fMixerMsgr.SendMessage(&act);
                     break;
@@ -1229,7 +1256,12 @@ void MainWindow::MessageReceived(BMessage* msg) {
             MixerWindow* mx = new MixerWindow(wr, strips, fProject->masterGain,
                                               BMessenger(this));
             fMixerMsgr = BMessenger(mx);
-            mx->Show();
+            fMixerScope = fScope.Current();   // which project it is addressed to
+            // The rack is a snapshot of the track layout: record what it was
+            // given, so PushTrackPeaks can tell a stale layout from a current
+            // one without rebuilding the payload to compare.
+            fMixerLayout = TrackLayoutOf(*fProject);
+            mx->Show();   // fits itself to the screen (see MixerWindow::FitToScreen)
             break;
         }
         case MSG_MARKERS:      // View > Markers (M2.7)
@@ -1243,6 +1275,10 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         case MSG_DUPLICATE_TRACK:   // Track > Duplicate Track (M2.6)
             fTimeline->DuplicateSelectedTrack();
+            // The duplicate is a new track: the console needs its strip
+            // (package 52). DuplicateSelectedTrack posts its own refresh for the
+            // panes; this is the console's copy of the same rule.
+            PostMessage(kMsgUiRefresh);
             break;
         case kMsgMarkerJump: {      // the markers window: locate
             int64 fr = 0;
@@ -1361,21 +1397,43 @@ void MainWindow::MessageReceived(BMessage* msg) {
         }
         case kMsgMixSends: {
             int64 tid = 0; msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid)) {
-                std::vector<std::pair<TrackId, std::string>> buses;
-                for (const Track& bt : fProject->Tracks())
-                    if (bt.type == TrackType::Bus && bt.id != (TrackId)tid)
-                        buses.push_back({bt.id, bt.name});
-                (new SendsWindow(BRect(200, 150, 540, 470), t->sends, buses,
-                                 (TrackId)tid, BMessenger(this)))->Show();
-            }
+            ShowSendsWindow((TrackId)tid);
             break;
         }
         case kMsgMixInst: {
             int64 tid = 0; msg->FindInt64("track", &tid);
-            if (Track* t = fProject->FindTrack((TrackId)tid))
-                (new InstrumentWindow(BRect(200, 150, 480, 340), t->instrument,
-                                      (TrackId)tid, BMessenger(this)))->Show();
+            ShowInstrumentWindow((TrackId)tid);
+            break;
+        }
+        // The strip's routing pair and its automation mode (package 52). The
+        // strip holds a snapshot, not the model, so it names the track and this
+        // side does the work -- through the INSPECTOR's own pickers, so the two
+        // places a track's input can be chosen cannot disagree.
+        case kMsgMixInput: {
+            int64 tid = 0; float x = 0, y = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindFloat("x", &x); msg->FindFloat("y", &y);
+            if (fInspector && fProject->FindTrack((TrackId)tid))
+                fInspector->PickInput((TrackId)tid, BPoint(x, y));
+            break;
+        }
+        case kMsgMixOutput: {
+            int64 tid = 0; float x = 0, y = 0;
+            msg->FindInt64("track", &tid);
+            msg->FindFloat("x", &x); msg->FindFloat("y", &y);
+            if (fInspector && fProject->FindTrack((TrackId)tid))
+                fInspector->PickOutput((TrackId)tid, BPoint(x, y));
+            break;
+        }
+        case kMsgMixAuto: {
+            // The strip's Auto button: cycle the track's automation-lane mode
+            // (the timeline owns it) and push the strips back, so the lamp
+            // follows the mode that is now set.
+            int64 tid = 0; msg->FindInt64("track", &tid);
+            if (fProject->FindTrack((TrackId)tid) != nullptr) {
+                fTimeline->CycleAuto((TrackId)tid);
+                PostMessage(kMsgUiRefresh);
+            }
             break;
         }
         case kMsgMixSelect: {
@@ -1388,7 +1446,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case kMsgApplyMaster:
-            msg->FindFloat("gain", &fProject->masterGain);
+            // Through the stack, exactly like the transport bar's own master
+            // slider (MSG_MASTER below): a drag's posts coalesce into one undo
+            // step, Cmd-Z takes it back, and the edit marks the project DIRTY --
+            // the old direct write did none of those, so a session whose only
+            // change was the master level reported clean and File > Close threw
+            // the level away without a prompt (package 52).
+            {
+                float g = 1.0f;
+                if (msg->FindFloat("gain", &g) == B_OK) {
+                    fStack->Execute(std::make_unique<SetMasterGainCommand>(g),
+                                    *fProject);
+                    UpdateTitle();
+                }
+            }
             if (fMaster) fMaster->SetValue((int32)(fProject->masterGain * 100.0f));
             break;
         case kMsgApplyNotes: {
@@ -1755,6 +1826,20 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 // once and the block publishes it.
                 fTransportCtl.fEngine->PublishFxWatchNow();
             }
+            break;
+        }
+        case kMsgFxLiveMix: {   // live wet/dry drag preview (package 52)
+            // The mix slider is the one row in that panel that used to wait for
+            // the release: the engine holds each insert's wet/dry in its own
+            // atomic rather than a numbered param slot, so the param preview
+            // could not reach it. Same shape as kMsgFxLive, one field.
+            int64 tid = 0; int32 fx = 0; float mix = 1.0f;
+            msg->FindInt64("track", &tid);
+            msg->FindInt32("fx", &fx);
+            msg->FindFloat("mix", &mix);
+            if (fTransportCtl.fEngine)
+                fTransportCtl.fEngine->SetFxMixLive((TrackId)tid,
+                    (TrackId)tid == kMasterFxTarget, fx, mix);
             break;
         }
         case kMsgToggleFxAuto: {
@@ -2163,6 +2248,8 @@ void MainWindow::MessageReceived(BMessage* msg) {
             break;
         }
         case MSG_PULSE: {
+            // Is a Stop's meter decay still running? (package 52)
+            const bool decaying = system_time() < fMeterDecayUntil;
             // The transport bar's own readouts first (M3.1): the lamps, the
             // status line and the tempo/meter/DSP/xrun line, all change-guarded
             // inside the bar, so a tick that changed nothing costs no repaint.
@@ -2213,6 +2300,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
             // Before any branch: an open native editor is fed on every pulse,
             // including while stopped (see PushFxParams).
             PushFxParams();
+            // The meter decay window (package 52): the transport is stopped but
+            // the pulse is still running, so the bars stay at zero and the peak
+            // holds FALL instead of freezing at the last playing value. One
+            // clear per tick is what makes the hold a moving thing.
+            if (decaying && !fTransportCtl.fPlaying && !fRecCtl.fRecMode
+                && !fTransportCtl.fMonitoring) {
+                ClearMeters();
+                break;
+            }
             if (fTransportCtl.fEngine && fTransportCtl.fMonitoring && !fTransportCtl.fPlaying && !fRecCtl.fRecMode) {
                 // Idle live-monitoring: apply live gain/pan/mute edits, then
                 // drive the meters (no playhead / transport).
@@ -2223,8 +2319,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 PushTrackPeaks();
                 break;
             }
-            if (fTransportCtl.fEngine && (fTransportCtl.fPlaying || fRecCtl.fRecMode)) {
-                fTransportCtl.fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
+            if (fTransportCtl.fEngine && (fTransportCtl.fPlaying || fRecCtl.fRecMode)) {                fTransportCtl.fEngine->UpdateMix(*fProject);   // live gain/pan/mute/solo
                 // M4.6: an insert whose plugin moved its own latency port (a
                 // 4K EQ 2 toggling oversampling) needs PDC re-solved, because
                 // the delay lines that align it were sized from the value the
@@ -2535,8 +2630,134 @@ void MainWindow::ShowFxWindow(TrackId track, int focusSlot) {
                        trackName.c_str(), keySources))->Show();
 }
 
-// The inspector's track, and with it the chain the dock's plugin page adds to
-// (T2). Both follow the same selection through this one call: the two used to
+// --- the sends and instrument windows (package 52) -------------------------
+//
+// One window per editor, carrying the track it is pointed at — the shape the
+// effects window has had since T2, and for the same reason: each of these
+// windows holds a WHOLE-SNAPSHOT copy of the list it edits and commits that
+// copy back, so two windows on one track silently overwrite each other's edits
+// (the last one to touch a control won, and the intervening edit was gone).
+//
+// So: a second ask for the SAME track activates the window; an ask for another
+// track RETARGETS it (fresh snapshot, title naming the track); and a track that
+// is gone closes it (CloseEditorsForGoneTracks).
+
+void MainWindow::ShowSendsWindow(TrackId tid) {
+    Track* t = fProject->FindTrack(tid);
+    if (!t) return;
+    std::vector<std::pair<TrackId, std::string>> buses;
+    for (const Track& bt : fProject->Tracks())
+        if (bt.type == TrackType::Bus && bt.id != tid)
+            buses.push_back({bt.id, bt.name});
+
+    if (fSendsMsgr.IsValid()) {
+        // The same track: bring it forward, no new state needed.
+        if (fSendsTrack == tid) {
+            fSendsMsgr.SendMessage(kMsgSendsActivate);
+            return;
+        }
+        // Another track: retarget, so there is never a second copy of a list
+        // that is committed wholesale.
+        BMessage r(kMsgSendsRetarget);
+        r.AddInt64("track", (int64)tid);
+        r.AddString("name", t->name.c_str());
+        for (const Send& s : t->sends) {
+            r.AddInt64("sd", (int64)s.dest);
+            r.AddFloat("sl", s.level);
+            r.AddInt32("sp", s.preFader ? 1 : 0);
+        }
+        for (const auto& b : buses) {
+            r.AddInt64("bid", (int64)b.first);
+            r.AddString("bname", b.second.c_str());
+        }
+        if (fSendsMsgr.SendMessage(&r) == B_OK) {
+            fSendsTrack = tid;
+            return;
+        }
+        fSendsMsgr = BMessenger();   // its messenger is dead: make a new one
+        fSendsTrack = kInvalidTrackId;
+    }
+
+    SendsWindow* w = new SendsWindow(BRect(200, 150, 540, 470), t->sends, buses,
+                                     tid, BMessenger(this), t->name.c_str());
+    fSendsMsgr = BMessenger(w);
+    fSendsTrack = tid;
+    fSendsScope = fScope.Current();
+    w->Show();
+}
+
+void MainWindow::ShowInstrumentWindow(TrackId tid) {
+    Track* t = fProject->FindTrack(tid);
+    if (!t) return;
+    // A MIDI track is the only thing with a voice to edit: the instrument slot
+    // belongs to the MIDI path (the inspector only offers its button there, and
+    // the mixer's strip only draws it for a MIDI track). Anything else is a
+    // message from a stale snapshot.
+    if (t->type != TrackType::Midi) return;
+    if (fInstMsgr.IsValid()) {
+        if (fInstTrack == tid) {
+            fInstMsgr.SendMessage(kMsgInstActivate);
+            return;
+        }
+        BMessage r(kMsgInstRetarget);
+        r.AddInt64("track", (int64)tid);
+        r.AddString("name", t->name.c_str());
+        // The descriptor travels in kMsgApplyInstrument's own field layout: one
+        // encoder shape for the two directions, so they cannot drift.
+        r.AddInt32("type", (int32)t->instrument.type);
+        r.AddInt32("wave", t->instrument.synth.waveform);
+        r.AddFloat("a", t->instrument.synth.attack);
+        r.AddFloat("d", t->instrument.synth.decay);
+        r.AddFloat("s", t->instrument.synth.sustain);
+        r.AddFloat("r", t->instrument.synth.release);
+        r.AddString("path", t->instrument.path.c_str());
+        r.AddInt32("preset", t->instrument.sf2Preset);
+        if (fInstMsgr.SendMessage(&r) == B_OK) {
+            fInstTrack = tid;
+            return;
+        }
+        fInstMsgr = BMessenger();
+        fInstTrack = kInvalidTrackId;
+    }
+    InstrumentWindow* w = new InstrumentWindow(BRect(200, 150, 480, 340),
+                                              t->instrument, tid,
+                                              BMessenger(this), t->name.c_str());
+    fInstMsgr = BMessenger(w);
+    fInstTrack = tid;
+    fInstScope = fScope.Current();
+    w->Show();
+}
+
+// An editor whose TRACK is gone cannot stay up: it holds a whole-snapshot copy
+// addressed by that id, and its next commit would be dropped by the model
+// guard at best. Runs from the kMsgUiRefresh funnel, which every track-list
+// edit posts (item B), so a delete is noticed wherever it was made.
+void MainWindow::CloseEditorsForGoneTracks() {
+    if (fSendsMsgr.IsValid() && fSendsTrack != kInvalidTrackId
+        && !fProject->FindTrack(fSendsTrack)) {
+        fSendsMsgr.SendMessage(B_QUIT_REQUESTED);
+        fSendsMsgr = BMessenger();
+        fSendsTrack = kInvalidTrackId;
+    }
+    if (fInstMsgr.IsValid() && fInstTrack != kInvalidTrackId
+        && !fProject->FindTrack(fInstTrack)) {
+        fInstMsgr.SendMessage(B_QUIT_REQUESTED);
+        fInstMsgr = BMessenger();
+        fInstTrack = kInvalidTrackId;
+    }
+    // The effects window is the same shape (a whole chain committed whole), and
+    // a chain addressed by a dead track id is exactly the stale address this
+    // package is about.
+    if (fFxMsgr.IsValid() && fFxTrack != kInvalidTrackId
+        && fFxTrack != kMasterFxTarget && !fProject->FindTrack(fFxTrack)) {
+        fFxMsgr.SendMessage(B_QUIT_REQUESTED);
+        fFxMsgr = BMessenger();
+        fFxTrack = kInvalidTrackId;
+        if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMeterFocus(kInvalidTrackId);
+    }
+}
+
+// The inspector's track, and with it the chain the dock's plugin page adds to// (T2). Both follow the same selection through this one call: the two used to
 // be updated separately, so the mixer's strip click moved the inspector but
 // left the page on the old track, and a new project left it on a track id that
 // belonged to the old one (T2 review).
@@ -2753,6 +2974,19 @@ void MainWindow::FrameResized(float newWidth, float newHeight) {
     if (fInspector) fInspector->Invalidate();
 }
 
+// Bars to zero: the transport stopped, so there is no signal and nothing is
+// coming. The clip LAMPS are deliberately kept (a lamp that cleared itself when
+// the transport stopped would hide the clip that just happened); the peak HOLDS
+// fall on their own while the decay window below keeps the pulse alive.
+void MainWindow::ClearMeters() {
+    if (fMeter) fMeter->SetReadings(MeterReadings{});
+    if (fTimeline) fTimeline->ClearTrackPeaks();
+    if (fInspector) fInspector->SetMeter(0.0f, 0.0f);
+    PushSilenceToMixer();
+    UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
+                          Loudness::kSilenceDb);
+}
+
 void MainWindow::UpdatePulse() {
     // A native editor watching an insert keeps the pulse alive even when the
     // transport is stopped: the generic parameter panel can move a value with
@@ -2760,7 +2994,12 @@ void MainWindow::UpdatePulse() {
     bool watching = false;
     for (const FxEntry& w : fFxWatches)
         if (w.editor && w.editor->Alive()) { watching = true; break; }
+    // ... and so does the meter decay window: a peak hold is a moving thing
+    // (PeakHold falls at a fixed dB per second), so freezing the tick at Stop
+    // leaves the mains't meter showing a level that never comes down.
+    const bool decaying = system_time() < fMeterDecayUntil;
     const bool need = fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring || watching
+                   || decaying
                    || (fRecCtl.fRecorder && fRecCtl.fRecorder->IsRecording())
                    || !fRender.fExportHandled      // an export's progress + completion
                    || !fRender.RegionJobHandled()  // ... and a region job's (M4.4)
@@ -2839,8 +3078,7 @@ bool MainWindow::AudioMonitorOn() const {
 // their command directly and then only asked for a repaint, so adding,
 // reordering or bypassing an insert from the strip did nothing audible until
 // something else happened to rebuild the engine.
-// Hand an open effects panel the chain as the MODEL now has it.
-//
+// Hand an open effects panel the chain as the MODEL now has it.//
 // The panel holds the copy it was constructed with and commits by sending that
 // whole copy back, so any edit made elsewhere -- another view's reorder, or a
 // native plugin editor committing a parameter -- would be rewritten from the
@@ -3190,7 +3428,93 @@ void MainWindow::LoadFrom(const char* path, bool asRecovery) {
 // Point every view at the project that just replaced the old one (Open, New).
 // Anything holding a track or clip id from before is reset rather than left to
 // address whatever reuses that id: the inspector, the docked editor, the arms.
+// --- the console's strip payload (package 52) ------------------------------
+
+// Send the model's strips to the open mixer, and remember the track layout
+// they described. ONE place builds and sends the payload: the refresh funnel,
+// View > Mixer asking an already-open window to update, and the drift net in
+// PushTrackPeaks all come through here, so none of them can forget to record
+// what the rack was told. True = a mixer was there to take it.
+bool MainWindow::PushMixerStrips() {
+    if (!fMixerMsgr.IsValid()) return false;
+    BMessage m(kMsgMixStrips);
+    AddMixerStripsPayload(m, *fProject, fTimeline);
+    if (fMixerMsgr.SendMessage(&m) != B_OK) {
+        // Its messenger is dead: the window is gone, and the layout it had is
+        // no longer anyone's concern.
+        fMixerMsgr = BMessenger();
+        fMixerLayout.clear();
+        return false;
+    }
+    fMixerLayout = TrackLayoutOf(*fProject);
+    return true;
+}
+
+// Push silence to the mixer: the meter tick stops with the transport, so
+// without this the rack froze at its last playing value -- a console of bars
+// and holds that never came down (package 52).
+void MainWindow::PushSilenceToMixer() {
+    if (!fMixerMsgr.IsValid()) return;
+    BMessage m(kMsgMixPeaks);
+    for (const Track& t : fProject->Tracks()) {
+        m.AddInt64("tid", (int64)t.id);
+        m.AddFloat("pl", 0.0f);
+        m.AddFloat("pr", 0.0f);
+    }
+    m.AddFloat("mpl", 0.0f); m.AddFloat("mpr", 0.0f);
+    m.AddFloat("mrl", 0.0f); m.AddFloat("mrr", 0.0f);
+    fMixerMsgr.SendMessage(&m);
+}
+
+// A window whose content is addressed by TRACK ID belongs to the project it was
+// opened against. A loaded file restarts track ids at 1 (see LoadFrom), so a
+// strip click or a knob move on a panel left over from the old session lands on
+// a DIFFERENT track in the new one -- and the effects panel commits its whole
+// chain, which is a data-corrupting write saved as an undoable edit. The native
+// LV2 editors already followed this rule (CloseFxEditors); the mixer, the
+// generic effects panel and the ad-hoc sends/instrument windows did not.
+//
+// The rule is by GENERATION, not by window kind: each window records the
+// project generation it was opened against, replacing the project bumps it
+// (fScope.Bump), and everything stale goes. A window type added later cannot be
+// forgotten here -- which is exactly how these four were.
+void MainWindow::CloseTrackWindows() {
+    fScope.Bump();
+    // `dropPending` is for the effects panel only: it flushes a pending wheel
+    // edit when it quits, and that edit belongs to the project being REPLACED
+    // (its commit names a track id that now means something else). It is told to
+    // drop the edit before the close request, so nothing posts a stale chain
+    // into the new session.
+    auto closeIfStale = [this](BMessenger& m, ProjectScope::Generation gen,
+                               bool dropPending) {
+        if (!m.IsValid()) return;
+        if (fScope.Stale(gen)) {
+            if (dropPending) m.SendMessage(kMsgFxDropPending);
+            m.SendMessage(B_QUIT_REQUESTED);
+        }
+        // The record is cleared either way: the window is going, and a
+        // messenger kept past this would be one more stale address.
+        m = BMessenger();
+    };
+    closeIfStale(fMixerMsgr, fMixerScope, false);
+    closeIfStale(fFxMsgr,    fFxScope,    true);
+    closeIfStale(fSendsMsgr, fSendsScope, false);
+    closeIfStale(fInstMsgr,  fInstScope,  false);
+    // The addresses those windows were pointed at are meaningless now too.
+    fFxTrack = kInvalidTrackId;
+    fSendsTrack = kInvalidTrackId;
+    fInstTrack = kInvalidTrackId;
+    fMixerLayout.clear();
+    if (fTransportCtl.fEngine) fTransportCtl.fEngine->SetMeterFocus(kInvalidTrackId);
+    CloseFxEditors();   // the native editors: their own flush + watch rules
+}
+
 void MainWindow::ShowReplacedProject(Frame playhead) {
+    // Every window addressed by track id goes first: the ids restart at 1 in
+    // the project that just loaded, so a strip or a panel left up would edit
+    // the wrong track the moment it was touched (package 52). Their native
+    // counterparts (the LV2 editors) are closed by the same call.
+    CloseTrackWindows();
     fRecCtl.fRecTracks.clear();
     fMaster->SetValue((int32)(fProject->masterGain * 100.0f));   // sync slider
     // The inspector AND the dock's plugin page (which adds to the track the
@@ -4222,6 +4546,17 @@ void MainWindow::PushTrackPeaks() {
         else                fInspector->SetMeter(0.0f, 0.0f);
     }
 
+    // The strip-payload drift net (package 52). The console draws the model's
+    // TRACK LAYOUT -- one strip per track, in the model's order -- and every
+    // track-list edit posts kMsgUiRefresh to refresh it. This is the net under
+    // those posts, on a tick that already runs: if the layout the rack was last
+    // sent is not the model's (a track added, deleted or reordered by some path
+    // that did not announce itself), the whole payload goes again. Cheap: a
+    // vector compare against the ids recorded by PushMixerStrips.
+    if (fMixerMsgr.IsValid()
+        && !TrackLayoutMatches(fMixerLayout, TrackLayoutOf(*fProject)))
+        PushMixerStrips();
+
     // Also feed the mixer window (its own looper) if one is open.
     if (fMixerMsgr.IsValid()) {
         BMessage m(kMsgMixPeaks);
@@ -4232,6 +4567,11 @@ void MainWindow::PushTrackPeaks() {
         }
         m.AddFloat("mpl", fTransportCtl.fEngine->PeakL());
         m.AddFloat("mpr", fTransportCtl.fEngine->PeakR());
+        // The master's RMS, for the master strip's own RMS line. Per-TRACK RMS
+        // does not exist in the engine (only the master runs the sliding
+        // StereoMeter), so a track strip has no RMS line to draw.
+        m.AddFloat("mrl", fTransportCtl.fEngine->RmsL());
+        m.AddFloat("mrr", fTransportCtl.fEngine->RmsR());
         fMixerMsgr.SendMessage(&m);
     }
 }

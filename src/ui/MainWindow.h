@@ -12,6 +12,7 @@
 #include "../model/Project.h"
 #include "../model/PeakCache.h"
 #include "PeakLoader.h"
+#include "../app/UiSync.h"       // ProjectScope + the track-layout rule (package 52)
 #include "../model/Commands.h"   // RelinkEntry (the Locate… walk)
 #include "../engine/Engine.h"
 #include "../engine/Recorder.h"
@@ -282,6 +283,9 @@ private:
     // Engine (or recorder) meter readings -> the master meter (M3.3).
     void PushMeter(bool fromRecorder);
     void PushTrackPeaks();           // engine per-track peaks -> timeline meters
+    // Bars to zero everywhere, lamps kept: the stopped transport's meters, the
+    // mixer's included (its tick stops with the transport).
+    void ClearMeters();
     void PushRollPlayhead(Frame ph); // push the playhead to an open piano roll
     void PushFxMeters();             // engine fx meters -> effects window
     void PushChainToFxWindow(TrackId tid);   // model's chain -> open panel
@@ -388,6 +392,23 @@ private:
     // "edit this chain" path goes through here so there is one window and one
     // place that decides.
     void ShowFxWindow(TrackId track, int focusSlot = -1);
+    // The sends and instrument editors (package 52), single-instance on the
+    // same pattern: the same track activates the open window, another track
+    // retargets it. Each holds a whole-snapshot copy that it commits wholesale,
+    // so two windows on one track would silently overwrite each other.
+    void ShowSendsWindow(TrackId track);
+    void ShowInstrumentWindow(TrackId track);
+    // Close an editor whose TRACK is gone (checked from the refresh funnel).
+    void CloseEditorsForGoneTracks();
+    // The console's payload: send the model's strips to the open mixer and
+    // record the layout it was given. True = a mixer took them.
+    bool PushMixerStrips();
+    // Push zeros to the mixer (the meter tick stops with the transport, so
+    // without this the rack froze at its last playing value).
+    void PushSilenceToMixer();
+    // Every window whose content is addressed by track id, closed because the
+    // project was replaced (see the definition).
+    void CloseTrackWindows();
     enum { kDockEditor = 0, kDockSamples = 1, kDockPlugins = 2 };
     // Show a browser page, pointed at `track` when it is a plugin browser (the
     // chain a choice will be added to). kInvalidTrackId leaves it as it is.
@@ -443,11 +464,34 @@ private:
     // slow runner. UpdateTitle() is also called directly on save/load/undo.
     BMessageRunner*           fTitlePoll = nullptr; // 2 Hz dirty-marker poll
     BMessenger                fMixerMsgr;    // open mixer window (for live peaks)
+    // Which PROJECT generation each track-addressed window was opened against
+    // (src/app/UiSync.h): a replacement bumps fScope and everything stale is
+    // closed. The generations start at 0 so a record nobody wrote reads as
+    // stale rather than as belonging to whatever project is open.
+    ProjectScope              fScope;
+    ProjectScope::Generation  fMixerScope = 0;
+    ProjectScope::Generation  fFxScope    = 0;
+    ProjectScope::Generation  fSendsScope = 0;
+    ProjectScope::Generation  fInstScope  = 0;
+    // The track layout the open mixer's strips describe (the drift net in
+    // PushTrackPeaks compares this with the model's).
+    std::vector<uint64_t>     fMixerLayout;
     BMessenger                fMarkersMsgr;  // open markers window (the list push)
     BMessenger                fRollMsgr;     // last-opened piano roll (playhead)
     BMessenger                fFxMsgr;       // open effects window (for live meters)
     TrackId                   fFxTrack = kInvalidTrackId;  // its track (~0 master)
-    // An open native LV2 editor watching one insert (engine -> editor values).
+    // The sends and instrument editors (package 52), each one window carrying
+    // the track it is pointed at.
+    BMessenger                fSendsMsgr;
+    TrackId                   fSendsTrack = kInvalidTrackId;
+    BMessenger                fInstMsgr;
+    TrackId                   fInstTrack = kInvalidTrackId;
+    // How long the 60 Hz pulse keeps running after a Stop so the meters' peak
+    // holds decay instead of freezing at their last playing value (0 = done).
+    // A hold is a moving thing: it holds 1.5 s and then falls at 20 dB/s over a
+    // 66 dB scale, so a full-scale one needs ~3.3 s -- 4 s covers it.
+    static constexpr bigtime_t kMeterDecayUs = 4000000;
+    bigtime_t                 fMeterDecayUntil = 0;    // An open native LV2 editor watching one insert (engine -> editor values).
     // The watch lives in the engine, addressed by (track, master, fx), and is
     // cleared both by the editor saying so and by its messenger dying.
     // One open native editor and the insert it is showing (see

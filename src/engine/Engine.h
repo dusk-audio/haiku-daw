@@ -894,6 +894,15 @@ public:
     void SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
                         float value);
 
+    // Push one insert's wet/dry mix into the running graph live, for the same
+    // reason as SetFxParamLive: the generic parameter panel's every other row
+    // previews while the control moves, and the mix slider was the one that
+    // stayed silent until release. This is exactly the store SyncFx does into
+    // the slot's own atomic (Graph::Bus::fxMix / Graph::fMasterFxMix), just
+    // addressed from the UI -- so nothing is rebuilt and nothing can disagree
+    // with the value the commit later writes.
+    void SetFxMixLive(TrackId track, bool master, int fxIndex, float mix);
+
     // Publish a watched insert's live parameter values for its open native
     // editor. Addressed exactly like SetFxParamLive (same track/master/fxIndex),
     // and resolved against the RUNNING chain on every block, so a rebuild cannot

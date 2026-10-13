@@ -1696,6 +1696,25 @@ void Engine::SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
         (*chain)[(size_t)fxIndex]->SetParam(slot, value);
 }
 
+void Engine::SetFxMixLive(TrackId track, bool master, int fxIndex, float mix) {
+    GraphPin pin(*this);
+    Graph* g = pin.Active();
+    if (!g) return;   // no graph yet: the commit reaches the model either way
+    std::atomic<float>* arr = nullptr;
+    size_t n = 0;
+    if (master) {
+        arr = g->fMasterFxMix.get();
+        n   = g->fMasterFx.size();
+    } else {
+        for (Graph::Bus& b : g->fBuses)
+            if (b.id == track) { arr = b.fxMix.get(); n = b.fx.size(); break; }
+    }
+    if (arr == nullptr || fxIndex < 0 || fxIndex >= (int)n) return;
+    // The same clamp and the same relaxed store as the SyncFx push: the RT
+    // thread reads this per block and no other field depends on it.
+    arr[fxIndex].store(ClampFxMix(mix), std::memory_order_relaxed);
+}
+
 void Engine::PublishFxWatchNow() {
     // The audio callback owns the published storage while it runs (it rewrites
     // the same arrays every block); this exists for the stopped transport, where

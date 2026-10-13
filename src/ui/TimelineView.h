@@ -323,6 +323,13 @@ public:
     void SetFollow(bool on) { fFollow = on; }   // chase the playhead in view
     void SetMonitorInput(bool on) { fMonitorInput = on; Invalidate(); }  // lane "I" lamp
     void CycleAuto(TrackId id);                 // inspector Auto button
+    // The track's automation-lane mode (0 Off / 1 Gain / 2 Pan / 3+ an fx lane).
+    // Read by the mixer's strip payload, so its Auto button's lamp is lit from
+    // the mode this view actually holds rather than from a second copy of it.
+    int  AutoModeFor(TrackId id) const {
+        auto it = fAutoMode.find(id);
+        return it == fAutoMode.end() ? 0 : it->second;
+    }
 
     // Currently selected track (drives the inspector; -1 if none).
     TrackId SelectedTrack() const { return fSelectedTrack; }
@@ -340,6 +347,9 @@ public:
         fTrackPeaks.clear();
         Invalidate(BRect(0, 0, HeaderWidth(), Bounds().bottom));
     }
+    // Clicking a lane's meter clears its clip lamp (the master meter's own
+    // gesture); the lamp itself latches at digital full scale, per channel.
+    void ClearClipLamps(TrackId id);
 
     // Live recording region drawn as a growing block on every armed track
     // while a take is being captured (before the real clips exist). Pass
@@ -635,6 +645,15 @@ private:
     // Multi-select over audio clips. Clip ids are project-unique, so a plain
     // set suffices; the track is found by scan when needed.
     std::map<TrackId, std::pair<float, float>> fTrackPeaks;   // header meters
+    // Per-track meter state (package 52): a peak hold and a clip latch per
+    // channel, so the lane meter reads like the mixer strips' -- a tick that
+    // falls, and a lamp that latches until it is clicked. Keyed by track id, so
+    // a refresh cannot hand one track's hold to another.
+    struct TrackMeterState {
+        PeakHold  holdL, holdR;
+        ClipLatch clipL, clipR;
+    };
+    std::map<TrackId, TrackMeterState> fTrackMeter;
 
     std::set<ClipId> fSelClips;
     // Captured start of each selected MIDI region at drag-start, for group move.

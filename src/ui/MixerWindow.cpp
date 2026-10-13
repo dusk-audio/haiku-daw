@@ -5,6 +5,8 @@
 #include "widgets/DawTextField.h"   // the inline dB entry (M3.4)
 #include "../model/types.h"         // kTrackTrimMax (the trim knob's ceiling)
 
+#include <OS.h>          // system_time() — the peak holds' clock
+#include <Screen.h>
 #include <String.h>
 #include <TextView.h>   // the inline level field's SelectAll
 
@@ -19,7 +21,6 @@ namespace daw {
 static constexpr float kStripW  = 96.0f;
 static constexpr float kGap     = 4.0f;
 static constexpr float kPadT    = 6.0f;
-static constexpr float kMaxGain = 1.5f;
 
 // Insert slot list. Rows are tighter than the inspector's (17 px) because a
 // mixer strip is 96 px wide and shares its height with five other sections; the
@@ -34,6 +35,10 @@ static constexpr int   kMaxSendRows = 2;
 static constexpr float kSendRowH = 18.0f;
 // The trim knob and its two neighbours (the phase button and the value text).
 static constexpr float kTrimRowH = 24.0f;
+// The horizontal scroll bar along the bottom of the rack.
+static constexpr float kBarH    = 13.0f;
+// The clip lamp above the stereo meter pair.
+static constexpr float kLampH   = 6.0f;
 
 // All the sub-control rects of one strip, laid out top -> bottom.
 struct StripLayout {
@@ -41,7 +46,7 @@ struct StripLayout {
     BRect send[2];                              // per-send rows (M3.4)
     BRect sendKnob[2], sendLabel[2], sendVal[2];
     BRect trim, trimKnob, trimVal, phase;       // input trim + polarity (M3.4)
-    BRect pan, val, fader, meter;
+    BRect pan, val, fader, meter, meterL, meterR, lamp;
     BRect mon, arm, mute, solo, sgroup, name;
 };
 
@@ -90,7 +95,13 @@ static StripLayout LayoutStrip(float x0, float h, int fxRows, int sendRows) {
     // (guards a div-by-zero in the fader drag on a very short window).
     const float botTop = std::max(h - 76.0f, y + 20.0f);
     s.fader = BRect(cx - 30, y, cx - 4, botTop);
-    s.meter = BRect(cx + 6,  y, cx + 26, botTop);
+    // The meter block: the clip lamp over a stereo pair, one bar per channel.
+    // Two bars rather than one for the louder channel -- a console strip meter
+    // that cannot show which side is hot is not a stereo meter.
+    s.lamp   = BRect(cx + 6, y, cx + 26, y + kLampH);
+    s.meterL = BRect(cx + 6, y + kLampH + 2, cx + 15, botTop);
+    s.meterR = BRect(cx + 17, y + kLampH + 2, cx + 26, botTop);
+    s.meter  = BRect(cx + 6, y, cx + 26, botTop);   // the whole block: the hit box
     float by = h - 72;
     s.mon  = BRect(L, by, cx - 2, by + 18);
     s.arm  = BRect(cx + 2, by, R, by + 18); by += 22;
@@ -146,70 +157,219 @@ int MixerStripsView::SendRowsFor(const MixerStripInfo& s) {
     return std::min<int>((int)s.sends.size(), kMaxSendRows);
 }
 
+MixerScrollBar::MixerScrollBar(const char* name, orientation dir, float min,
+                               float max, std::function<void(float)> onValue)
+    : BScrollBar(name, nullptr, min, max, dir), fOnValue(std::move(onValue)) {}
+
+void MixerScrollBar::ValueChanged(float newValue) {
+    BScrollBar::ValueChanged(newValue);
+    if (fOnValue) fOnValue(newValue);
+}
+
 MixerStripsView::MixerStripsView(BRect frame, std::vector<MixerStripInfo> strips,
                                  float masterGain, BMessenger apply)
-    : BView(frame, "strips", B_FOLLOW_ALL_SIDES, B_WILL_DRAW),
+    : BView(frame, "strips", B_FOLLOW_ALL_SIDES,
+            B_WILL_DRAW | B_FRAME_EVENTS | B_NAVIGABLE),
       fStrips(std::move(strips)), fMasterGain(masterGain), fApply(apply) {
     ApplyTheme();
     RecomputeFxRows();
+    // Real scrollbar (package 52): the rack pans by pixel offset, so the bar
+    // reports its value instead of scrolling a target (MixerScrollBar).
+    fHBar = new MixerScrollBar("mixerh", B_HORIZONTAL, 0.0f, 1.0f,
+                               [this](float v) { SetScrollX(v, false); });
+    AddChild(fHBar);
+    LayoutBar();
 }
 
 void MixerStripsView::ApplyTheme() {
     SetViewColor(ColBackground());
 }
 
+void MixerStripsView::AttachedToWindow() {
+    BView::AttachedToWindow();
+    // The keyboard drives the rack (package 52): Left/Right pick a strip and
+    // Up/Down its gain, so a mixer is usable without a mouse at all.
+    MakeFocus(true);
+    LayoutBar();
+    SetScrollX(fScrollX, true);
+}
+
+float MixerStripsView::BarThickness() const { return Themed(kBarH); }
+
+float MixerStripsView::StripAreaHeight() const {
+    return std::max(60.0f, Bounds().Height() - BarThickness() - 2.0f);
+}
+
+void MixerStripsView::LayoutBar() {
+    if (fHBar == nullptr) return;
+    const float b = BarThickness();
+    fHBar->MoveTo(1.0f, Bounds().bottom - b + 1.0f);
+    fHBar->ResizeTo(std::max(1.0f, Bounds().Width() - 2.0f), b - 1.0f);
+}
+
+void MixerStripsView::FrameResized(float, float) {
+    LayoutBar();
+    SetScrollX(fScrollX, true);   // the range changed with the width
+    Invalidate();
+}
+
 float MixerStripsView::StripX(int i) const {
+    // i == count is the MASTER, and the master is pinned to the view's right
+    // edge instead of travelling with the pan (see MasterX). Every caller --
+    // drawing, hit-testing, the level field, the drag maths -- asks for a
+    // strip's left edge through here, so this is the one place that has to know.
+    if (i == (int)fStrips.size()) return MasterX();
     return 8.0f + i * (kStripW + kGap) - fScrollX;
 }
 
-// Every strip, the master, and the margins -- what the rack needs to be shown
-// whole. Used to clamp the horizontal pan.
-float MixerStripsView::ContentWidth() const {
-    return 8.0f + ((float)fStrips.size() + 1.0f) * (kStripW + kGap) + 8.0f;
+// The master does NOT scroll: it is pinned to the view's right edge, outside the
+// panned content, so it is always in front of the user. It used to be drawn at
+// StripX(fStrips.size()), the far right end of the rack, which on a screen
+// narrower than the console put the master fader and meter off-window.
+float MixerStripsView::MasterX() const {
+    return std::max(8.0f, Bounds().right - 8.0f - kStripW);
 }
 
-// The wheel pans the rack sideways when it is wider than the view (M1.4): a
-// console with more strips than fit is the normal case on a small screen, and
-// a mixer that silently cuts the last strips off is worse than one that moves.
-void MixerStripsView::MessageReceived(BMessage* msg) {
-    if (msg->what == kMsgMixLevelCommit) {   // the inline dB field's Enter
-        CommitLevelEntry();
-        return;
+float MixerStripsView::ContentWidth() const {
+    return 8.0f + (float)fStrips.size() * (kStripW + kGap) + 8.0f;
+}
+
+// How far the rack can pan: everything left of the master's own column.
+float MixerStripsView::MaxScroll() const {
+    const float visible = MasterX() - kGap - 8.0f;
+    const float max = ContentWidth() - visible;
+    return max > 0.0f ? max : 0.0f;
+}
+
+void MixerStripsView::SetScrollX(float x, bool moveBar) {
+    const float max = MaxScroll();
+    if (x < 0.0f) x = 0.0f;
+    if (x > max) x = max;
+    if (x == fScrollX) return;
+    fScrollX = x;
+    // The bar follows the pan (a wheel move); a pan that CAME from the bar must
+    // not push the value back into it. BScrollBar's own SetValue calls our
+    // ValueChanged, so the loop closes by itself: the callback re-enters here
+    // with the value we just took and returns above.
+    if (moveBar && fHBar != nullptr) {
+        fHBar->SetRange(0.0f, std::max(1.0f, max));
+        fHBar->SetProportion(max > 0.0f
+                                 ? (MasterX() - kGap - 8.0f) / ContentWidth()
+                                 : 1.0f);
+        fHBar->SetValue(fScrollX);
     }
-    if (msg->what == B_MOUSE_WHEEL_CHANGED) {
-        float dy = 0.0f, dx = 0.0f;
-        msg->FindFloat("be:wheel_delta_y", &dy);
-        msg->FindFloat("be:wheel_delta_x", &dx);
-        const float move = (dx != 0.0f ? dx : dy) * 40.0f;
-        const float maxScroll = ContentWidth() - Bounds().Width();
-        if (maxScroll <= 0.0f) { fScrollX = 0.0f; return; }
-        fScrollX += move;
-        if (fScrollX < 0.0f) fScrollX = 0.0f;
-        if (fScrollX > maxScroll) fScrollX = maxScroll;
-        Invalidate();
-        return;
-    }
-    BView::MessageReceived(msg);
+    Invalidate();
 }
 
 void MixerStripsView::SetPeaks(
         const std::map<uint64, std::pair<float, float>>& peaks,
-        float masterL, float masterR) {
+        float masterL, float masterR, float masterRmsL, float masterRmsR) {
     fPeaks = peaks;
     fMasterL = masterL; fMasterR = masterR;
+    fMasterRmsL = masterRmsL; fMasterRmsR = masterRmsR;
+    // The holds and the lamps move HERE, once per meter tick, not per Draw: a
+    // hold is a time-based state machine (PeakHold), and driving it from a
+    // repaint would make it decay at whatever rate the window happened to draw.
+    const int64_t now = system_time();
+    for (const MixerStripInfo& s : fStrips) {
+        MeterState& m = fMeter[s.trackId];
+        float l = 0.0f, r = 0.0f;
+        if (auto it = fPeaks.find(s.trackId); it != fPeaks.end()) {
+            l = it->second.first; r = it->second.second;
+        }
+        m.holdL.Update(LinToFrac(l), now);
+        m.holdR.Update(LinToFrac(r), now);
+        m.clipL.Latch(ReachesClipLevel(l));
+        m.clipR.Latch(ReachesClipLevel(r));
+    }
+    fMasterMeter.holdL.Update(LinToFrac(masterL), now);
+    fMasterMeter.holdR.Update(LinToFrac(masterR), now);
+    fMasterMeter.clipL.Latch(ReachesClipLevel(masterL));
+    fMasterMeter.clipR.Latch(ReachesClipLevel(masterR));
+    Invalidate();
+}
+
+// The wheel adjusts the control under the pointer and pans the rack only from
+// bare panel space (package 52): a wheel over a fader that scrolled the console
+// sideways was the one gesture nobody expects.
+bool MixerStripsView::WheelAdjust(BPoint where, float dy) {
+    const int i = StripAt(where);
+    if (i < 0) return false;
+    const bool master = (i == (int)fStrips.size());
+    const StripLayout L = LayoutStrip(StripX(i), StripAreaHeight(), FxRows(),
+                                      SendRows());
+    const bool fine = (modifiers() & B_SHIFT_KEY) != 0;
+    if (L.fader.Contains(where)) {
+        NudgeStripGain(i, -dy * (fine ? 0.1f : 0.5f));
+        return true;
+    }
+    if (master) return false;
+    MixerStripInfo& s = fStrips[i];
+    if (L.pan.Contains(where)) {
+        float p = s.pan + -dy * (fine ? 0.005f : 0.02f);
+        if (p < -1.0f) p = -1.0f; if (p > 1.0f) p = 1.0f;
+        s.pan = p;
+        ApplyStrip(i); Invalidate();
+        return true;
+    }
+    if (L.trimKnob.Contains(where)) {
+        const float knob = TrimToKnob(s.trim) + -dy * (fine ? 0.01f : 0.05f);
+        s.trim = KnobToTrim(knob);
+        ApplyStrip(i); Invalidate();
+        return true;
+    }
+    for (int k = 0; k < SendRows() && k < (int)s.sends.size(); k++) {
+        if (!L.sendKnob[k].Contains(where)) continue;
+        float v = s.sends[(size_t)k].level + -dy * (fine ? 0.01f : 0.05f);
+        if (v < 0.0f) v = 0.0f; if (v > 1.5f) v = 1.5f;
+        s.sends[(size_t)k].level = v;
+        PostSendLevel(i, k, v);
+        Invalidate();
+        return true;
+    }
+    if (L.meter.Contains(where)) {   // the lamp block: a click, not a wheel
+        return false;
+    }
+    return false;                    // bare panel: the caller pans the rack
+}
+
+void MixerStripsView::ClearClipLamps(int i) {
+    if (i == (int)fStrips.size()) {
+        fMasterMeter.clipL.Reset();
+        fMasterMeter.clipR.Reset();
+    } else if (i >= 0 && i < (int)fStrips.size()) {
+        MeterState& m = fMeter[fStrips[i].trackId];
+        m.clipL.Reset();
+        m.clipR.Reset();
+    }
+    Invalidate();
+}
+
+void MixerStripsView::NudgeStripGain(int i, float deltaDb) {
+    if (i == (int)fStrips.size()) {
+        fMasterGain = NudgeGainDb(fMasterGain, deltaDb);
+    } else if (i >= 0 && i < (int)fStrips.size()) {
+        fStrips[i].gain = NudgeGainDb(fStrips[i].gain, deltaDb);
+    } else {
+        return;
+    }
+    ApplyStrip(i);
     Invalidate();
 }
 
 void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
                                 float peakL, float peakR, bool master) {
     const float x0 = StripX(i);
-    const float h  = Bounds().Height();
+    const float h  = StripAreaHeight();
     BRect strip(x0, 2, x0 + kStripW, h - 4);
     const StripLayout L = LayoutStrip(x0, h, FxRows(), SendRows());
     const int  type = info ? info->type : 0;
-    const rgb_color accent = master ? Rgb(200, 165, 90)
+    // The master's own tone: an accent mixed towards the text colour, not a
+    // literal gold -- in System mode a hand-picked RGB reads as a foreign
+    // rectangle inside a light panel (UI_GUIDELINES §5).
+    const rgb_color accent = master ? MixColor(ColAccent(), ColText(), 0.35f)
                            : type == 1 ? ColMidiAccent() : ColAudioAccent();
-    const rgb_color tc = master ? Rgb(150, 120, 70)
+    const rgb_color tc = master ? MixColor(ColAccent(), ColTextDim(), 0.5f)
                        : (info ? TrackColor(info->colorIndex) : ColAccent());
 
     SetHighColor(ColHeader());
@@ -218,8 +378,10 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
     // Section buttons (track strips only).
     if (info) {
         char b[24];
-        DrawButton(this, L.input, info->hasInput ? "In" : "\xE2\x80\x94",
-                   info->hasInput, Rgb(52, 104, 74));
+        // The lamp says whether an input is routed; the button is ALWAYS live --
+        // it opens the input picker, which is where an unrouted track gets one.
+        // (It used to draw as a disabled "—" and swallow the click.)
+        DrawButton(this, L.input, "In", info->hasInput, ColMon());
 
         // --- Insert slots ---------------------------------------------------
         // Same shape as the inspector's list, narrower: a row per insert with
@@ -301,10 +463,17 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
             SetHighColor(ColTextDim());
             DrawString(b, BPoint(L.sendVal[k].left, L.sendVal[k].bottom - 4));
         }
+        // The output: the lamp says whether it leaves for a bus or the master,
+        // the button always opens the picker (see the In button above).
         std::snprintf(b, sizeof(b), "\xE2\x86\x92%s", info->outLabel.c_str());
-        DrawButton(this, L.out, b, info->outLabel != "Mst", Rgb(70, 90, 130));
-        DrawButton(this, L.autob, "Read", false, ColMidiAccent());
-        if (type == 1) DrawButton(this, L.inst, "Inst", true, Rgb(70, 90, 130));
+        DrawButton(this, L.out, b, info->outLabel != "Mst", ColAudioAccent());
+        // The automation-lane mode this track is in (0 = Off). Named "Auto"
+        // rather than "Read": there is no read on/off state to switch -- this
+        // engine always reads automation -- so the button drives the one
+        // automation mode a track has, the timeline's lane mode. It used to be
+        // a "Read" button that was never lit and never answered a click.
+        DrawButton(this, L.autob, "Auto", info->autoMode != 0, ColMidiAccent());
+        if (type == 1) DrawButton(this, L.inst, "Inst", true, ColMidiAccent());
 
         // Input trim (unity at 12 o'clock), its value in dB, and the phase
         // button beside it (M3.4).
@@ -338,16 +507,24 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
         DrawString(pv, BPoint(L.val.left + 3, L.val.bottom - 3));
     }
 
-    // Fader + meter. The meter is the shared dB-scaled bar (M3.3); the ticks
-    // beside it are the same dB scale (MeterMath's list), so the strip reads
-    // as a dB meter rather than as a filled rectangle.
-    DrawFader(this, L.fader, GainToFrac(gain), 1.0f / kMaxGain);
-    DrawMeterBar(this, L.meter, std::max(peakL, peakR), false);
+    // Fader + meter. The fader's law is the dB one (MeterMath's
+    // FaderFracToGain), so the whole of the level field's advertised range is on
+    // the travel and 0 dB sits where the scale says; the meter is the shared
+    // dB-scaled bar (M3.3), one bar per channel, with the ticks beside it.
+    DrawFader(this, L.fader, GainToFaderFrac(gain), FaderUnityFrac());
+    const MeterState& ms = master ? fMasterMeter
+                                  : fMeter[fStrips[(size_t)i].trackId];
+    const float mRmsL = master ? fMasterRmsL : -1.0f;
+    const float mRmsR = master ? fMasterRmsR : -1.0f;
+    DrawMeterBar(this, L.meterL, peakL, false, mRmsL, ms.holdL.Frac());
+    DrawMeterBar(this, L.meterR, peakR, false, mRmsR, ms.holdR.Frac());
+    DrawClipLamp(this, L.lamp, ms.clipL.Clipped() || ms.clipR.Clipped());
     SetHighColor(ColTextDim());
-    for (int i = 0; i < kMeterTickCount; i++) {
-        const float yy = L.meter.bottom - L.meter.Height() * DbToFrac(kMeterTicksDb[i]);
-        if (yy < L.meter.top || yy > L.meter.bottom) continue;
-        StrokeLine(BPoint(L.meter.right + 2, yy), BPoint(L.meter.right + 5, yy));
+    for (int t = 0; t < kMeterTickCount; t++) {
+        const float yy = L.meterR.bottom
+                       - L.meterR.Height() * DbToFrac(kMeterTicksDb[t]);
+        if (yy < L.meterR.top || yy > L.meterR.bottom) continue;
+        StrokeLine(BPoint(L.meterR.right + 2, yy), BPoint(L.meterR.right + 5, yy));
     }
 
     // Input-monitor / Record / Mute / Solo / Solo-group (track strips only).
@@ -373,15 +550,29 @@ void MixerStripsView::DrawStrip(int i, const MixerStripInfo* info, float gain,
     SetHighColor(tc);
     FillRect(L.name);
     SetHighColor(LabelOn(tc));   // the theme's rule: whichever of the two reads
-    DrawString(info ? info->name.c_str() : "Master",
-               BPoint(L.name.left + 5, L.name.bottom - 6));
+    // TRUNCATED to its own bar: a long name used to print straight over the
+    // next strip, in the contrast colour, in a view that truncates everything
+    // else it draws (UI_GUIDELINES §3, "Text fits").
+    BString name(info ? info->name.c_str() : "Master");
+    TruncateString(&name, B_TRUNCATE_END, L.name.Width() - 8.0f);
+    DrawString(name.String(), BPoint(L.name.left + 5, L.name.bottom - 6));
 
     SetHighColor(ColGrid());
     StrokeRect(strip);
+    // The keyboard's current strip (package 52): a focus frame, so Left/Right
+    // and Up/Down have a visible subject before the first move changes anything.
+    if (i == fCurStrip && IsFocus()) {
+        SetHighColor(ColAccent());
+        StrokeRect(strip.InsetBySelf(1.0f, 1.0f));
+    }
 }
 
 void MixerStripsView::Draw(BRect) {
     for (size_t i = 0; i < fStrips.size(); i++) {
+        // Cull strips panned out of view: a 40-strip console redraws what is on
+        // screen, not the whole rack, on every meter tick.
+        const float x0 = StripX((int)i);
+        if (x0 + kStripW < 0.0f || x0 > MasterX() - kGap) continue;
         const MixerStripInfo& s = fStrips[i];
         float pl = 0, pr = 0;
         if (auto it = fPeaks.find(s.trackId); it != fPeaks.end()) {
@@ -393,12 +584,23 @@ void MixerStripsView::Draw(BRect) {
 }
 
 int MixerStripsView::StripAt(BPoint where) const {
-    const int total = (int)fStrips.size() + 1;   // + master
-    for (int i = 0; i < total; i++) {
+    // The master first: it is pinned over the panning content's right edge, so a
+    // click there belongs to it even while a strip is panned underneath.
+    const float mx = MasterX();
+    if (where.x >= mx && where.x <= mx + kStripW) return (int)fStrips.size();
+    for (int i = 0; i < (int)fStrips.size(); i++) {
         const float x0 = StripX(i);
         if (where.x >= x0 && where.x <= x0 + kStripW) return i;
     }
     return -1;
+}
+
+void MixerStripsView::SetCurrentStrip(int i) {
+    if (i < 0) i = 0;
+    if (i > (int)fStrips.size()) i = (int)fStrips.size();
+    if (i == fCurStrip) return;
+    fCurStrip = i;
+    Invalidate();
 }
 
 void MixerStripsView::ApplyStrip(int i) {
@@ -441,9 +643,9 @@ void MixerStripsView::PostSendLevel(int i, int index, float level) {
 // --- the inline dB entry (M3.4) -------------------------------------------
 
 void MixerStripsView::BeginLevelEntry(int strip) {
-    if (strip < 0 || strip >= (int)fStrips.size()) return;
+    if (strip < 0 || strip > (int)fStrips.size()) return;
     const float x0 = StripX(strip);
-    const StripLayout L = LayoutStrip(x0, Bounds().Height(), FxRows(),
+    const StripLayout L = LayoutStrip(x0, StripAreaHeight(), FxRows(),
                                       SendRows());
     // The field covers the strip's value row, so what is being typed is where
     // the value it replaces was.
@@ -463,9 +665,12 @@ void MixerStripsView::BeginLevelEntry(int strip) {
         fLevelField->MoveTo(r.left, r.top);
         fLevelField->ResizeTo(r.Width(), r.Height());
     }
-    const MixerStripInfo& s = fStrips[strip];
+    // The master strip can be typed into as well, so it is a value a level
+    // field may hold -- the same field, the same parse, either way.
+    const bool master = (strip == (int)fStrips.size());
+    const float gain = master ? fMasterGain : fStrips[(size_t)strip].gain;
     char db[32];
-    const float d = s.gain > 1e-4f ? 20.0f * std::log10(s.gain) : -80.0f;
+    const float d = gain > 1e-4f ? 20.0f * std::log10(gain) : -80.0f;
     if (d <= -80.0f) std::snprintf(db, sizeof(db), "-inf");
     else             std::snprintf(db, sizeof(db), "%.1f", d);
     fLevelStrip = strip;
@@ -487,10 +692,14 @@ void MixerStripsView::CommitLevelEntry() {
     const int strip = fLevelStrip;
     const std::string typed = fLevelField->Text() ? fLevelField->Text() : "";
     float db = 0.0f;
-    if (ParseDecibels(typed, &db) && strip < (int)fStrips.size()) {
-        float gain = GainFromDb(db);
-        if (gain > kMaxGain) gain = kMaxGain;    // the fader's own range
-        fStrips[strip].gain = gain;
+    // ParseDecibels clamps to the fader's own range (kFaderMinDb..kFaderMaxDb),
+    // which IS the fader's range now -- so a typed value is never clamped a
+    // second time, silently, to a ceiling the field never advertised. What the
+    // value row reads back is what the model gets.
+    if (ParseDecibels(typed, &db)) {
+        const float gain = GainFromDb(db);
+        if (strip == (int)fStrips.size()) fMasterGain = gain;
+        else                              fStrips[(size_t)strip].gain = gain;
         ApplyStrip(strip);
     }
     // A value that could not be read is simply not applied: the fader stays
@@ -513,6 +722,11 @@ void MixerStripsView::SetStrips(std::vector<MixerStripInfo> strips, float master
     fStrips = std::move(strips);
     fMasterGain = masterGain;
     RecomputeFxRows();
+    // A strip list that shrank (a track was deleted) must not leave the
+    // keyboard's current strip past the end: it would then address the master.
+    if (fCurStrip > (int)fStrips.size()) fCurStrip = (int)fStrips.size();
+    LayoutBar();
+    SetScrollX(fScrollX, true);        // the content width changed
     Invalidate();
 }
 
@@ -528,16 +742,26 @@ void MixerStripsView::MouseDown(BPoint where) {
     // it, and leaving it up would hide the value it is covering.
     if (fLevelStrip >= 0 && fLevelField != nullptr) CancelLevelEntry();
 
+    MakeFocus(true);   // the keyboard drives the strip that was clicked (P)
     const int i = StripAt(where);
     if (i < 0) return;
+    SetCurrentStrip(i);
     const float x0 = StripX(i);
-    const float h  = Bounds().Height();
+    const float h  = StripAreaHeight();
     const bool master = (i == (int)fStrips.size());
     const StripLayout L = LayoutStrip(x0, h, FxRows(), SendRows());
 
     BMessage* msg = Window() ? Window()->CurrentMessage() : nullptr;
     int32 clicks = 1;
     if (msg) msg->FindInt32("clicks", &clicks);
+
+    // The clip lamp: a click clears the latched clip (the master meter's own
+    // gesture), and nothing else about the strip. Deliberately BEFORE the
+    // double-click test below: a lamp is not a control you type into.
+    if (L.lamp.Contains(where)) {
+        ClearClipLamps(i);
+        return;
+    }
 
     // A double-click on the fader or on the value readout types a dB value
     // (M3.4) instead of dragging.
@@ -548,9 +772,10 @@ void MixerStripsView::MouseDown(BPoint where) {
 
     if (L.fader.Contains(where)) {
         fDrag = Drag::Fader; fDragStrip = i;
+        fFaderGrabY = where.y;
+        fFaderOrig  = master ? fMasterGain : fStrips[(size_t)i].gain;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
-        MouseMoved(where, 0, nullptr);
-        return;
+        return;   // nothing moves until the pointer does (grab-relative)
     }
     if (master) return;
     MixerStripInfo& s = fStrips[i];
@@ -572,6 +797,28 @@ void MixerStripsView::MouseDown(BPoint where) {
         fDrag = Drag::Send; fDragStrip = i; fSendIndex = k;
         fSendGrabY = where.y; fSendOrig = s.sends[(size_t)k].level;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
+        return;
+    }
+    // The routing pair and the automation mode: the three buttons that used to
+    // fall through to "select track" and do nothing (package 52).
+    if (L.input.Contains(where)) {
+        BMessage m(kMsgMixInput);
+        m.AddInt64("track", (int64)s.trackId);
+        const BPoint sp = ConvertToScreen(where);
+        m.AddFloat("x", sp.x); m.AddFloat("y", sp.y);
+        fApply.SendMessage(&m);
+        return;
+    }
+    if (L.out.Contains(where)) {
+        BMessage m(kMsgMixOutput);
+        m.AddInt64("track", (int64)s.trackId);
+        const BPoint sp = ConvertToScreen(where);
+        m.AddFloat("x", sp.x); m.AddFloat("y", sp.y);
+        fApply.SendMessage(&m);
+        return;
+    }
+    if (L.autob.Contains(where)) {
+        Post(kMsgMixAuto, s.trackId);
         return;
     }
     if (L.phase.Contains(where)) {
@@ -633,9 +880,13 @@ void MixerStripsView::MouseDown(BPoint where) {
 void MixerStripsView::MouseMoved(BPoint where, uint32, const BMessage*) {
     if (fDrag == Drag::None || fDragStrip < 0) return;
     const float x0 = StripX(fDragStrip);
-    const float h  = Bounds().Height();
+    const float h  = StripAreaHeight();
     const bool master = (fDragStrip == (int)fStrips.size());
     const StripLayout L = LayoutStrip(x0, h, FxRows(), SendRows());
+    // Shift is the fine rate on every gesture here (package 52): the effects
+    // view's knobs have had it since M1.3, and a mixer whose trim jumped in
+    // 1/50 steps while the plugin's knob next to it did not was the odd one out.
+    const float fine = (modifiers() & B_SHIFT_KEY) != 0 ? 0.1f : 1.0f;
 
     if (fDrag == Drag::FxSlot) {
         if (fDragStrip >= (int)fStrips.size()) return;
@@ -649,22 +900,28 @@ void MixerStripsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         return;
     }
     if (fDrag == Drag::Fader) {
+        // Grab-relative (the effects view's rule): the travel moves by the
+        // pointer's own delta, so a fader never jumps to wherever the click
+        // landed -- and Shift gives a fine rate on the same gesture.
         const float fh = L.fader.Height();
-        float t = fh > 0 ? (L.fader.bottom - where.y) / fh : 0;
-        if (t < 0) t = 0; if (t > 1) t = 1;
-        const float gain = t * kMaxGain;
+        float delta = fh > 0 ? (fFaderGrabY - where.y) / fh : 0.0f;
+        delta *= fine;
+        float frac = GainToFaderFrac(fFaderOrig) + delta;
+        if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
+        const float gain = FaderFracToGain(frac);
         if (master) fMasterGain = gain;
         else        fStrips[fDragStrip].gain = gain;
     } else if (fDrag == Drag::Trim) {
         // The trim knob: the pan knob's gesture, mapped over the trim scale
         // (unity at 12 o'clock), so a long drag down is silence and up is headroom.
-        const float knob = TrimToKnob(fTrimOrig) + (fTrimGrabY - where.y) / 100.0f;
+        const float knob = TrimToKnob(fTrimOrig)
+                         + (fTrimGrabY - where.y) / 100.0f * fine;
         fStrips[fDragStrip].trim = KnobToTrim(knob);
     } else if (fDrag == Drag::Send) {
         if (fDragStrip >= (int)fStrips.size() || fSendIndex < 0) return;
         MixerStripInfo& s = fStrips[fDragStrip];
         if (fSendIndex >= (int)s.sends.size()) return;
-        float v = fSendOrig + (fSendGrabY - where.y) / 100.0f * 1.5f;
+        float v = fSendOrig + (fSendGrabY - where.y) / 100.0f * 1.5f * fine;
         if (v < 0.0f) v = 0.0f;
         if (v > 1.5f) v = 1.5f;
         s.sends[(size_t)fSendIndex].level = v;
@@ -673,7 +930,7 @@ void MixerStripsView::MouseMoved(BPoint where, uint32, const BMessage*) {
         Invalidate();
         return;   // no ApplyStrip: a send is not part of the strip's own state
     } else {   // Pan knob: vertical drag (up = right) relative to grab.
-        float p = fPanOrig + (fPanGrabY - where.y) / 100.0f;
+        float p = fPanOrig + (fPanGrabY - where.y) / 100.0f * fine;
         if (p < -1) p = -1; if (p > 1) p = 1;
         fStrips[fDragStrip].pan = p;
     }
@@ -717,6 +974,76 @@ void MixerStripsView::MouseUp(BPoint) {
     Invalidate();
 }
 
+// The keyboard (package 52). There was none at all: no focus, no KeyDown, so
+// the only way to move a fader was the mouse. The current strip is what
+// kMsgMixSelect already names, so the click and the keyboard agree about which
+// strip is "here" -- and the master is the last position, not a special case.
+void MixerStripsView::KeyDown(const char* bytes, int32 numBytes) {
+    if (numBytes < 1) return;
+    const unsigned char c = (unsigned char)bytes[0];
+    const int count = (int)fStrips.size();
+    const bool master = (fCurStrip == count);
+    switch (c) {
+        case B_LEFT_ARROW:
+            SetCurrentStrip(fCurStrip - 1);
+            if (fCurStrip < count) Post(kMsgMixSelect, fStrips[(size_t)fCurStrip].trackId);
+            return;
+        case B_RIGHT_ARROW:
+            SetCurrentStrip(fCurStrip + 1);
+            if (fCurStrip < count) Post(kMsgMixSelect, fStrips[(size_t)fCurStrip].trackId);
+            return;
+        case B_UP_ARROW:   NudgeStripGain(fCurStrip, +0.5f); return;
+        case B_DOWN_ARROW: NudgeStripGain(fCurStrip, -0.5f); return;
+        case 'm': case 'M': {
+            if (master) return;
+            MixerStripInfo& s = fStrips[(size_t)fCurStrip];
+            s.muted = !s.muted; ApplyStrip(fCurStrip); Invalidate();
+            return;
+        }
+        case 's': case 'S': {
+            if (master) return;
+            MixerStripInfo& s = fStrips[(size_t)fCurStrip];
+            s.soloed = !s.soloed; ApplyStrip(fCurStrip); Invalidate();
+            return;
+        }
+        case 'r': case 'R': {
+            if (master) return;
+            MixerStripInfo& s = fStrips[(size_t)fCurStrip];
+            s.armed = !s.armed; Post(kMsgMixArm, s.trackId); Invalidate();
+            return;
+        }
+        default: break;
+    }
+    BView::KeyDown(bytes, numBytes);
+}
+
+// The wheel pans the rack sideways when it is wider than the view (M1.4), and
+// adjusts the control under the pointer when there is one (package 52).
+void MixerStripsView::MessageReceived(BMessage* msg) {
+    if (msg->what == kMsgMixLevelCommit) {   // the inline dB field's Enter
+        CommitLevelEntry();
+        return;
+    }
+    if (msg->what == B_MOUSE_WHEEL_CHANGED) {
+        float dy = 0.0f, dx = 0.0f;
+        msg->FindFloat("be:wheel_delta_y", &dy);
+        msg->FindFloat("be:wheel_delta_x", &dx);
+        const float move = (dx != 0.0f ? dx : dy);
+        // The wheel message carries no position; ask for the pointer, as the
+        // effects view does for the same reason. Never mid-drag: a wheel turned
+        // during a fader gesture would move the value the gesture is holding.
+        if (fDrag == Drag::None) {
+            BPoint pt;
+            uint32 buttons = 0;
+            GetMouse(&pt, &buttons, false);
+            if (WheelAdjust(pt, move)) return;
+        }
+        SetScrollX(fScrollX + move * 40.0f, true);
+        return;
+    }
+    BView::MessageReceived(msg);
+}
+
 // --- window ---------------------------------------------------------------
 
 MixerWindow::MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
@@ -724,9 +1051,33 @@ MixerWindow::MixerWindow(BRect frame, std::vector<MixerStripInfo> strips,
     : BWindow(frame, "Mixer", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fApply(apply) {
-    SetSizeLimits(160, 100000, 320, 100000);   // keep the strip tall enough
+    SetSizeLimits(220, 100000, 320, 100000);   // keep the strip tall enough
     fView = new MixerStripsView(Bounds(), std::move(strips), masterGain, apply);
     AddChild(fView);
+    FitToScreen();
+}
+
+// The frame the caller passes is a guess (a strip count times a strip width).
+// Clamp it to the screen: a mixer wider than the display used to put the master
+// fader and meter off-window with nothing saying so, and a taller-than-screen
+// one put the M/S/G row and the name bars below the bezel. The rack scrolls
+// horizontally and the master is pinned, so a narrower window is still usable.
+void MixerWindow::FitToScreen() {
+    const BRect sf = BScreen(this).Frame();
+    float w = Bounds().Width(), h = Bounds().Height();
+    const float maxW = std::max(240.0f, sf.Width() - 24.0f);
+    const float maxH = std::max(200.0f, sf.Height() - 40.0f);
+    if (w > maxW) w = maxW;
+    if (h > maxH) h = maxH;
+    if (w != Bounds().Width() || h != Bounds().Height())
+        ResizeTo(w, h);
+    // Keep it on screen even when the caller's origin was already near an edge.
+    BRect f = Frame();
+    if (f.right > sf.right - 4.0f) f.OffsetTo(sf.right - 4.0f - f.Width(), f.top);
+    if (f.bottom > sf.bottom - 4.0f) f.OffsetTo(f.left, sf.bottom - 4.0f - f.Height());
+    if (f.left < sf.left + 4.0f) f.OffsetTo(sf.left + 4.0f, f.top);
+    if (f.top < sf.top + 4.0f) f.OffsetTo(f.left, sf.top + 4.0f);
+    MoveTo(f.left, f.top);
 }
 
 void MixerWindow::DispatchMessage(BMessage* m, BHandler* h) {
@@ -752,7 +1103,12 @@ void MixerWindow::MessageReceived(BMessage* msg) {
         float ml = 0, mr = 0;
         msg->FindFloat("mpl", &ml);
         msg->FindFloat("mpr", &mr);
-        fView->SetPeaks(peaks, ml, mr);
+        // The master's RMS, for its own bar: absent (an older sender) means the
+        // bar simply has no RMS line.
+        float mrl = -1.0f, mrr = -1.0f;
+        msg->FindFloat("mrl", &mrl);
+        msg->FindFloat("mrr", &mrr);
+        fView->SetPeaks(peaks, ml, mr, mrl, mrr);
         return;
     }
     if (msg->what == kMsgMixStrips) {
@@ -807,6 +1163,7 @@ void MixerWindow::MessageReceived(BMessage* msg) {
             msg->FindBool("hi", i, &b); s.hasInput = b;
             const char* ol = nullptr; msg->FindString("ol", i, &ol);
             s.outLabel = ol ? ol : "Mst";
+            msg->FindInt32("am", i, &s.autoMode);   // the Auto lamp
             strips.push_back(std::move(s));
         }
         float mg = 1.0f; msg->FindFloat("mg", &mg);
