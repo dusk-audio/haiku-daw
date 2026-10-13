@@ -17,6 +17,7 @@
 #include "../model/SnapGrid.h"     // the arrange grid the menu offers
 #include "../model/Crossfade.h"   // ClipFades (the per-track fade cache)
 #include "../model/KeyMap.h"       // the one keyboard map (M3.2)
+#include "../model/ArrangeLogic.h" // the kit-free rules behind the gestures
 #include "UiMetrics.h"             // HeaderWidth() (the peak invalidation)
 
 #include <Cursor.h>
@@ -207,10 +208,16 @@ public:
     // In-place rename (M2.6). The name field in the header becomes a text
     // field; Enter commits ONE SetTrackNameCommand, Esc cancels, a press
     // outside commits first. Public so the test can read the edit state.
+    // A CLIP renames through the same field, drawn over its own name strip
+    // (package 50): RenamingClip() says which one is open, kInvalidClipId
+    // when it is a track's. BeginClipRename falls back to the (screen-clamped)
+    // RenameWindow only for a clip too narrow to hold a field.
     bool        RenamingInPlace() const { return fRenameTrack != kInvalidTrackId; }
     TrackId     RenamingTrack()   const { return fRenameTrack; }
+    ClipId      RenamingClip()    const { return fRenameClip; }
     const char* RenameBuffer()    const { return fRenameText.c_str(); }
     void        BeginTrackRename(TrackId track);
+    void        BeginClipRename(TrackId track, ClipId clip);
 
     // --- markers (M2.7) -----------------------------------------------------
     //
@@ -226,6 +233,13 @@ public:
     // window is never stale.
     void AddMarkerAt(Frame frame);                          // "Marker N"
     void RemoveMarkerAt(Frame frame, const std::string& name);
+    // The marker lane's drag: one MoveMarkerCommand, one undo step. Public
+    // like the clip-depth actions, so the functional test drives exactly what
+    // the menu and the drag run.
+    void MoveMarkerTo(Frame oldFrame, const std::string& name, Frame newFrame);
+    // The marker flag's own menu entries (a popup cannot be driven by the
+    // suite, so the test calls these -- the established pattern).
+    void RenameMarkerAt(Frame frame, const std::string& name, BPoint where);
     void SeekTo(Frame frame);        // move the playhead AND the drawn line
     // The transport bar's RTZ and Loop buttons run exactly what the keyboard
     // map's Home/Enter and L run (M3.1) — one implementation, two ways in.
@@ -284,6 +298,11 @@ public:
         fSelClips.clear();
         fRangeValid = false;
         fRangeA = fRangeB = 0;
+        // The CLIPBOARD too (package 50): a clip copied in project A names a
+        // source by a path relative to A, so pasting it into B put a clip in B
+        // pointing at A's media — a clip that plays the wrong file, or nothing
+        // at all once the project moves.
+        fClipboard.clear();
         // An in-place rename addresses a track by id in the project that made
         // it; a new project's ids mean something else (stale content is a bug).
         CancelTrackRename();
@@ -353,6 +372,9 @@ private:
     void DrawTrackHeader(const Track& t, BRect lane);
     void DrawTrackHeaderCompact(const Track& t, BRect lane);  // collapsed lane
     void DrawNameField(const Track& t, BRect lane);   // the in-place rename box
+    // The field itself, at any rect: the track's name box and a clip's name
+    // strip are the same well, the same caret and the same scrolling.
+    void DrawRenameFieldIn(const BRect& r);
     void DrawLiveMidi(BRect region, TrackId track);   // in-progress notes while recording
     void DrawLiveAudio(BRect region, TrackId track);  // in-progress waveform while recording
     void DrawMidiNotes(const Track& t, BRect lane);
@@ -379,19 +401,30 @@ private:
     void  OpenColourPicker(TrackId track, BPoint where);
     void  OpenInputPicker(TrackId track, BPoint where);
     // In-place rename internals: the key handler is the field's own, and only
-    // the commit and the cancel end the edit.
+    // the commit and the cancel end the edit. One field serves a track's name
+    // and a clip's (fRenameClip says which), because the keys, the caret and
+    // the "a press outside commits" rule are the same for both.
     bool  HandleRenameKey(const char* bytes, int32 numBytes);
-    void  CommitTrackRename();
+    void  CommitRename();
     void  CancelTrackRename();
     TrackId     fRenameTrack = kInvalidTrackId;
+    ClipId      fRenameClip  = kInvalidClipId;   // set = a CLIP's name field
     std::string fRenameText;
     int         fRenameCaret = 0;       // byte offset into fRenameText
+    // The clip whose name strip holds the open field, or an invalid rect when
+    // no clip rename is open (the commit-outside test's rect).
+    BRect ClipRenameFieldRect() const;
 
     // --- the marker lane (M2.7) --------------------------------------------
     void   DrawMarkerLane();
     void   HandleMarkerLaneClick(BPoint where, bool rightClick);
     // The marker whose flag or name is under a point on the marker lane.
     const Marker* MarkerInLane(BPoint where) const;
+    // The flag drag: where the flag was grabbed and where the pointer has
+    // taken it. The model is untouched until the release (one command).
+    Frame       fDragMarkerOrig = 0;
+    Frame       fDragMarkerTo   = 0;
+    std::string fDragMarkerName;
     bool   fMarkerLane = false;
 
     // --- the tools' gestures ----------------------------------------------
@@ -427,7 +460,7 @@ private:
     void DrawScissorsHover(const BRect& block);          // the future cut line
 
     // --- navigation (M2.2) -------------------------------------------------
-    void SyncScrollBars();              // ranges/proportions/values
+    void SyncScrollBars();              // ranges/proportions/values/STEPS
     void LayoutScrollBars();            // frames (a layout view does not
                                         // reposition children by follow modes)
     void FrameResized(float newWidth, float newHeight) override;
@@ -437,6 +470,11 @@ private:
     bool  fSyncingBars  = false;        // our own SetValue must not echo back
     float fBarLastX = -1.0f, fBarLastY = -1.0f, fBarLastRangeX = -1.0f;
     float fBarLastRangeY = -1.0f, fBarLastPropX = -1.0f, fBarLastPropY = -1.0f;
+    // The step sizes last pushed to the horizontal bar. The range is in
+    // FRAMES, so the steps have to be frames too, scaled with the zoom
+    // (ScrollStepsFor) — the constructor's stock 12/120 moved the view by a
+    // fiftieth of a pixel.
+    float fBarLastStepX = -1.0f, fBarLastPageX = -1.0f;
 
     // --- editing tools / snap (M2.3) ---------------------------------------
     Tool     fTool = Tool::Pointer;
@@ -463,9 +501,15 @@ private:
     int   TrackIndexAt(BPoint where) const;             // -1 if none
     void  HandleHeaderClick(const Track& t, BRect lane, BPoint where);
     void  HandleRulerMenu(BPoint where);        // tempo/meter/marker menu
+    // The lane area's one context menu: the empty part of a lane, the 1 px gap
+    // between lanes, and everything below the last lane. `track` is the track
+    // under the cursor (an invalid id below the last lane) and is where Paste
+    // lands; without one it pastes at the playhead.
+    void  LaneAreaMenu(BPoint where, TrackId track);
+    void  ClearSelectionAndRange();             // both, one invalidate each
     const Marker* MarkerAt(BPoint where) const; // ruler marker under the cursor
     void  JumpToMarker(int dir);                // -1 = prev, +1 = next, from playhead
-    void  LoopBetweenMarkers();                 // cycle the markers bracketing the playhead
+    bool  LoopBetweenMarkers();                 // cycle the markers bracketing the playhead
     Frame BarStartFrameAt(Frame f) const;       // nearest bar boundary frame
 
     // Live fader/pan drag. During a drag we preview by writing the model
@@ -475,7 +519,7 @@ private:
                       ClipFadeIn, ClipFadeOut,
                       ClipGain, Note, NoteResize, NoteVelocity, RulerLoop,
                       RulerPunch, Pencil, Slip, RangeSelect, LaneResize,
-                      ClipStretch };
+                      Marker, ClipStretch };
     void  PreviewDrag(BPoint where);   // apply the dragged value for feedback
     int   PitchAt(BRect lane, float y) const;   // y -> MIDI pitch
     Drag    fDrag      = Drag::None;
@@ -536,13 +580,12 @@ private:
     void  PasteItems(const std::vector<ClipItem>& items, Frame at,
                      bool toSourceTracks = false);
     TrackId PasteTargetFor(bool midi) const;          // selected track, else first
-    int      ContextMenu(BPoint where, bool withSplit = false,
-                         bool withTake = false) const;   // 0=Copy 1=Delete 2=Split 3=NextTake
-    // Richer audio-clip menu (adds region ops + the clip-depth entries);
-    // returns the chosen item's label ("" if dismissed) so callers switch on
-    // meaning, not a fragile index.
-    std::string AudioClipMenu(BPoint where, bool withTake) const;
-    bool     PastePopup(BPoint where) const;    // "Paste here" -> true if chosen
+    // The ONE block menu, for an audio clip and for a MIDI region: `midi`
+    // drops the entries the model cannot serve for a region (no name field, no
+    // fade shape, no decoded audio; SetClipColorCommand is audio-only). Returns
+    // the chosen item's label ("" if dismissed) so callers switch on meaning,
+    // not a fragile index.
+    std::string ClipMenu(BPoint where, bool midi, bool withTake) const;
     void     PasteToTrack(TrackId track, Frame at, TrackType type);
     // The keyboard map's actions this view runs itself (M3.2). The ones that
     // change state the main window owns (record, click) are posted there.

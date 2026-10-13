@@ -5,6 +5,7 @@
 #include "widgets/DawTextField.h"
 
 #include <LayoutBuilder.h>
+#include <Screen.h>
 #include <View.h>
 
 namespace daw {
@@ -42,6 +43,25 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
         .End();
 
     ResizeToPreferred();
+    // Clamp to the screen (package 50). The window opens AT the caller's
+    // anchor — a clip under the pointer, a row in a list — and that anchor can
+    // sit near an edge (or be off the screen entirely, for a clip at the far
+    // right of a scrolled timeline), which used to put the whole window,
+    // OK button included, where it could not be reached. The guidelines' rule
+    // for a content-sized window (UI_GUIDELINES §4): size from the content,
+    // then clamp to BScreen.
+    {
+        BScreen screen(this);
+        if (screen.IsValid()) {
+            const BRect sf = screen.Frame();
+            BRect f = Frame();
+            if (f.right  > sf.right)  f.OffsetBy(sf.right - f.right, 0.0f);
+            if (f.bottom > sf.bottom) f.OffsetBy(0.0f, sf.bottom - f.bottom);
+            if (f.left   < sf.left)   f.OffsetBy(sf.left - f.left, 0.0f);
+            if (f.top    < sf.top)    f.OffsetBy(0.0f, sf.top - f.top);
+            MoveTo(f.left, f.top);
+        }
+    }
     fText->MakeFocus(true);
 }
 

@@ -827,6 +827,15 @@ void MainWindow::MessageReceived(BMessage* msg) {
                 fTransportCtl.StartPlayback();
             break;
         }
+        // A view's own status message (package 50: the timeline's loop toggle
+        // says which range it adopted, or that it had none to adopt). The
+        // status line keeps it until the transport state changes, like every
+        // other job/error message (UpdateTransportStatus).
+        case kMsgTransportStatus: {
+            const char* s = nullptr;
+            if (msg->FindString("s", &s) == B_OK && s) SetTransportStatus(s);
+            break;
+        }
         case MSG_ZOOM_IN:  fTimeline->ZoomBy(0.5); break;
         case MSG_ZOOM_OUT: fTimeline->ZoomBy(2.0); break;
         case MSG_MON_DIM:
