@@ -865,6 +865,11 @@ static void ClearExportAlert() {
 // The export OPTIONS dialog: a plain BWindow whose title NAMES THE ACTION
 // ("Export Mix" for this flow; see TestDialogVocabulary for the stems one), so
 // it can no longer be confused with the failure alert, which stays "Export".
+//
+// The title is shared with the file panel behind it (ShowPanel titles each
+// panel for its action), so this lookup is only unambiguous when no panel is
+// up -- which is what the WaitQuiet() before it guarantees. Anything that has
+// to tell the two apart afterwards compares POINTERS.
 static BWindow* FindExportDialog() {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
@@ -957,12 +962,13 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
 
     // The dialog applies by posting its own go-ahead to itself; it then quits.
     dlg->PostMessage('exok');
-    // Wait for the save panel AND for the dialog to have left the application's
-    // window list entirely. "Not visible" is not enough: a window that is
-    // quitting stops being DRAWN before it is removed, and touching one in that
-    // state is how this suite used to hang and, before that, crash.
+    // Wait for the DIALOG to leave the window list -- BY IDENTITY, not by
+    // title: the file panel it opens is titled "Export Mix" too (ShowPanel
+    // names each panel for its action, which is where the dialog's own title
+    // comes from), so a title lookup can never go quiet once the panel is up.
+    // That is also why the shot window above is waited for by pointer.
     CHECK(WaitFor([&] {
-        return !WindowListed("Export Mix") && VisibleWindows() >= windowsBefore + 1;
+        return !WindowListed(dlg) && VisibleWindows() >= windowsBefore + 1;
     }));
     HideOtherWindows(win);
     CHECK(WaitQuiet());
@@ -4471,6 +4477,18 @@ static void TestWidgetKit(MainWindow* win) {
     // The toggle reports the value it flipped TO: off -> on -> off.
     click(toggle, BPoint(45, 11));
     CHECK(probeState(kMsgKitToggle, B_CONTROL_ON));
+    // ... and it still HOLDS it: the control's own state is the thing a lamp
+    // is drawn from, so a toggle that reports ON and holds OFF is the bug in
+    // waiting (BButton::Invoke resets the value to off after the invoke, which
+    // is what made the second click below report ON again).
+    {
+        int32 held = -1;
+        if (probe->LockWithTimeout(1000000) == B_OK) {
+            held = toggle->Value();
+            probe->Unlock();
+        }
+        CHECK(held == B_CONTROL_ON);
+    }
     click(toggle, BPoint(45, 11));
     CHECK(probeState(kMsgKitToggle, B_CONTROL_OFF));
 
@@ -4537,9 +4555,18 @@ static void TestWidgetKit(MainWindow* win) {
     // drawing a border (which is what it did: Return did nothing in every
     // converted dialog).
     CHECK(dynamic_cast<BButton*>(button) != nullptr);
-    // ... and it is reachable by Tab, like every other kit control.
-    CHECK((button->Flags() & B_NAVIGABLE) != 0);
-    CHECK((toggle->Flags() & B_NAVIGABLE) != 0);
+    // Flags() on a BView is a locked call: BView::Flags() runs _CheckLock(),
+    // which trips the debugger ("Looper must be locked.") when the view's
+    // window lock is not held by the calling thread -- and a faulted run
+    // wedges the whole team (docs/HANDOFF.md). Read them under the probe's
+    // lock, like every other view call here.
+    bool tabReachable = false;
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        tabReachable = (button->Flags() & B_NAVIGABLE) != 0
+                    && (toggle->Flags() & B_NAVIGABLE) != 0;
+        probe->Unlock();
+    }
+    CHECK(tabReachable);
 
     // MakeDefault reaches the WINDOW: that is the registration BWindow routes
     // Return to (BWindow::_DetermineTarget), and the thing that was missing.

@@ -44,7 +44,10 @@ BSlider* PercentRow(const char* name, const char* label, int value,
 
 QuantizeWindow::QuantizeWindow(BRect frame, const QuantizeOpts& opts,
                                BMessenger apply)
-    : BWindow(frame, "Quantize", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+    // Look and feel as separate arguments (see ExportWindow): the
+    // (window_type, flags, workspace) overload would silently swallow the
+    // flags.
+    : BWindow(frame, "Quantize", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
               | B_CLOSE_ON_ESCAPE),
       fApply(apply) {

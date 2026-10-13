@@ -18,7 +18,12 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
               title ? title
                     : (what == kMsgRenameMarker ? "Rename Marker"
                                                 : "Rename Track"),
-              B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+              // The look and the feel are separate arguments on purpose:
+              // BWindow's (window_type, flags, workspace) overload would take
+              // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, flags) and put
+              // the flags in `workspace`, losing every one of them (the same
+              // trap ExportWindow documents).
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
               | B_CLOSE_ON_ESCAPE),
       fTrack(track), fApply(apply), fWhat(what), fAux(aux),

@@ -56,9 +56,13 @@ NewProjectWindow::NewProjectWindow(std::vector<TemplateInfo> templates,
                                    std::vector<std::string> lookedIn,
                                    BMessenger apply)
     : BWindow(BRect(160, 160, 160 + 440, 160 + 220), "New Project",
-              B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL | B_NOT_ZOOMABLE | B_NOT_RESIZABLE
-              | B_ASYNCHRONOUS_CONTROLS | B_CLOSE_ON_ESCAPE),
+              // Look, feel and flags as three arguments (see ExportWindow):
+              // the four-argument form resolved to BWindow's (window_type,
+              // flags, workspace) overload, where a feel constant in the flags
+              // expression is a stray bit and nothing else is where it says.
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fTemplates(std::move(templates)), fLookedIn(std::move(lookedIn)),
       fApply(apply) {
     // A dialog with no rows at all would be a dead end; the caller adds the
