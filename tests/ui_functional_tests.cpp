@@ -8894,6 +8894,9 @@ static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) 
         s1.AddInt64("track", (int64)a.id);
         win->PostMessage(&s1);
         CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-a"); }));
+        // The review's own note: this window and the instrument editor had no
+        // Shot() anywhere, so nothing had ever LOOKED at them. Capture both.
+        Shot("ux-sends");
         // An instrument editor for an AUDIO track: refused, because there is no
         // voice to edit there (and a window opened on a stale snapshot would
         // then commit a whole descriptor for the wrong kind of track).
@@ -8944,6 +8947,41 @@ static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) 
         }
         win->PostMessage(kMsgUiRefresh);
         CHECK(WaitFor([&] { return !WindowUp("Sends \xE2\x80\x94 ux-b"); }));
+
+        // The instrument editor, which the suite had only ever REFUSED (audio
+        // track): open it for a MIDI track and look at it.
+        Track m;
+        m.id = project.NextTrackId();
+        m.type = TrackType::Midi;
+        m.name = "ux-midi";
+        CHECK(LockedAddTrack(win, project, m));
+        BMessage s6(kMsgMixInst);
+        s6.AddInt64("track", (int64)m.id);
+        win->PostMessage(&s6);
+        CHECK(WaitFor([&] { return WindowUp("Instrument \xE2\x80\x94 ux-midi"); }));
+        Shot("ux-instrument");
+        {
+            // ... and it is single-instance too, the same rule as the sends
+            // editor above (one window, retargeted).
+            BMessage again(kMsgMixInst);
+            again.AddInt64("track", (int64)m.id);
+            win->PostMessage(&again);
+            snooze(200000);
+            int instUp = 0;
+            for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                BWindow* w = be_app->WindowAt(i);
+                if (w && !w->IsHidden()
+                    && std::strncmp(WindowTitle(w), "Instrument", 10) == 0)
+                    instUp++;
+            }
+            CHECK(instUp == 1);
+        }
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<RemoveTrackCommand>(m.id), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+        CHECK(WaitFor([&] { return !WindowUp("Instrument \xE2\x80\x94 ux-midi"); }));
     }
 
     // --- A: an Open closes every window addressed by track id --------------
