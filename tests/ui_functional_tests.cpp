@@ -8540,7 +8540,10 @@ static void TestPreferences(MainWindow* win, Project& project) {
             if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("bfh")))
                 haveBufferHint = BString(h->Text()).FindFirst("next Play") >= 0;
             if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("ush")))
-                haveScaleHint = BString(h->Text()).FindFirst("Applied now") >= 0;
+                // "Applied on Apply" since the vocabulary pass gave the window
+                // a Cancel/Apply pair: the row is a setting until then.
+                haveScaleHint = BString(h->Text()).FindFirst("Applied on Apply")
+                                >= 0;
             w->Unlock();
         }
         CHECK(haveBufferHint);

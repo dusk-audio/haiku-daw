@@ -887,10 +887,12 @@ if(HAIKU)
     add_dependencies(ui_functional_tests daw_templates)
     add_test(NAME ui_functional_tests COMMAND ui_functional_tests)
     # TIMEOUT: a window test that wedges (a prompt nobody answers, a lock held)
-    # must fail the suite rather than block ctest forever. The whole run is
-    # ~15 s normally; the longest single wait inside it is 60 s.
+    # must fail the suite rather than block ctest forever. The suite grew a lot
+    # with the UX packages (four packages' worth of dialog-driving checks and
+    # ~20 screenshots): MEASURED at 6 min 15 s on the VM, so the cap is 15 min.
+    # A run that wedges still fails rather than hanging ctest.
     set_tests_properties(ui_functional_tests PROPERTIES SKIP_RETURN_CODE 77
-                         TIMEOUT 300)
+                         TIMEOUT 900)
 
     # --- Sample effect add-on (plugin ABI demo) -----------------------
     # A Haiku shared add-on (.so) the host loads at runtime. Only needs the
