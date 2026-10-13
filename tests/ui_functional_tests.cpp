@@ -5760,6 +5760,25 @@ static void TestMixerStripExtras(MainWindow* win, Project& project) {
     CHECK(strips != nullptr);
     if (strips == nullptr) return;
 
+    // Asking for the mixer while it is open pushes a fresh strip payload and
+    // raises the window. That payload now has ONE encoder; it used to have a
+    // second, hand-rolled copy whose field names did not match what the mixer
+    // decodes, so the strips came back nameless at unity gain on the second
+    // View > Mixer. The name and the gain are what such a copy loses first.
+    {
+        win->PostMessage(MSG_MIXER_TEST);
+        const bool kept = WaitFor([&] {
+            if (mixer->LockWithTimeout(1000000) != B_OK) return false;
+            bool found = false;
+            for (const MixerStripInfo& s : strips->Strips())
+                if (s.name == "strip-track" && s.gain > 0.9f && s.gain < 1.1f)
+                    found = true;
+            mixer->Unlock();
+            return found;
+        });
+        CHECK(kept);
+    }
+
     auto trackOf = [&] {
         Track out;
         if (win->LockWithTimeout(1000000) == B_OK) {
