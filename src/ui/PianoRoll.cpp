@@ -1681,6 +1681,7 @@ void PianoRollView::MouseMoved(BPoint where, uint32 transit, const BMessage*) {
 
 void PianoRollView::MouseUp(BPoint) {
     const Drag was = fDrag;
+    const int dragged = fDragNote;   // the Alt-click's toggle needs it below
     fDrag = Drag::None;
     fDragNote = -1;
     fVelLaneDrag = false;
@@ -1688,9 +1689,8 @@ void PianoRollView::MouseUp(BPoint) {
     if (was == Drag::AltPending) {
         // Alt without a drag: the additive selection toggle (the gesture the
         // Alt bits mean in the arrangement too).
-        if (fDragNote >= 0 && (size_t)fDragNote < fSel.size()) {
-            fSel[(size_t)fDragNote] = fSel[(size_t)fDragNote] ? 0 : 1;
-            fDragNote = -1;
+        if (dragged >= 0 && (size_t)dragged < fSel.size()) {
+            fSel[(size_t)dragged] = fSel[(size_t)dragged] ? 0 : 1;
             Invalidate();
         }
         return;

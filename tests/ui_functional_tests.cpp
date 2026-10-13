@@ -4997,6 +4997,78 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         }));
     }
 
+    // --- H2. Alt: a click toggles the selection, a DRAG duplicates ----------
+    // Both gestures share the Alt bits (on a PC keyboard Alt IS B_COMMAND_KEY,
+    // which used to mean only "toggle"), and which one it is depends on whether
+    // the pointer moves.
+    {
+        auto postMouse = [&](uint32 what, BPoint p, uint32 mods) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_UP ? 0 : 1);
+            m.AddInt32("clicks", 1);
+            m.AddInt32("modifiers", mods);
+            m.AddPoint("where", p);
+            BMessenger(roll).SendMessage(&m);
+        };
+        // The Alt-click toggle: selected -> not selected, nothing committed.
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+        int selBefore = -1, notesBefore = 0;
+        MidiClip c0;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            selBefore = roll->SelectedCountForTest();
+            win->Unlock();
+            modelClip(&c0);
+            notesBefore = (int)c0.notes.size();
+            return selBefore > 0;
+        }));
+        float nx = 0.0f, ny = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const MidiNote n0 = roll->NoteForTest(0);
+            nx = roll->XForFrameForTest(n0.startFrame + 100);
+            ny = Themed(28.0f) + (float)(96 - n0.pitch) * Themed(12.0f)
+               + Themed(6.0f);
+            win->Unlock();
+        }
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const int s2 = roll->SelectedCountForTest();
+            win->Unlock();
+            return s2 == selBefore - 1;
+        }));
+        {
+            MidiClip c1;
+            modelClip(&c1);
+            CHECK((int)c1.notes.size() == notesBefore);   // a toggle is not an edit
+        }
+        Shot("roll-alt-click");
+
+        // The Alt-drag duplicate: the model gains a copy (and one undo takes it
+        // back, so it went through the stack).
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_MOVED, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            MidiClip c2;
+            if (!modelClip(&c2)) return false;
+            return (int)c2.notes.size() > notesBefore;
+        }));
+        Shot("roll-alt-drag");
+        win->PostMessage(MSG_UNDO_TEST);
+        CHECK(WaitFor([&] {
+            MidiClip c3;
+            if (!modelClip(&c3)) return false;
+            return (int)c3.notes.size() == notesBefore;
+        }));
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+    }
+
     // --- D. Audition: a click on the keyboard column sounds -----------------
     // The engine side cannot be heard by a test, so the engine counts the
     // audition notes its callback actually RENDERS (Engine::
