@@ -760,6 +760,16 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
                             && bytes != nullptr;
         const bool isTab = haveBytes && bytes[0] == B_TAB;
+        // A focused KIT BUTTON owns Space and Return -- the Haiku rule (Space
+        // presses it, Return is the window's default) and since package 49
+        // every button is B_NAVIGABLE, so the user can tab to one. The map's
+        // Space is the transport's play/stop and its Return returns to zero,
+        // but only where the keyboard is not explicitly on a button.
+        if (haveBytes && (bytes[0] == B_SPACE || bytes[0] == B_RETURN)
+            && dynamic_cast<BButton*>(focus) != nullptr) {
+            BWindow::DispatchMessage(message, handler);
+            return;
+        }
         // ... except when the DOCKED MIDI editor holds the focus: the roll is
         // custom drawn and carries its own editor keys (its tool palette, the
         // grid menu, the nudge arrows, Del), deliberately OUTSIDE the arrange's
@@ -1506,6 +1516,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0, cid = 0, base = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
+            // The base the roll committed against. The declaration above has
+            // always been here and the field was never read, so every commit
+            // recorded base 0 -- a serial no stack ever has -- and the gate's
+            // staleness check compared against nothing.
+            msg->FindInt64("base", &base);
             // A hosted roll always names its base (it is pushed the moment it
             // opens); one that never arrived — a test harness building a view
             // itself — has none, and keeps the pre-51 behaviour.
@@ -1558,6 +1573,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0, cid = 0, base = 0;
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
+            // The base the roll committed against. The declaration above has
+            // always been here and the field was never read, so every commit
+            // recorded base 0 -- a serial no stack ever has -- and the gate's
+            // staleness check compared against nothing.
+            msg->FindInt64("base", &base);
             if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
                 RefreshRolls(true);
                 break;
@@ -2345,6 +2365,13 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case MSG_PULSE: {
             // Is a Stop's meter decay still running? (package 52)
             const bool decaying = system_time() < fMeterDecayUntil;
+            if (fMeterDecayUntil != 0 && !decaying) {
+                // The window has expired: clear it and re-evaluate, or the
+                // runner that the decay kept alive is never asked again and
+                // the 60 Hz tick spins for the rest of the session.
+                fMeterDecayUntil = 0;
+                UpdatePulse();
+            }
             // The transport bar's own readouts first (M3.1): the lamps, the
             // status line and the tempo/meter/DSP/xrun line, all change-guarded
             // inside the bar, so a tick that changed nothing costs no repaint.
@@ -2746,13 +2773,12 @@ void MainWindow::ShowSendsWindow(TrackId tid) {
             buses.push_back({bt.id, bt.name});
 
     if (fSendsMsgr.IsValid()) {
-        // The same track: bring it forward, no new state needed.
-        if (fSendsTrack == tid) {
-            fSendsMsgr.SendMessage(kMsgSendsActivate);
-            return;
-        }
-        // Another track: retarget, so there is never a second copy of a list
-        // that is committed wholesale.
+        // The same track: push the CURRENT list, not just an activate. The
+        // window holds a snapshot and commits its whole list on any edit, and
+        // the model can have moved under it since (an undo, the inspector, a
+        // mixer knob) -- "no new state needed" was a stale-list bug waiting
+        // for its second editor. Retarget() shows and activates the window,
+        // so the push is also what brings it forward.
         BMessage r(kMsgSendsRetarget);
         r.AddInt64("track", (int64)tid);
         r.AddString("name", t->name.c_str());
@@ -2790,10 +2816,9 @@ void MainWindow::ShowInstrumentWindow(TrackId tid) {
     // message from a stale snapshot.
     if (t->type != TrackType::Midi) return;
     if (fInstMsgr.IsValid()) {
-        if (fInstTrack == tid) {
-            fInstMsgr.SendMessage(kMsgInstActivate);
-            return;
-        }
+        // Same rule as the sends window above: push the current descriptor
+        // rather than only activating, because the window commits its whole
+        // descriptor and the model may have moved since it was opened.
         BMessage r(kMsgInstRetarget);
         r.AddInt64("track", (int64)tid);
         r.AddString("name", t->name.c_str());
@@ -4313,6 +4338,10 @@ void MainWindow::SaveSettings() {
     s.countInBars  = fRecCtl.fCountInBars;
     s.metronome    = fTransportCtl.fMetronome;
     s.monitorInput = fTransportCtl.fMonitorInput;
+    // The MIDI editor's audition (package 51). The other settings writers set
+    // this; the one that runs at quit did not, so the preference was lost
+    // every session, whatever the window said.
+    s.previewNotes = fRollPreview;
     s.lastDir      = fLastDir;
     s.recentProjects = fDoc.Recent();
     s.exportContainer = (int)fExportChoices.container;

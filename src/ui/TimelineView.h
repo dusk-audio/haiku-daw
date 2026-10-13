@@ -434,6 +434,11 @@ private:
     // taken it. The model is untouched until the release (one command).
     Frame       fDragMarkerOrig = 0;
     Frame       fDragMarkerTo   = 0;
+    // Where the flag was grabbed, and whether the pointer has moved far enough
+    // to mean a DRAG: under ~4 px the release is still the click-to-seek it
+    // looks like (the same threshold the ruler's loop/punch drags use).
+    BPoint      fDragMarkerDown{-1.0f, -1.0f};
+    bool        fDragMarkerMoved = false;
     std::string fDragMarkerName;
     bool   fMarkerLane = false;
 

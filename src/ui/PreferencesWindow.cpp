@@ -397,6 +397,9 @@ void PreferencesWindow::MessageReceived(BMessage* msg) {
             if (msg->FindInt32("metsnd", &i)  == B_OK) v.metronomeSound = i;
             if (msg->FindFloat("metlvl", &f)  == B_OK) v.metronomeLevel = f;
             if (msg->FindBool("monin", &b)    == B_OK) v.monitorInput = b;
+            // The audition switch (package 51). It was missing here, so every
+            // push blanked it: the row read OFF whatever the setting said.
+            if (msg->FindBool("preview", &b)  == B_OK) v.previewNotes = b;
             if (msg->FindBool("dark", &b)     == B_OK) v.darkMode = b;
             if (msg->FindFloat("uiscale", &f) == B_OK) v.uiScale = f;
             if (msg->FindString("projdir", &s) == B_OK && s) v.projectDir = s;

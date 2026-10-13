@@ -3579,6 +3579,17 @@ void TimelineView::PreviewDrag(BPoint where) {
     if (fDrag == Drag::Marker) {
         Frame f = Snapped(XToFrame(where.x));
         if (f < 0) f = 0;
+        // The same ~4 px threshold the ruler drags below use: a click wobbles a
+        // pixel or two during button-down, and without it that wobble turned
+        // the click into a move -- the flag jumped a grid step and the seek the
+        // click was meant to be never happened. Under the threshold the flag
+        // stays where it was and the release is still a click.
+        if (!fDragMarkerMoved) {
+            const float dx = where.x - fDragMarkerDown.x;
+            const float dy = where.y - fDragMarkerDown.y;
+            if (dx * dx + dy * dy < 16.0f) return;   // 4 px
+            fDragMarkerMoved = true;
+        }
         if (f != fDragMarkerTo) {
             fDragMarkerTo = f;
             Invalidate(BRect(0, RulerBottom(), Bounds().right, ContentTop()));
@@ -4457,6 +4468,8 @@ void TimelineView::HandleMarkerLaneClick(BPoint where, bool rightClick) {
         fDragMarkerOrig = mk->frame;
         fDragMarkerTo   = mk->frame;
         fDragMarkerName = mk->name;
+        fDragMarkerDown = where;
+        fDragMarkerMoved = false;
         SetMouseEventMask(B_POINTER_EVENTS, B_LOCK_WINDOW_FOCUS);
         return;
     }

@@ -114,6 +114,13 @@ void InstrumentWindow::UpdateTitle(const char* trackName) {
 // the only state to carry is the descriptor itself and the title.
 void InstrumentWindow::Retarget(InstrumentDesc inst, TrackId track,
                                 const char* trackName) {
+    // A file panel opened for the OLD track must not answer for the new one:
+    // its reply is a message to this window, and it would set the new track's
+    // soundfont path. Put it away and forget which track it belonged to.
+    if (fPanel != nullptr && fPanelTrack != kInvalidTrackId
+        && fPanelTrack != track)
+        fPanel->Hide();
+    fPanelTrack = kInvalidTrackId;
     fDesc = std::move(inst);
     fTrack = track;
     fTrackName = trackName ? trackName : "";
@@ -422,10 +429,17 @@ void InstrumentWindow::MessageReceived(BMessage* msg) {
                 fFilter = new SoundfontFilter();
                 fPanel->SetRefFilter(fFilter);
             }
+            fPanelTrack = fTrack;   // whose voice this pick is for
             fPanel->Show();
             break;
         }
         case MSG_PICKED: {
+            // The pick belongs to the track the panel was opened for. A
+            // retarget (or a stale reply arriving late) means this is not that
+            // track any more, and applying the path would rewrite the wrong
+            // voice.
+            if (fPanelTrack != fTrack) { fPanelTrack = kInvalidTrackId; break; }
+            fPanelTrack = kInvalidTrackId;
             entry_ref ref;
             if (msg->FindRef("refs", &ref) != B_OK) break;
             BPath p(&ref);

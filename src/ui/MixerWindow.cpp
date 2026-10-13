@@ -245,20 +245,26 @@ void MixerStripsView::SetScrollX(float x, bool moveBar) {
     const float max = MaxScroll();
     if (x < 0.0f) x = 0.0f;
     if (x > max) x = max;
-    if (x == fScrollX) return;
+    const bool moved = (x != fScrollX);
     fScrollX = x;
     // The bar follows the pan (a wheel move); a pan that CAME from the bar must
     // not push the value back into it. BScrollBar's own SetValue calls our
     // ValueChanged, so the loop closes by itself: the callback re-enters here
-    // with the value we just took and returns above.
+    // with the value we just took and returns at the SetValue below.
+    //
+    // The RANGE and PROPORTION are refreshed whenever the caller asks for a bar
+    // sync, even when the offset did not move: a resize changes them while the
+    // clamped offset stays put, and the old early return left the thumb sized
+    // for the previous width (a window dragged wider had a thumb that could not
+    // reach the end of the rack).
     if (moveBar && fHBar != nullptr) {
         fHBar->SetRange(0.0f, std::max(1.0f, max));
         fHBar->SetProportion(max > 0.0f
                                  ? (MasterX() - kGap - 8.0f) / ContentWidth()
                                  : 1.0f);
-        fHBar->SetValue(fScrollX);
+        if (moved) fHBar->SetValue(fScrollX);
     }
-    Invalidate();
+    if (moved) Invalidate();
 }
 
 void MixerStripsView::SetPeaks(

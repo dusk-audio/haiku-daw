@@ -80,6 +80,10 @@ private:
     BMessenger                 fApply;
     BView*                     fRoot;
     BFilePanel*                fPanel = nullptr;
+    // The track the open panel was opened FOR: its reply is a message to this
+    // window, and this window is retargeted from track to track, so a file
+    // picked after a retarget would otherwise land on the new track's voice.
+    TrackId                    fPanelTrack = kInvalidTrackId;
     // BFilePanel does NOT take ownership of its ref filter, so the window has
     // to outlive the panel with it and delete it alongside.
     BRefFilter*                fFilter = nullptr;

@@ -357,8 +357,15 @@ void PianoRollView::CopySelection() {
 // target.
 void PianoRollView::PasteClipboard() {
     if (fClipboard.empty()) return;
-    const Frame target = (fPlayhead >= 0 && fPlayhead >= fClipStart)
-                       ? fPlayhead - fClipStart : 0;
+    // The playhead, when it is INSIDE the region; the region head otherwise.
+    // The upper bound matters: a playhead parked past the end used to paste
+    // there, i.e. outside the window the notes are played in -- silently, since
+    // the paste "worked". A region with no length (or none known) keeps the
+    // old rule.
+    const Frame rel = fPlayhead - fClipStart;
+    const Frame target = (fPlayhead >= 0 && rel >= 0
+                          && (fClipLen <= 0 || rel <= fClipLen))
+                       ? rel : 0;
     Frame first = fClipboard.front().startFrame;
     for (const MidiNote& n : fClipboard) first = std::min(first, n.startFrame);
     std::vector<MidiNote> copies =
