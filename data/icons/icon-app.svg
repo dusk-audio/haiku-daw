@@ -47,8 +47,8 @@
     <polygon points="32,10 56,22 32,34 8,22" fill="url(#topFace)"/>
     <!-- Interior edges: a darker shade of the surface, not black. -->
     <polyline points="8,22 32,34 56,22" fill="none" stroke="#4d6478"
-              stroke-width="1"/>
-    <line x1="32" y1="34" x2="32" y2="48" stroke="#3d5163" stroke-width="1"/>
+              stroke-width="1.5"/>
+    <line x1="32" y1="34" x2="32" y2="48" stroke="#3d5163" stroke-width="1.5"/>
   </g>
 
   <g id="faders">
@@ -58,22 +58,23 @@
     <g id="fader-1">
       <rect x="22" y="19" width="4" height="9" rx="1" fill="#1b2a38"/>
       <rect x="20.5" y="24" width="7" height="3.5" rx="1"
-            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="0.5"/>
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
     </g>
     <g id="fader-2">
       <rect x="30" y="17" width="4" height="13" rx="1" fill="#1b2a38"/>
       <rect x="28.5" y="20" width="7" height="3.5" rx="1"
-            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="0.5"/>
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
     </g>
     <g id="fader-3">
       <rect x="38" y="19" width="4" height="9" rx="1" fill="#1b2a38"/>
       <rect x="36.5" y="23" width="7" height="3.5" rx="1"
-            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="0.5"/>
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
     </g>
   </g>
 
-  <!-- The silhouette: 1 px black at 32 x 32, drawn last so nothing covers
-       it. (At 64 px it is 2 px; Icon-O-Matic rescales the style.) -->
+  <!-- The silhouette: 2 units here, which is the guidelines' 1 px black at
+       32 x 32 (the artwork is drawn on the 64 x 64 grid Icon-O-Matic uses).
+       Drawn last so nothing covers it. -->
   <polygon points="32,10 56,22 56,36 32,48 8,36 8,22" fill="none"
-           stroke="#000000" stroke-width="1" stroke-linejoin="miter"/>
+           stroke="#000000" stroke-width="2" stroke-linejoin="miter"/>
 </svg>

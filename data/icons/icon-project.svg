@@ -34,7 +34,7 @@
     <!-- The fold: the corner turned back, and the crease. -->
     <polygon points="33,7 33,17 43,17" fill="#cfcbbc"/>
     <polyline points="33,7 33,17 43,17" fill="none" stroke="#8f8c7e"
-              stroke-width="0.75"/>
+              stroke-width="1"/>
     <!-- A whisper of a rule near the bottom of the page, so it reads as
          paper and not as a blank slab. -->
     <line x1="17" y1="47" x2="39" y2="47" stroke="#c8c5b6"
@@ -42,8 +42,8 @@
   </g>
 
   <g id="overlay">
-    <!-- The flat type mark: three fader bars, one of them capped in the
-         app icon's accent colour. -->
+    <!-- The flat type mark: three fader bars, the two taller ones capped in
+         the app icon's accent colour. -->
     <rect x="17" y="34" width="5" height="10" fill="url(#barsFace)"/>
     <rect x="26" y="24" width="5" height="20" fill="url(#barsFace)"/>
     <rect x="35" y="30" width="5" height="14" fill="url(#barsFace)"/>
@@ -51,8 +51,9 @@
     <rect x="35" y="30" width="5" height="3" fill="#d8a241"/>
   </g>
 
-  <!-- The silhouette: 1 px black at 32 x 32, drawn last. -->
+  <!-- The silhouette: 2 units here, which is the guidelines' 1 px black at
+       32 x 32. Drawn last. -->
   <polyline points="13,51 13,7 33,7 43,17 46,19.5 46,53.5 15,53.5 13,51"
-            fill="none" stroke="#000000" stroke-width="1"
+            fill="none" stroke="#000000" stroke-width="2"
             stroke-linejoin="miter"/>
 </svg>
