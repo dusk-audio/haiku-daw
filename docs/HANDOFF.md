@@ -332,6 +332,15 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
 
 ## M4 state (how the UI is built — read before touching it)
 
+> **This section is history, not the current UI.** It describes the window as
+> it was at M4 (one strip, no menu bar, rebuild-on-play). Since then: the menu
+> bar, the split `MainWindow` (M1.1), the theme and widget kit (M1.2/M1.3), the
+> Layout Kit dialogs with the inspector and dock panes (M1.4), the two-row
+> transport bar, the arrange-window work, and the engine graph that swaps in
+> place (M4.1). The current tour is `docs/USER_GUIDE.md`, the design of record
+> `docs/ARCHITECTURE.md`, and the per-item state the status table in
+> `docs/agent-prompts/README.md`.
+
 - **One window, no menu bar.** `MainWindow` stacks a transport `BView` strip
   (Play/Stop, `mm:ss.mmm` readout, Undo/Redo buttons, `MeterView`) over a
   `TimelineView` that fills the rest.
@@ -362,18 +371,19 @@ inherited `Frame()` method, so unqualified `Frame` fails to name a type. Each
 such class declares `using Frame = daw::Frame;` to hide the inherited name.
 Do the same in any new view/window that uses model frames.
 
-## Next task — core ladder + feature phases A–H are done
+## Next task — the 1.0 push
 
-The full milestone ladder (M0–M8 + resampler + DSP) and feature phases A–H
-(mixer routing, automation, editing depth, recording depth, tempo/meter map,
-MIDI instrument, sample browser, persistence) are **done** — see the status
-list above and `docs/ROADMAP.md`. The project is now in a **production-readiness
-push**: the P0/P1 stability batch is fixed + committed, and export mastering
-(Phase X) is under way. The current worklist + priorities live in
-**`docs/PRODUCTION_HANDOFF.md`**; the phase/parity map in **`docs/ROADMAP.md`**.
-In short, remaining work is: finish Phase X (export UI + worker thread),
-Phase Y (latency compensation), Phase Z (external Midi Kit 2 I/O + MIDI depth),
-Phase I (LV2 plugin hosting), and the small deferred items.
+The milestone ladder (M0–M8 + resampler + DSP) and feature phases A–H (mixer
+routing, automation, editing depth, recording depth, tempo/meter map, MIDI
+instrument, sample browser, persistence) are **done**, and so is the 1.0 plan
+that followed them: `docs/PLAN_1.0.md` M0–M7 with the UI foundation, the
+arrange window, the transport/mixer/preferences layer, the engine work
+(off the window thread, a seamless loop, the stream pool, background peaks, the
+sinc resampler, dynamic latency), multichannel input, the compressed formats,
+sidechain, time-stretch and MIDI expression. What remains is the release
+itself: `docs/RELEASE_CHECKLIST.md` on the hardware, the tag, and the three
+items the plan's status header names (M1.5 unmeasured, M1.6's HVIF bytes,
+M5.3 not built). Per-item state: `docs/agent-prompts/README.md`.
 
 Keep every milestone runnable; keep the audio thread real-time-safe; commit as
 `marc@duskaudio.com` with no AI trailer; ship via the git-pull loop.
