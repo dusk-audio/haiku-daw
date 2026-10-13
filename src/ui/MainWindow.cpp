@@ -41,6 +41,7 @@
 #include "../engine/Resampler.h"
 #include "../model/ProjectIO.h"
 #include "../model/Commands.h"
+#include "../model/KeyMap.h"            // TimelineTakesKey (the key-routing gate)
 #include "../model/RegionOps.h"
 #include "../model/ProjectTimebase.h"   // ScaleProjectTimebase (a template's rate)
 #include "../model/SmfIO.h"
@@ -732,12 +733,13 @@ MainWindow::~MainWindow() {
 
 void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
     if (message->what == B_KEY_DOWN && fTimeline) {
-        // The timeline takes the transport keys only when nothing else is
-        // using them: a focused control (a text field being edited, a slider's
-        // arrows) keeps its keys, and Tab always belongs to BWindow's own
-        // focus navigation -- stealing it made the keyboard unusable. The
-        // common cases this covers: nothing focused yet (a fresh window), or
-        // the timeline itself after a click on it.
+        // The timeline takes the map's keys unless a TEXT FIELD is being typed
+        // into -- the one thing that holds them. A control that merely has the
+        // focus keeps only the keys the map does not bind: clicking the master
+        // volume slider or a browser's list used to swallow R/S/M/Home/,/. and
+        // the arrows, because any focus held everything but Space. The rule is
+        // the kit-free TimelineTakesKey(); Tab still belongs to BWindow's own
+        // focus navigation, and Cmd shortcuts keep flowing to the menus.
         BView* focus = CurrentFocus();
         int32 mods = 0;
         message->FindInt32("modifiers", &mods);
@@ -745,18 +747,16 @@ void MainWindow::DispatchMessage(BMessage* message, BHandler* handler) {
         const bool haveBytes = message->FindString("bytes", &bytes) == B_OK
                             && bytes != nullptr;
         const bool isTab = haveBytes && bytes[0] == B_TAB;
-        // Space is the transport's WHATEVER control holds the focus, except a
-        // text field being typed into (the same rule the aux windows apply to
-        // their own spacebar passthrough). A focused BControl eats Space in the
-        // kit's own KeyDown -- the dock's page switch re-sent its page on every
-        // press and the transport never started: click a page, press Space,
-        // nothing happens at all (found by this suite once the dock's pages
-        // were driven for real).
-        const bool isSpace = haveBytes && bytes[0] == B_SPACE;
         const bool textFocus = dynamic_cast<BTextControl*>(focus) != nullptr
                             || dynamic_cast<BTextView*>(focus) != nullptr;
-        const bool held = focus != nullptr && focus != fTimeline
-                       && !(isSpace && !textFocus);
+        const bool mapTakes = haveBytes
+                           && TimelineTakesKey(bytes[0], (uint32_t)mods,
+                                              textFocus);
+        // An unbound key is still the focused control's (a list's Up/Down, a
+        // slider's own keys); with nothing focused there is nobody else to give
+        // it to, so it goes to the timeline as it always did.
+        const bool held = textFocus
+                       || (!mapTakes && focus != nullptr && focus != fTimeline);
         if (!(mods & B_COMMAND_KEY) && !held && !isTab) {
             // Hand it straight to the timeline: a BMessage carries no
             // retarget verb (Haiku's BMessage has no SetTarget), and this is

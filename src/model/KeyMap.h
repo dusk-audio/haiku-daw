@@ -269,6 +269,22 @@ inline const KeyBinding* FindKeyBinding(char key, uint32_t modifiers) {
     return nullptr;
 }
 
+// The routing gate, shared by the UI and the host tests: does this key press
+// belong to the timeline's map, or to whatever view has the focus?
+//
+// The rule the arrange window applies (MainWindow::DispatchMessage): a text
+// field being typed into owns the keyboard, so every key stays with it; with
+// any other view focused (or none), a key THIS TABLE binds is the app's -- the
+// map must not die because a slider or a list happens to hold the focus, which
+// is what clicking the master volume or a browser row used to do. A key the
+// table does not bind stays with the focused control (a list's Up/Down, a
+// slider's fine adjustment), and a Menu row is the menu's, never the view's.
+inline bool TimelineTakesKey(char key, uint32_t modifiers, bool textFocus) {
+    if (textFocus) return false;
+    const KeyBinding* b = FindKeyBinding(key, modifiers);
+    return b != nullptr && b->route == KeyRoute::Dispatch;
+}
+
 // The help text, generated from the table: the group's name, then one
 // "<key name>\t<what it does>" line per row. The window sets a tab width, so
 // the descriptions line up.
