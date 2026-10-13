@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Haiku DAW — .dawproj file icon (source artwork, not shipped as-is).
+     A document in Haiku's set: a page with the top-right corner folded, a
+     paper-thickness band on the unlit right and bottom edges, a shadow cast
+     to the right, and a flat three-fader overlay marking the file type.
+     The overlay is deliberately flat and three bars wide: at 16 x 16 it is
+     the only part that survives, and it is what tells a .dawproj from any
+     other document. data/icons/README.md says how this becomes an HVIF. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>Haiku DAW project</title>
+
+  <defs>
+    <linearGradient id="pageFace" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f4ea"/>
+      <stop offset="1" stop-color="#e3e0d2"/>
+    </linearGradient>
+    <linearGradient id="barsFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4b8cb1"/>
+      <stop offset="1" stop-color="#2c6484"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Shadow: the page's own silhouette, cast straight to the right. -->
+  <g id="shadow">
+    <polygon points="16.5,53 16.5,9 36.5,9 46.5,19 49.5,21.5 49.5,55.5 18.5,55.5"
+             fill="#000000" opacity="0.16"/>
+  </g>
+
+  <g id="page">
+    <!-- Paper thickness: the unlit right and bottom edges. -->
+    <polygon points="43,17 46,19.5 46,53.5 15,53.5 13,51 43,51" fill="#a9a698"/>
+    <!-- The page. -->
+    <polygon points="13,7 33,7 43,17 43,51 13,51" fill="url(#pageFace)"/>
+    <!-- The fold: the corner turned back, and the crease. -->
+    <polygon points="33,7 33,17 43,17" fill="#cfcbbc"/>
+    <polyline points="33,7 33,17 43,17" fill="none" stroke="#8f8c7e"
+              stroke-width="0.75"/>
+    <!-- A whisper of a rule near the bottom of the page, so it reads as
+         paper and not as a blank slab. -->
+    <line x1="17" y1="47" x2="39" y2="47" stroke="#c8c5b6"
+          stroke-width="1" opacity="0.9"/>
+  </g>
+
+  <g id="overlay">
+    <!-- The flat type mark: three fader bars, one of them capped in the
+         app icon's accent colour. -->
+    <rect x="17" y="34" width="5" height="10" fill="url(#barsFace)"/>
+    <rect x="26" y="24" width="5" height="20" fill="url(#barsFace)"/>
+    <rect x="35" y="30" width="5" height="14" fill="url(#barsFace)"/>
+    <rect x="26" y="24" width="5" height="3" fill="#d8a241"/>
+    <rect x="35" y="30" width="5" height="3" fill="#d8a241"/>
+  </g>
+
+  <!-- The silhouette: 1 px black at 32 x 32, drawn last. -->
+  <polyline points="13,51 13,7 33,7 43,17 46,19.5 46,53.5 15,53.5 13,51"
+            fill="none" stroke="#000000" stroke-width="1"
+            stroke-linejoin="miter"/>
+</svg>
