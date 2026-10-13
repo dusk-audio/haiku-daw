@@ -2,13 +2,15 @@ SUMMARY="A native digital audio workstation for Haiku"
 DESCRIPTION="Multitrack audio and MIDI recording, editing and mixing on a \
 timeline, with buses and aux sends, automation, built-in effects and LV2 \
 plugins, a sampler and synth, and offline export to WAV (16/24-bit or 32-bit \
-float, dithered, loudness-normalized)."
+float, dithered, loudness-normalized), FLAC or Ogg Vorbis."
 HOMEPAGE="https://github.com/dusk-audio/haiku-daw"
 COPYRIGHT="2026 Marc Korte"
 LICENSE="MIT"
 REVISION="1"
-# DRAFT: the source tarball exists only once the release is tagged. Fill the
-# checksum from `sha256sum` of the v$portVersion tarball before building.
+# DRAFT: the source tarball exists only once the release is tagged, and the
+# checksum can only be computed from that tarball. So this stays a post-tag
+# step: tag v$portVersion, download what SOURCE_URI names, fill the line with
+# its `sha256sum`, then build the package.
 SOURCE_URI="https://github.com/dusk-audio/haiku-daw/archive/refs/tags/v$portVersion.tar.gz"
 CHECKSUM_SHA256="TODO-fill-from-the-tag-tarball"
 SOURCE_DIR="haiku-daw-$portVersion"
@@ -16,11 +18,19 @@ SOURCE_DIR="haiku-daw-$portVersion"
 ARCHITECTURES="?x86_64"
 
 PROVIDES="haiku_daw = $portVersion"
-REQUIRES="haiku lilv"
-# LV2 support is optional at build time; naming lilv here is what makes
-# the packaged build have it. Drop it from both lines to package without.
-BUILD_REQUIRES="cmake gcc lilv_devel"
-BUILD_PREREQUIRES="cmd:cmake cmd:gcc cmd:make"
+REQUIRES="haiku lilv lib:libFLAC lib:libvorbis"
+# LV2 hosting and the FLAC/Ogg formats are optional at build time (CMake's
+# DAW_LV2, DAW_FLAC and DAW_VORBIS auto-disable when a library is absent);
+# naming them here is what makes the PACKAGED build have them. Drop a line from
+# both halves to package without that format. libvorbis is the package that
+# carries libvorbis, libvorbisenc and libvorbisfile -- the encoders and the
+# reader the app links -- and it pulls in libogg.
+BUILD_REQUIRES="cmake gcc lilv_devel flac_devel libvorbis_devel"
+# The resource step in CMakeLists.txt needs rc and xres (and mimeset, which is
+# a base-system command): without them the binary would carry no signature, no
+# version and no file types, and CMake now fails the configure rather than
+# skipping the step.
+BUILD_PREREQUIRES="cmd:cmake cmd:gcc cmd:make cmd:rc cmd:xres"
 
 BUILD()
 {
@@ -32,14 +42,24 @@ BUILD()
 
 INSTALL()
 {
-	# The app is one binary: its signature and version ride inside it as a
-	# resource (haiku-daw.rdef), so there is nothing beside it to install.
+	# The app is one binary: its signature, version, file types and icon ride
+	# inside it as a resource (haiku-daw.rdef), so there is nothing beside it
+	# to install.
 	mkdir -p "$appsDir/HaikuDAW"
 	cp build/daw "$appsDir/HaikuDAW/HaikuDAW"
+	# The Deskbar's Applications menu: an app nested in its own folder shows up
+	# as a submenu, so the first-level entry is a symlink in
+	# $dataDir/deskbar/menu/Applications -- haikuporter's helper writes it.
+	addAppDeskbarSymlink "$appsDir/HaikuDAW/HaikuDAW"
 	# The New Project templates: the app looks for them beside its binary and
-	# in $dataDir/haiku-daw/templates (CMakeLists.txt's install rule targets
-	# the same directory; this copy is here because INSTALL() copies the
-	# binary by hand instead of running `make install`).
+	# in $dataDir/haiku-daw/templates (src/app/ProjectTemplates.cpp's search
+	# order; CMakeLists.txt's install rule targets the same directory, and
+	# this copy is here because INSTALL() copies the binary by hand instead of
+	# running `make install`).
 	mkdir -p "$dataDir/haiku-daw/templates"
 	cp data/templates/*.dawproj "$dataDir/haiku-daw/templates/"
+	# The user-facing docs, where Haiku keeps an application's documentation.
+	mkdir -p "$documentationDir/haiku-daw"
+	cp README.md CHANGELOG.md "$documentationDir/haiku-daw/"
+	cp docs/USER_GUIDE.md "$documentationDir/haiku-daw/"
 }

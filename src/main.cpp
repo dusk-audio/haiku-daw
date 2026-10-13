@@ -35,9 +35,11 @@
 
 #include <Application.h>
 #include <Entry.h>
+#include <File.h>
 #include <FindDirectory.h>
 #include <MimeType.h>
 #include <Path.h>
+#include <Resources.h>
 #include <Roster.h>
 
 #include <cstdio>
@@ -88,6 +90,25 @@ static void InstallLv2() {
 #endif
 }
 
+// The .dawproj type's icon (M1.6): a file type's icon lives in the MIME
+// database, not in the binary, so the HVIF bytes haiku-daw.rdef carries as the
+// named resource "dawproj_icon" are read off the app image and handed to the
+// type. The resource is absent until the artwork is converted
+// (data/icons/README.md), and a missing resource is a no-op, not an error.
+static void SetProjectTypeIcon(BMimeType& type) {
+    app_info info;
+    if (be_app == nullptr || be_app->GetAppInfo(&info) != B_OK)
+        return;
+    BFile file(&info.ref, B_READ_ONLY);
+    if (file.InitCheck() != B_OK)
+        return;
+    BResources resources(&file);
+    size_t size = 0;
+    const void* data = resources.LoadResource('VICN', "dawproj_icon", &size);
+    if (data != nullptr && size > 0)
+        type.SetIcon(static_cast<const uint8*>(data), size);
+}
+
 // Make a .dawproj open THIS app: install the type in the user MIME DB, describe
 // it, point it at our signature, and give it a sniffer rule keyed on the
 // writer's header line (ProjectIO writes "DAW 1 <flags>"). Idempotent and
@@ -107,6 +128,7 @@ static void RegisterProjectMimeType() {
         type.SetSnifferRule("0.8 [0:6] ('DAW 1 ')");
     }
     type.SetPreferredApp(DAW_APP_SIGNATURE);
+    SetProjectTypeIcon(type);
 }
 
 class DawApplication : public BApplication {

@@ -2,12 +2,38 @@
      (~/.claude/plans/bright-juggling-bird.md), so every implementer can read
      it. This copy is now the plan of record; edit it here. -->
 
-> **Status (2026-10-10).** Done: M0.1–M0.7, M1.1, M1.2, M1.3, M1.4 (minus the
-> docked browser pane and a single-instance effects window) and its visual pass.
-> M1.5 is measured, not built; M1.6 has the vector toolbar icons but no HVIF
-> app/file icon. M2–M8 are not started. Per-item records and the live status
-> table: `docs/agent-prompts/README.md`. Where to start:
-> `docs/agent-prompts/24-continue-1.0-ENTRY.md`.
+> **Status (2026-10-12).** M0–M7 are done. Data safety (M0); the UI foundation
+> — the `MainWindow` split, the theme, the widget kit, Layout Kit dialogs with
+> the inspector and dock panes, and the two theme modes (M1.1–M1.4); the
+> arrange window (M2); the transport bar, meters, mixer strips, Preferences,
+> Project Settings and templates (M3); the engine work — the graph off the
+> window thread, the loop walked inside the running graph, the disk-stream
+> pool, background peaks with a disk cache, the windowed-sinc resampler and
+> dynamic LV2 latency (M4.1–M4.6); multichannel input (M5); AIFF/FLAC/Ogg and
+> the rate conversion (M6); and the 1.0 features — sidechain, time-stretch,
+> MIDI expression, LV2 state and presets (M7). Per-item records and the live
+> status table: `docs/agent-prompts/README.md`; the phase history:
+> `docs/ROADMAP.md`.
+>
+> **This push closes M8.1–M8.3:** the recipe's `lib:` dependencies, the Deskbar
+> entry and the installed docs and templates, a CMake resource step that fails
+> loudly instead of skipping, the README/CHANGELOG/ROADMAP/USER_GUIDE pass and
+> the status table, and the extended release checklist. Three items are still
+> open and are named so they cannot be mistaken for done: **M1.5** — its
+> play-start half is measured and fixed (the VM's 51-track/320-clip build went
+> **3295 ms → 151 ms**, M4.1/M4.3; the timeline **draw**-time number is the one
+> still missing, its protocol in
+> `docs/agent-prompts/23-offscreen-and-icons.md` waiting on Marc's run) — and
+> the back-buffer it decides is not built;
+> **M1.6** has its artwork and plumbing (`data/icons/`, the rdef blocks, the
+> MIME SetIcon call) but not the HVIF bytes, which need Icon-O-Matic on a Haiku
+> machine; and **M5.3** (output-device selection in Preferences) did not land —
+> the Preferences row is disabled and audio goes to the system default.
+>
+> **What the release still needs:** Marc's hardware pass over
+> `docs/RELEASE_CHECKLIST.md`, the `.hpkg` built and installed, and then the tag
+> `v1.0.0` with the CHANGELOG date set and the recipe's `CHECKSUM_SHA256`
+> filled from that tag's tarball (M8.1 says why that is a post-tag step).
 >
 > **Decided 2026-10-10 (Marc), overriding M1.2/M1.3 below where they differ:**
 > the app never recolours the OS (`set_ui_color` goes); the default look is

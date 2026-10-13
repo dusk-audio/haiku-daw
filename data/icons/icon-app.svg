@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Haiku DAW — application icon (source artwork, not shipped as-is).
+     Drawn to Haiku's icon guidelines: a 64 x 64 canvas, 2:1 isometric, the
+     key light from the top left with a cooler ambient from the right, a black
+     1 px silhouette outline, a floor shadow cast to the right, mixed colours
+     (no pure red/green/blue). A mixing-console slab with three faders: the
+     fader caps are the one bright accent, so the icon still reads as "desk"
+     at 16 x 16, where the body collapses to two shades and the caps stay.
+     data/icons/README.md says how this becomes the HVIF in haiku-daw.rdef.in. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <title>Haiku DAW</title>
+
+  <defs>
+    <!-- Key light from the top left: the top face is lightest at its left,
+         the viewer-facing left face lightest at its top, the unlit right
+         face the darkest of the three. -->
+    <linearGradient id="topFace" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a8c3da"/>
+      <stop offset="1" stop-color="#7793ae"/>
+    </linearGradient>
+    <linearGradient id="leftFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6e88a0"/>
+      <stop offset="1" stop-color="#4a6076"/>
+    </linearGradient>
+    <linearGradient id="rightFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c3c4c"/>
+      <stop offset="1" stop-color="#1e2a35"/>
+    </linearGradient>
+    <linearGradient id="capFace" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0e2b6"/>
+      <stop offset="1" stop-color="#d8a241"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Floor shadow: cast straight to the right, clear of the canvas edge. -->
+  <g id="shadow">
+    <ellipse cx="38" cy="49" rx="22" ry="6" fill="#000000" opacity="0.20"/>
+    <ellipse cx="34" cy="47.5" rx="15" ry="4" fill="#000000" opacity="0.20"/>
+  </g>
+
+  <g id="console">
+    <!-- Right face (ambient only). -->
+    <polygon points="32,34 56,22 56,36 32,48" fill="url(#rightFace)"/>
+    <!-- Left front face (key light). -->
+    <polygon points="8,22 32,34 32,48 8,36" fill="url(#leftFace)"/>
+    <!-- Top face. -->
+    <polygon points="32,10 56,22 32,34 8,22" fill="url(#topFace)"/>
+    <!-- Interior edges: a darker shade of the surface, not black. -->
+    <polyline points="8,22 32,34 56,22" fill="none" stroke="#4d6478"
+              stroke-width="1.5"/>
+    <line x1="32" y1="34" x2="32" y2="48" stroke="#3d5163" stroke-width="1.5"/>
+  </g>
+
+  <g id="faders">
+    <!-- Three faders, each running away from the viewer along the depth
+         axis (which is vertical here). The slot is a dark well, the cap is
+         the bright accent, and the caps sit at different heights. -->
+    <g id="fader-1">
+      <rect x="22" y="19" width="4" height="9" rx="1" fill="#1b2a38"/>
+      <rect x="20.5" y="24" width="7" height="3.5" rx="1"
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
+    </g>
+    <g id="fader-2">
+      <rect x="30" y="17" width="4" height="13" rx="1" fill="#1b2a38"/>
+      <rect x="28.5" y="20" width="7" height="3.5" rx="1"
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
+    </g>
+    <g id="fader-3">
+      <rect x="38" y="19" width="4" height="9" rx="1" fill="#1b2a38"/>
+      <rect x="36.5" y="23" width="7" height="3.5" rx="1"
+            fill="url(#capFace)" stroke="#8a6a1f" stroke-width="1"/>
+    </g>
+  </g>
+
+  <!-- The silhouette: 2 units here, which is the guidelines' 1 px black at
+       32 x 32 (the artwork is drawn on the 64 x 64 grid Icon-O-Matic uses).
+       Drawn last so nothing covers it. -->
+  <polygon points="32,10 56,22 56,36 32,48 8,36 8,22" fill="none"
+           stroke="#000000" stroke-width="2" stroke-linejoin="miter"/>
+</svg>

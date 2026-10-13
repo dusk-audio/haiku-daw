@@ -3,10 +3,34 @@
  * here cannot drift from the ones the code uses (Version.h) or the recipe
  * packages.
  *
- * No icon yet: a vector_icon block belongs here once there is one, and until
- * then the app shows the generic one.
+ * The icons are commented out because the HVIF bytes are the one step that
+ * needs a Haiku machine with Icon-O-Matic (nothing else authors HVIF, and `rc`
+ * compiles icons from raw HVIF bytes only). The artwork and the exact
+ * conversion are in data/icons/README.md; filling either block is mechanical:
+ * uncomment it and paste the byte string where the marker says. Until then the
+ * app and the .dawproj files show the generic icons.
  */
 resource app_signature "@DAW_APP_SIGNATURE@";
+
+/* The application icon (data/icons/icon-app.svg). This is the resource
+ * Deskbar, Tracker and HaikuDepot read; the CMake post-build step's `rc` and
+ * `mimeset` carry it into the binary's attributes.
+ *
+ * resource vector_icon array {
+ *     $"<paste Icon-O-Matic's exported HVIF byte string here>"
+ * };
+ */
+
+/* The .dawproj type's icon (data/icons/icon-project.svg). Tracker does not
+ * read this one off the binary by itself: a file type's icon lives in the MIME
+ * database, so src/main.cpp's RegisterProjectMimeType() loads this resource by
+ * name and hands it to BMimeType::SetIcon -- and does nothing while it is
+ * absent, so the two icons can land separately.
+ *
+ * resource(1, "dawproj_icon") #'VICN' array {
+ *     $"<paste the .dawproj icon's HVIF byte string here>"
+ * };
+ */
 
 /* One instance: a second launch (a double-click on a project, `open`) hands
  * its files to the running app as B_REFS_RECEIVED instead of starting a

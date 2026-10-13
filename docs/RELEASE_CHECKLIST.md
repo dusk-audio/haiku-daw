@@ -1,9 +1,9 @@
 # Release checklist — run on the real hardware
 
-Everything here needs **ears or a real audio device**, which is why it is not a
-test. Everything that a test *can* reach already is: the host suites, the
-Kit-cross-compile check, and — since 2026-10-09 — `ui_functional_tests`, which
-drives the real windows on the VM over SSH (see
+Everything here needs **ears, a real audio device, or a real installation**,
+which is why it is not a test. Everything that a test *can* reach already is: the
+host suites, the Kit-cross-compile check, and — since 2026-10-09 —
+`ui_functional_tests`, which drives the real windows on the VM over SSH (see
 `docs/agent-prompts/09-ui-functional-tests.md`). If an item below turns out to
 be automatable, it should move there instead of being ticked here.
 
@@ -171,6 +171,102 @@ one is possible.
 
 29. **Version.** `daw --version` and Help ▸ About.
     → Both say 1.0.0.
+
+## H. Packaging and installation
+
+30. **Install from the package.** Build the `.hpkg` on the VM (`haikuporter`
+    with the release tag, or the recipe's build by hand), copy it to the box,
+    install it (`pkgman install haiku_daw-1.0.0-1-x86_64.hpkg`).
+    → The app is in the Deskbar's Applications menu, `daw --version` and
+    Help ▸ About both say 1.0.0, and **File ▸ New Project…** offers Empty, Band
+    and Producer — the shipped templates, i.e. the package put them where the
+    app looks (`$dataDir/haiku-daw/templates`, `src/app/ProjectTemplates.cpp`).
+    A missing template directory is a non-event (the dialog falls back to the
+    built-in Empty row), so seeing three rows is what says the install is
+    complete.
+
+31. **Launch from the Deskbar.** Click the application in the Deskbar's
+    Applications menu.
+    → The window opens at a usable size with no Terminal involved; the entry
+    reads "Haiku DAW" and, once the HVIF icon lands, shows it rather than the
+    generic application icon.
+
+32. **Open a project by double-click in Tracker.** Save a project, quit, then
+    double-click the `.dawproj` in Tracker; then repeat with the app already
+    running.
+    → First case: the app starts and opens the project (title without `*`).
+    Second: the running instance takes it — `B_SINGLE_LAUNCH` — and no second
+    copy appears; a project opened while the current session has unsaved
+    changes raises the Save/Discard/Cancel prompt first.
+
+## I. The 1.0 features that need ears or eyes
+
+*(The plan's M8.3 list also names the unsaved-changes prompt; that flow is
+already driven by `ui_functional_tests` (M0.1's test) and is deliberately not
+repeated here. Same for anything else the suite reaches.)*
+
+33. **Disk full during recording.** Point the project at a filesystem with no
+    room left (a small image is easiest) and record a 24-bit stereo take.
+    → The take stops with the "Recording" alert, the app stays up, and what
+    was written is still there: the file plays and sits on the timeline up to
+    the failure. (The Recorder's write error reaches `ReportError` and the
+    partial take is landed through `FramesWritten()`.)
+
+34. **Multichannel record.** Arm two mono tracks, point each `In` field at a
+    different channel of the same interface, record; then a stereo track
+    addressed to channels 1–2.
+    → Each mono track gets its own take holding only its channel, the two are
+    in time with each other, and the stereo take is one 2-channel file. With
+    the Focusrite: it may not appear in the In menu at all — Haiku's
+    `usb_audio` driver is USB audio class 1 only (`README.md`, known
+    limitations), and the 2i2 3rd Gen is UAC2 — in which case record the skip
+    and run the same check from the HDA box's own inputs, which are what this
+    app is developed against.
+
+35. **FLAC and Ogg export played back.** Export the loop range as FLAC and as
+    Ogg Vorbis, then play both files.
+    → Both play at the length and level you heard, with nothing ragged at the
+    start or end. Where MediaPlayer has no decoder plugins (`docs/HANDOFF.md`:
+    the dev VM image ships none) play them back in the DAW instead — its own
+    readers are the ones that matter — and say which machine each check ran on.
+
+36. **Sidechain ducking.** Put the compressor (or gate) on a bus, give it a key
+    from a drum track (the insert's Key row), and play the drum against
+    material on the bus.
+    → The bus ducks on each hit, in time (the key is delay-aligned to the
+    consumer's input), and clearing the key restores it. A track keyed from
+    itself changes nothing.
+
+37. **A stretched loop stays in time.** With a loop range set, Cmd-drag (or
+    Alt-drag) a clip's right edge to stretch it to about twice its length, then
+    play through the loop for several passes.
+    → It stays with the metronome, the loop seam does not stumble, and every
+    pass sounds the same; the clip shows its `×2.00` badge. (The per-pass
+    alignment is what M7.2's seek determinism buys.)
+
+38. **A sustain pedal.** Play a keyboard into an armed MIDI track and hold the
+    sustain pedal (CC64) while pressing and releasing notes; then play the
+    recorded region back.
+    → Notes ring on after key-up while the pedal is down and stop when it is
+    released, live and on playback, with the pedal recorded as a controller
+    event. Same with the piano roll's own notes if no pedal is at hand: draw
+    CC64 into the lane of a region and play it.
+
+39. **A dynamic-latency plugin.** Put **4K EQ 2** on a track (it switches
+    oversampling at runtime), play material against another track, and toggle
+    oversampling on and off while it plays.
+    → The transport keeps rolling, the two tracks never end up *permanently*
+    offset, and the re-alignment is the documented short step when the latency
+    moves (`docs/agent-prompts/46-dynamic-latency-PR.md`), not a lasting shift
+    or a click.
+
+40. **Every window at 100% and 150%.** Run the `DAW_UI_SHOTS` pass on the box
+    (screen unlocked — a locked screen draws nothing), once per theme mode, and
+    once with the Preferences UI scale at 150%; then open every shot of every
+    window you changed.
+    → Nothing overlaps, no label is clipped or runs past its control, and every
+    new row is legible at both sizes. This is the pass M1.3/M1.4 merged
+    without; it is not a formality.
 
 ## What a pass means
 

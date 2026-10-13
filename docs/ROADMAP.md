@@ -3,6 +3,52 @@
 Living plan: what's built, what's left, in staged order. Update as phases land.
 See `HANDOFF.md` for current state detail and `ARCHITECTURE.md` for the design.
 
+## 1.0 — the plan is done (2026-10-12)
+
+`docs/PLAN_1.0.md` (M0–M8) has landed; each item has a record in
+`docs/agent-prompts/*-PR.md` and a row in that directory's status table. On top
+of Phases A–Z above and below, the 1.0 push added:
+
+- **Data safety** — unsaved-changes tracking with the Save/Discard/Cancel
+  prompt, the real File menu (New, Open, Open Recent, Save, Save As, Close),
+  never-reused take names, error reporting the user can see, and the last
+  edits that bypassed undo turned into commands.
+- **UI foundation** — `MainWindow` split into `ProjectDocument`,
+  `TransportController`, `RecordController` and `RenderJobs`; the theme (colour
+  tokens, font-scaled metrics, one meter threshold set); the drawn widget kit;
+  Layout Kit dialogs with the inspector and dock panes; and the two theme modes
+  (System native, or the DAW's own Dark palette) that never write the system
+  colour table.
+- **Arrange window** — cursors and hover feedback, zoom that anchors on the
+  mouse, a tool palette with a snap grid menu, time-range selection with range
+  edits, clip and track depth (names, colours, mute, slip edit, nudge, fade
+  shapes, drag-resize, colour picker, duplicate track, expand/hide), and a
+  markers list window.
+- **Transport, mixer, settings** — the two-row transport bar (buttons that show
+  state, a large time display that cycles BBT/min:sec/samples/timecode and takes
+  a typed position, tempo and meter, a DSP-load peak hold with an xrun counter,
+  a status line); meters with dB scales, peak hold, clip lamps and a
+  correlation strip; mixer strips with sends, input trim, phase invert, solo
+  groups and dB entry; the Preferences window; Project Settings; and New
+  Project templates.
+- **Engine** — the graph built off the window thread and swapped in place, the
+  loop walked inside the running graph (no restart at the seam), a disk-stream
+  pool, background peaks with an on-disk cache, the windowed-sinc resampler,
+  and dynamic LV2 latency re-solved without stopping playback.
+- **Formats and plugins** — AIFF, FLAC and Ogg Vorbis import/export through our
+  own readers and writers; LV2 plugin state and presets; sidechain keys for the
+  built-ins and for LV2 plugins with sidechain ports.
+- **Features** — multichannel input (a device and channel pair per track, mono
+  or stereo tracks, 16/24-bit and float takes), MIDI expression (sustain
+  pedal, pitch-bend, mod wheel, any CC in the lane), and time-stretch (WSOLA on
+  the disk thread and the same stretcher in the exporter).
+
+**Not in 1.0:** output-device selection in Preferences (M5.3 — the row is
+disabled and audio goes to the system default), pitch-shift, live MIDI CC
+recording, catkeys localisation, HVIF icons (the artwork and the plumbing are
+in `data/icons/` and `haiku-daw.rdef.in`; the bytes need Icon-O-Matic), and
+everything in the post-1.0 list below.
+
 ## Done (foundation is solid)
 
 - **Engine** — `BSoundPlayer` output, per-track bus mixing, per-stream resampling
@@ -43,7 +89,7 @@ sort, with sends, a monitor section, and BS.1770 metering.
   short-term LUFS + true-peak dBTP, live readout in the transport bar. Integrated
   disabled on the audio thread (RT-safe); available offline.
 
-## Phase T — Tempo & meter map  ✅ DONE (step changes)
+## Phase T — Tempo & meter map  ✅ DONE
 
 - ✅ Kit-free `TempoMap` (T1): frame-anchored tempo + meter changes, exact
   frame<->beat integral, meter-aware BBT. Project field + IO. Host-tested.
@@ -51,7 +97,12 @@ sort, with sends, a monitor section, and BS.1770 metering.
 - ✅ Metronome (T3): clicks follow tempo changes, accent follows meter.
 - ✅ UI (T4): right-click the ruler to add/remove tempo (preset BPM) + meter
   (preset signature) changes; amber/blue markers on the ruler.
-- *Deferred:* tempo ramps (accel/rit); BBT transport readout.
+- ✅ Tempo ramps (accel/rit): `TempoChange::ramp` interpolates the tempo across
+  a segment, `TempoAt`/the frame<->beat integrals walk it, the ruler's
+  right-click menu toggles "Ramp to next tempo", the segment draws as a
+  diagonal, and `ProjectIO` persists the flag.
+- ✅ BBT transport readout: the transport's time display cycles BBT, min:sec,
+  samples and timecode (M3.1; the earlier readout is Phase G's).
 
 ## Phase B — Automation  ✅ DONE (gain + pan)
 
@@ -221,9 +272,11 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   guarantees the output dBTP ceiling by limiting peaks. Wired into `ExportWav`
   (`ExportNormalize::limiter`) so normalization can hit the target LUFS and the
   limiter — not a whole-program attenuation — holds the ceiling. Host-tested.
-- *Remaining:* export bit-depth/rate/format **selection UI**; worker-thread
-  export with progress/cancel; FLAC/Ogg/MP3 encoders (bundled/own libs — no
-  Media Kit decoders on target); export presets + ranges.
+- *Done since:* the bit-depth/rate/format selection UI and the worker-thread
+  render with progress + cancel (`08-export-dialog-PR.md`); FLAC and Ogg Vorbis
+  encoders and the importers (`28-formats-PR.md`); and the windowed-sinc
+  resampler for exporting at another rate (`45-sinc-resampler-PR.md`).
+- *Remaining:* MP3 (out of scope), export presets.
 
 ## Phase Y — Latency compensation  ◐ IN PROGRESS
 
@@ -254,9 +307,13 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   `exporter_pdc_tests` gained a real-`LimiterDesc` transparency case. Engine +
   Exporter pick up its latency generically; addable from the effects editor.
   **VM audio-runtime verification pending.**
-- *Remaining:* the Media-Kit device-latency query feeding `fRoundTripFrames`;
-  round-trip compensation for the punch/loop-record paths; BBT/playhead report
-  offset by the master latency during playback.
+- *Done since:* the device-latency query and round-trip compensation for the
+  plain, punch and loop-record paths (`08-stability-leftovers-PR.md`), and
+  dynamic LV2 latency — observed, re-latched and re-solved without stopping
+  playback (`46-dynamic-latency-PR.md`; the brief re-alignment step is the
+  documented cost).
+- *Remaining:* the playhead/BBT report offset by the master latency during
+  playback.
 
 ## Phase Z — MIDI depth  ◐ IN PROGRESS (channel controls done end to end)
 
@@ -310,11 +367,13 @@ Stability / durability / audio-safety hardening from a deep audit (details in
   single keyboard behaves exactly as before. Host-tested (`midirouting_tests`,
   which fails if the endpoint filter is defeated). **VM runtime pending: needs
   two MIDI sources to exercise.**
-- *Remaining:* pitch-bend + mod-wheel (both modulate frequency, so the stateless
-  synth needs phase integration — deferred); a generic "other CC" lane (today
-  only the three audible controllers are offered); live-MIDI CC recording
-  (`MidiPort`/`MidiRecorder` capture note on/off only — CC/bend are dropped);
-  MIDI clock/MTC; sysex.
+- *Done since:* sustain (CC64), pitch-bend and the mod wheel are audible live
+  and on playback, and the CC lane offers any of the 128 controllers
+  (`32-midi-expression-PR.md`). Live channel controllers are engine-wide, not
+  per endpoint.
+- *Remaining:* live-MIDI CC recording (`MidiPort`/`MidiRecorder` capture note
+  on/off only — CC/bend are dropped); a parameter target for other controllers
+  (MIDI learn); MIDI clock/MTC; sysex.
 
 ## Phase I — Plugins (SHIPPED: LV2 hosting landed in packages 02/03/07)
 
@@ -333,34 +392,45 @@ already declares non-goals (no Pro Tools/Ableton parity, no VST3 GUI at first,
 no video/notation/cloud). Beyond the phases, a pro DAW like Ardour also has:
 
 - **Plugins** — LADSPA/LV2/VST2/VST3/AU hosting, plugin delay compensation
-  (PDC), presets, sidechain, plugin scan/manager. (We have built-in DSP only;
-  hosting is Phase I.)
-- **Latency compensation** — record + plugin PDC across the graph.
+  (PDC), presets, sidechain, plugin scan/manager. *(Since 1.0: LV2 hosting with
+  state, presets, sidechain and PDC, dynamic latency included. Still out: the
+  other formats, and a scan cache/blocklist.)*
+- **Latency compensation** — record + plugin PDC across the graph. *(Since 1.0:
+  both, plus a plugin whose latency moves at runtime.)*
 - **Advanced routing** — VCA master faders, a monitor/control-room section
   (dim/mono/AFL/PFL), an any-to-any routing matrix, external hardware inserts,
-  full sidechain routing.
-- **Metering** — K-system, phase/correlation, a meterbridge. (We have per-track
-  peak meters + a BS.1770 master LUFS / true-peak readout; K-system and
-  correlation are the gaps.)
+  full sidechain routing. *(Since 1.0: dim/mono and sidechain keys. Still out:
+  VCAs, AFL/PFL, the routing matrix, hardware inserts.)*
+- **Metering** — K-system, phase/correlation, a meterbridge. *(Since 1.0: dB
+  scales, peak hold, clip lamps, RMS and a master correlation strip. Still out:
+  K-system and the meterbridge.)*
 - **Audio editing** — time-stretch / pitch-shift (Rubber Band), transient
   detection, audio quantize, strip-silence, region normalize/reverse/gain,
-  ripple + slip/slide edit, playlists per track.
+  ripple + slip/slide edit, playlists per track. *(Since 1.0: WSOLA
+  time-stretch, strip-silence, normalize/reverse, slip edit. Still out:
+  pitch-shift, transient detection, audio quantize, ripple edit, playlists.)*
 - **Tempo/time** — a real tempo/meter MAP (multiple changes + ramps), BBT,
-  timecode. (We have a single project tempo.)
+  timecode. *(Since 1.0: the map with ramps, BBT and a timecode display.)*
 - **Sync** — MTC / LTC / MMC, JACK transport, Ableton Link, master/slave.
 - **Control surfaces** — Mackie/OSC/generic MIDI-learn.
 - **MIDI depth** — SMF import/export, CC/controller lanes, step entry, program
-  change/sysex, MIDI clock. (We have an internal piano roll only.)
-- **Comping / cue** — take comping, a clip-launch (cue) page.
+  change/sysex, MIDI clock. *(Since 1.0: SMF both ways, a CC lane for any
+  controller, sustain/bend/mod-wheel. Still out: step entry, program
+  change/sysex, MIDI clock, live CC recording.)*
+- **Comping / cue** — take comping, a clip-launch (cue) page. *(Comping is in;
+  the cue page is out.)*
 - **Track ops** — freeze/bounce a track, track templates, folder tracks.
-- **Export** — multi-format (FLAC/MP3/Ogg), export presets, ranges. (We have
-  stems + per-track/per-bus bounce, 16/24/32-bit with TPDF dither, BS.1770
-  loudness normalization, and a look-ahead true-peak limiter — Phase X;
-  compressed formats + presets + ranges are the gaps.)
+  *(Since 1.0: freeze, project templates. Still out: folder tracks and per-track
+  templates.)*
+- **Export** — multi-format (FLAC/MP3/Ogg), export presets, ranges. *(Since
+  1.0: FLAC and Ogg in and out, the dialog with ranges and stems, a
+  windowed-sinc rate conversion. Still out: MP3, presets.)*
 - **Session** — snapshots, templates, archive/bundle, cleanup-unused, autosave,
-  markers / ranges / locations.
+  markers / ranges / locations. *(Since 1.0: templates, autosave/recovery,
+  markers and a locations window. Still out: snapshots, archive/bundle,
+  cleanup-unused.)*
 - **Other** — video timeline, Lua scripting, surround/VBAP panning, spectral
-  analysis/spectrogram.
+  analysis/spectrogram. *(A spectrum display exists on the EQ.)*
 
 Reaching full Ardour parity is a multi-year effort. The realistic target for
 this project is a **clean, native, genuinely useful Haiku DAW** — the phases
@@ -371,38 +441,34 @@ Haiku image, control-surface zoo).
 
 ### Recommended additions to the plan (high value + feasible here)
 
-These are the Ardour-tier gaps worth building — mostly kit-free / host-testable,
-native-feeling, and not blocked by the plugin-less VM:
+All of these have landed, which is what the 1.0 section above records:
 
-- **Tempo & meter MAP** *(new, high priority)* — multiple tempo + time-signature
-  changes with ramps, replacing the single project tempo. Kit-free extension of
-  `Grid`; touches the ruler, snap, metronome, synth, and export. Foundational
-  for real arrangements. → new **Phase T**, slot right after Phase A.
-- **Markers / ranges / locations** *(easy, high workflow value)* — named
-  markers, loop/punch ranges, a locations list. Kit-free model + UI. → fold into
-  Phase C.
-- **Metering upgrade** — per-track meters, and LUFS + true-peak on the master
-  (kit-free loudness math, host-testable). → extend Phase A / Phase G.
-- **Export upgrade** — stem / per-track / per-bus bounce, export ranges,
-  dithering, loudness-normalize; FLAC/Ogg encoders later. → extend the exporter.
-- ~~**Freeze / bounce a track**~~ ✅ done (Phase C8).
-- **Region ops** — ✅ normalize / reverse / strip-silence / clear-fades done
-  (Phase C7); gain (Ctrl-drag) already existed. *Later:* fade presets, region
-  reverse-with-gain, per-clip normalize target level.
-- **SMF (MIDI file) import/export + CC lanes** — standard `.mid` read/write
-  (kit-free) and controller lanes that feed automation. → Phase B / E.
-- **Snapshots + autosave** — cheap given `ProjectIO`. → Phase H.
-- **Basic monitor section** — master dim / mono / solo-safe. Small. → Phase A.
-- **Time-stretch / pitch-shift** *(stretch — harder)* — a basic WSOLA/phase-
-  vocoder, kit-free. High value, high effort; flag as its own later phase.
+- **Tempo & meter MAP** ✅ (became Phase T; ramps and BBT included).
+- **Markers / ranges / locations** ✅ (a marker lane and a markers window).
+- **Metering upgrade** ✅ — dB scales, peak hold, clip lamps, RMS, correlation.
+- **Export upgrade** ✅ — stems, ranges, dither, loudness normalization, FLAC
+  and Ogg, a driven dialog.
+- ~~**Freeze / bounce a track**~~ ✅ done (Phase C8) and now run as a background
+  job with progress and Cancel (M4.4).
+- **Region ops** ✅ (Phase C7) — and the same background-job treatment.
+  *Later:* fade presets, per-clip normalize target level.
+- **SMF (MIDI file) import/export + CC lanes** ✅ — including a CC lane for any
+  of the 128 controllers.
+- **Snapshots + autosave** ✅ — autosave and crash recovery (Phase H).
+  *Later:* named snapshots.
+- **Basic monitor section** ✅ — master dim / mono / solo-safe.
+- **Time-stretch / pitch-shift** — the stretch half is ✅ (M7.2, WSOLA on the
+  disk thread and in the exporter); pitch-shift is still out.
 
 ### Deliberately skipped (for now — low value here or out of scope)
 
-VST hosting (LV2 shipped); PDC beyond Phase I; timecode/LTC/MTC/MMC &
-Ableton Link sync; control surfaces / OSC / MIDI-learn; VCA masters + full
-routing matrix (basic buses/sends in Phase A are enough for now); transient
-detection / audio quantize; video timeline; Lua scripting; surround/VBAP. These
-can be reconsidered once the core is done and if a concrete need appears.
+VST hosting (LV2 shipped); timecode/LTC/MTC/MMC & Ableton Link sync; control
+surfaces / OSC / MIDI-learn; VCA masters + full routing matrix (basic
+buses/sends in Phase A are enough for now); transient detection / audio
+quantize; video timeline; Lua scripting; surround/VBAP. (PDC beyond Phase I,
+multichannel input and compressed formats were on early versions of this list
+and shipped in 1.0.) These can be reconsidered once the core is done and if a
+concrete need appears.
 
 ---
 
