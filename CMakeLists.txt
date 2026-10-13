@@ -453,6 +453,14 @@ add_executable(track_depth_tests tests/track_depth_tests.cpp)
 target_link_libraries(track_depth_tests PRIVATE daw_model)
 add_test(NAME track_depth_tests COMMAND track_depth_tests)
 
+# The kit-free rules the UI's refresh and identity bookkeeping rests on
+# (package 52): which open windows belong to the project on screen, whether a
+# console is showing the model's track layout, and how a parameter's value
+# becomes text.
+add_executable(ui_rules_tests tests/ui_rules_tests.cpp)
+target_link_libraries(ui_rules_tests PRIVATE daw_model)
+add_test(NAME ui_rules_tests COMMAND ui_rules_tests)
+
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
 add_test(NAME dsp_extra_tests COMMAND dsp_extra_tests)

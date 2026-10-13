@@ -291,6 +291,50 @@ int main() {
         CHECK(std::fabs(KnobToTrim(1.0f, kMax) - kMax) < 1e-6f);
     }
 
+    // The channel fader's law: the travel is divided in dB over exactly the
+    // range the typed-level field advertises, so the whole of that range is
+    // reachable and nothing is clamped in silence.
+    {
+        // Unity sits where 0 dB falls on the scale, not at some fixed fraction.
+        CHECK(std::fabs(FaderUnityFrac()
+                        - (0.0f - kFaderMinDb) / (kFaderMaxDb - kFaderMinDb))
+              < 1e-6f);
+        CHECK(std::fabs(GainToFaderFrac(1.0f) - FaderUnityFrac()) < 1e-5f);
+        // The ends: the top of the travel is the field's ceiling, the bottom is
+        // true silence (not -3.5 dB, which is where the old linear law put it).
+        CHECK(std::fabs(GainToFaderFrac(GainFromDb(kFaderMaxDb)) - 1.0f) < 1e-5f);
+        CHECK(GainToFaderFrac(0.0f) == 0.0f);
+        CHECK(FaderFracToGain(0.0f) == 0.0f);
+        CHECK(std::fabs(FaderFracToGain(1.0f) - GainFromDb(kFaderMaxDb)) < 1e-6f);
+        // A gain above the ceiling pins the fader rather than running off it.
+        CHECK(GainToFaderFrac(100.0f) == 1.0f);
+        // Mid-travel is half the dB range, not half the gain: the difference is
+        // the whole point of a dB law (the linear one put 0.75 of the travel's
+        // gain at unity and the rest above it).
+        const float midDb = kFaderMinDb + 0.5f * (kFaderMaxDb - kFaderMinDb);
+        CHECK(std::fabs(FaderFracToGain(0.5f) - GainFromDb(midDb)) < 1e-6f);
+        // ... and the linear law's own reading is NOT what mid-travel holds:
+        // at 0.5 of the travel the gain is well under the old 0.75.
+        CHECK(FaderFracToGain(0.5f) < 0.75f);
+        // Round trip over the whole travel.
+        for (float f = 0.0f; f <= 1.0f; f += 0.125f) {
+            const float g = FaderFracToGain(f);
+            CHECK(std::fabs(GainToFaderFrac(g) - f) < 1e-4f);
+        }
+
+        // The nudge (the keyboard's step, a wheel notch): +0.5 dB is +0.5 dB
+        // wherever it starts, the range is the fader's, and silence stays
+        // silence rather than climbing to the floor and jumping.
+        CHECK(std::fabs(NudgeGainDb(1.0f, 0.5f) - GainFromDb(0.5f)) < 1e-6f);
+        CHECK(std::fabs(NudgeGainDb(GainFromDb(-6.0f), 0.5f)
+                        - GainFromDb(-5.5f)) < 1e-6f);
+        CHECK(std::fabs(NudgeGainDb(GainFromDb(kFaderMaxDb), 0.5f)
+                        - GainFromDb(kFaderMaxDb)) < 1e-6f);   // clamped at the top
+        CHECK(NudgeGainDb(0.0f, -0.5f) == 0.0f);   // silence: +/- nothing
+        CHECK(std::fabs(NudgeGainDb(GainFromDb(kFaderMinDb + 0.25f), -0.5f))
+              < 1e-6f);                            // ... clamped at the bottom
+    }
+
     std::printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails == 0 ? 0 : 1;
 }
