@@ -113,7 +113,7 @@ against each other, and not a merged total):
   templates) and M4.4's region jobs. Records `39-transport-bar-PR.md`,
   `40-mixer-strips-PR.md`, `41-preferences-PR.md`,
   `42-project-settings-templates-PR.md`, `43-region-jobs-PR.md`, plus
-  `44-pr1-integration-fixes.md` for the integration pass. Host 71/71, VM
+  `48-pr1-integration-fixes.md` for the integration pass. Host 71/71, VM
   `build` 73/73 + `build-off` 68/68, `ui_functional_tests` 960 checks with the
   shots opened in both theme modes.
 - **`feature/multichannel-input`** — M5: a device and channel pair per track,
@@ -126,7 +126,7 @@ against each other, and not a merged total):
   `45-sinc-resampler-PR.md`, `46-dynamic-latency-PR.md`,
   `47-lv2-sidechain-PR.md` (host 69/69 each, syntax check 75 OK 4 FAIL).
 - M7.2 time-stretch is the `feature/timestretch` row above. (Two records carry
-  the number 44 — `44-pr1-integration-fixes.md` on `feature/m3-shell` and
+  the number 44 — `48-pr1-integration-fixes.md` on `feature/m3-shell` and
   `44-multichannel-input-PR.md` on `feature/multichannel-input`; rename one
   when the branches meet.)
 
