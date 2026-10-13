@@ -142,6 +142,13 @@ and the step that failed.
 | `sh scripts/haiku_syntax_check.sh` | **81 OK, 4 FAIL** — the four pre-existing FLAC/vorbis files (the cross toolchain has no FLAC headers; untouched by this branch) |
 | `DAW_UI_SHOTS` pass, System and Dark | **960 checks, 0 failures** each, 79 shots each |
 
+One incident worth recording: a `ctest --test-dir build` run timed out in the middle of
+this pass, and the cause was **my own** leftover `./daw` — the app I had started by hand
+for the click experiment was still running (Haiku has no `pkill`; the first attempt to
+stop it silently failed), so two instances shared the device, the settings file and the
+`/tmp` fixtures. `kill`ing it and re-running gave 73/73 and 68/68 again. The suite is
+sensitive to that state, which is worth knowing for the integration machine.
+
 ## Not verified / honest notes
 
 * The menu field's pop-up could not be *chosen from* with synthetic input (a menu takes
