@@ -5,6 +5,7 @@
 #include "widgets/DawTextField.h"
 
 #include <LayoutBuilder.h>
+#include <Screen.h>
 #include <View.h>
 
 namespace daw {
@@ -18,8 +19,14 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
               title ? title
                     : (what == kMsgRenameMarker ? "Rename Marker"
                                                 : "Rename Track"),
-              B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
-              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS),
+              // The look and the feel are separate arguments on purpose:
+              // BWindow's (window_type, flags, workspace) overload would take
+              // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, flags) and put
+              // the flags in `workspace`, losing every one of them (the same
+              // trap ExportWindow documents).
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fTrack(track), fApply(apply), fWhat(what), fAux(aux),
       fOldName(current ? current : "") {
     // Layout Kit (M1.4): the window sizes itself to its contents, which is
@@ -32,16 +39,40 @@ RenameWindow::RenameWindow(BRect frame, TrackId track, const char* current,
     fText = new DawTextField("name", "Name:", current, new BMessage(MSG_OK));
     DawButton* ok = new DawButton("ok", "OK", new BMessage(MSG_OK));
     ok->MakeDefault(true);
+    // A visible way out beside the keyboard one: the same B_QUIT_REQUESTED
+    // Escape posts (B_CLOSE_ON_ESCAPE above), so both leave without renaming.
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(B_QUIT_REQUESTED));
     BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
         .SetInsets(Themed(8.0f))
         .Add(fText)
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
+            .Add(cancel)
             .Add(ok)
         .End()
         .End();
 
     ResizeToPreferred();
+    // Clamp to the screen (package 50). The window opens AT the caller's
+    // anchor — a clip under the pointer, a row in a list — and that anchor can
+    // sit near an edge (or be off the screen entirely, for a clip at the far
+    // right of a scrolled timeline), which used to put the whole window,
+    // OK button included, where it could not be reached. The guidelines' rule
+    // for a content-sized window (UI_GUIDELINES §4): size from the content,
+    // then clamp to BScreen.
+    {
+        BScreen screen(this);
+        if (screen.IsValid()) {
+            const BRect sf = screen.Frame();
+            BRect f = Frame();
+            if (f.right  > sf.right)  f.OffsetBy(sf.right - f.right, 0.0f);
+            if (f.bottom > sf.bottom) f.OffsetBy(0.0f, sf.bottom - f.bottom);
+            if (f.left   < sf.left)   f.OffsetBy(sf.left - f.left, 0.0f);
+            if (f.top    < sf.top)    f.OffsetBy(0.0f, sf.top - f.top);
+            MoveTo(f.left, f.top);
+        }
+    }
     fText->MakeFocus(true);
 }
 

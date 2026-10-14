@@ -1,14 +1,20 @@
 // PreferencesWindow — the app's preferences (plan M3.5).
 //
 // Own looper and no model access, like the mixer and the markers window: the
-// main window pushes the current values IN, every control change goes back as
-// ONE message carrying the whole set (kMsgPrefsChanged), and MainWindow is the
-// only place that applies and persists anything. The window never reads a
-// Project and never writes the settings file.
+// main window pushes the current values IN, the window holds them as SETTINGS
+// (a pick or a tick changes nothing outside the window), and Apply reads the
+// whole view and posts it back as ONE message carrying the whole set
+// (kMsgPrefsChanged). Cancel -- and Escape, the same B_QUIT_REQUESTED -- closes
+// without posting, so what was not applied is discarded. MainWindow is the only
+// place that applies and persists anything; the window never reads a Project
+// and never writes the settings file. That is the settings vocabulary this
+// package settled on, shared with Project Settings (Cancel + Apply).
 //
 // The audio-output-device row is deliberately a disabled placeholder: this
 // package does not build device enumeration (the multichannel-input package,
 // plan M5.3, owns that and adds the picker here — see the seam in the .cpp).
+// The row says what a user can see for themselves (the system default) and the
+// note under it says choosing is not available yet.
 #pragma once
 
 #include "Theme.h"                 // ThemeAware + the tokens
@@ -38,6 +44,7 @@ struct PrefsView {
     int         metronomeSound    = 0;      // 0 click, 1 beep, 2 wood block
     float       metronomeLevel    = 0.30f;  // 0..1
     bool        monitorInput      = false;
+    bool        previewNotes      = true;   // the MIDI editor's audition (51)
     bool        darkMode          = false;
     float       uiScale           = 0.0f;   // 0 = follow the system font
     std::string projectDir;
@@ -56,8 +63,6 @@ constexpr uint32 kMsgPrefsValues   = 'prvl';
 constexpr uint32 kMsgPrefsActivate = 'prac';
 // The default-folder panel's answer (an entry_ref).
 constexpr uint32 kMsgPrefsDirRef   = 'pdrf';
-// A control moved -> the window reads them ALL and posts one kMsgPrefsChanged.
-constexpr uint32 kMsgPrefsEdited   = 'pred';
 
 class PreferencesWindow : public BWindow, public ThemeAware {
 public:
@@ -70,11 +75,12 @@ public:
 
     // --- what the functional test drives ---------------------------------
     // A test cannot press a menu (BPopUpMenu::Go blocks until a choice is
-    // made), so it flips a control and calls NotifyChanged() — the same path a
-    // click takes — under the window lock.
+    // made), so it flips a control and calls NotifyChanged() -- the Apply
+    // path, so nothing the test does can go through a door a user does not
+    // have -- under the window lock.
     PrefsView Values() const;             // the controls, as they stand
     void SetValues(const PrefsView& v);   // ... and push a set in
-    void NotifyChanged();                 // post them to the app
+    void NotifyChanged();                 // apply: post them to the app
 
     BMenuField*   BufferField()   const { return fBuffer; }
     BMenuField*   RateField()     const { return fRate; }
@@ -82,6 +88,7 @@ public:
     BMenuField*   SoundField()    const { return fSound; }
     BSlider*      LevelSlider()   const { return fLevel; }
     BCheckBox*    MonitorCheck()  const { return fMonitor; }
+    BCheckBox*    PreviewCheck()  const { return fPreview; }
     BCheckBox*    DarkCheck()     const { return fDark; }
     BMenuField*   ScaleField()    const { return fScale; }
     BTextControl* DirField()      const { return fDir; }
@@ -102,6 +109,7 @@ private:
     BSlider*      fLevel     = nullptr;
     BStringView*  fLevelText = nullptr;
     BCheckBox*    fMonitor   = nullptr;
+    BCheckBox*    fPreview   = nullptr;   // preview notes while editing
     BCheckBox*    fDark      = nullptr;
     BMenuField*   fScale     = nullptr;
     BTextControl* fDir       = nullptr;

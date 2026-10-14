@@ -1,5 +1,7 @@
 #include "MidiOps.h"
 
+#include "RollEdit.h"   // NoteInRegion: the ONE statement of the window rule
+
 #include <algorithm>
 #include <cmath>
 
@@ -31,9 +33,11 @@ inline int Jitter(uint64_t h, int mag) {
 // Does the region window let this note sound? Content outside [0, clipLen) is
 // kept but silent by design, so every time-domain transform skips it: snapping
 // a silent note back in would make it suddenly audible, and moving it further
-// out is not what the user asked for either.
+// out is not what the user asked for either. The rule itself lives in
+// RollEdit.h (NoteInRegion), which the piano roll's drawing reads too — one
+// statement, so what is dimmed there is exactly what is silent here.
 inline bool InWindow(const MidiNote& n, Frame clipLen) {
-    return n.startFrame >= 0 && n.startFrame < clipLen;
+    return NoteInRegion(n, clipLen);
 }
 
 // The two halves of the window rule, kept separate because the order matters:

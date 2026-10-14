@@ -12,8 +12,18 @@ namespace daw {
 
 ExportProgressWindow::ExportProgressWindow(BRect frame, BMessenger main,
                                            const char* label)
-    : BWindow(frame, label ? label : "Working", B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL,
+    // Look and feel as separate arguments (see ExportWindow): written as
+    // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, <flags>), this call
+    // resolved to BWindow's (window_type, flags, workspace) overload and every
+    // flag landed in `workspace` -- the bar was zoomable, resizable and
+    // closable, and only a stray B_NOT_H_RESIZABLE survived.
+    //
+    // B_NOT_CLOSABLE removes the title bar's close box and the Cmd-W shortcut
+    // (Window.cpp: the flag is only consulted when the shortcut is installed);
+    // the app's own B_QUIT_REQUESTED still closes the bar when the render
+    // ends, and Cancel still stops it.
+    : BWindow(frame, label ? label : "Working", B_TITLED_WINDOW_LOOK,
+              B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_NOT_CLOSABLE
               | B_ASYNCHRONOUS_CONTROLS),
       fMain(main) {

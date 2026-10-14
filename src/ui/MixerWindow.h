@@ -5,14 +5,22 @@
 // thread; it holds a snapshot of the mix state, edits the local copy on mouse
 // input, and posts changes to the main window (kMsgApplyMix / kMsgApplyMaster).
 // The main window pushes live per-track peaks via kMsgMixPeaks.
+//
+// Geometry (package 52): the rack scrolls horizontally under a real BScrollBar
+// and the MASTER strip is pinned to the view's right edge, outside the scrolling
+// content — on a small screen the master used to be at the far end of the rack,
+// off-window, with nothing saying so.
 #pragma once
 
 
 #include "Theme.h"   // ThemeAware (T1)
+#include "../dsp/MeterMath.h"   // PeakHold / ClipLatch (the strip meters)
 #include <Messenger.h>
+#include <ScrollBar.h>
 #include <View.h>
 #include <Window.h>
 
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -61,6 +69,10 @@ struct MixerStripInfo {
     std::vector<MixerSendInfo> sends;  // the aux sends, in the model's order
     bool        hasInput = false;
     std::string outLabel;        // "Mst" or a bus name
+    // The track's automation-lane mode (0 Off / 1 Gain / 2 Pan / 3+ an fx lane),
+    // which the strip's Auto button cycles. The MODE lives in the timeline's view
+    // state, so it travels here or the lamp could not be lit at all.
+    int         autoMode = 0;
 };
 
 // One strip's edited state -> the model. Fields: int64 "track", float "gain",
@@ -76,7 +88,9 @@ constexpr uint32 kMsgMixLevelCommit = 'mxlc';
 // Master gain -> the model. Field: float "gain".
 constexpr uint32 kMsgApplyMaster = 'mmst';
 // Live peaks pushed from the main window. Per track: int64 "tid", float "pl",
-// "pr"; plus master float "mpl","mpr".
+// "pr"; plus master float "mpl","mpr" and — for the master strip's RMS line —
+// "mrl"/"mrr". Per-TRACK RMS is deliberately absent: the engine meters stereo
+// RMS on the master only, so a strip has no RMS to draw and does not fake one.
 constexpr uint32 kMsgMixPeaks    = 'mpks';
 // Refreshed strip STATE pushed from the main window when the model changes
 // elsewhere (mute/solo/arm/fx/routing). Per strip the same fields the mixer
@@ -96,6 +110,15 @@ constexpr uint32 kMsgMixFx       = 'mxfx';   // open the effects editor; optiona
 constexpr uint32 kMsgMixSends    = 'mxsn';   // open the sends editor
 constexpr uint32 kMsgMixInst     = 'mxis';   // open the instrument editor
 constexpr uint32 kMsgMixSelect   = 'mxse';   // select the track (inspector focus)
+// The routing pair the strip's In and ->Bus buttons open, and the automation
+// mode the Auto button cycles. They carry int64 "track" plus, for the two
+// pickers, float "x"/"y" — the SCREEN point to open the popup at, taken from the
+// button that was clicked, so the menu appears where the user pointed. The
+// pickers are the inspector's own (InspectorView::PickInput / PickOutput): one
+// code path, so the strip's choice and the inspector's choice cannot diverge.
+constexpr uint32 kMsgMixInput    = 'mxin';
+constexpr uint32 kMsgMixOutput   = 'mxou';
+constexpr uint32 kMsgMixAuto     = 'mxau';
 // Insert-slot edits. The mixer holds a snapshot, not descriptors, so these name
 // what to do and the main window does it to the real chain (see MixerInsertInfo).
 constexpr uint32 kMsgMixFxBypass = 'mxfb';   // + int32 "fx": toggle that insert
@@ -105,6 +128,22 @@ constexpr uint32 kMsgMixFxAdd    = 'mxfa';   // open the plugin browser for it
 // Bring the (already open) mixer to the front. The main window sends this
 // instead of opening a second rack (M1.4).
 constexpr uint32 kMsgMixerActivate = 'mxac';
+
+// A BScrollBar that reports its value instead of scrolling a target view: the
+// rack is panned by a pixel offset (StripX subtracts it), not by moving the
+// view's bounds, so the default behaviour (ScrollBy on a target) is the wrong
+// mechanism. With no target set, BScrollBar only updates itself and calls this
+// virtual, which is the hook. (The same shape TimelineView uses for the same
+// reason; kept separate because the two views' scrolling are independent.)
+class MixerScrollBar : public BScrollBar {
+public:
+    MixerScrollBar(const char* name, orientation dir, float min, float max,
+                   std::function<void(float)> onValue);
+    void ValueChanged(float newValue) override;
+
+private:
+    std::function<void(float)> fOnValue;
+};
 
 class MixerStripsView : public BView, public ThemeAware {
 public:
@@ -117,10 +156,14 @@ public:
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* drag) override;
     void MouseUp(BPoint where) override;
-    void MessageReceived(BMessage* msg) override;   // wheel: pan the rack
+    void MessageReceived(BMessage* msg) override;   // wheel + scrollbar
+    void KeyDown(const char* bytes, int32 numBytes) override;
+    void AttachedToWindow() override;
+    void FrameResized(float w, float h) override;
 
-    void SetPeaks(const std::map<uint64, std::pair<float, float>>& peaks,
-                  float masterL, float masterR);
+    void SetPeaks(const std::map<uint64_t, std::pair<float, float>>& peaks,
+                  float masterL, float masterR,
+                  float masterRmsL = -1.0f, float masterRmsR = -1.0f);
     // Replace the strip state from a refresh (ignored mid-drag so it doesn't
     // disrupt a fader/pan gesture).
     void SetStrips(std::vector<MixerStripInfo> strips, float masterGain);
@@ -130,15 +173,47 @@ public:
     // it mid-gesture -- the rack's snapshot is the observable the inspector,
     // which draws straight from the model, cannot offer.
     const std::vector<MixerStripInfo>& Strips() const { return fStrips; }
+    // The master gain the rack is showing (the same observable for the master
+    // fader: the model's value, as this window last heard it).
+    float MasterGain() const { return fMasterGain; }
+
+    // The strip the keyboard drives: 0..Strips().size(), the last being the
+    // master. Set by a click (with the selection it implies) and by Left/Right.
+    int  CurrentStrip() const { return fCurStrip; }
+    void SetCurrentStrip(int i);
+
+    float ScrollX() const { return fScrollX; }
+    void  SetScrollX(float x, bool moveBar = true);
+    float MaxScroll() const;
 
 private:
     float StripX(int i) const;       // left x of strip i (i == count -> master)
+    // The master is pinned to the right edge OUTSIDE the scrolled content, so
+    // it is always in front of the user however far the rack is panned.
+    float MasterX() const;
+    // Every strip, the master, and the margins -- what the rack needs to be
+    // shown whole. Used to clamp the horizontal pan.
+    float ContentWidth() const;
+    // The height the strips and the master are laid out in: the view minus the
+    // horizontal scroll bar reserved along the bottom.
+    float StripAreaHeight() const;
+    float BarThickness() const;
+
     void  DrawStrip(int i, const MixerStripInfo* info, float gain,
                     float peakL, float peakR, bool master);
     int   StripAt(BPoint where) const;   // -1 none, count == master
     void  ApplyStrip(int i);
     void  PostSendLevel(int i, int index, float level);   // one send (M3.4)
     void  Post(uint32 what, uint64 track);   // section-button message helper
+    // The strip-level edit funnel: post the changed gain, then repaint. Shared
+    // by the fader drag, the wheel and the keyboard so all three land the same
+    // one undoable edit.
+    void  NudgeStripGain(int i, float deltaDb);
+    // The control under the pointer, if any, and its wheel nudge. False = the
+    // pointer is over bare panel, so the wheel pans the rack.
+    bool  WheelAdjust(BPoint where, float dy);
+    void  ClearClipLamps(int i);     // a click on a strip's lamp
+    void  LayoutBar();
 
     // Rows the insert block reserves. Every strip reserves the SAME number --
     // the largest any strip needs -- so the pan knobs, faders and meters stay on
@@ -165,20 +240,38 @@ private:
     class DawTextField* fLevelField = nullptr;
     int   fLevelStrip = -1;
 
-    float fScrollX = 0.0f;           // horizontal pan when the rack is wider
-    float ContentWidth() const;      // all strips + master + margins
+    float fScrollX = 0.0f;           // horizontal pan (pixels)
+    MixerScrollBar* fHBar = nullptr;
+
+    // Per-strip METER state: a peak hold and a clip latch per channel, keyed by
+    // track id so a refresh that rebuilds the strip list (or reorders it) does
+    // not hand one track's hold to another. The master's is its own -- it is not
+    // a track. Clip lamps latch until clicked, exactly like the master meter's.
+    struct MeterState {
+        PeakHold  holdL, holdR;
+        ClipLatch clipL, clipR;
+    };
+    std::map<uint64, MeterState> fMeter;
+    MeterState fMasterMeter;
 
     std::vector<MixerStripInfo> fStrips;
     std::map<uint64, std::pair<float, float>> fPeaks;
     float      fMasterGain;
     float      fMasterL = 0.0f, fMasterR = 0.0f;
+    float      fMasterRmsL = -1.0f, fMasterRmsR = -1.0f;
     BMessenger fApply;
     int        fFxRows = 1;
     int        fSendRows = 0;
+    int        fCurStrip = 0;        // the keyboard's strip (count == master)
 
     enum class Drag { None, Fader, Pan, FxSlot, Trim, Send };
     Drag  fDrag = Drag::None;
     int   fDragStrip = -1;   // count == master
+    // Fader: grab-relative, like the effects view's knobs -- a click that
+    // captured the value absolutely made the fader jump to wherever the pointer
+    // landed, which is not a gesture anyone means.
+    float fFaderGrabY = 0.0f;
+    float fFaderOrig  = 1.0f;
     float fPanGrabY = 0.0f;  // pan knob drags vertically
     float fPanOrig  = 0.0f;
     float fTrimGrabY = 0.0f; // trim knob: vertical drag, like the pan knob
@@ -200,6 +293,9 @@ public:
                 float masterGain, BMessenger apply);
     void MessageReceived(BMessage* msg) override;
     void DispatchMessage(BMessage* msg, BHandler* h) override;  // spacebar -> transport
+    // Fit the frame to the screen: a rack wider than the display used to put
+    // the master fader and meter off-window with nothing saying so.
+    void FitToScreen();
 private:
     MixerStripsView* fView;
     BMessenger       fApply;

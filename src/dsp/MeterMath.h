@@ -150,6 +150,48 @@ inline bool ParseDecibels(const std::string& text, float* db) {
     return true;
 }
 
+// --- the channel fader's law --------------------------------------------
+
+// A fader is a dB control, not a gain control. The old law was `gain / 1.5`:
+// linear in gain, a +3.5 dB ceiling, more than half the travel spent on the
+// top 3.5 dB, and the bottom of the travel at -3.5 dB rather than silence --
+// while the typed-level field beside it advertised [-96, +12] and clamped
+// anything above the ceiling in silence (kFaderMinDb/kFaderMaxDb, above).
+//
+// The travel is therefore divided in dB, over exactly the range the field
+// advertises. Unity (0 dB) sits at FaderUnityFrac() of it -- 8/9 here -- and
+// the bottom is true silence, because a dB below the floor is silence in this
+// app's one level vocabulary (GainFromDb).
+inline float FaderUnityFrac() {
+    return (0.0f - kFaderMinDb) / (kFaderMaxDb - kFaderMinDb);
+}
+
+inline float GainToFaderFrac(float gain) {
+    if (!(gain > 0.0f)) return 0.0f;          // silence / NaN -> the bottom
+    const float db = 20.0f * std::log10(gain);
+    if (db <= kFaderMinDb) return 0.0f;
+    if (db >= kFaderMaxDb) return 1.0f;
+    return (db - kFaderMinDb) / (kFaderMaxDb - kFaderMinDb);
+}
+
+inline float FaderFracToGain(float frac) {
+    if (!(frac > 0.0f)) return 0.0f;          // the bottom of the travel: silence
+    if (frac >= 1.0f) return GainFromDb(kFaderMaxDb);
+    return GainFromDb(kFaderMinDb + frac * (kFaderMaxDb - kFaderMinDb));
+}
+
+// One nudge in dB, clamped to the fader's own range. The keyboard's step and a
+// wheel notch both come through here, so a nudge is the same move whichever
+// device made it -- and a gain at silence stays silence rather than jumping to
+// the bottom of the range and back up.
+inline float NudgeGainDb(float gain, float deltaDb) {
+    const float db = (gain > 0.0f) ? 20.0f * std::log10(gain) : kFaderMinDb;
+    float d = db + deltaDb;
+    if (d < kFaderMinDb) d = kFaderMinDb;
+    if (d > kFaderMaxDb) d = kFaderMaxDb;
+    return GainFromDb(d);
+}
+
 // --- peak hold ------------------------------------------------------------
 
 // A peak-hold marker: it jumps to a new peak, stays there for kHoldUs, then

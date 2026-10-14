@@ -30,6 +30,7 @@
 #include "../src/ui/widgets/DawKnob.h"
 #include "../src/ui/widgets/DawSlider.h"
 #include "../src/model/MidiOps.h"       // QuantGrid
+#include "../src/model/RollEdit.h"   // the roll's kit-free rules (package 51)
 #include "../src/model/MidiExpression.h"  // the lane's path into a voice
 #include "../src/synth/Synth.h"           // ...rendered, to prove it arrives
 #include "../src/model/Project.h"
@@ -87,6 +88,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 static int g_checks = 0, g_fails = 0;
@@ -120,6 +122,12 @@ using namespace daw;
 #endif
 #ifndef MSG_UNDO_TEST
 #define MSG_UNDO_TEST 'undo'  // Edit > Undo (MainWindow's MSG_UNDO)
+#endif
+#ifndef MSG_FOLLOW_TEST
+#define MSG_FOLLOW_TEST 'folw'   // View > Follow Playhead (package 51)
+#endif
+#ifndef MSG_AUDITION_IDLE_TEST
+#define MSG_AUDITION_IDLE_TEST 'auid'   // the audition's idle stopper (package 51)
 #endif
 #ifndef MSG_MIXER_TEST
 #define MSG_MIXER_TEST 'mixr'   // View > Mixer (MainWindow's MSG_MIXER)
@@ -348,6 +356,54 @@ static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
     return WaitFor([&] { return VisibleWindows() == 1; }, timeoutUs);
 }
 
+// --- the UX shell (fix/ux-shell): the status line and the dialog vocabulary --
+//
+// Shared by the tests below and by the dialog tests further down, so they live
+// with the other helpers.
+
+// The status line as the transport bar last set it.
+static std::string TransportStatus(MainWindow* win) {
+    std::string s;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        if (auto* bar = dynamic_cast<TransportBar*>(win->TransportBarView()))
+            s = bar->StatusText();
+        win->Unlock();
+    }
+    return s;
+}
+
+// The vocabulary the shell settled on, checked on a real window of the app's
+// own class: a Cancel button and a primary one whose label is the verb; the
+// primary button is the window's DEFAULT (what BWindow routes Return to, the
+// registration no kit button ever made) and is focusable by Tab; and the window
+// closes on Escape (B_CLOSE_ON_ESCAPE turns the key into B_QUIT_REQUESTED).
+// The caller closes the window by posting exactly that.
+static void CheckVocabulary(BWindow* w, const char* title,
+                            const char* primaryName, const char* primaryLabel) {
+    if (w == nullptr) { CHECK(w != nullptr); return; }
+    if (w->LockWithTimeout(2000000) != B_OK) {
+        CHECK(false);   // "the dialog answered its lock"
+        return;
+    }
+    CHECK(std::strcmp(WindowTitle(w), title) == 0);
+    CHECK((w->Flags() & B_CLOSE_ON_ESCAPE) != 0);
+    DawButton* cancel = dynamic_cast<DawButton*>(w->FindView("cx"));
+    DawButton* primary = dynamic_cast<DawButton*>(w->FindView(primaryName));
+    CHECK(cancel != nullptr);
+    CHECK(cancel != nullptr && cancel->Label() != nullptr
+          && std::strcmp(cancel->Label(), "Cancel") == 0);
+    CHECK(primary != nullptr);
+    CHECK(primary != nullptr && primary->Label() != nullptr
+          && std::strcmp(primary->Label(), primaryLabel) == 0);
+    // The default registration: BWindow::_DetermineTarget routes B_ENTER to
+    // the button DefaultButton() names, and BButton::KeyDown invokes on it.
+    CHECK(primary != nullptr && w->DefaultButton() == primary);
+    // ... which is only type-safe because a kit button IS a BButton.
+    CHECK(dynamic_cast<BButton*>(primary) != nullptr);
+    CHECK(primary != nullptr && (primary->Flags() & B_NAVIGABLE) != 0);
+    w->Unlock();
+}
+
 static bool AlertUp(const char* title) {
     return WindowUp(title);
 }
@@ -417,12 +473,16 @@ static void TestMessageRoundTrip(MainWindow* win, Project& project) {
     std::printf("test_message_round_trip\n");
     const size_t before = project.Tracks().size();
     win->PostMessage(MSG_NEW_MIDI);
+    // The FIRST check in the file gets a longer wait than the 5 s default: it
+    // is the one that runs against a cold-started window (a fresh build, a
+    // cold file cache), and it failed once in a no-LV2 run that passed on a
+    // re-run with the same binary. A slow start is not what this asserts.
     CHECK(WaitFor([&] {
         if (win->LockWithTimeout(1000000) != B_OK) return false;
         const size_t now = project.Tracks().size();
         win->Unlock();
         return now == before + 1;
-    }));
+    }, 20000000));
 }
 
 // --- package 32: the CC lane offers ANY controller, and it reaches a voice ---
@@ -710,6 +770,15 @@ static void TestExportFlow(MainWindow* win, Project& project) {
     std::printf("  export: file written\n");
     CHECK(FileExists(kExportPath));
     CHECK(!FileExists(std::string(kExportPath) + ".part"));
+    // A finished bounce SAYS so on the status line (the same pass that closes
+    // its bar), not only on stderr -- checked before WaitQuiet, because the
+    // message is transient on purpose (kStatusHoldUs).
+    CHECK(WaitFor([&] {
+        const std::string s = TransportStatus(win);
+        return s.find("Exported") != std::string::npos
+            && s.find("haiku_daw_ui_export.wav") != std::string::npos;
+    }, 60000000));
+    std::printf("  export: %s\n", TransportStatus(win).c_str());
     CHECK(WaitQuiet());   // its bar closes on a pulse
     std::printf("  export: done\n");
 }
@@ -805,13 +874,19 @@ static void ClearExportAlert() {
     snooze(200000);
 }
 
-// The export OPTIONS dialog: a plain BWindow titled "Export" (the alert above
-// carries the same title, which is why BAlert is excluded).
+// The export OPTIONS dialog: a plain BWindow whose title NAMES THE ACTION
+// ("Export Mix" for this flow; see TestDialogVocabulary for the stems one), so
+// it can no longer be confused with the failure alert, which stays "Export".
+//
+// The title is shared with the file panel behind it (ShowPanel titles each
+// panel for its action), so this lookup is only unambiguous when no panel is
+// up -- which is what the WaitQuiet() before it guarantees. Anything that has
+// to tell the two apart afterwards compares POINTERS.
 static BWindow* FindExportDialog() {
     for (int32 i = 0; i < be_app->CountWindows(); i++) {
         BWindow* w = be_app->WindowAt(i);
         if (!w || w->IsHidden()) continue;
-        if (std::strcmp(WindowTitle(w), "Export") != 0) continue;
+        if (std::strcmp(WindowTitle(w), "Export Mix") != 0) continue;
         if (dynamic_cast<BAlert*>(w) != nullptr) continue;
         return w;
     }
@@ -843,6 +918,11 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return (dlg = FindExportDialog()) != nullptr; }));
     if (!dlg) return;
     snooze(300000);
+
+    // The dialog the app opened for a MIXDOWN names it (the stems one is
+    // checked in TestDialogVocabulary), and its vocabulary is Cancel + Export
+    // Mix with Return on the verb.
+    CheckVocabulary(dlg, "Export Mix", "ok", "Export Mix");
 
     // THIS is the window this suite can screenshot. The one MainWindow opens
     // is not mapped by this VM's app_server -- it is in the window list, not
@@ -894,12 +974,13 @@ static void TestExportFormatDialog(MainWindow* win, Project& project) {
 
     // The dialog applies by posting its own go-ahead to itself; it then quits.
     dlg->PostMessage('exok');
-    // Wait for the save panel AND for the dialog to have left the application's
-    // window list entirely. "Not visible" is not enough: a window that is
-    // quitting stops being DRAWN before it is removed, and touching one in that
-    // state is how this suite used to hang and, before that, crash.
+    // Wait for the DIALOG to leave the window list -- BY IDENTITY, not by
+    // title: the file panel it opens is titled "Export Mix" too (ShowPanel
+    // names each panel for its action, which is where the dialog's own title
+    // comes from), so a title lookup can never go quiet once the panel is up.
+    // That is also why the shot window above is waited for by pointer.
     CHECK(WaitFor([&] {
-        return !WindowListed("Export") && VisibleWindows() >= windowsBefore + 1;
+        return !WindowListed(dlg) && VisibleWindows() >= windowsBefore + 1;
     }));
     HideOtherWindows(win);
     CHECK(WaitQuiet());
@@ -1852,6 +1933,72 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return playing(); }));
     sendKey(" ");                              // leave the transport stopped
     CHECK(WaitFor([&] { return !playing(); }));
+
+    // --- the UX-shell rule: only a TEXT FIELD holds the map -----------------
+    // Clicking a slider (the master volume) or a list used to take the whole
+    // keyboard map with it: R/S/M/Home/,/. and the arrows did nothing until
+    // the user clicked the timeline back. The map owns its keys whatever
+    // control has the focus; only a key the map does NOT bind stays with the
+    // focus view.
+    BView* master = nullptr;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        master = win->FindView("master");
+        win->Unlock();
+    }
+    CHECK(master != nullptr);
+    if (master != nullptr) {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            master->MakeFocus(true);
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = win->CurrentFocus() == master;
+            win->Unlock();
+            return ok;
+        }));
+
+        auto playhead = [&] {
+            daw::Frame ph = -1;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                ph = project.transport.playhead;
+                win->Unlock();
+            }
+            return ph;
+        };
+        // Home reaches the transport: the playhead goes to the start.
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            project.transport.playhead = 96000;
+            win->Unlock();
+        }
+        sendKey("\x01");   // B_HOME
+        CHECK(WaitFor([&] { return playhead() == 0; }));
+
+        // M drops a marker (the map's Editing action, not the slider's).
+        auto markerCount = [&] {
+            size_t n = 0;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                n = project.markers.size();
+                win->Unlock();
+            }
+            return n;
+        };
+        const size_t before = markerCount();
+        sendKey("m");
+        CHECK(WaitFor([&] { return markerCount() == before + 1; }));
+
+        // The slider itself still has its value (the map does not touch it),
+        // and an UNBOUND key is still the focused control's: 'z' does nothing
+        // to the transport.
+        const bool stillStopped = !playing();
+        sendKey("z");
+        snooze(200000);
+        CHECK(stillStopped && !playing());
+    }
+
+    // Put the focus back on the timeline for whatever runs next.
+    if (timeline) BMessenger(timeline).SendMessage(&down);
+    snooze(150000);
 }
 
 // M1.2 slice B: every shared layout metric is a function of the theme scale
@@ -3056,6 +3203,43 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         }
         return s;
     };
+    // The sections above end at whatever zoom their last wheel or zoom key
+    // left (TestArrangeFeel finishes with a zoom-out), and a click on the
+    // fixture clip has to land on its BODY — 9 px from an edge is a trim grab,
+    // and the in-place rename needs a strip wide enough to hold a field. Zoom
+    // in until the clip is comfortably wide and put the top of the timeline
+    // back in view, so a click's x is where the clip is drawn. Returns the
+    // zoom it found, so the caller can put it back (the sections after this
+    // one were written at the old scale).
+    auto zoomForBodyClick = [&]() -> double {
+        double fpp = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            fpp = tv->FramesPerPixel();
+            win->Unlock();
+        }
+        const double was = fpp;
+        for (int i = 0; i < 10 && fpp > 128.0; i++) {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                tv->ZoomBy(0.5);
+                fpp = tv->FramesPerPixel();
+                win->Unlock();
+            }
+        }
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->ScrollToFrame(0);
+            win->Unlock();
+        }
+        snooze(100000);
+        return was;
+    };
+    auto restoreZoom = [&](double was) {
+        double now = 0.0;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            now = tv->FramesPerPixel();
+            if (was > 0.0 && now > 0.0 && was != now) tv->ZoomBy(was / now);
+            win->Unlock();
+        }
+    };
     // The Edit menu, by walking the bar (FindMenu exists only on BMenu).
     auto editMenu = [&]() -> BMenu* {
         BMenu* out = nullptr;
@@ -3125,8 +3309,22 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
     // --- 1. A drag on empty lane content makes a time range ----------------
     std::printf("  depth: range drag\n");
     {
+        // The state this section STARTS from, stated rather than asserted: the
+        // bare click above clears the range (that gesture is checked on purpose
+        // in section 2, where a range is set first), but a synthetic click can
+        // be joined by the app_server's own report of the real pointer — the
+        // press sets SetMouseEventMask(B_POINTER_EVENTS), so a pointer report
+        // that lands between the press and the release is, to the view, an
+        // ordinary range drag. That race would set a range HERE and fail a line
+        // whose subject is the drag below, not the click. (Seen once on the VM:
+        // the merged branch's run failed this check while section 2's identical
+        // click passed in the same run.)
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->ClearTimeRange();
+            win->Unlock();
+        }
         Frame a = -1, b = -1;
-        CHECK(!range(&a, &b));          // the focusing click left none
+        CHECK(!range(&a, &b));          // ...and it really is clear now
         // The drag itself: press, move, release -- the pointer events a mouse
         // sends, with the release far enough for the 4 px threshold. It must
         // start on EMPTY content: a press inside a clip is a clip drag (which
@@ -3274,6 +3472,46 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
             return c.startFrame == 48000 && c.lengthFrames == 48000
                 && c.sourceOffset == 0 && clips(ta.id) == 1;
         }));
+    }
+
+    // --- 6b. Delete acts on the thing the user touched LAST (item C) -------
+    // The range used to win whenever one existed, even after a click on a
+    // clip: the Delete key then removed a time range the user had stopped
+    // looking at. The two selections are mutually exclusive now — the clip
+    // click drops the range — so Delete takes the clip.
+    std::printf("  depth: delete acts on the newest selection\n");
+    double zoomWas = 0.0;
+    {
+        zoomWas = zoomForBodyClick();
+        const float xMid = (frameX(48000) + frameX(96000)) * 0.5f;  // clip's middle
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            tv->SetTimeRange(60000, 72000);
+            win->Unlock();
+        }
+        Frame ra = -1, rb = -1;
+        CHECK(WaitFor([&] { return range(&ra, &rb); }));
+
+        click(xMid, laneMidA);               // on the clip: selects it...
+        CHECK(WaitFor([&] {                  // ...and drops the range
+            Frame a = -1, b = -1;
+            return !range(&a, &b);
+        }));
+        bool sel = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            sel = tv->SelectionCount() > 0;
+            win->Unlock();
+        }
+        CHECK(sel);
+        CHECK(clips(ta.id) == 1);            // the click changed nothing else
+
+        win->PostMessage(MSG_EDIT_DELETE);   // Edit > Delete / the Delete key
+        CHECK(WaitFor([&] { return clips(ta.id) == 0; }));
+        CHECK(undoName() == "Delete Clips");
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clips(ta.id) == 1; }));
+        CHECK(clipOf(ta.id, ac.id).lengthFrames == 48000);   // whole clip back
+        // The range is gone, not merely hidden: none of the clip was cut away.
+        CHECK(clipOf(ta.id, ac.id).startFrame == 48000);
     }
 
     // --- 7. Insert Silence ripples everything from the range start --------
@@ -3445,6 +3683,57 @@ static void TestArrangeDepth(MainWindow* win, Project& project,
         Shot("depth-clip-colour");
         win->PostMessage(MSG_EDIT_UNDO);
         CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).colorIndex == 0; }));
+    }
+
+    // --- 10b. Rename a clip IN PLACE, in its name strip (package 50) -------
+    // The double-click used to open RenameWindow at the raw click point, which
+    // can hang off the screen; the field lives on the clip now, and the keys
+    // (Enter commits, Esc cancels) are the track rename's own.
+    std::printf("  depth: clip rename in place\n");
+    {
+        const float xc = (frameX(48000) + frameX(96000)) * 0.5f;   // clip's middle
+        BPoint screen(xc, laneMidA);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = tv->ConvertToScreen(BPoint(xc, laneMidA));
+            win->Unlock();
+        }
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 2);
+            m.AddInt32("modifiers", 0);
+            m.AddPoint("where", BPoint(xc, laneMidA));
+            m.AddPoint("screen_where", screen);
+            BMessenger(tv).SendMessage(&m);
+        }
+        CHECK(WaitFor([&] {
+            bool on = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                on = tv->RenamingInPlace() && tv->RenamingClip() == ac.id;
+                win->Unlock();
+            }
+            return on;
+        }));
+        Shot("depth-clip-rename-field");      // the open field, on the strip
+        for (int i = 0; i < 5; i++) sendKey("\x08");   // clear "Verse"
+        sendKey("C"); sendKey("h"); sendKey("1");
+        sendKey("\n");                        // Enter commits
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name == "Ch1"; }));
+        CHECK(undoName() == "Rename Clip");
+        CHECK(WaitFor([&] {
+            bool done = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                done = !tv->RenamingInPlace();
+                win->Unlock();
+            }
+            return done;
+        }));
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] { return clipOf(ta.id, ac.id).name == "Verse"; }));
+        // The zoom the sections above were written at (10b's click needed the
+        // clip wide enough to hold the field).
+        restoreZoom(zoomWas);
     }
 
     // --- 11. Fade shapes (M2.5) -------------------------------------------
@@ -4045,13 +4334,67 @@ static void TestArrangeTracks(MainWindow* win, Project& project,
             return ph == mkFrame && drawn == mkFrame;
         }));
 
-        // Right-clicking the flag removes it -- one undoable step.
-        postMouseTo(tv, B_MOUSE_DOWN, BPoint(xAt, yMarker), 0, 2, 1);
-        postMouseTo(tv, B_MOUSE_UP,   BPoint(xAt, yMarker), 0, 0, 1);
-        CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
-        CHECK(undoName() == "Remove Marker");
-        win->PostMessage(MSG_EDIT_UNDO);
-        CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+        // Dragging the flag MOVES the marker (package 50, ux-timeline): the
+        // release lands it snapped on the grid, and the whole gesture is ONE
+        // undo step (Move Marker).
+        {
+            float xTo = 0.0f;
+            lock([&] { xTo = tv->FrameToX(180000); });
+            postMouseTo(tv, B_MOUSE_DOWN,  BPoint(xAt, yMarker), 0, 1, 1);
+            postMouseTo(tv, B_MOUSE_MOVED, BPoint(xTo, yMarker), 0, 1, 1);
+            postMouseTo(tv, B_MOUSE_UP,    BPoint(xTo, yMarker), 0, 0, 1);
+            CHECK(WaitFor([&] {
+                Frame f = -1;
+                lock([&] {
+                    if (!project.markers.empty())
+                        f = project.markers.back().frame;
+                });
+                return f == 180000;
+            }));
+            CHECK(markerCount() == markersBefore + 1);   // moved, not copied
+            CHECK(undoName() == "Move Marker");
+            // A test earlier in the run saved a project, so the autosave
+            // runner can leave a recovery file behind -- and a modal "Recover?"
+            // in front of this window makes the shot useless (found by reading
+            // the pass: the marker lane was behind one). Clear it first; the
+            // suite deletes it at start-up for the same reason.
+            {
+                BPath settings;
+                if (ProjectDocument::SettingsPath(settings) == B_OK) {
+                    BPath recovery(settings);
+                    if (recovery.Append("recovery.dawproj") == B_OK)
+                        BEntry(recovery.Path()).Remove();
+                }
+            }
+            Shot("markers-lane-moved");
+            win->PostMessage(MSG_EDIT_UNDO);
+            CHECK(WaitFor([&] {
+                Frame f = -1;
+                lock([&] {
+                    if (!project.markers.empty())
+                        f = project.markers.back().frame;
+                });
+                return f == mkFrame;                     // back where it was
+            }));
+        }
+
+        // The flag's right-click opens a menu now (Rename… / Delete) instead
+        // of deleting the marker outright. A popup cannot be driven by the
+        // suite -- and posting the click would sit in the popup's Go() -- so
+        // the DELETE its menu entry runs is called directly: the established
+        // pattern (a popup needs eyes; docs/UI_GUIDELINES.md §1).
+        {
+            std::string mkName;
+            lock([&] {
+                if (!project.markers.empty())
+                    mkName = project.markers.back().name;
+            });
+            lock([&] { tv->RemoveMarkerAt(mkFrame, mkName); });
+            CHECK(WaitFor([&] { return markerCount() == markersBefore; }));
+            CHECK(undoName() == "Remove Marker");
+            win->PostMessage(MSG_EDIT_UNDO);
+            CHECK(WaitFor([&] { return markerCount() == markersBefore + 1; }));
+        }
 
         // ...and the playhead-seek from a marker is what the markers window
         // uses too (checked in section 9).
@@ -4342,6 +4685,18 @@ static void TestWidgetKit(MainWindow* win) {
     // The toggle reports the value it flipped TO: off -> on -> off.
     click(toggle, BPoint(45, 11));
     CHECK(probeState(kMsgKitToggle, B_CONTROL_ON));
+    // ... and it still HOLDS it: the control's own state is the thing a lamp
+    // is drawn from, so a toggle that reports ON and holds OFF is the bug in
+    // waiting (BButton::Invoke resets the value to off after the invoke, which
+    // is what made the second click below report ON again).
+    {
+        int32 held = -1;
+        if (probe->LockWithTimeout(1000000) == B_OK) {
+            held = toggle->Value();
+            probe->Unlock();
+        }
+        CHECK(held == B_CONTROL_ON);
+    }
     click(toggle, BPoint(45, 11));
     CHECK(probeState(kMsgKitToggle, B_CONTROL_OFF));
 
@@ -4402,9 +4757,311 @@ static void TestWidgetKit(MainWindow* win) {
     }
     CHECK(!invokedOutside);
 
+    // --- the default button and Tab (the UX-shell pass) ---------------------
+    // A kit button IS a BButton now: that is the type BWindow::SetDefaultButton
+    // takes and calls back into, so MakeDefault can register instead of only
+    // drawing a border (which is what it did: Return did nothing in every
+    // converted dialog).
+    CHECK(dynamic_cast<BButton*>(button) != nullptr);
+    // Flags() on a BView is a locked call: BView::Flags() runs _CheckLock(),
+    // which trips the debugger ("Looper must be locked.") when the view's
+    // window lock is not held by the calling thread -- and a faulted run
+    // wedges the whole team (docs/HANDOFF.md). Read them under the probe's
+    // lock, like every other view call here.
+    bool tabReachable = false;
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        tabReachable = (button->Flags() & B_NAVIGABLE) != 0
+                    && (toggle->Flags() & B_NAVIGABLE) != 0;
+        probe->Unlock();
+    }
+    CHECK(tabReachable);
+
+    // MakeDefault reaches the WINDOW: that is the registration BWindow routes
+    // Return to (BWindow::_DetermineTarget), and the thing that was missing.
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        button->MakeDefault(true);
+        probe->Unlock();
+    }
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->DefaultButton() == button;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    // A default button DRAWS differently (the look's B_DEFAULT_BUTTON frame),
+    // which is what the shot below is for.
+    Shot("widget-kit-default");
+
+    // One default per window: making another button the default demotes this
+    // one (BWindow's own bookkeeping, through the same override).
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        toggle->MakeDefault(true);
+        probe->Unlock();
+    }
+    CHECK(WaitFor([&] {
+        if (probe->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = probe->DefaultButton() == toggle;
+        probe->Unlock();
+        return ok;
+    }, 5000000));
+    if (probe->LockWithTimeout(1000000) == B_OK) {
+        probe->SetDefaultButton(nullptr);   // no dangling default on teardown
+        probe->Unlock();
+    }
+
     probe->Lock();
     probe->Quit();
     snooze(150000);
+}
+
+// The three transient dialogs no other test opens get looked at here: Rename
+// (the Save-Preset prompt's class), Quantize (the roll's) and the stems export
+// dialog. Each is closed the way Escape closes it -- B_QUIT_REQUESTED -- and
+// must go quietly, without sending anything.
+static void TestDialogVocabulary(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("ux shell: dialog vocabulary ...\n");
+
+    // Rename. A track id that exists (nothing is applied: the window is never
+    // told OK).
+    {
+        const TrackId tid = project.Tracks().empty()
+                          ? kInvalidTrackId : project.Tracks().front().id;
+        const int before = VisibleWindows();
+        RenameWindow* rn = new RenameWindow(BRect(200, 200, 460, 244), tid,
+                                            "track-name", BMessenger(win), 0,
+                                            0, nullptr);
+        rn->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("rename-dialog");
+        CheckVocabulary(rn, "Rename Track", "ok", "OK");
+        rn->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(rn); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // Quantize.
+    {
+        const int before = VisibleWindows();
+        QuantizeOpts opts;
+        QuantizeWindow* qz = new QuantizeWindow(BRect(200, 200, 500, 452),
+                                                opts, BMessenger(win));
+        qz->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("quantize-dialog");
+        CheckVocabulary(qz, "Quantize", "ok", "Quantize");
+        qz->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(qz); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // The export options dialog, stems mode: its TITLE names the action (the
+    // file panel behind it does), where "Export" alone did not say which.
+    {
+        const int before = VisibleWindows();
+        ExportChoices c;
+        ExportWindow* ew = new ExportWindow(BRect(200, 200, 580, 560), c,
+                                            /*stems*/ true, BMessenger(win));
+        ew->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(250000);
+        Shot("export-stems-dialog");
+        CheckVocabulary(ew, "Export Stems", "ok", "Export Stems");
+        ew->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(ew); }));
+        CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+    }
+
+    // The mixdown one carries the other title and verb, so the two cannot be
+    // the same dialog under two names.
+    {
+        const int before = VisibleWindows();
+        ExportChoices c;
+        ExportWindow* ew = new ExportWindow(BRect(200, 200, 580, 560), c,
+                                            /*stems*/ false, BMessenger(win));
+        ew->Show();
+        CHECK(WaitFor([&] { return VisibleWindows() == before + 1; }));
+        snooze(200000);
+        CheckVocabulary(ew, "Export Mix", "ok", "Export Mix");
+        ew->PostMessage(B_QUIT_REQUESTED);
+        CHECK(WaitFor([&] { return !WindowListed(ew); }));
+    }
+
+    CHECK(WaitQuiet());
+}
+
+// The status line's job messages (the UX-shell pass): a refused second render
+// says so instead of returning in silence, a cancelled one says what happened,
+// and either way the message is TRANSIENT -- after a few seconds the transport
+// state takes the row back, so a stale "Export cancelled" is not still there
+// ten minutes later.
+static void TestRenderFeedback(MainWindow* win, Project& project) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("ux shell: render feedback ...\n");
+
+    // The fixture has to be (a) everything the bounce can render and (b) long.
+    // (a) is the part the first two versions got wrong, and the exporter's own
+    // code is what proves it: by this point in the suite an earlier meter test
+    // has SOLOED its fixture and muted every other track, and ExportWav
+    // computes BOTH its project end and the material it walks from the AUDIBLE
+    // tracks only (`anySolo` -> only soloed ones). So the bounce rendered that
+    // one short clip -- tens of milliseconds -- and the progress bar it raised
+    // was gone before the test could look. The solo goes, the rest stays muted,
+    // and the fixture is the only audible thing.
+    {
+        win->Lock();
+        for (Track& other : project.Tracks()) {
+            other.soloed = false;   // a solo, not a mute, is what silenced us
+            other.muted  = true;
+        }
+        win->Unlock();
+        // A model change made directly posts the same refresh the app's own
+        // edit paths do, or the screen shows the old lamps (UI_GUIDELINES §2).
+        win->PostMessage(kMsgUiRefresh);
+    }
+    // (b) Twelve 120-second notes: seconds of real render (the twelve are a
+    // chord -- the cost is per note-sample, not per second of material, which
+    // is why one note was not enough), and the cancel below stops every one of
+    // them within a chunk.
+    for (int i = 0; i < 12; i++) {
+        char name[32];
+        std::snprintf(name, sizeof(name), "status-synth-%d", i);
+        Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, name);
+        CHECK(LockedAddTrack(win, project, t));
+    }
+    // What the bounce will walk, in the log: the exporter's own rule (nothing
+    // is soloed now, so audible = unmuted) over the same fields it reads. A
+    // test that prints its fixture's size would have caught the empty-render
+    // problem the first time.
+    {
+        Frame projEnd = 0;
+        int audible = 0;
+        win->Lock();
+        for (const Track& tr : project.Tracks()) {
+            if (tr.muted) continue;
+            audible++;
+            for (const Clip& c : tr.clips)
+                if (c.startFrame + c.lengthFrames > projEnd)
+                    projEnd = c.startFrame + c.lengthFrames;
+            for (const MidiNote& n : tr.CollectPlaybackNotes())
+                if (n.startFrame + n.lengthFrames > projEnd)
+                    projEnd = n.startFrame + n.lengthFrames;
+        }
+        win->Unlock();
+        std::printf("  fixture: %d audible track(s), %.0f s of material\n",
+                    audible, (double)projEnd / project.sampleRate);
+    }
+
+    // The remembered choices are pinned first: by this point in the suite an
+    // earlier test has left "Loop range" selected, and a loop-range bounce of
+    // one second is not the fixture this test wants. Whole project, plain WAV.
+    //
+    // The pinning message ANSWERS WITH ITS FILE PANEL (that is how the export
+    // options message works -- every export flow in this suite posts it and
+    // then hides what it opens), so the panel is put away again before
+    // anything here is COUNTED: a panel left up is one extra visible window,
+    // and every count below (windowsBefore, the "exactly one bar" check,
+    // WaitQuiet at the end) is about the quiet screen.
+    {
+        BMessage opts(kMsgExportOptions);
+        opts.AddInt32("container", (int32)AudioFileFormat::Wav);
+        opts.AddInt32("bits", 16);
+        opts.AddInt32("range", 0);
+        opts.AddInt32("stems", 0);
+        win->PostMessage(&opts);
+        MaybeHidePanels(win);   // the panel is up: hide it, and wait it out
+    }
+    CHECK(WaitQuiet());
+
+    const char* pathA = "/tmp/haiku_daw_ui_status_a.wav";
+    const char* pathB = "/tmp/haiku_daw_ui_status_b.wav";
+    std::remove(pathA);
+    std::remove(pathB);
+
+    entry_ref dir;
+    CHECK(BEntry("/tmp").GetRef(&dir) == B_OK);
+    const int32 windowsBefore = VisibleWindows();
+    BMessage a(MSG_EXPORT_REF);
+    a.AddRef("directory", &dir);
+    a.AddString("name", "haiku_daw_ui_status_a.wav");
+    BMessage b(MSG_EXPORT_REF);
+    b.AddRef("directory", &dir);
+    b.AddString("name", "haiku_daw_ui_status_b.wav");
+
+    // The second export is refused -- and SAYS so (it used to return in
+    // silence, so choosing Export again looked like a dead menu item).
+
+    // Both requests go in BACK TO BACK, and that is the guarantee: a window
+    // handles its queue in order, so the first request has started its render
+    // before the second is looked at, and no render of this fixture can be
+    // over in the microseconds between two messages on one thread. The first
+    // version waited for the first render's progress bar before asking for the
+    // second -- a race the test can lose (a short bar is easy to miss between
+    // polls, and a render that never rendered anything made it millisecond
+    // short), and losing it turned "the second export is refused" into "the
+    // second export ran".
+    const bigtime_t askedUs = system_time();
+    win->PostMessage(&a);
+    win->PostMessage(&b);
+    const bool refused = WaitFor([&] {
+        return TransportStatus(win) == "A render is already running";
+    }, 30000000);
+    // A failure here has two very different shapes (the message never set, or
+    // the message set and not read), and which one it is decides whether the
+    // app or the test is at fault: print the row and the windows.
+    if (!refused)
+        std::printf("  DIAG no refusal: status \"%s\", windows %d (base %d)\n",
+                    TransportStatus(win).c_str(), (int)VisibleWindows(),
+                    (int)windowsBefore);
+    CHECK(refused);
+    // How long the request took to be handled is worth a line in the log: it
+    // is the number a loaded VM moves, and it is what the first versions of
+    // this test were really measuring.
+    std::printf("  refusal after %.0f ms\n", (system_time() - askedUs) / 1000.0);
+    // The refusal is only set while the first render IS running, so the bar it
+    // raised is up right now -- and nothing was raised for the refused path.
+    CHECK(VisibleWindows() == windowsBefore + 1);
+
+    // Cancel the long one: the message on the row changes to the cancel.
+    win->PostMessage(kMsgExportCancel);
+    const bool cancelled = WaitFor([&] {
+        return TransportStatus(win) == "Export cancelled";
+    }, 60000000);
+    if (!cancelled)
+        std::printf("  DIAG no cancel message: status \"%s\", windows %d\n",
+                    TransportStatus(win).c_str(), (int)VisibleWindows());
+    CHECK(cancelled);
+    CHECK(WaitFor([&] { return VisibleWindows() == windowsBefore; }, 60000000));
+    CHECK(!FileExists(pathB));   // the refused render wrote nothing
+    CHECK(WaitQuiet());
+
+    // The hold is 4 s (kStatusHoldUs) and the deadline is checked by the 2 Hz
+    // title poll, so the job message is gone inside a second of it.
+    //
+    // What comes back is the TRANSPORT'S STATE, and that is not always
+    // "Stopped": with input monitoring live (a track left armed with its I
+    // lamp, which this suite has by now) the state line is "Monitoring input",
+    // and the row saying so is the app working, not the app failing (the run
+    // that failed printed exactly that, and the message had never been set
+    // because the refusal never happened -- see the fixture above). The
+    // promise this check owns is the one the finding made: a job message does
+    // not stand longer than its hold.
+    const bool jobMessageGone = WaitFor([&] {
+        const std::string s = TransportStatus(win);
+        return s.find("Export") == std::string::npos
+            && s != "A render is already running";
+    }, 20000000);
+    if (!jobMessageGone)
+        std::printf("  DIAG the row after the hold: \"%s\"\n",
+                    TransportStatus(win).c_str());
+    CHECK(jobMessageGone);
+
+    std::remove(pathA);
+    std::remove(pathB);
 }
 
 // M1.4: the docked MIDI editor. The timeline posts kMsgOpenEditor (it no
@@ -4520,6 +5177,726 @@ static void TestDockedEditor(MainWindow* win, Project& project,
         break;
     }
     CHECK(WaitFor([&] { return VisibleWindows() == before; }));
+}
+
+// Package 51: the roll's snapshot against the model — the stale-list bug and
+// the region moving under an open editor — plus the grid the toolbar's field
+// selects and the CC lane's point drag. All of it runs on the DOCKED editor,
+// because that is where the main window's pushes and the Edit menu's routing
+// live; the view's own looper does the message handling, so every touch of the
+// view is under the window's lock (docs/HANDOFF.md: a view method off the
+// window thread trips the kit's assertion).
+static void TestRollModelSync(MainWindow* win, Project& project,
+                              CommandStack* stack) {
+    std::printf("piano roll: model sync, grid, lane drag (package 51)\n");
+    // Two things this test learned on the target, and both are why every click
+    // below is aimed with the VIEW's own mapping instead of with numbers that
+    // only look right:
+    //
+    //  * the docked pane is SHORT (its split height persists; the default is
+    //    Themed(260), so the roll's view is ~236 px tall). A pitch row 36
+    //    semitones below the toolbar is far below the velocity lane, so a click
+    //    meant for a note body lands IN THE LANE -- which is why the notes here
+    //    sit high (90/94), and why every row is computed and checked;
+    //  * the view centres itself on the playhead when one falls inside the
+    //    region, so the transport is parked at 0 first and the scroll is printed
+    //    and checked: a frame-derived x is only meaningful once it is known.
+    // The notes sit on the TOP rows (92-95, plus the audition key at 96): the
+    // usable band is [the toolbar, the velocity lane), and the pane's height is
+    // persisted in the settings file -- the VM has had 200, 236 and 260 px
+    // panes across runs. The top rows are inside the band for anything taller
+    // than ~150 px, and the row CHECKs below say so with the height printed.
+    Track t = MakeMidiTrack(project, { { 95, 100, 0, 4800 },
+                                       { 94, 100, 6000, 3000 } }, "sync-roll");
+    const TrackId tid = t.id;
+    const ClipId  cid = t.midiClips.front().id;
+    const Frame   origLen = t.midiClips.front().lengthFrames;
+    CHECK(LockedAddTrack(win, project, t));
+
+    {
+        win->LockWithTimeout(1000000);
+        project.transport.playhead = 0;
+        win->Unlock();
+    }
+
+    BMessage open(kMsgOpenEditor);
+    open.AddInt64("track", (int64)tid);
+    open.AddInt64("clip", (int64)cid);
+    win->PostMessage(&open);
+
+    PianoRollView* roll = nullptr;
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        roll = dynamic_cast<PianoRollView*>(win->FindView("roll"));
+        win->Unlock();
+        return roll != nullptr;
+    }));
+    if (roll == nullptr) return;
+    // Let the dock's split lay the pane out before its bounds are read: the
+    // view exists as soon as it is a child, but its size arrives with the
+    // layout, and every click below is aimed from this reading.
+    snooze(300000);
+
+    // The view's own terms: how big it is, where it looks, and where a pitch's
+    // row falls. Every click below comes from these, so a click cannot miss the
+    // pane without the aim CHECK saying so.
+    float viewW = 0.0f, viewH = 0.0f;
+    Frame scroll0 = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        viewW = roll->Bounds().Width();
+        viewH = roll->Bounds().Height();
+        scroll0 = roll->ScrollFrame();
+        win->Unlock();
+    }
+    std::printf("  roll view: %.0fx%.0f at scroll %lld\n", viewW, viewH,
+                (long long)scroll0);
+    const float laneTop = viewH - Themed(64.0f);
+    // The y of a pitch's row, in the roll's own metrics (the toolbar's height
+    // plus the semitone rows), half a row down so the click is mid-row.
+    auto rowY = [&](int pitch) {
+        return Themed(28.0f) + (float)(96 - pitch) * Themed(12.0f)
+             + Themed(6.0f);
+    };
+    auto aimOk = [&](float x, float y) {
+        const bool in = x >= Themed(58.0f) && x <= viewW
+                     && y >= Themed(30.0f) && y < laneTop;
+        if (!in)
+            std::printf("  AIM MISS: (%.1f, %.1f) view %.0fx%.0f laneTop %.0f\n",
+                        x, y, viewW, viewH, laneTop);
+        return in;
+    };
+    CHECK(scroll0 == 0);                                        // the park worked
+    CHECK(rowY(96) > Themed(30.0f) && rowY(96) < laneTop);   // the audition key
+    CHECK(rowY(95) > Themed(30.0f) && rowY(95) < laneTop);   // the notes' rows
+    CHECK(rowY(94) > Themed(30.0f) && rowY(94) < laneTop);
+    CHECK(rowY(93) > Themed(30.0f) && rowY(93) < laneTop);   // the drawn ones
+    CHECK(rowY(92) > Themed(30.0f) && rowY(92) < laneTop);
+
+    // A key event for the window's FOCUS view. The token matters: a message
+    // posted with the window's own token is not a "focus message"
+    // (BWindow::_IsFocusMessage requires B_PREFERRED_TOKEN), so the menu's
+    // shortcut path never runs and the key lands in BWindow::MessageReceived,
+    // which does not handle keys -- the natural BMessenger(win) spelling sends
+    // a key nowhere at all. A null handler gives the preferred token, whose
+    // target the window keeps equal to the focus view.
+    auto postKey = [&](const char* bytes, uint32 mods) {
+        BMessage key(B_KEY_DOWN);
+        key.AddString("bytes", bytes);
+        key.AddInt32("modifiers", mods);
+        BMessenger((const BHandler*)nullptr, win).SendMessage(&key);
+    };
+
+    // A synthetic click, in VIEW coordinates. The message has to carry
+    // screen_where: BWindow::DispatchMessage converts a mouse message's SCREEN
+    // point into the view-local be:view_where that the kit's BView::
+    // MessageReceived actually reads, and a message carrying only "where" is
+    // not converted at all -- the view then sees (0, 0), the click lands in the
+    // toolbar's corner, and every interaction in this test silently does
+    // nothing. (The suite's older click helpers post screen_where for exactly
+    // this reason; this test was written without it and paid for it.)
+    auto click = [&](uint32 what, BPoint viewPt, uint32 mods, int32 buttons) {
+        BPoint screen(viewPt);
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            screen = roll->ConvertToScreen(viewPt);
+            win->Unlock();
+        }
+        BMessage m(what);
+        m.AddInt32("buttons", buttons);
+        m.AddInt32("clicks", 1);
+        m.AddInt32("modifiers", mods);
+        m.AddPoint("where", viewPt);
+        m.AddPoint("screen_where", screen);
+        BMessenger(roll).SendMessage(&m);
+    };
+
+    // Reading the ROLL's own state, and the model's, under the window lock.
+    auto rollNotes = [&]() -> std::vector<MidiNote> {
+        std::vector<MidiNote> out;
+        if (win->LockWithTimeout(1000000) != B_OK) return out;
+        for (int i = 0; i < roll->NoteCount(); i++) out.push_back(roll->NoteForTest(i));
+        win->Unlock();
+        return out;
+    };
+    auto modelClip = [&](MidiClip* out) -> bool {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const Track* tr = project.FindTrack(tid);
+        const MidiClip* c = tr ? tr->FindMidiClip(cid) : nullptr;
+        if (c) *out = *c;
+        win->Unlock();
+        return c != nullptr;
+    };
+
+    // The docked editor is a view the main window HOSTS, so it opens synced:
+    // that is what every later commit's base comes from.
+    {
+        bool synced = false;
+        Frame start = -1, len = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            synced = roll->Synced();
+            start  = roll->RegionStart();
+            len    = roll->RegionLength();
+            win->Unlock();
+        }
+        CHECK(synced);
+        CHECK(start == 0);
+        CHECK(len == origLen);
+    }
+
+    // The note the interactions grab: the WIDEST one, so its middle is far from
+    // both of its edges whatever the zoom. Clicking near a note's head is a
+    // different gesture (the left-edge resize) and a note one frame long cannot
+    // be grabbed at all -- both are how this test's first cut turned its moves
+    // into resizes and its toggles into new notes.
+    auto widestNote = [&](int* idxOut) {
+        MidiNote best{};
+        int bestI = -1;
+        Frame bestLen = -1;
+        if (win->LockWithTimeout(1000000) != B_OK) return best;
+        for (int i = 0; i < roll->NoteCount(); i++) {
+            const MidiNote n = roll->NoteForTest(i);
+            if (n.lengthFrames > bestLen) {
+                bestLen = n.lengthFrames;
+                best = n;
+                bestI = i;
+            }
+        }
+        win->Unlock();
+        if (idxOut) *idxOut = bestI;
+        return best;
+    };
+
+    // A click-drag on a note body MOVES it, and the commit lands in the model.
+    // (The roll's own snapshot is what it commits, so the two agreeing after a
+    // drag is not the point — the point is what happens on an undo below.)
+    // Aimed at `idx`'s own row and at the MIDDLE of its body, moved by
+    // `dFrames` worth of x: the middle is a move, the edges would be resizes.
+    auto dragNote = [&](int idx, Frame dFrames) {
+        float x = 0.0f, x2 = 0.0f, y = 0.0f;
+        if (win->LockWithTimeout(1000000) != B_OK) return;
+        if (idx < 0 || idx >= roll->NoteCount()) { win->Unlock(); return; }
+        const MidiNote n = roll->NoteForTest(idx);
+        const Frame mid = n.startFrame + std::max<Frame>(1, n.lengthFrames) / 2;
+        x  = roll->XForFrameForTest(mid);
+        x2 = roll->XForFrameForTest(mid + dFrames);
+        y  = rowY(n.pitch);
+        win->Unlock();
+        CHECK(aimOk(x, y));
+        CHECK(aimOk(x2, y));
+        click(B_MOUSE_DOWN,  BPoint(x, y),  0, 1);
+        click(B_MOUSE_MOVED, BPoint(x2, y), 0, 1);
+        click(B_MOUSE_UP,    BPoint(x2, y), 0, 0);
+        snooze(150000);
+    };
+
+    int grabIdx = -1;
+    {
+        const MidiNote wide = widestNote(&grabIdx);
+        std::printf("  grabbing note %d (pitch %d, %lld frames)\n",
+                    grabIdx, wide.pitch, (long long)wide.lengthFrames);
+    }
+    dragNote(grabIdx, 7000);   // ~one 16th to the right, snapped by the roll
+    MidiClip now;
+    CHECK(WaitFor([&] {
+        MidiClip c;
+        if (!modelClip(&c)) return false;
+        now = c;
+        return c.notes.size() == 2 && c.notes[0].startFrame != 0;
+    }));
+    if (now.notes.size() != 2 || now.notes[0].startFrame == 0)
+        std::printf("  drag did not land: %d notes, first start %lld\n",
+                    (int)now.notes.size(),
+                    now.notes.empty() ? -1LL
+                                      : (long long)now.notes[0].startFrame);
+
+    // --- A. Undo: the model reverts, and the ROLL reverts with it -----------
+    // Before package 51 the roll kept showing the move, and the next gesture
+    // committed that stale list as a fresh edit — the model was silently
+    // rewritten. The roll must now be re-read by the window's push.
+    win->PostMessage(MSG_UNDO_TEST);
+    CHECK(WaitFor([&] {
+        MidiClip c;
+        if (!modelClip(&c)) return false;
+        if (c.notes[0].startFrame != 0) return false;
+        const std::vector<MidiNote> shown = rollNotes();
+        return shown.size() == 2 && shown[0].startFrame == 0;
+    }));
+    {
+        const std::vector<MidiNote> shown = rollNotes();
+        MidiClip c;
+        modelClip(&c);
+        CHECK(shown.size() == c.notes.size());
+        CHECK(shown.size() == 2 && shown[0].startFrame == c.notes[0].startFrame);
+    }
+    Shot("roll-after-undo");
+
+    // --- E. The grid the toolbar's field selects ----------------------------
+    // Draw a note at a frame the TEST chooses (so both grids' answers are
+    // known), then the same frame on the quarter grid: the start must be the
+    // frame the kit-free snap says it is. The roll used to be welded to the
+    // 16th, so triplet and swing parts could not be drawn at all.
+    auto drawAt = [&](Frame f, int pitch) {
+        float x = 0.0f;
+        bool focused = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            x = roll->XForFrameForTest(f);
+            focused = roll->IsFocus();
+            win->Unlock();
+        }
+        // The drags above clicked the roll, so it holds the focus -- and the
+        // Pencil tool is picked by posting the key to the WINDOW, the way a
+        // keyboard sends it. The roll's editor keys are outside the arrange's
+        // map, so this is also the check that the window hands them to the
+        // docked editor rather than letting the map take them.
+        CHECK(focused);
+        postKey("2", 0);
+        snooze(80000);
+        const float y = rowY(pitch);
+        CHECK(aimOk(x, y));
+        click(B_MOUSE_DOWN, BPoint(x, y), 0, 1);
+        click(B_MOUSE_UP,   BPoint(x, y), 0, 0);
+        snooze(150000);
+    };
+    auto waitForNoteAt = [&](int pitch, Frame want) {
+        return WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            for (const MidiNote& n : c.notes)
+                if (n.pitch == pitch && n.startFrame == want) return true;
+            return false;
+        });
+    };
+    const Frame drawFrame = 7000;         // the test's own frame, not an x
+    Frame clipStart = 0;
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        clipStart = roll->RegionStart();
+        win->Unlock();
+    }
+    const Frame want16 = SnapClipRelative(project.tempoMap, drawFrame, clipStart,
+                                          SnapGrid{ SnapKind::Sixteenth, false });
+    drawAt(drawFrame, 93);
+    CHECK(waitForNoteAt(93, want16));
+    Shot("roll-grid-16th");
+
+    // The same point on the quarter grid lands on a different frame: 1/4 is
+    // coarser, so the two cannot agree unless the grid is ignored.
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetSnapGrid(SnapGrid{ SnapKind::Quarter, false });
+            win->Unlock();
+        }
+        bool snapOk = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            snapOk = roll->Snap().kind == SnapKind::Quarter && roll->Snap().On();
+            win->Unlock();
+        }
+        CHECK(snapOk);
+    }
+    const Frame want4 = SnapClipRelative(project.tempoMap, drawFrame, clipStart,
+                                         SnapGrid{ SnapKind::Quarter, false });
+    CHECK(want4 != want16);          // the two grids really do differ here
+    drawAt(drawFrame, 92);           // a new pitch row: a NEW note's frame
+    CHECK(waitForNoteAt(92, want4));
+    Shot("roll-grid-quarter");
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetSnapGrid(SnapGrid{ SnapKind::Sixteenth, false });
+            win->Unlock();
+        }
+    }
+
+    // --- F. A CC point drags; it does not paint a staircase -----------------
+    // Two points of the same controller, then a drag that STARTS on the first
+    // one: the count must not change (the old code wrote a new point at every
+    // new x and left the grabbed one behind).
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetLaneCc(1);
+            win->Unlock();
+        }
+        {
+            std::vector<MidiClipEvent> ev;
+            for (int i = 0; i < 2; i++) {
+                MidiClipEvent e;
+                e.type = MidiClipEvent::CC;
+                e.data = 1;
+                e.startFrame = 3000 + i * 6000;   // clip-relative
+                e.value = 40 + i * 60;
+                ev.push_back(e);
+            }
+            win->LockWithTimeout(1000000);
+            stack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                               tid, cid, std::move(ev)), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgReloadEngine);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = roll->EventCount() == 2 && roll->Lane() == 1;
+            win->Unlock();
+            return ok;
+        }));
+        Shot("roll-cc-lane");
+
+        // The point at 3000, grabbed at its own x and its own y (the lane's
+        // value->y mapping), dragged by a frame delta the test chooses.
+        float x0 = 0.0f, x1 = 0.0f, y0 = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            x0 = roll->XForFrameForTest(3000);
+            x1 = roll->XForFrameForTest(3000 + 11520);
+            y0 = roll->LaneValueYForTest(40);
+            win->Unlock();
+        }
+        const float y1 = y0 + Themed(12.0f);
+        std::printf("  cc aim: (%.1f, %.1f) -> (%.1f, %.1f), laneTop %.0f\n",
+                    x0, y0, x1, y1, laneTop);
+        CHECK(x0 >= Themed(58.0f) && x0 <= viewW);
+        CHECK(x1 >= Themed(58.0f) && x1 <= viewW);
+        CHECK(y0 > laneTop && y0 <= viewH);          // inside the lane
+        click(B_MOUSE_DOWN,  BPoint(x0, y0), 0, 1);
+        click(B_MOUSE_MOVED, BPoint(x1, y1), 0, 1);
+        click(B_MOUSE_UP,    BPoint(x1, y1), 0, 0);
+        snooze(150000);
+
+        // Wait for the dragged point to be at a frame that is NEITHER of the
+        // two the model started with: that is the commit landing.
+        std::vector<MidiClipEvent> after;
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            for (const MidiClipEvent& e : c.events)
+                if (e.type == MidiClipEvent::CC && e.data == 1
+                    && e.startFrame != 3000 && e.startFrame != 9000) {
+                    after = c.events;
+                    return true;
+                }
+            return false;
+        }));
+        if (after.empty()) {
+            MidiClip c;
+            modelClip(&c);
+            std::printf("  cc drag did not land: %d events\n", (int)c.events.size());
+            for (const MidiClipEvent& e : c.events)
+                std::printf("    type %d data %d frame %lld value %d\n",
+                            (int)e.type, (int)e.data, (long long)e.startFrame,
+                            (int)e.value);
+        }
+        int points = 0;
+        Frame movedPre = -1;
+        for (const MidiClipEvent& e : after)
+            if (e.type == MidiClipEvent::CC && e.data == 1) {
+                points++;
+                if (e.startFrame != 9000) movedPre = e.startFrame;
+            }
+        CHECK(points == 2);              // no staircase of new points
+        CHECK(movedPre > 3000);          // the grabbed point moved, in time
+        Shot("roll-cc-drag");
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SetLaneCc(-1);
+            win->Unlock();
+        }
+    }
+
+    // --- B. The region moves under the roll --------------------------------
+    // The timeline drags a MIDI region with MoveMidiClipCommand (the id stays,
+    // only startFrame moves) and posts kMsgReloadEngine. The roll must re-point
+    // (its notes are clip-relative) and its next gesture must not write the old
+    // absolute position back into the model.
+    const Frame newStart = 48000;
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<MoveMidiClipCommand>(tid, cid, newStart),
+                       project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = roll->RegionStart() == newStart;
+        win->Unlock();
+        return ok;
+    }));
+    {
+        MidiClip c;
+        modelClip(&c);
+        const std::vector<MidiNote> shown = rollNotes();
+        CHECK(shown.size() == c.notes.size());   // still this region's notes
+    }
+    Shot("roll-region-moved");
+
+    // --- B2. A split trims the half; the roll must not grow it back ---------
+    const Frame halfLen = 24000;
+    Frame preSplitLen = 0;
+    {
+        MidiClip c;
+        modelClip(&c);
+        preSplitLen = c.lengthFrames;
+    }
+    CHECK(preSplitLen > halfLen);
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<SplitMidiClipCommand>(tid, cid,
+                                                              newStart + halfLen),
+                       project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool ok = roll->RegionLength() == halfLen;
+        win->Unlock();
+        return ok;
+    }));
+    // A gesture inside the half: the region must not go back to its PRE-SPLIT
+    // length (the bug swallowed the split). It may still grow past the half
+    // when a note's tail runs past the new end -- the notes command's
+    // documented "only ever grows" rule -- so the check is against the old
+    // length, which is what the bug restored.
+    {
+        const std::vector<MidiNote> beforeDrag = rollNotes();
+        int idx = -1;
+        widestNote(&idx);
+        dragNote(idx, 7000);
+        CHECK(WaitFor([&] {
+            MidiClip c2;
+            if (!modelClip(&c2)) return false;
+            return !NotesEqual(c2.notes, beforeDrag);
+        }));   // the gesture landed
+        MidiClip c;
+        modelClip(&c);
+        // The region must cover its OWN notes and nothing else. The bug grew it
+        // back over the notes the split had taken away (and over the length the
+        // region had before the split), so a length that exceeds the end of
+        // every note it now holds is the signature to catch -- a length that
+        // merely grew to cover a note's tail is the notes command's documented
+        // "only ever grows" rule and is allowed.
+        Frame ownEnd = 0;
+        for (const MidiNote& n : c.notes)
+            ownEnd = std::max(ownEnd, n.startFrame
+                                       + std::max<Frame>(1, n.lengthFrames));
+        std::printf("  after the split gesture: len %lld (half %lld, own notes "
+                    "end %lld, was %lld)\n",
+                    (long long)c.lengthFrames, (long long)halfLen,
+                    (long long)ownEnd, (long long)preSplitLen);
+        CHECK(c.lengthFrames <= std::max(ownEnd, halfLen));
+        CHECK(c.startFrame == newStart);
+    }
+    Shot("roll-after-split");
+
+    // --- C. Follow is the View menu's policy, both ways ---------------------
+    auto followOf = [&]() -> int {
+        int v = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            v = roll->Follow() ? 1 : 0;
+            win->Unlock();
+        }
+        return v;
+    };
+    auto followMarked = [&]() -> int {
+        int v = -1;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "View") == 0 && it->Submenu())
+                            for (int32 j = 0; j < it->Submenu()->CountItems(); j++)
+                                if (BMenuItem* vi = it->Submenu()->ItemAt(j)) {
+                                    const char* vl = vi->Label();
+                                    if (vl && std::strcmp(vl, "Follow Playhead") == 0)
+                                        v = vi->IsMarked() ? 1 : 0;
+                                }
+                    }
+            win->Unlock();
+        }
+        return v;
+    };
+    CHECK(followOf() == 1);                  // opens following, like the menu
+    win->PostMessage(MSG_FOLLOW_TEST);
+    CHECK(WaitFor([&] { return followOf() == 0; }));
+    CHECK(followMarked() == 0);              // the mark agrees with the roll
+    win->PostMessage(MSG_FOLLOW_TEST);
+    CHECK(WaitFor([&] { return followOf() == 1; }));
+    CHECK(followMarked() == 1);
+
+    // --- H. The clipboard, from the docked editor ---------------------------
+    // The docked roll is a VIEW of the main window, so the menu bar claims
+    // Cmd-C first. Haiku skips the shortcut of a DISABLED item but still
+    // swallows the key, so there are two halves to check: the Edit menu's Copy
+    // is enabled when the EDITOR has a selection (not only when the arrangement
+    // has one), and the key then reaches the roll's clipboard and pastes back
+    // as a model edit. The menu is refreshed through its own entry point --
+    // the test cannot wait on the 2 Hz poll, and reading the item before the
+    // poll ran is exactly how this check failed the first time.
+    {
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            roll->SelectAll();
+            win->UpdateEditMenu();   // what the poll would do, now
+            win->Unlock();
+        }
+        bool copyEnabled = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (BMenuBar* mb = win->KeyMenuBar())
+                for (int32 i = 0; i < mb->CountItems(); i++)
+                    if (BMenuItem* it = mb->ItemAt(i)) {
+                        const char* l = it->Label();
+                        if (l && std::strcmp(l, "Edit") == 0 && it->Submenu())
+                            for (int32 j = 0; j < it->Submenu()->CountItems(); j++)
+                                if (BMenuItem* ei = it->Submenu()->ItemAt(j)) {
+                                    const char* el = ei->Label();
+                                    if (el && std::strcmp(el, "Copy") == 0)
+                                        copyEnabled = ei->IsEnabled();
+                                }
+                    }
+            win->Unlock();
+        }
+        CHECK(copyEnabled);
+        // The key itself, through the focus view's token (see postKey): the
+        // menu bar's shortcut is what delivers it, which is why the item's
+        // enabled state above is the gate the user meets too.
+        postKey("c", B_COMMAND_KEY);
+        bool haveClip = false;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            haveClip = !roll->ClipboardEmpty();
+            win->Unlock();
+            return haveClip;
+        }));
+        // Paste it: the model gains notes (the undo below is the proof the
+        // commit went through the stack, not around it).
+        const int notesBefore = (int)rollNotes().size();
+        postKey("v", B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() > notesBefore;
+        }));
+        Shot("roll-clipboard");
+        win->PostMessage(MSG_UNDO_TEST);   // leave the region as it was
+        CHECK(WaitFor([&] {
+            MidiClip c;
+            if (!modelClip(&c)) return false;
+            return (int)c.notes.size() == notesBefore;
+        }));
+    }
+
+    // --- H2. Alt: a click toggles the selection, a DRAG duplicates ----------
+    // Both gestures share the Alt bits (on a PC keyboard Alt IS B_COMMAND_KEY,
+    // which used to mean only "toggle"), and which one it is depends on whether
+    // the pointer moves.
+    {
+        auto postMouse = [&](uint32 what, BPoint p, uint32 mods) {
+            click(what, p, mods, what == B_MOUSE_UP ? 0 : 1);
+        };
+        // Aimed at the widest note's own row and its MIDDLE, like every other
+        // click here (an edge would be a resize; a one-frame note cannot be
+        // grabbed at all).
+        int altIdx = -1;
+        const MidiNote altNote = widestNote(&altIdx);
+        float nx = 0.0f, ny = 0.0f;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            const Frame mid = altNote.startFrame
+                            + std::max<Frame>(1, altNote.lengthFrames) / 2;
+            nx = roll->XForFrameForTest(mid);
+            ny = rowY(altNote.pitch);
+            roll->SelectAll();
+            win->Unlock();
+        }
+        CHECK(aimOk(nx, ny));
+        int selBefore = -1, notesBefore = 0;
+        MidiClip c0;
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            selBefore = roll->SelectedCountForTest();
+            win->Unlock();
+            modelClip(&c0);
+            notesBefore = (int)c0.notes.size();
+            return selBefore > 0;
+        }));
+        // The Alt-click toggle: selected -> not selected, nothing committed.
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const int s2 = roll->SelectedCountForTest();
+            win->Unlock();
+            return s2 == selBefore - 1;
+        }));
+        {
+            MidiClip c1;
+            modelClip(&c1);
+            CHECK((int)c1.notes.size() == notesBefore);   // a toggle is not an edit
+        }
+        Shot("roll-alt-click");
+
+        // The Alt-drag duplicate: the model gains copies (and one undo takes
+        // them back, so it went through the stack).
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+        postMouse(B_MOUSE_DOWN, BPoint(nx, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_MOVED, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        snooze(80000);
+        postMouse(B_MOUSE_UP, BPoint(nx + 40.0f, ny), B_COMMAND_KEY);
+        CHECK(WaitFor([&] {
+            MidiClip c2;
+            if (!modelClip(&c2)) return false;
+            return (int)c2.notes.size() > notesBefore;
+        }));
+        Shot("roll-alt-drag");
+        win->PostMessage(MSG_UNDO_TEST);
+        CHECK(WaitFor([&] {
+            MidiClip c3;
+            if (!modelClip(&c3)) return false;
+            return (int)c3.notes.size() == notesBefore;
+        }));
+        if (win->LockWithTimeout(1000000) == B_OK) { roll->SelectAll(); win->Unlock(); }
+    }
+
+    // --- D. Audition: a click on the keyboard column sounds -----------------
+    // The engine side cannot be heard by a test, so the engine counts the
+    // audition notes its callback actually RENDERS (Engine::
+    // AuditionNotesRendered). That is the end-to-end proof of the path the
+    // click takes: the view's post, MainWindow's engine, the graph's bus for
+    // the region's track, and the instrument render. It is also the regression
+    // check for the bug this test would have caught: Bus's hand-written move
+    // constructor dropped the reserved audition list, so the graph's bus had
+    // capacity 0 and every click was silently dropped.
+    {
+        const uint64_t before = win->AuditionNotesRendered();
+        const float kx = Themed(20.0f);            // inside the keyboard column
+        const float ky = rowY(96);                 // a row the pane can show
+        click(B_MOUSE_DOWN, BPoint(kx, ky), 0, 1);
+        snooze(120000);
+        click(B_MOUSE_UP,   BPoint(kx, ky), 0, 0);
+        CHECK(WaitFor([&] {
+            return win->AuditionNotesRendered() > before;
+        }));
+        std::printf("  audition: %llu notes rendered\n",
+                    (unsigned long long)win->AuditionNotesRendered());
+        Shot("roll-audition");
+        // Put the idle engine away (the test's own click raised it).
+        win->PostMessage(MSG_AUDITION_IDLE_TEST);
+        CHECK(WaitFor([&] { return !win->AuditionEngineUp(); }));
+    }
+
+    // --- The region is gone: the editor closes -----------------------------
+    {
+        win->LockWithTimeout(1000000);
+        stack->Execute(std::make_unique<RemoveMidiClipCommand>(tid, cid), project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgReloadEngine);
+    CHECK(WaitFor([&] {
+        if (win->LockWithTimeout(1000000) != B_OK) return false;
+        const bool gone = win->FindView("roll") == nullptr;
+        win->Unlock();
+        return gone;
+    }));
+    Shot("roll-region-gone");
+
+    // Leave the dock as the test found it (the region is already gone).
+    win->PostMessage(MSG_TOGGLE_DOCK);
+    snooze(150000);
 }
 
 // M7.1's sidechain picker (package 05). The picker is a BPopUpMenu, which is
@@ -5197,11 +6574,52 @@ static void TestKeyMap(MainWindow* win, Project& project, CommandStack& stack) {
     }));
 
     // L: loop on, then off. (It needs no loop range: the marker-span rule may
-    // set one, and the flag is what the key owns.)
+    // set one, the bar rule always can, and the flag is what the key owns.)
     sendKey("l");
     CHECK(WaitFor([&] { return loopOn() != loopBefore; }));
     sendKey("l");
     CHECK(WaitFor([&] { return loopOn() == loopBefore; }));
+
+    // L with nothing at all to adopt leaves a range the engine can walk — the
+    // BAR around the playhead (package 50, item D). Before this the flag lit
+    // while the engine ignored a zero-length loop: the lamp and the status
+    // line claimed looping and nothing looped. Markers would win the adoption
+    // order (they are tried first), so this case starts with none.
+    {
+        std::vector<Marker> markersWere;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            markersWere = project.markers;      // the marker rule is tried first
+            project.markers.clear();            // ...so this is the "nothing" case
+            project.transport.loopEnabled = false;
+            project.transport.loopStart  = 0;
+            project.transport.loopEnd    = 0;
+            win->Unlock();
+        }
+        setPlayhead(120000);                    // inside bar 2 (96000..192000)
+        sendKey("l");
+        daw::Frame lo = -1, hi = -1;
+        CHECK(WaitFor([&] {
+            bool on = false;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                on = project.transport.loopEnabled;
+                lo = project.transport.loopStart;
+                hi = project.transport.loopEnd;
+                win->Unlock();
+            }
+            return on && hi > lo;
+        }));
+        CHECK(lo == 96000);                     // the bar containing the playhead
+        CHECK(hi == 192000);
+        sendKey("l");                           // and off again
+        CHECK(WaitFor([&] { return !loopOn(); }));
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            project.markers = markersWere;      // put the session back
+            project.transport.loopStart = 0;
+            project.transport.loopEnd   = 0;
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+    }
 
     // C: the click. The window's own state is the observable.
     const bool clickBefore = win->MetronomeOn();
@@ -5282,6 +6700,23 @@ static std::string WriteMeterWav(const char* path, double amp, double hz,
 // this is one project for the whole run and earlier tests leave clips on it,
 // so anything else still audible would land in the master meter's sum (the
 // first cut of this test read a peak that was partly someone else's audio).
+// What PlayMeterFixture changed, so the caller can put it back: id + the
+// muted/soloed pair each track had BEFORE the fixture silenced the session.
+static std::vector<std::tuple<uint64_t, bool, bool>> gMeterSaved;
+
+static void RestoreMeterFixture(MainWindow* win, Project& project) {
+    if (win->LockWithTimeout(2000000) != B_OK) return;
+    for (const auto& e : gMeterSaved) {
+        if (Track* t = project.FindTrack((TrackId)std::get<0>(e))) {
+            t->muted  = std::get<1>(e);
+            t->soloed = std::get<2>(e);
+        }
+    }
+    gMeterSaved.clear();
+    win->Unlock();
+    win->PostMessage(kMsgUiRefresh);
+}
+
 static bool PlayMeterFixture(MainWindow* win, Project& project,
                              const std::string& wav, float gain,
                              TrackId* outTrack) {
@@ -5298,13 +6733,23 @@ static bool PlayMeterFixture(MainWindow* win, Project& project,
     t.clips.push_back(c);
     if (!LockedAddTrack(win, project, t)) return false;
     if (outTrack) *outTrack = t.id;
+    // Silencing the rest is what isolates the meter -- but it is also state
+    // the NEXT test inherits, and the tests after this one share the project:
+    // every later render or playback then finds its material muted out. (That
+    // leak went unnoticed for months and made a render-feedback fixture look
+    // like it rendered impossibly fast -- its material was simply inaudible.)
+    // What is changed is recorded here so RestoreMeterFixture undoes it
+    // exactly, rather than assuming what the values were.
     if (win->LockWithTimeout(1000000) == B_OK) {
+        gMeterSaved.clear();
         for (Track& other : project.Tracks()) {
+            gMeterSaved.push_back({ other.id, other.muted, other.soloed });
             if (other.id == t.id) continue;
             other.soloed = false;
             other.muted  = true;
         }
         if (Track* mine = project.FindTrack(t.id)) mine->soloed = true;
+        gMeterSaved.push_back({ t.id, false, true });   // what t holds now
         project.transport.playhead = 0;
         win->Unlock();
     }
@@ -5446,6 +6891,16 @@ static void TestMetering(MainWindow* win, Project& project, CommandStack& stack)
     win->PostMessage(MSG_STOP);
     CHECK(WaitFor([&] { return !win->IsPlaying(); }));
     CHECK(meter->ClipLatched());   // the latch outlives the transport
+
+    // Put the session back: the fixture muted every other track to isolate the
+    // meter, and the tests after this one share the project. Leaving them
+    // muted is a silent cross-test leak -- the material is there, it just does
+    // not sound, which is exactly the kind of thing that reads as a fast
+    // renderer or a broken engine somewhere else.
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+    RestoreMeterFixture(win, project);
+    CHECK(WaitQuiet());
 
     (void)stack;
 }
@@ -6209,6 +7664,58 @@ static void TestDockPages(MainWindow* win, Project& project, CommandStack* stack
                    "the plugins list well", __LINE__);
     Shot("dock-plugins");
 
+    // The page with NO track selected (the UX-shell pass): it cannot add an
+    // insert to a chain nobody named, so it must SAY so -- the title asks for a
+    // selection ("add to no track selected" read as an error about a chain the
+    // user never had), and a pick answers on the status line instead of being
+    // swallowed in silence.
+    {
+        auto dockTitle = [&] {
+            std::string s;
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                if (BStringView* t = dynamic_cast<BStringView*>(
+                        win->FindView("edtitle")))
+                    s = t->Text() ? t->Text() : "";
+                win->Unlock();
+            }
+            return s;
+        };
+        BMessage none(kMsgTrackSelected);
+        none.AddInt64("track", 0);          // kInvalidTrackId: nothing selected
+        win->PostMessage(&none);
+        CHECK(WaitFor([&] {
+            return dockTitle().find("select a track") != std::string::npos;
+        }));
+        std::printf("  plugins page with no track: \"%s\"\n",
+                    dockTitle().c_str());
+
+        BView* v = nullptr;
+        win->Lock();
+        v = win->FindView("pluginbrowserview");
+        win->Unlock();
+        CHECK(v != nullptr);
+        if (v != nullptr) {
+            win->Lock();
+            if (BListView* l = dynamic_cast<BListView*>(v->FindView("list")))
+                l->Invoke();   // the LIST's own invocation, a double-click
+            win->Unlock();
+        }
+        CHECK(WaitFor([&] {
+            return TransportStatus(win) == "Select a track first";
+        }, 5000000));
+
+        // Back to a real selection for the rest of the test (the pick below
+        // selects its own track; this keeps the page honest in between).
+        TrackId back = kInvalidTrackId;
+        win->Lock();
+        if (!project.Tracks().empty()) back = project.Tracks().front().id;
+        win->Unlock();
+        BMessage sel(kMsgTrackSelected);
+        sel.AddInt64("track", (int64)back);
+        win->PostMessage(&sel);
+        snooze(200000);
+    }
+
     // The strip's own controls belong ON the strip: a title with an unlimited
     // max size, next to a control that stretches, once pushed Pop out and the x
     // past the window's edge -- a layout can be perfectly "valid" and still
@@ -6921,6 +8428,13 @@ static void TestProjectSettings(MainWindow* win, Project& project,
     CHECK(WaitFor([&] { return FindVisibleWindow("Project Settings") != nullptr; }));
     Shot("project-settings");
 
+    // The settings vocabulary (the UX-shell pass): Cancel + Apply, Apply is the
+    // default, Escape closes. The old pair was "Close" (which discarded) next
+    // to a Preferences window whose "Close" meant "done" -- one word, two
+    // meanings, and neither said which.
+    CheckVocabulary(FindVisibleWindow("Project Settings"), "Project Settings",
+                    "ap", "Apply");
+
     // One window: asking again activates it.
     win->PostMessage(MSG_PROJECT_SETTINGS);
     snooze(400000);
@@ -7070,6 +8584,10 @@ static void TestNewProjectTemplates(MainWindow* win, Project& project,
     win->PostMessage(MSG_NEW_PROJECT);
     CHECK(WaitFor([&] { return FindVisibleWindow("New Project") != nullptr; }));
     Shot("new-project");
+
+    // An action dialog: Cancel + the verb, Return presses Create, Escape closes.
+    CheckVocabulary(FindVisibleWindow("New Project"), "New Project", "ok",
+                    "Create");
 
     // The rows the shipped templates produce (when the copy rule ran, which is
     // what makes a build tree usable at all).
@@ -7253,6 +8771,33 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
     Shot("preferences");
 
+    // The vocabulary (the UX-shell pass): a SETTINGS window is Cancel + Apply,
+    // its Apply is the default button (Return applies), and Escape closes it
+    // (the same B_QUIT_REQUESTED Cancel posts -- so Escape discards what was
+    // not applied, exactly like Cancel).
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            DawButton* cancel = dynamic_cast<DawButton*>(w->FindView("cx"));
+            DawButton* apply  = dynamic_cast<DawButton*>(w->FindView("ap"));
+            CHECK(cancel != nullptr && cancel->Label() != nullptr
+                  && std::strcmp(cancel->Label(), "Cancel") == 0);
+            CHECK(apply != nullptr && apply->Label() != nullptr
+                  && std::strcmp(apply->Label(), "Apply") == 0);
+            CHECK(apply != nullptr && w->DefaultButton() == apply);
+            CHECK((w->Flags() & B_CLOSE_ON_ESCAPE) != 0);
+            // The device row says what is true for a user -- the system's
+            // default is used -- and not what a roadmap note said.
+            if (BMenuField* dv = dynamic_cast<BMenuField*>(w->FindView("dv")))
+                CHECK(dv->Menu() != nullptr && dv->Menu()->ItemAt(0) != nullptr
+                      && std::strcmp(dv->Menu()->ItemAt(0)->Label(),
+                                     "System default") == 0);
+            if (BStringView* hint = dynamic_cast<BStringView*>(w->FindView("dvh")))
+                CHECK(BString(hint->Text()).FindFirst("not available yet") >= 0);
+            w->Unlock();
+        }
+    }
+
     // It shows the app's values, not its own defaults.
     {
         const PrefsView v = shownValues();
@@ -7270,7 +8815,10 @@ static void TestPreferences(MainWindow* win, Project& project) {
             if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("bfh")))
                 haveBufferHint = BString(h->Text()).FindFirst("next Play") >= 0;
             if (BStringView* h = dynamic_cast<BStringView*>(w->FindView("ush")))
-                haveScaleHint = BString(h->Text()).FindFirst("Applied now") >= 0;
+                // "Applied on Apply" since the vocabulary pass gave the window
+                // a Cancel/Apply pair: the row is a setting until then.
+                haveScaleHint = BString(h->Text()).FindFirst("Applied on Apply")
+                                >= 0;
             w->Unlock();
         }
         CHECK(haveBufferHint);
@@ -7281,6 +8829,60 @@ static void TestPreferences(MainWindow* win, Project& project) {
     win->PostMessage(MSG_PREFERENCES);
     snooze(400000);
     CHECK(countPrefs() == 1);
+
+    // A SETTING is not a commit (the UX-shell pass): changing a control in the
+    // window changes nothing outside it until Apply -- this used to apply on
+    // every pick, so there was no way to look at a choice before taking it.
+    // (A menu row is marked here the way the existing edits do it, but WITHOUT
+    // the window's change path: marking is what a user's click does.)
+    const int uncommitted = beforeCountIn == 4 ? 2 : 4;
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            BMenu* m = static_cast<PreferencesWindow*>(w)->CountInField()->Menu();
+            for (int32 i = 0; i < m->CountItems(); i++)
+                if (BMenuItem* it = m->ItemAt(i))
+                    it->SetMarked(it->Label() != nullptr
+                                  && std::atoi(it->Label()) == uncommitted);
+            w->Unlock();
+        }
+    }
+    snooze(300000);
+    CHECK((int)win->CountInBarsForTest() == beforeCountIn);   // the app is untouched
+    CHECK(shownValues().countInBars == uncommitted);          // the window shows it
+
+    // Apply is a real button of the window: invoking it is what a click does,
+    // and it commits the whole view.
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (DawButton* apply = dynamic_cast<DawButton*>(w->FindView("ap")))
+                apply->Invoke();
+            w->Unlock();
+        }
+    }
+    CHECK(WaitFor([&] { return (int)win->CountInBarsForTest() == uncommitted; }));
+
+    // Cancel -- and Escape, which posts the same B_QUIT_REQUESTED -- leaves
+    // WITHOUT applying what the window was holding. Checked on the dark-mode
+    // box: flipping it and cancelling must not switch the look.
+    {
+        const ThemeMode mode = ActiveThemeMode();
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (BCheckBox* dark = dynamic_cast<BCheckBox*>(w->FindView("dm")))
+                dark->SetValue(mode == ThemeMode::Dark ? B_CONTROL_OFF
+                                                       : B_CONTROL_ON);
+            w->Unlock();
+        }
+        if (w != nullptr) w->PostMessage(B_QUIT_REQUESTED);   // what Escape posts
+        CHECK(WaitFor([&] { return findPrefs() == nullptr; }));
+        snooze(300000);
+        CHECK(ActiveThemeMode() == mode);
+    }
+    win->PostMessage(MSG_PREFERENCES);   // back for the rest of the test
+    CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
+    snooze(200000);
 
     // Count-in: pick "4 bars" in the window's menu and take its change path.
     CHECK(edit([](PreferencesWindow* w) {
@@ -7370,8 +8972,444 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitQuiet());
 }
 
-static void TestThemeMode(MainWindow* win) {
-    const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
+// The mixer and the windows it shares a session with (package 52). Every check
+// here drives the REAL widget: the messages the strips post, the file-panel
+// ref an Open arrives as, and a key sent to the mixer window the way the input
+// server delivers one.
+//
+// It runs LAST among the project-touching tests because the last section
+// replaces the session (an Open), which is the point of it.
+static void TestUxMixer(MainWindow* win, Project& project, CommandStack* stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("test_ux_mixer\n");
+
+    // --- fixture: two named tracks, so a strip list has something to show ---
+    Track a;
+    a.id = project.NextTrackId();
+    a.type = TrackType::Audio;
+    a.name = "ux-a";
+    CHECK(LockedAddTrack(win, project, a));
+    Track b;
+    b.id = project.NextTrackId();
+    b.type = TrackType::Audio;
+    b.name = "ux-b";
+    CHECK(LockedAddTrack(win, project, b));
+
+    // --- the rack: one strip per track, and it FOLLOWS a track added --------
+    win->PostMessage(MSG_MIXER_TEST);
+    MixerStripsView* strips = nullptr;
+    BWindow* mixer = nullptr;
+    CHECK(WaitFor([&] {
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (!w || w->IsHidden() || w == win) continue;
+            if (w->LockWithTimeout(500000) != B_OK) continue;
+            BView* v = w->FindView("strips");
+            if (v) { mixer = w; strips = dynamic_cast<MixerStripsView*>(v); }
+            w->Unlock();
+            if (strips) return true;
+        }
+        return false;
+    }));
+    CHECK(strips != nullptr);
+    if (strips == nullptr) return;
+
+    auto stripCount = [&] {
+        size_t n = 0;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            n = strips->Strips().size();
+            mixer->Unlock();
+        }
+        return n;
+    };
+    auto stripNames = [&] {
+        std::string s;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            for (const MixerStripInfo& st : strips->Strips()) s += st.name + ",";
+            mixer->Unlock();
+        }
+        return s;
+    };
+    const size_t before = stripCount();
+    CHECK(before >= 2);
+    CHECK(stripNames().find("ux-a") != std::string::npos);
+    std::printf("  rack: %zu strips [%s]\n", before, stripNames().c_str());
+
+    // Track > New Audio goes through the app's own menu handler, and the rack
+    // has to grow the strip for it: it used to need an unrelated edit (a mute
+    // toggle, a marker rename) to show up at all.
+    win->PostMessage(MSG_NEW_AUDIO);
+    CHECK(WaitFor([&] { return stripCount() > before; }));
+    const size_t afterAdd = stripCount();
+    CHECK(WaitFor([&] { return stripNames().find("Audio") != std::string::npos; }));
+    std::printf("  after Track > New Audio: %zu strips [%s]\n", afterAdd,
+                stripNames().c_str());
+
+    // A track deletion (the model + the refresh a delete posts) takes its strip
+    // with it. Left up, that strip looked live and dropped every edit silently.
+    {
+        TrackId gone = kInvalidTrackId;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (!project.Tracks().empty()) gone = project.Tracks().back().id;
+            win->Unlock();
+        }
+        if (gone != kInvalidTrackId) {
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                stack->Execute(std::make_unique<RemoveTrackCommand>(gone), project);
+                win->Unlock();
+            }
+            win->PostMessage(kMsgUiRefresh);
+            CHECK(WaitFor([&] { return stripCount() == afterAdd - 1; }));
+            std::printf("  after deleting a track: %zu strips\n", stripCount());
+        }
+    }
+
+    // The rack as it stands: the shot is taken with the mixer in front, so what
+    // is reviewed is the console -- strips, meters, lamps and the master.
+    if (mixer->LockWithTimeout(1000000) == B_OK) {
+        mixer->Activate(true);
+        mixer->Unlock();
+    }
+    snooze(300000);
+    Shot("ux-mixer");
+
+    // --- the master fader is an undoable, DIRTYING edit (item D) ------------
+    // It used to write project.masterGain directly, so there was no Cmd-Z for a
+    // master move and a session whose only change was the level reported clean:
+    // File > Close gave no prompt and the level was lost.
+    {
+        float was = 1.0f;
+        bool wasDirty = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            was = project.masterGain;
+            wasDirty = stack->IsDirty();
+            win->Unlock();
+        }
+        BMessage m(kMsgApplyMaster);
+        m.AddFloat("gain", 0.5f);
+        win->PostMessage(&m);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = std::fabs(project.masterGain - 0.5f) < 1e-3f;
+            win->Unlock();
+            return ok;
+        }));
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool dirtied = stack->IsDirty();
+            const bool named = stack->UndoName() == "Set Master Gain";
+            win->Unlock();
+            return dirtied && named;
+        }));
+        std::printf("  master fader: an undoable, dirtying edit\n");
+        // And it undoes, which the direct write never could.
+        win->PostMessage(MSG_EDIT_UNDO);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool ok = std::fabs(project.masterGain - was) < 1e-3f;
+            win->Unlock();
+            return ok;
+        }));
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool same = stack->IsDirty() == wasDirty;
+            win->Unlock();
+            return same;
+        }));
+    }
+
+    // --- the keyboard drives the rack (item P) -----------------------------
+    // There was no focus and no KeyDown at all: a mixer could only be mixed
+    // with a mouse. A click on the strip's NAME bar (never a control that opens
+    // a popup -- that would wedge the run) makes it current and focuses the view.
+    //
+    // THE KEYS ARE POSTED TO THE LOOPER'S PREFERRED HANDLER (a null BHandler),
+    // not to the window. That is not a detail: Haiku only routes a key to the
+    // FOCUS VIEW when the message is a "focus message", i.e. its header target
+    // is B_PREFERRED_TOKEN (BWindow::task_looper -> _DetermineTarget ->
+    // CurrentFocus, and BWindow::_IsFocusMessage, which bails out otherwise).
+    // A key posted with the WINDOW's own token -- window->PostMessage, or
+    // BMessenger(window) -- is not one, so BWindow::MessageReceived simply
+    // drops it. Real events from the app_server carry the preferred token,
+    // which is what makes this the faithful way to drive them.
+    {
+        BPoint click(50.0f, 0.0f);        // on the strip's NAME bar
+        BPoint screen = click;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            click.y = strips->Bounds().Height() - 12.0f;
+            screen = strips->ConvertToScreen(click);
+            mixer->Unlock();
+        }
+        BMessage md(B_MOUSE_DOWN);
+        md.AddInt32("buttons", 1);
+        md.AddInt32("clicks", 1);
+        md.AddPoint("where", click);
+        md.AddPoint("screen_where", screen);
+        BMessenger(strips).SendMessage(&md);
+        BMessage mu(B_MOUSE_UP);
+        mu.AddInt32("buttons", 0);
+        mu.AddInt32("clicks", 1);
+        mu.AddPoint("where", click);
+        mu.AddPoint("screen_where", screen);
+        BMessenger(strips).SendMessage(&mu);
+        snooze(100000);
+
+        // Where the keys will land, and whether the rack took the focus at all.
+        // Printed on EVERY run: "the keys do nothing" and "the view never took
+        // focus" are different bugs, and this is the line that tells them apart.
+        BHandler* focus = nullptr;
+        int cur = -1;
+        if (mixer->LockWithTimeout(1000000) == B_OK) {
+            cur = strips->CurrentStrip();
+            focus = mixer->CurrentFocus();
+            mixer->Unlock();
+        }
+        const char* focusName = "(none)";
+        if (focus != nullptr && focus->Name() != nullptr)
+            focusName = focus->Name();
+        std::printf("  mixer keyboard: current strip %d of %zu, focus '%s'\n",
+                    cur, stripCount(), focusName);
+        CHECK(cur == 0);
+        CHECK(focus == strips);   // the view took the focus (B_NAVIGABLE + MakeFocus)
+
+        BMessenger toFocus((const BHandler*)nullptr, (const BLooper*)mixer);
+        CHECK(toFocus.IsValid());
+
+        // Down-arrow nudges the strip's gain by 0.5 dB, through the same
+        // message path a mouse drag takes (so it is one undoable edit).
+        float wasGain = 0.0f;
+        TrackId firstId = kInvalidTrackId;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (!project.Tracks().empty()) {
+                wasGain = project.Tracks().front().gain;
+                firstId = project.Tracks().front().id;
+            }
+            win->Unlock();
+        }
+        BMessage key(B_KEY_DOWN);
+        const char down = (char)B_DOWN_ARROW;
+        key.AddString("bytes", std::string(1, down).c_str());
+        key.AddInt32("modifiers", 0);
+        toFocus.SendMessage(&key);
+        const bool nudged = WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && t->gain < wasGain - 1e-3f;
+            win->Unlock();
+            return ok;
+        });
+        float nowGain = wasGain;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (const Track* t = project.FindTrack(firstId)) nowGain = t->gain;
+            win->Unlock();
+        }
+        // Printed either way: a key that changed nothing is a fact the next
+        // reader needs, and the success printf alone hides it.
+        std::printf("  mixer keyboard: gain %.4f -> %.4f (%s)\n", wasGain,
+                    nowGain, nudged ? "arrow" : "NO CHANGE");
+        CHECK(nudged);
+        // 'm' toggles the current strip's mute, through kMsgApplyMix.
+        BMessage mk(B_KEY_DOWN);
+        mk.AddString("bytes", "m");
+        mk.AddInt32("modifiers", 0);
+        toFocus.SendMessage(&mk);
+        const bool muted = WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && t->muted;
+            win->Unlock();
+            return ok;
+        });
+        std::printf("  mixer keyboard: 'm' %s\n", muted ? "muted" : "NO CHANGE");
+        CHECK(muted);
+        // ... and put it back, so the fixture is as it was.
+        toFocus.SendMessage(&mk);
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const Track* t = project.FindTrack(firstId);
+            const bool ok = t && !t->muted;
+            win->Unlock();
+            return ok;
+        }));
+    }
+
+    // --- one sends window per editor, retargeted (item L) -------------------
+    // Two windows on one track silently overwrote each other's edits, because
+    // each commits its whole list.
+    {
+        const size_t w0 = (size_t)VisibleWindows();
+        BMessage s1(kMsgMixSends);
+        s1.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s1);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-a"); }));
+        // The review's own note: this window and the instrument editor had no
+        // Shot() anywhere, so nothing had ever LOOKED at them. Capture both.
+        Shot("ux-sends");
+        // An instrument editor for an AUDIO track: refused, because there is no
+        // voice to edit there (and a window opened on a stale snapshot would
+        // then commit a whole descriptor for the wrong kind of track).
+        {
+            const size_t w1 = (size_t)VisibleWindows();
+            BMessage s2(kMsgMixInst);
+            s2.AddInt64("track", (int64)a.id);
+            win->PostMessage(&s2);
+            snooze(300000);
+            CHECK((size_t)VisibleWindows() == w1);
+        }
+
+        // Asking again for the same track: the SAME window is activated, not a
+        // second copy of the send list.
+        BMessage s3(kMsgMixSends);
+        s3.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s3);
+        snooze(200000);
+        int sendsWindows = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strncmp(WindowTitle(w), "Sends", 5) == 0)
+                sendsWindows++;
+        }
+        CHECK(sendsWindows == 1);
+
+        // Another track RETARGETS it: same window, its title now names ux-b.
+        BMessage s4(kMsgMixSends);
+        s4.AddInt64("track", (int64)b.id);
+        win->PostMessage(&s4);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-b"); }));
+        int sendsWindows2 = 0;
+        for (int32 i = 0; i < be_app->CountWindows(); i++) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && !w->IsHidden()
+                && std::strncmp(WindowTitle(w), "Sends", 5) == 0)
+                sendsWindows2++;
+        }
+        CHECK(sendsWindows2 == 1);
+        std::printf("  sends windows: same=%d retargeted=%d (%zu -> %zu windows)\n",
+                    sendsWindows, sendsWindows2, w0, (size_t)VisibleWindows());
+
+        // Deleting that track closes it (checked in the refresh funnel).
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<RemoveTrackCommand>(b.id), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+        CHECK(WaitFor([&] { return !WindowUp("Sends \xE2\x80\x94 ux-b"); }));
+
+        // The instrument editor, which the suite had only ever REFUSED (audio
+        // track): open it for a MIDI track and look at it.
+        Track m;
+        m.id = project.NextTrackId();
+        m.type = TrackType::Midi;
+        m.name = "ux-midi";
+        CHECK(LockedAddTrack(win, project, m));
+        BMessage s6(kMsgMixInst);
+        s6.AddInt64("track", (int64)m.id);
+        win->PostMessage(&s6);
+        CHECK(WaitFor([&] { return WindowUp("Instrument \xE2\x80\x94 ux-midi"); }));
+        Shot("ux-instrument");
+        {
+            // ... and it is single-instance too, the same rule as the sends
+            // editor above (one window, retargeted).
+            BMessage again(kMsgMixInst);
+            again.AddInt64("track", (int64)m.id);
+            win->PostMessage(&again);
+            snooze(200000);
+            int instUp = 0;
+            for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                BWindow* w = be_app->WindowAt(i);
+                if (w && !w->IsHidden()
+                    && std::strncmp(WindowTitle(w), "Instrument", 10) == 0)
+                    instUp++;
+            }
+            CHECK(instUp == 1);
+        }
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<RemoveTrackCommand>(m.id), project);
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+        CHECK(WaitFor([&] { return !WindowUp("Instrument \xE2\x80\x94 ux-midi"); }));
+    }
+
+    // --- A: an Open closes every window addressed by track id --------------
+    // Track ids restart at 1 in a loaded file, so a panel left up edits the NEW
+    // project's same-numbered track -- and the effects panel commits its whole
+    // chain, which is a data-corrupting write saved as an undoable edit.
+    {
+        const char* openPath = "/tmp/haiku_daw_ui_uxmix.dawproj";
+        std::remove(openPath);
+        {
+            Project other;
+            other.sampleRate = project.sampleRate;
+            CHECK(other.AddTrack(MakeMidiTrack(other, { { 60, 100, 0, 4800 } },
+                                               "ux-opened")));
+            CHECK(ProjectIO::Save(other, openPath));
+        }
+        // The editor windows that hold a track id, all up at once: the mixer,
+        // the generic effects panel, the sends editor.
+        win->PostMessage(MSG_MIXER_TEST);
+        CHECK(WaitFor([&] { return WindowUp("Mixer"); }));
+        {
+            BMessage fx(kMsgShowFx);
+            fx.AddInt64("track", (int64)a.id);
+            fx.AddInt32("focus", -1);
+            win->PostMessage(&fx);
+            CHECK(WaitFor([&] {
+                for (int32 i = 0; i < be_app->CountWindows(); i++) {
+                    BWindow* w = be_app->WindowAt(i);
+                    if (w && !w->IsHidden()
+                        && std::strstr(WindowTitle(w), "ux-a") != nullptr)
+                        return true;
+                }
+                return false;
+            }));
+        }
+        BMessage s5(kMsgMixSends);
+        s5.AddInt64("track", (int64)a.id);
+        win->PostMessage(&s5);
+        CHECK(WaitFor([&] { return WindowUp("Sends \xE2\x80\x94 ux-a"); }));
+
+        int upBefore = VisibleWindows();
+        std::printf("  before Open: %d window(s) up\n", upBefore);
+        CHECK(upBefore >= 4);   // main + mixer + effects + sends
+
+        // Dirty the project first, so the unsaved-changes prompt is the one
+        // that appears (and Discard is the answer that loads).
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            stack->Execute(std::make_unique<SetTrackNameCommand>(a.id, "ux-a2"),
+                           project);
+            win->Unlock();
+        }
+        entry_ref ref;
+        CHECK(BEntry(openPath).GetRef(&ref) == B_OK);
+        BMessage open(MSG_OPEN_REF);
+        open.AddRef("refs", &ref);
+        win->PostMessage(&open);
+        CHECK(WaitFor([&] { return AlertUp("Unsaved Changes"); }));
+        CHECK(AnswerAlertWhenUp("Unsaved Changes", 1));       // Discard
+
+        CHECK(WaitFor([&] {
+            if (win->LockWithTimeout(1000000) != B_OK) return false;
+            const bool loaded = project.Tracks().size() == 1
+                             && project.Tracks().front().name == "ux-opened";
+            win->Unlock();
+            return loaded;
+        }));
+        // Every one of them closed. This is the check the package exists for.
+        CHECK(WaitFor([&] { return VisibleWindows() == 1; }, 20000000));
+        std::printf("  after Open: %d window(s) up\n", VisibleWindows());
+        CHECK(!WindowUp("Mixer"));
+        CHECK(!WindowUp("Sends \xE2\x80\x94 ux-a"));
+        std::remove(openPath);
+    }
+
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+}
+
+static void TestThemeMode(MainWindow* win) {    const ThemeMode runMode = ActiveThemeMode();   // DAW_UI_THEME for this pass
 
     // The user's own panel colour, before anything is switched. Haiku keeps it
     // in the app_server and SAVES it, which is why the app may never write it.
@@ -7565,7 +9603,9 @@ static int32 TestThread(void*) {
     TestArrangeDepth(win, project, &stack);
     TestArrangeTracks(win, project, &stack);
     TestWidgetKit(win);
+    TestDialogVocabulary(win, project);   // the UX-shell dialog vocabulary
     TestDockedEditor(win, project, &stack);
+    TestRollModelSync(win, project, &stack);   // package 51: the roll vs the model
     TestShortcutsWindow(win);
     TestPreferences(win, project);   // M3.5: opens and puts itself away
     TestProjectSettings(win, project, stack);   // M3.6: applies and undoes
@@ -7573,6 +9613,7 @@ static int32 TestThread(void*) {
     TestMetering(win, project, stack);
     TestTransportBar(win, project);
     TestRegionJob(win, project);
+    TestRenderFeedback(win, project);   // the status line's job messages
     TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
@@ -7587,6 +9628,11 @@ static int32 TestThread(void*) {
     TestNewProjectTemplates(win, project, stack);
     TestFileMenuFlows(win, project, stack);
     TestUnsavedChanges(win, project, stack);   // last: it replaces the project
+    // The mixer and the windows it shares a session with (package 52). Also
+    // replaces the project (its item-A check IS a project replacement), which
+    // is why it comes after the unsaved-changes flow and before the theme
+    // switch, which depends on no project state at all.
+    TestUxMixer(win, project, &stack);
     // The theme switch flips the whole process and puts it back; last, so no
     // other test's shots depend on the mode it leaves behind.
     TestThemeMode(win);

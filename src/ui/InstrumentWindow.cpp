@@ -70,10 +70,18 @@ std::string LeafOf(const std::string& p) {
 } // namespace
 
 InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
-                                   TrackId track, BMessenger apply)
-    : BWindow(frame, "Instrument", B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL,
+                                   TrackId track, BMessenger apply,
+                                   const char* trackName)
+    // Look and feel as separate arguments (see ExportWindow): the
+    // (window_type, flags, workspace) overload would take
+    // (B_TITLED_WINDOW, B_FLOATING_APP_WINDOW_FEEL, <flags>) and swallow the
+    // flags -- this window was zoomable and horizontally locked instead of
+    // not-zoomable.
+    : BWindow(frame, "Instrument", B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
-      fDesc(std::move(inst)), fTrack(track), fApply(apply) {
+      fDesc(std::move(inst)), fTrack(track),
+      fTrackName(trackName ? trackName : ""), fApply(apply) {
+    UpdateTitle(fTrackName.c_str());
     BGroupView* root = new ThemedGroupView("root", B_VERTICAL, Themed(6.0f));
     root->GroupLayout()->SetInsets(Themed(8.0f), Themed(8.0f), Themed(8.0f),
                                    Themed(8.0f));
@@ -90,6 +98,46 @@ InstrumentWindow::InstrumentWindow(BRect frame, InstrumentDesc inst,
         LoadSoundfontNow(false);
     }
     Build();
+}
+
+// The title names the track: one window is retargeted from track to track, so
+// "Instrument" alone would not say whose voice is on screen.
+void InstrumentWindow::UpdateTitle(const char* trackName) {
+    std::string title = "Instrument";
+    if (trackName != nullptr && trackName[0] != '\0')
+        title += std::string(" \xE2\x80\x94 ") + trackName;   // em dash
+    SetTitle(title.c_str());
+}
+
+// Point the window at another track (package 52). Every edit this window makes
+// is applied as it is made -- there is no local list held across gestures, so
+// the only state to carry is the descriptor itself and the title.
+void InstrumentWindow::Retarget(InstrumentDesc inst, TrackId track,
+                                const char* trackName) {
+    // A file panel opened for the OLD track must not answer for the new one:
+    // its reply is a message to this window, and it would set the new track's
+    // soundfont path. Put it away and forget which track it belonged to.
+    if (fPanel != nullptr && fPanelTrack != kInvalidTrackId
+        && fPanelTrack != track)
+        fPanel->Hide();
+    fPanelTrack = kInvalidTrackId;
+    fDesc = std::move(inst);
+    fTrack = track;
+    fTrackName = trackName ? trackName : "";
+    UpdateTitle(fTrackName.c_str());
+    // The soundfont state is per path/preset, and the cache is process-wide:
+    // look it up for the new voice rather than showing the old track's summary.
+    fLoadOk = false;
+    fPartial = false;
+    fStatus.clear();
+    fPresets.clear();
+    if (fDesc.UsesSoundfont() && !fDesc.path.empty()) {
+        if (fDesc.type == InstrumentType::Sf2) RefreshPresets();
+        LoadSoundfontNow(false);
+    }
+    Build();
+    if (IsHidden()) Show();
+    Activate(true);
 }
 
 InstrumentWindow::~InstrumentWindow() {
@@ -185,6 +233,25 @@ static BSlider* AdsrRow(const char* label, int slot,
     m->AddFloat("min", mn);
     m->AddFloat("max", mx);
     BSlider* s = new DawSlider(label, label, m, 0, 1000, B_HORIZONTAL);
+    // The value as a NUMBER (package 52): the ADSR rows said "Attack (s)" and
+    // nothing else, so the envelope you were drawing was only visible by ear.
+    // Milliseconds below a second, seconds above -- a 40 ms attack and a 1.20 s
+    // release are both values a synth is set by. Slot 2 is SUSTAIN, which is a
+    // level and not a time: it stays a plain number.
+    //
+    // The formatter goes on BEFORE the first SetValue: a slider reserves room
+    // for its text line from the moment it has any, and this window sizes
+    // itself from the layout's preferred sizes.
+    if (DawSlider* ds = dynamic_cast<DawSlider*>(s)) {
+        ds->SetValueText([mn, mx, slot](int32 v) {
+            const float val = mn + (v / 1000.0f) * (mx - mn);
+            char buf[32];
+            if (slot == 2)          std::snprintf(buf, sizeof buf, "%.2f", val);
+            else if (val < 1.0f)    std::snprintf(buf, sizeof buf, "%.0f ms", val * 1000.0f);
+            else                    std::snprintf(buf, sizeof buf, "%.2f s", val);
+            return std::string(buf);
+        });
+    }
     float t = (mx > mn) ? (value - mn) / (mx - mn) : 0.0f;
     if (t < 0) t = 0; if (t > 1) t = 1;
     s->SetValue((int32)(t * 1000.0f));
@@ -302,6 +369,33 @@ void InstrumentWindow::DispatchMessage(BMessage* m, BHandler* h) {
 
 void InstrumentWindow::MessageReceived(BMessage* msg) {
     switch (msg->what) {
+        case kMsgInstActivate:
+            // Already open on this track: come to the front rather than opening
+            // a second copy of the same editor (package 52).
+            Activate(true);
+            SetWorkspaces(B_CURRENT_WORKSPACE);
+            break;
+        case kMsgInstRetarget: {
+            int64 tid = 0;
+            msg->FindInt64("track", &tid);
+            const char* name = nullptr;
+            msg->FindString("name", &name);
+            // The descriptor travels as the fields kMsgApplyInstrument carries,
+            // so there is ONE layout for it between the two windows.
+            InstrumentDesc d;
+            int32 v = 0;
+            msg->FindInt32("type", &v); d.type = (InstrumentType)v;
+            msg->FindInt32("wave", &v); d.synth.waveform = v;
+            msg->FindFloat("a", &d.synth.attack);
+            msg->FindFloat("d", &d.synth.decay);
+            msg->FindFloat("s", &d.synth.sustain);
+            msg->FindFloat("r", &d.synth.release);
+            const char* path = nullptr;
+            if (msg->FindString("path", &path) == B_OK && path) d.path = path;
+            msg->FindInt32("preset", &d.sf2Preset);
+            Retarget(std::move(d), (TrackId)tid, name);
+            break;
+        }
         case MSG_MODE: {
             int32 t = 0;
             msg->FindInt32("type", &t);
@@ -335,10 +429,17 @@ void InstrumentWindow::MessageReceived(BMessage* msg) {
                 fFilter = new SoundfontFilter();
                 fPanel->SetRefFilter(fFilter);
             }
+            fPanelTrack = fTrack;   // whose voice this pick is for
             fPanel->Show();
             break;
         }
         case MSG_PICKED: {
+            // The pick belongs to the track the panel was opened for. A
+            // retarget (or a stale reply arriving late) means this is not that
+            // track any more, and applying the path would rewrite the wrong
+            // voice.
+            if (fPanelTrack != fTrack) { fPanelTrack = kInvalidTrackId; break; }
+            fPanelTrack = kInvalidTrackId;
             entry_ref ref;
             if (msg->FindRef("refs", &ref) != B_OK) break;
             BPath p(&ref);

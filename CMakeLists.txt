@@ -436,6 +436,14 @@ add_executable(snapgrid_tests tests/snapgrid_tests.cpp)
 target_link_libraries(snapgrid_tests PRIVATE daw_model)
 add_test(NAME snapgrid_tests COMMAND snapgrid_tests)
 
+# Package 51: the piano roll's kit-free rules — the model-⇄-roll sync decision
+# (the stale-list bug), the commit gate, the region window, snapping in the
+# region's own space, the lane addressing (bend included), the CC lane's point
+# editing and the toolbar's layout.
+add_executable(rolledit_tests tests/rolledit_tests.cpp)
+target_link_libraries(rolledit_tests PRIVATE daw_model)
+add_test(NAME rolledit_tests COMMAND rolledit_tests)
+
 # The arrange editing commands M2.1-2.3 add: Glue's two joins, the slip edit.
 add_executable(arrange_cmd_tests tests/arrange_cmd_tests.cpp)
 target_link_libraries(arrange_cmd_tests PRIVATE daw_model)
@@ -447,11 +455,27 @@ add_executable(range_edit_tests tests/range_edit_tests.cpp)
 target_link_libraries(range_edit_tests PRIVATE daw_model)
 add_test(NAME range_edit_tests COMMAND range_edit_tests)
 
+# The arrangement view's kit-free rules (package 50-ux-timeline,
+# src/model/ArrangeLogic.h): the draw-order hit rule, the loop range the L key
+# adopts, the scrollbar step maths, which selection Delete acts on — plus the
+# marker move command the marker lane's drag runs.
+add_executable(arrange_logic_tests tests/arrange_logic_tests.cpp)
+target_link_libraries(arrange_logic_tests PRIVATE daw_model)
+add_test(NAME arrange_logic_tests COMMAND arrange_logic_tests)
+
 # The M2.6 model work: duplicating a whole track (fresh clip ids) and folding
 # a lane.
 add_executable(track_depth_tests tests/track_depth_tests.cpp)
 target_link_libraries(track_depth_tests PRIVATE daw_model)
 add_test(NAME track_depth_tests COMMAND track_depth_tests)
+
+# The kit-free rules the UI's refresh and identity bookkeeping rests on
+# (package 52): which open windows belong to the project on screen, whether a
+# console is showing the model's track layout, and how a parameter's value
+# becomes text.
+add_executable(ui_rules_tests tests/ui_rules_tests.cpp)
+target_link_libraries(ui_rules_tests PRIVATE daw_model)
+add_test(NAME ui_rules_tests COMMAND ui_rules_tests)
 
 add_executable(dsp_extra_tests tests/dsp_extra_tests.cpp)
 target_link_libraries(dsp_extra_tests PRIVATE daw_model)
@@ -863,10 +887,12 @@ if(HAIKU)
     add_dependencies(ui_functional_tests daw_templates)
     add_test(NAME ui_functional_tests COMMAND ui_functional_tests)
     # TIMEOUT: a window test that wedges (a prompt nobody answers, a lock held)
-    # must fail the suite rather than block ctest forever. The whole run is
-    # ~15 s normally; the longest single wait inside it is 60 s.
+    # must fail the suite rather than block ctest forever. The suite grew a lot
+    # with the UX packages (four packages' worth of dialog-driving checks and
+    # ~20 screenshots): MEASURED at 6 min 15 s on the VM, so the cap is 15 min.
+    # A run that wedges still fails rather than hanging ctest.
     set_tests_properties(ui_functional_tests PROPERTIES SKIP_RETURN_CODE 77
-                         TIMEOUT 300)
+                         TIMEOUT 900)
 
     # --- Sample effect add-on (plugin ABI demo) -----------------------
     # A Haiku shared add-on (.so) the host loads at runtime. Only needs the

@@ -27,7 +27,8 @@ namespace daw {
 namespace {
 
 // The window's own messages (nothing outside needs them).
-enum { MSG_CHOOSE_DIR = 'prcd' };
+enum { MSG_CHOOSE_DIR = 'prcd', MSG_LEVEL_MOVED = 'prlm',
+       MSG_APPLY = 'prap' };
 
 // A text line in this window. A BStringView caches the view colour it was
 // created with, so a theme switch has to re-take it (T1) -- the kit controls
@@ -51,8 +52,9 @@ protected:
     }
 };
 
-// A menu of labels, each item posting `what`: a choice applies at once (this
-// window has no Apply button, exactly like the radio items it replaces).
+// A menu of labels. `what` 0 means "a setting": choosing a row marks it and
+// nothing else happens -- the window applies the whole view on Apply, so a pick
+// is not a commit (the settings vocabulary, one pass with Project Settings).
 BMenu* PickMenu(const char* name, const char* const* labels, int count,
                 int marked, uint32 what) {
     BMenu* menu = new BPopUpMenu(name);
@@ -93,9 +95,10 @@ int IndexInFloatSet(float v, const float* set, int count) {
 
 PreferencesWindow::PreferencesWindow(const PrefsView& values, BMessenger apply)
     : BWindow(BRect(120, 120, 120 + 460, 120 + 400), "Preferences",
-              B_TITLED_WINDOW,
-              B_FLOATING_APP_WINDOW_FEEL | B_NOT_ZOOMABLE | B_NOT_RESIZABLE
-              | B_ASYNCHRONOUS_CONTROLS),
+              // Look, feel and flags as three arguments (see ExportWindow).
+              B_TITLED_WINDOW_LOOK, B_NORMAL_WINDOW_FEEL,
+              B_NOT_ZOOMABLE | B_NOT_RESIZABLE | B_ASYNCHRONOUS_CONTROLS
+              | B_CLOSE_ON_ESCAPE),
       fApply(apply) {
     // Layout Kit (M1.4): the window sizes itself to its contents.
     BView* root = new ThemedView("root", B_WILL_DRAW);
@@ -153,28 +156,26 @@ void PreferencesWindow::BuildRows(BView* root) {
     std::vector<const char*> scl = labels(scaleLabels);
     std::vector<const char*> al = labels(autosaveLabels);
 
-    BMenu* bufferMenu = PickMenu("buffer", bl.data(), (int)bl.size(), 0,
-                                 kMsgPrefsEdited);
-    BMenu* rateMenu   = PickMenu("rate", rl.data(), (int)rl.size(), 0,
-                                 kMsgPrefsEdited);
-    BMenu* countMenu  = PickMenu("countin", cl.data(), (int)cl.size(), 0,
-                                 kMsgPrefsEdited);
-    BMenu* soundMenu  = PickMenu("sound", sl.data(), (int)sl.size(), 0,
-                                 kMsgPrefsEdited);
-    BMenu* scaleMenu  = PickMenu("scale", scl.data(), (int)scl.size(), 0,
-                                 kMsgPrefsEdited);
-    BMenu* autoMenu   = PickMenu("autosave", al.data(), (int)al.size(), 1,
-                                 kMsgPrefsEdited);
+    // No message on any row: a pick or a tick is a SETTING until Apply (the
+    // window holds the values and posts them as one; see NotifyChanged).
+    BMenu* bufferMenu = PickMenu("buffer", bl.data(), (int)bl.size(), 0, 0);
+    BMenu* rateMenu   = PickMenu("rate", rl.data(), (int)rl.size(), 0, 0);
+    BMenu* countMenu  = PickMenu("countin", cl.data(), (int)cl.size(), 0, 0);
+    BMenu* soundMenu  = PickMenu("sound", sl.data(), (int)sl.size(), 0, 0);
+    BMenu* scaleMenu  = PickMenu("scale", scl.data(), (int)scl.size(), 0, 0);
+    BMenu* autoMenu   = PickMenu("autosave", al.data(), (int)al.size(), 1, 0);
 
     // ---- M5.3 SEAM: the audio output device ------------------------------
     // The multichannel-input package owns device enumeration (plan M5.3) and
     // adds the picker HERE: a menu of the live output nodes, a settings key for
     // the chosen one, and the engine told at the next Play. Until then the row
-    // says what is happening rather than showing nothing, and it is disabled
-    // because a control that cannot do what it says is worse than no control.
-    static const char* const kDeviceLabels[1] = { "Default Output" };
+    // says what is actually happening -- the system's default -- and the note
+    // under it says choosing is not available yet, in the user's words rather
+    // than the roadmap's. The control is disabled because one that cannot do
+    // what it says is worse than no control.
+    static const char* const kDeviceLabels[1] = { "System default" };
     BMenu* deviceMenu = PickMenu("device", kDeviceLabels, 1, 0, 0);
-    fDevice = new DawMenuField("dv", "Audio output:", deviceMenu);
+    fDevice = new DawMenuField("dv", "Output device:", deviceMenu);
     fDevice->SetEnabled(false);
 
     fBuffer   = new DawMenuField("bf", "Buffer size:", bufferMenu);
@@ -182,31 +183,48 @@ void PreferencesWindow::BuildRows(BView* root) {
     fCountIn  = new DawMenuField("ci", "Count-in:", countMenu);
     fSound    = new DawMenuField("ms", "Metronome sound:", soundMenu);
 
-    fLevel = new DawSlider("ml", "", new BMessage(kMsgPrefsEdited), 0, 100);
+    // The level slider: MSG_LEVEL_MOVED only refreshes the readout beside it
+    // (the value itself is a setting like any other -- it goes to the app when
+    // Apply is pressed).
+    fLevel = new DawSlider("ml", "", new BMessage(MSG_LEVEL_MOVED), 0, 100);
+    fLevel->SetModificationMessage(new BMessage(MSG_LEVEL_MOVED));
     fLevel->SetValue(30);
     fLevelText = new PrefsLabel("mlv", "30%");
 
     fMonitor = new DawCheckBox("mi", "Monitor the input while recording",
-                               new BMessage(kMsgPrefsEdited));
+                               nullptr);
+    // The MIDI editor's audition (package 51). The roll always asks for it;
+    // MainWindow is where this decides (EnsureAuditionEngine), so the switch
+    // silences the clicks without the editor having to know. Like every other
+    // row here it carries no message: a setting until Apply.
+    fPreview = new DawCheckBox("pn", "Preview notes when editing MIDI",
+                               nullptr);
     fDark    = new DawCheckBox("dm", "Dark mode (this app's windows only)",
-                               new BMessage(kMsgPrefsEdited));
+                               nullptr);
     fScale   = new DawMenuField("us", "UI scale:", scaleMenu);
 
-    fDir = new DawTextField("pd", "Default project folder:", "",
-                            new BMessage(kMsgPrefsEdited));
+    fDir = new DawTextField("pd", "Default project folder:", "", nullptr);
     DawButton* chooseDir = new DawButton("cd", "Choose" B_UTF8_ELLIPSIS,
                                          new BMessage(MSG_CHOOSE_DIR));
 
     fAutosave = new DawMenuField("as", "Autosave:", autoMenu);
 
-    DawButton* close = new DawButton("cx", "Close",
-                                     new BMessage(B_QUIT_REQUESTED));
+    // The settings vocabulary (one pass, with Project Settings): Cancel + Apply,
+    // whose names say what they do -- Apply commits the whole view, Cancel (and
+    // Escape, B_CLOSE_ON_ESCAPE above) leaves without applying what was not.
+    // The old "Close" meant "done" only by convention, next to a window whose
+    // Close discarded.
+    DawButton* cancel = new DawButton("cx", "Cancel",
+                                      new BMessage(B_QUIT_REQUESTED));
+    DawButton* applyBtn = new DawButton("ap", "Apply",
+                                        new BMessage(MSG_APPLY));
+    applyBtn->MakeDefault(true);   // Return applies
 
     BLayoutBuilder::Group<>(root, B_VERTICAL, Themed(8.0f))
         .SetInsets(Themed(10.0f))
         .Add(fDevice)
-        .Add(new PrefsLabel("dvh", "(device selection arrives with the "
-                                   "multichannel-input package)"))
+        .Add(new PrefsLabel("dvh", "The system's default output device is "
+                                   "used; choosing one is not available yet."))
         .Add(fBuffer)
         // What the row PROMISES, next to the row: the buffer is the audio
         // device's block size, and a running device is not re-opened under the
@@ -224,13 +242,14 @@ void PreferencesWindow::BuildRows(BView* root) {
             .Add(fLevelText)
         .End()
         .Add(fMonitor)
+        .Add(fPreview)
         .Add(fDark)
         .Add(fScale)
         // The scale IS applied now (the whole process re-lays out at it); what
         // waits for a launch is the window FRAMES, which stay where the user
         // put them rather than jumping under the pointer.
-        .Add(new PrefsLabel("ush", "Applied now; window sizes settle at the "
-                                   "next launch."))
+        .Add(new PrefsLabel("ush", "Applied on Apply; window sizes settle at "
+                                   "the next launch."))
         .AddGroup(B_HORIZONTAL, Themed(6.0f))
             .Add(fDir)
             .Add(chooseDir)
@@ -238,7 +257,8 @@ void PreferencesWindow::BuildRows(BView* root) {
         .Add(fAutosave)
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
-            .Add(close)
+            .Add(cancel)
+            .Add(applyBtn)
         .End()
         .End();
 }
@@ -258,6 +278,7 @@ PrefsView PreferencesWindow::Values() const {
                                    kMetronomeSoundCount);
     v.metronomeLevel = fLevel ? (float)fLevel->Value() / 100.0f : 0.30f;
     v.monitorInput = fMonitor != nullptr && fMonitor->Value() == B_CONTROL_ON;
+    v.previewNotes = fPreview != nullptr && fPreview->Value() == B_CONTROL_ON;
     v.darkMode     = fDark != nullptr && fDark->Value() == B_CONTROL_ON;
     v.uiScale = kUiScaleChoices[
         MarkedIndex(fScale ? fScale->Menu() : nullptr, kUiScaleChoiceCount)];
@@ -295,6 +316,8 @@ void PreferencesWindow::SetValues(const PrefsView& v) {
     }
     if (fMonitor) fMonitor->SetValue(v.monitorInput ? B_CONTROL_ON
                                                     : B_CONTROL_OFF);
+    if (fPreview) fPreview->SetValue(v.previewNotes ? B_CONTROL_ON
+                                                    : B_CONTROL_OFF);
     if (fDark)    fDark->SetValue(v.darkMode ? B_CONTROL_ON : B_CONTROL_OFF);
     if (fScale) mark(fScale->Menu(), IndexInFloatSet(v.uiScale,
                                                      kUiScaleChoices,
@@ -314,9 +337,10 @@ void PreferencesWindow::UpdateLevelLabel() {
     fLevelText->SetText(b);
 }
 
-// Push the whole set to the app. Called by every control's own message, so a
-// change is applied and persisted the moment it is made (the radio items it
-// replaces behaved the same way).
+// Push the whole set to the app -- on Apply, and on anything that means the
+// same thing (this is the ONE place a set leaves the window). The controls
+// themselves post nothing: a pick or a tick is a setting the app only sees when
+// the user applies it, or forgets when Cancel (or Escape) closes the window.
 void PreferencesWindow::NotifyChanged() {
     if (!fApply.IsValid()) return;
     const PrefsView v = Values();
@@ -327,6 +351,7 @@ void PreferencesWindow::NotifyChanged() {
     m.AddInt32("metsnd", v.metronomeSound);
     m.AddFloat("metlvl", v.metronomeLevel);
     m.AddBool("monin", v.monitorInput);
+    m.AddBool("preview", v.previewNotes);
     m.AddBool("dark", v.darkMode);
     m.AddFloat("uiscale", v.uiScale);
     m.AddString("projdir", v.projectDir.c_str());
@@ -372,6 +397,9 @@ void PreferencesWindow::MessageReceived(BMessage* msg) {
             if (msg->FindInt32("metsnd", &i)  == B_OK) v.metronomeSound = i;
             if (msg->FindFloat("metlvl", &f)  == B_OK) v.metronomeLevel = f;
             if (msg->FindBool("monin", &b)    == B_OK) v.monitorInput = b;
+            // The audition switch (package 51). It was missing here, so every
+            // push blanked it: the row read OFF whatever the setting said.
+            if (msg->FindBool("preview", &b)  == B_OK) v.previewNotes = b;
             if (msg->FindBool("dark", &b)     == B_OK) v.darkMode = b;
             if (msg->FindFloat("uiscale", &f) == B_OK) v.uiScale = f;
             if (msg->FindString("projdir", &s) == B_OK && s) v.projectDir = s;
@@ -379,8 +407,11 @@ void PreferencesWindow::MessageReceived(BMessage* msg) {
             SetValues(v);
             break;
         }
-        case kMsgPrefsEdited:
+        case MSG_LEVEL_MOVED:
+            // The slider's live readout; the value itself waits for Apply.
             UpdateLevelLabel();
+            break;
+        case MSG_APPLY:
             NotifyChanged();
             break;
         case MSG_CHOOSE_DIR:
@@ -392,7 +423,7 @@ void PreferencesWindow::MessageReceived(BMessage* msg) {
                 BPath path(&ref);
                 if (path.InitCheck() == B_OK && fDir != nullptr) {
                     fDir->SetText(path.Path());
-                    NotifyChanged();
+                    // A setting like any other: it reaches the app on Apply.
                 }
             }
             break;

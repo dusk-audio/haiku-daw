@@ -15,6 +15,7 @@
 #include "../src/dsp/EffectFactory.h"
 #include "../src/model/Effect.h"
 
+
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -83,7 +84,7 @@ int main() {
         CHECK(host.Create(r.uri, 48000.0) == nullptr);
     }
 
-    // Listing entries are well-formed and unique: the URI is the persisted id,
+    // --- Listing entries are well-formed and unique: the URI is the persisted id,
     // so a duplicate or empty one would make a saved project ambiguous.
     for (size_t i = 0; i < plugins.size(); i++) {
         CHECK(!plugins[i].uri.empty());
@@ -91,6 +92,14 @@ int main() {
         CHECK(host.Find(plugins[i].uri) == &plugins[i]);
         for (size_t j = i + 1; j < plugins.size(); j++)
             CHECK(plugins[i].uri != plugins[j].uri);
+        // An enumeration's names are PARALLEL to its values: the value is an
+        // index, so a filter type with a name missing (or belonging to another
+        // point) prints a number the plugin never named. The labels themselves
+        // are asserted against the fixture, in lv2_fixture_tests -- this suite
+        // runs against whatever the machine has installed.
+        for (const Lv2ParamInfo& p : plugins[i].params)
+            if (!p.scalePointNames.empty())
+                CHECK(p.scalePointNames.size() == p.scalePoints.size());
     }
 
     // --- Work item 4: persistence degrades softly ------------------------

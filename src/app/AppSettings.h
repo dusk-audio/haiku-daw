@@ -81,6 +81,11 @@ struct AppSettings {
     // The crash-recovery interval in seconds; 0 turns autosave off. One of
     // kAutosaveChoices (a loaded value is clamped, not snapped).
     int   autosaveSeconds   = 30;
+    // Whether the MIDI editor auditions a note through its region's track
+    // instrument when one is clicked, drawn or previewed (package 51). On by
+    // default: it is what every DAW does, and an editor that is silent when
+    // you click a note reads as broken.
+    bool  previewNotes      = true;
 
     std::vector<std::string> recentProjects;
     static constexpr size_t kMaxRecent = 10;

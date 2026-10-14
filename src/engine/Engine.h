@@ -72,6 +72,7 @@
 #include "../synth/IInstrument.h"
 #include "../synth/InstrumentFactory.h"
 #include "../midi/IMidiInput.h"
+#include "../midi/MidiEventRing.h"   // the audition ring (package 51)
 #include "../midi/MidiRouting.h"
 #include "Metronome.h"
 #include "IMonitorSource.h"
@@ -363,6 +364,12 @@ public:
             // thread from the shared voice pool. Reserved at build so the RT
             // rebuild never allocates.
             std::vector<MidiNote>                 liveNotes;
+            // The piano roll's audition clicks for this bus (package 51):
+            // voices from Engine::AuditionNote, rebuilt per block like
+            // liveNotes and rendered through the same instrument. Unlike
+            // liveNotes this needs no armed track — the click sounds on the
+            // region's own track.
+            std::vector<MidiNote>                 auditionNotes;
             std::vector<std::unique_ptr<IEffect>> fx;
             std::vector<EffectType>               fxTypes;  // parallel to fx (SyncFx match)
             // Parallel to fx, both hashes rather than the strings: they are
@@ -477,6 +484,7 @@ public:
                   inEndpoint(o.inEndpoint.load(std::memory_order_relaxed)),
                   inChannel(o.inChannel.load(std::memory_order_relaxed)),
                   liveNotes(std::move(o.liveNotes)),
+                  auditionNotes(std::move(o.auditionNotes)),
                   fx(std::move(o.fx)), fxTypes(std::move(o.fxTypes)),
                   fxIdentity(std::move(o.fxIdentity)),
                   fxStateHash(std::move(o.fxStateHash)),
@@ -513,6 +521,12 @@ public:
                 inEndpoint.store(o.inEndpoint.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 inChannel.store(o.inChannel.load(std::memory_order_relaxed), std::memory_order_relaxed);
                 liveNotes = std::move(o.liveNotes);
+                // The audition's list rides these hand-written moves too: a bus
+                // moved after its reserve (the graph build's push_back) would
+                // otherwise come back with capacity 0, and the RT hand-off's
+                // `size() < capacity()` guard would then silently drop every
+                // click (the whole feature dead, with no crash to show for it).
+                auditionNotes = std::move(o.auditionNotes);
                 fx = std::move(o.fx); fxTypes = std::move(o.fxTypes);
                 fxIdentity = std::move(o.fxIdentity);
                 fxStateHash = std::move(o.fxStateHash);
@@ -551,6 +565,12 @@ public:
             // accumulator at its note-on, so a wheel move bends it from where
             // it started rather than jumping its phase.
             double  bend      = 0.0;
+            // An audition voice (Engine::AuditionNote): it renders through the
+            // bus whose id is Engine::fAuditionTrack rather than through the
+            // armed tracks' monitor route, and switching monitoring off must
+            // not release it. Last member so the existing brace initializers
+            // stay valid.
+            bool    audition  = false;
         };
         static constexpr int kMaxLiveVoices = 64;
 
@@ -581,9 +601,16 @@ public:
         // is stopped. The live controllers are cleared with them: a bend or a
         // pedal left "down" by a keyboard that is no longer sending would
         // otherwise colour the next start.
+        // Which track's bus hears the audition clicks, snapshotted at BUILD
+        // (from BuildRequest::auditionTrack): the bus set and the routing then
+        // cannot disagree -- routing by the Engine's live atomic while the
+        // graph was built for another target silently dropped clicks.
+        TrackId fAuditionTrack = kInvalidTrackId;
+
         void ResetVoices() {
             for (LiveVoice& v : fVoices) v.active = false;
             fLiveNotes.clear();
+            for (Bus& b : fBuses) b.auditionNotes.clear();
             for (int i = 0; i < 128; i++) fLiveCc[i] = 0;
             fLiveBendRatio = 1.0f;
             fLiveBendPhase = 0.0;
@@ -701,6 +728,27 @@ public:
         // RT-only helpers, split out of Render for readability.
         void UpdateLiveVoices(Engine& e, Frame blockStart, size_t frames);
 
+        // The live keyboard's own drain (one event at a time into the voice
+        // pool): its note-on takes a free voice or steals the oldest, its
+        // note-off releases the matching one. Called from UpdateLiveVoices
+        // while a live input is attached.
+        void DrainLiveInput(IMidiInput* in, Frame blockStart);
+
+        // The piano roll's audition clicks (package 51): their own ring, the
+        // same voice pool, and a note-on that renders through the bus named by
+        // Engine::fAuditionTrack rather than through a monitored route. Runs
+        // whether or not a keyboard is attached.
+        void DrainAudition(Engine& e, Frame blockStart);
+
+        // Claim a free voice for a note-on, or steal the oldest. One place, so
+        // the keyboard's and the audition's notes cannot drift apart.
+        void TakeVoice(int pitch, int velocity, int channel, int32_t source,
+                       Frame blockStart, bool audition);
+
+        // A note-off: release the voice matching (pitch, channel, source), or
+        // let the pedal defer it (Sustain.h).
+        void ReleaseVoice(int pitch, int channel, int32_t source, Frame blockStart);
+
         // The pedal lifted at `at`: every voice it was holding stops ringing
         // there. A voice the player is still holding down is untouched — the
         // pedal only releases what it took (model/Sustain.h).
@@ -774,6 +822,19 @@ public:
     // The most recent completed build's status (B_OK, B_ENTRY_NOT_FOUND, ...).
     status_t LastLoadStatus() const {
         return (status_t)fLoadStatus.load(std::memory_order_relaxed);
+    }
+    // Is the player's callback running now? (Start sets it, Stop clears it.)
+    // The window needs it to tell "the clicks own this engine" from "the
+    // transport does, and it merely looks the same".
+    bool PlayerRunning() const {
+        return fPlayerRunning.load(std::memory_order_acquire);
+    }
+    // Audition notes actually rendered by the callback (package 51): the count
+    // is the whole end-to-end proof of the click path that a test can make
+    // without ears -- a bus that lost its reserved list (the hand-written move)
+    // or a graph built for another target renders none of them.
+    uint64_t AuditionNotesRendered() const {
+        return fAuditionRendered.load(std::memory_order_relaxed);
     }
     // How many BSoundPlayers have been opened (a rebuild must not move this).
     uint64_t PlayersOpened() const {
@@ -894,6 +955,15 @@ public:
     void SetFxParamLive(TrackId track, bool master, int fxIndex, int slot,
                         float value);
 
+    // Push one insert's wet/dry mix into the running graph live, for the same
+    // reason as SetFxParamLive: the generic parameter panel's every other row
+    // previews while the control moves, and the mix slider was the one that
+    // stayed silent until release. This is exactly the store SyncFx does into
+    // the slot's own atomic (Graph::Bus::fxMix / Graph::fMasterFxMix), just
+    // addressed from the UI -- so nothing is rebuilt and nothing can disagree
+    // with the value the commit later writes.
+    void SetFxMixLive(TrackId track, bool master, int fxIndex, float mix);
+
     // Publish a watched insert's live parameter values for its open native
     // editor. Addressed exactly like SetFxParamLive (same track/master/fxIndex),
     // and resolved against the RUNNING chain on every block, so a rebuild cannot
@@ -990,6 +1060,27 @@ public:
     // come from MidiInputPort::MonitorInput() (a ring separate from the record
     // drain, so the RT thread is the sole consumer).
     void SetLiveMidi(IMidiInput* in) { fLiveMidi.store(in); }
+
+    // --- audition (package 51) ---------------------------------------------
+    // The piano roll's clicks. An audition note renders through the instrument
+    // + fader + FX of ONE track — the region's own — which is what makes an
+    // audition the note the region will actually play, rather than a bare
+    // synth blip. It needs no keyboard and no armed track, which is why it has
+    // its own small ring rather than riding the live-input path. The engine
+    // must be running: the window raises the monitor-only engine for the
+    // clicks when the transport is stopped (MainWindow::EnsureAuditionEngine),
+    // and the track must be AUDIBLE (a muted track's clicks stay silent, as
+    // its playback does).
+    void SetAuditionTrack(TrackId track) {
+        fAuditionTrack.store(track, std::memory_order_relaxed);
+    }
+    TrackId AuditionTrack() const {
+        return fAuditionTrack.load(std::memory_order_relaxed);
+    }
+    // `on` false with the note still down releases it; a released voice rings
+    // out its own release tail. RT-safe: a lock-free push into the ring the
+    // callback drains (a full ring drops the event, as the live input's does).
+    void AuditionNote(int pitch, int velocity, bool on);
 
     // Per-track live-input routing. The caller (MainWindow) resolves each MIDI
     // track's endpoint NAME to a Midi Kit producer id when it opens the input
@@ -1136,6 +1227,11 @@ private:
         Frame        minEndFrame = 0;
         LoadMode     mode        = LoadMode::NewPosition;
         bool         monitorOnly = false;
+        // The track the piano roll's audition clicks render through (package
+        // 51). Set from the Engine at request time, like monitorOnly: the
+        // builder then keeps that track's bus alive even when its region
+        // carries no notes, which is exactly when a click has to sound.
+        TrackId      auditionTrack = kInvalidTrackId;
         // Build the graph without a loop even when the snapshot's transport has
         // one enabled. The record path sets it: a record pass rolls a long
         // transport through the loop end and the window re-aligns the engine at
@@ -1275,6 +1371,14 @@ private:
     std::atomic<bool>  fInputMonitor{false};
     std::atomic<IMidiInput*> fLiveMidi{nullptr};  // live-monitor input
     std::atomic<bool>  fMonitorOnly{false};       // idle monitor mode
+    // The piano roll's audition (package 51): which track the clicks render
+    // through, and the events themselves. The ring is UI-producer / RT-consumer
+    // like the live input's, and small — a click is a note-on and a note-off,
+    // and a burst is at most a fast arpeggio being typed.
+    std::atomic<TrackId> fAuditionTrack{kInvalidTrackId};
+    MidiEventRing      fAuditionRing{64};
+    // Counted on the RT thread, one per audition note the instrument renders.
+    std::atomic<uint64_t> fAuditionRendered{0};
     // Bumped once per completed RT callback; QuiesceMonitorInput() waits on it
     // to bound the monitor/live-MIDI source teardown UAF window, and the graph
     // reclaimer waits on it to know a retired graph is out of the callback.

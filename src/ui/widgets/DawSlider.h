@@ -14,6 +14,8 @@
 #include <Window.h>
 
 #include <cmath>
+#include <functional>
+#include <string>
 
 namespace daw {
 
@@ -52,10 +54,15 @@ public:
     // The value a double-click returns to (the minimum until one is set).
     void SetDefaultValue(int32 value) { fDefaultValue = value; }
 
-    // The drag model: clicking the trough jumps there (the stock gesture),
-    // then dragging is RELATIVE to the grab point, which is what makes Shift
-    // for a fine rate possible at all. The keyboard, the hash marks and the
-    // focus model stay the base class's.
+    // An optional value readout: a formatter turns the slider's own integer
+    // value into the text drawn above the bar. Without one there is NO text --
+    // which is what every slider in this app had, so no control anywhere said
+    // what it was set to (package 52). A slider whose value is a plain number
+    // (a level in dB, a time in ms) sets one; one whose value is only
+    // meaningful through its label leaves it unset.
+    using ValueText = std::function<std::string(int32)>;
+    void SetValueText(ValueText f) { fValueText = std::move(f); }
+
     void MouseDown(BPoint where) override {
         if (!IsEnabled()) return;
         MakeFocus(true);
@@ -170,8 +177,19 @@ protected:
                                              Orientation());
     }
 
-    // The value text BSlider asks for (UpdateText() formats it) in the theme's
-    // colours, in the space the bar leaves above it.
+    // The value text BSlider asks for. With a formatter set this is the value
+    // the user is setting, drawn in the theme's colours in the space the bar
+    // leaves above it; with none, an empty string means nothing is drawn --
+    // not a "0" invented for a control whose value is only meaningful through
+    // its label.
+    const char* UpdateText() const override {
+        if (!fValueText) return "";
+        fTextCache = fValueText(Value());
+        return fTextCache.c_str();
+    }
+
+    // The drawn text, in the theme's colours, in the space the bar leaves
+    // above it.
     void DrawText() override {
         const char* text = UpdateText();
         if (text == nullptr || text[0] == '\0') return;
@@ -186,6 +204,8 @@ protected:
     bool  fDragging     = false;
     BPoint fGrabPoint;
     int32 fGrabValue    = 0;
+    ValueText fValueText;
+    mutable std::string fTextCache;
 
     void DrawFocusMark() override {
         if (!IsFocus()) return;

@@ -75,8 +75,13 @@ void TransportController::StartPlayback() {
     if (dev != B_OK) {
         fWin->ReportError("Audio Device",
                     "The audio output device could not be opened.\n\n"
-                    "Check the Audio menu's buffer size, and that no other "
-                    "application holds the device.");
+                    // The menu path, in the app's own UTF-8 hex-escape spelling
+                    // (U+25B8, the black right-pointing small triangle). The
+                    // buffer size moved out of the Audio menu in M3.5 and this
+                    // text used to send the user to a menu that no longer has
+                    // the item.
+                    "The buffer size is in File \xE2\x96\xB8 Preferences.\n\n"
+                    "Check that no other application holds the device.");
         std::fprintf(stderr, "MainWindow: engine load failed (%s)\n",
                      strerror(dev));
         fEngine.reset();
@@ -122,15 +127,16 @@ void TransportController::StopPlayback(bool resumeMonitor) {
         fEngine->Stop();
     fPlaying = false;
     if (fWin->fTransport) fWin->fTransport->SetPlaying(false);
+    // Bars to zero, everywhere the transport's tick had been feeding: the
+    // master meter, the track meters and -- the one this used to miss -- the
+    // MIXER's, which has no tick of its own once the pulse stops. The clip
+    // latch and the peak hold are the VIEW's state and are deliberately kept: a
+    // lamp that cleared itself when the transport stopped would hide the clip
+    // that just happened. The holds fall during the decay window below.
+    fWin->ClearMeters();
+    fWin->fMeterDecayUntil = system_time() + MainWindow::kMeterDecayUs;
     fWin->UpdatePulse();
     fWin->PushRollPlayhead(-1);   // hide the roll playhead when stopped
-    // Bars to zero. The clip latch and the peak hold are the VIEW's state and
-    // are deliberately kept: a lamp that cleared itself when the transport
-    // stopped would hide the clip that just happened.
-    fWin->fMeter->SetReadings(MeterReadings{});
-    fWin->fTimeline->ClearTrackPeaks();
-    fWin->UpdateLoudnessReadout(Loudness::kSilenceLufs, Loudness::kSilenceLufs,
-                          Loudness::kSilenceDb);
     // Leave the playhead where it stopped; the readout keeps its last value.
     if (resumeMonitor)
         fWin->fRecCtl.UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
@@ -227,8 +233,13 @@ void TransportController::PollEngineLoad() {
     if (rc != B_ENTRY_NOT_FOUND)
         fWin->ReportError("Audio Device",
                     "The audio output device could not be opened.\n\n"
-                    "Check the Audio menu's buffer size, and that no other "
-                    "application holds the device.");
+                    // The menu path, in the app's own UTF-8 hex-escape spelling
+                    // (U+25B8, the black right-pointing small triangle). The
+                    // buffer size moved out of the Audio menu in M3.5 and this
+                    // text used to send the user to a menu that no longer has
+                    // the item.
+                    "The buffer size is in File \xE2\x96\xB8 Preferences.\n\n"
+                    "Check that no other application holds the device.");
     std::fprintf(stderr, "MainWindow: engine load failed (%s)\n", strerror(rc));
     if (!fPlaying) return;   // the monitor path loads synchronously and reports itself
     fEngine->Stop();

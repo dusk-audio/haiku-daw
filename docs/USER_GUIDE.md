@@ -54,9 +54,11 @@ comes from the file's header, not its extension, so a renamed file still opens.
 monitoring, if your input would otherwise be silent), then the Record button in
 the transport. Count-in bars are in **Preferences** now (the Audio menu keeps
 the metronome toggle); **drag on the ruler** to set the loop, and **Ctrl-drag**
-there to set a punch range (a bare click in the ruler clears the punch).
-Recording inside an enabled loop stacks takes you can comp from — right-click a
-take for **Next Take**.
+there to set a punch range. A plain click on the ruler just moves the playhead —
+**Clear Loop** and **Clear Punch** are entries of the ruler's right-click menu
+(or the Loop button and `L` switch looping off). **L** with no loop range loops
+the bar the playhead is in. Recording inside an enabled loop stacks takes you
+can comp from — right-click a take for **Next Take**.
 
 **Choose the input:** a track's `In` field lists what the system reports —
 `None`, `Default Input`, then each live device with its channels. One channel
@@ -77,21 +79,43 @@ pitch-bend and the mod wheel are audible, live and on playback.
 ## Editing
 
 - **Clips:** drag to move, drag an edge to trim, drag the top corners to set
-  fades. **Cmd**-drag (or **Alt**-drag) the right edge to *stretch* the clip —
-  time-stretch, pitch kept, with the ratio drawn on the clip. Right-click for
-  Copy / Delete / Split here / Normalize / Reverse / Strip Silence / Clear
+  fades. **Alt**-drag (or **Cmd**-drag) *through a clip's middle* slips it —
+  the audio moves under the clip's window and the clip stays put (the edges and
+  corners keep their own gestures). **Cmd**-drag (or **Alt**-drag) the right
+  edge to *stretch* the clip — time-stretch, pitch kept, with the ratio drawn
+  on the clip. Double-click a clip to rename it in place on its name strip
+  (Enter commits, Esc cancels). Right-click for Copy / Delete / Split here /
+  Rename / Mute / Fade Shape / Normalize / Reverse / Strip Silence / Clear
   Fades. Overlapping clips crossfade automatically, and **Shift** bypasses the
-  grid for free placement.
+  grid for free placement. In a crossfade the click always takes the clip drawn
+  on top.
 - **Multi-select:** rubber-band or Cmd-click, then move/delete/duplicate as a
   group. Drag on empty lane area for a time range independent of the clips,
-  then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence.
+  then use Edit ▸ Cut/Copy/Paste/Delete or Insert Silence. A range and a clip
+  selection are never both live: whichever you made last is what Delete acts
+  on.
 - **Notes:** double-click a MIDI region to open the **piano roll**. Its tool
   palette (keys `1`–`7`) picks pointer, pencil, brush, eraser, scissors, glue
-  and velocity; the bottom lane shows velocity or *any* controller — pick the
-  number, and the caption names it where the name is known. The **MIDI** button
-  has the transforms — quantize (with grid, strength, swing and note ends),
-  humanize, legato, transpose, velocity — and `q` re-runs the last quantize.
-  Each transform is one undo step.
+  and velocity; the bottom lane shows velocity, **pitch bend**, or *any*
+  controller — pick the number, and the menu spells out what each one does
+  (the lanes a voice acts on today: mod wheel, volume, expression, pan, sustain;
+  the rest say "no effect yet"). Drag a point to move it; right-click one to
+  delete it, or use **Clear lane**. The **MIDI** button has the transforms —
+  quantize (with grid, strength, swing and note ends), humanize, legato,
+  transpose, velocity — and `q` re-runs the last quantize. Each transform is
+  one undo step.
+- **Piano-roll editing:** the grid field (key `g`) switches what edits snap to
+  — bar, 1/2 … 1/32, triplets, or Off; **Shift** is still free placement.
+  **Cmd-C/X/V/D** copy, cut, paste and duplicate notes (**Alt**-drag duplicates
+  under the pointer too), the arrows nudge a selection by a grid step, `+`/`-`
+  zoom about the playhead and `f` fits the region. The region's start and end
+  are drawn, and notes the region does not play are dimmed — widening the
+  region (drag its edge in the arrangement) brings them back. Clicking a key on
+  the keyboard column, drawing a note, or clicking a velocity lollipop
+  **sounds** the note through the track's instrument
+  (Preferences ▸ "Preview notes when editing MIDI" turns that off). The roll
+  follows the same playhead chase the arrangement does: View ▸ Follow Playhead
+  drives both.
 - **Normalize, Reverse, Strip Silence and Freeze** run in the background: the
   progress bar appears with a **Cancel**, the window stays usable while they
   work, and a cancelled job changes nothing.
@@ -105,29 +129,56 @@ pitch-bend and the mod wheel are audible, live and on playback.
   box, and **dB entry** — double-click a fader or its value to type a level.
   A send level takes effect on the next Play (the engine builds its send tables
   with the graph).
+- **The mixer window** is a console: the master strip is pinned to the right
+  edge, and anything wider than the window scrolls with the scrollbar (or the
+  wheel over empty panel space). The strips follow the arrangement — a track
+  added, deleted or reordered shows up at once.
+  - Each strip's `In` opens the same input picker the inspector offers,
+    `→Mst`/`→Bus` the same output picker, and `Auto` cycles the track's
+    automation lane mode (the one the timeline's Auto box shows).
+  - Every fader is a dB fader: the whole range from silence to +12 dB is on the
+    travel, 0 dB sits at its own tick, and a typed level is never silently
+    clamped.
+  - The meters are stereo (one bar per channel) with a peak-hold tick and a
+    clip lamp per strip; click the lamp to clear it, as on the master meter.
+  - The keyboard drives it: click a strip (or `←`/`→`) to make it current,
+    `↑`/`↓` nudge its gain by 0.5 dB, `M`/`S`/`R` toggle mute, solo and
+    record-arm. Shift is the fine rate while dragging a fader, pan, trim or
+    send knob, and while turning the wheel over one.
 - **Buses and sends:** create a bus (Track ▸ New Bus), then give tracks an
   output or a send in the inspector. Pre-fader sends tap before the fader and
   its effects. Solo groups: put the same number in several tracks' `G` boxes
-  and soloing one solos the group.
+  and soloing one solos the group. The sends editor shows each level in dB and
+  names the track it belongs to.
 - **Inserts:** the inspector's insert slots. Click an empty slot to add a
   built-in effect, a native add-on, or an LV2 plugin; click a filled row to
   edit it (an LV2 plugin with its own interface opens *that*, and it drives the
-  sound while you play). Each insert has a bypass dot and a wet/dry control.
+  sound while you play). Each insert has a bypass dot and a wet/dry control —
+  the wet/dry slider sounds while you drag it, like every other control in the
+  panel. Double-click any control there (knob, parameter row, wet/dry or an EQ
+  band handle) to put it back to its default, and hold Shift while dragging for
+  a fine rate. An LV2 parameter with named values shows the plugin's own name
+  ("Lowpass"), and a port whose name declares a unit ("Frequency (Hz)") shows
+  it. Hovering or dragging an EQ band handle prints that band's frequency, gain
+  and Q in the graph; the wheel over a handle turns its Q.
   The compressor and gate — and an LV2 plugin with sidechain inputs — take a
   **Key** from any other track.
 - **Automation:** cycle a track's `Auto` box to the parameter you want, then
   click the lane to add points and drag them. Volume, pan and any effect
   parameter can be automated.
 - The master strip has a BS.1770 loudness meter (momentary, short-term, true
-  peak) so you can see what an export will measure.
+  peak) so you can see what an export will measure. The master level is an
+  ordinary undoable edit (Cmd-Z takes a fader move back) and marks the project
+  as changed, so File ▸ Close prompts for it.
 
 ## Preferences and Project Settings
 
 **File ▸ Preferences…** is where the session-shaping choices live: buffer size
 (taking effect at the next Play), default sample rate for *new* projects,
-count-in bars, the metronome's sound and level, monitor input, dark mode, the
-UI scale (applied at once; window sizes settle at the next launch), the folder
-a first Save starts in, and the autosave interval (0 turns it off). Audio
+count-in bars, the metronome's sound and level, monitor input, **preview notes
+while editing MIDI** (the piano roll's audition), dark mode, the UI scale
+(applied at once; window sizes settle at the next launch), the folder a first
+Save starts in, and the autosave interval (0 turns it off). Audio
 output still goes to the system default device — the row for it is disabled
 until output-device selection lands.
 

@@ -182,6 +182,38 @@ int main() {
     // Exact matching: L + Ctrl is not L.
     CHECK(FindKeyBinding('l', kModControl) == nullptr);
 
+    // --- the routing gate (the UX-shell pass) -----------------------------
+    // A text field being typed into owns the keyboard: nothing reaches the map.
+    CHECK(!TimelineTakesKey('r', 0, true));
+    CHECK(!TimelineTakesKey(kKeyHome, 0, true));
+    CHECK(!TimelineTakesKey(' ', 0, true));
+
+    // With any other view focused, a bound key is the map's -- the bug this
+    // rule fixed: a focused slider or list used to swallow R/Home/M/,/. and
+    // the arrows, so the transport was unreachable until the user clicked the
+    // timeline back.
+    CHECK(TimelineTakesKey('r', 0, false));
+    CHECK(TimelineTakesKey('m', 0, false));
+    CHECK(TimelineTakesKey(',', 0, false));
+    CHECK(TimelineTakesKey('.', 0, false));
+    CHECK(TimelineTakesKey(kKeyHome, 0, false));
+    CHECK(TimelineTakesKey(kKeyLeft, 0, false));
+    CHECK(TimelineTakesKey(kKeyRight, 0, false));
+    CHECK(TimelineTakesKey(' ', 0, false));         // the transport's space
+    CHECK(TimelineTakesKey('L', kModShift, false)); // case + modifiers agree
+
+    // A key the table does not bind stays with the focused control (a list's
+    // Up/Down, a view's own editing keys), so a control keeps what the map
+    // has no opinion about.
+    CHECK(!TimelineTakesKey(0x1e /* B_UP_ARROW */, 0, false));
+    CHECK(!TimelineTakesKey(0x1f /* B_DOWN_ARROW */, 0, false));
+    CHECK(!TimelineTakesKey('z', 0, false));
+    CHECK(!TimelineTakesKey('r', kModCommand, false));   // Cmd-R: nobody's
+    // A menu accelerator is the MENU's, never the timeline's.
+    CHECK(!TimelineTakesKey('n', kModCommand, false));
+    CHECK(!TimelineTakesKey('s', kModCommand, false));
+    CHECK(!TimelineTakesKey('s', kModCommand | kModShift, false));
+
     // --- the help is generated from the table -----------------------------
     const std::string text = BuildShortcutsText();
     CHECK(!text.empty());

@@ -59,9 +59,10 @@ void PluginBrowserView::ApplyTheme() {
     ApplyWellColors(fScroll);
 }
 
-PluginBrowserView::PluginBrowserView(TrackId track, BMessenger target)
+PluginBrowserView::PluginBrowserView(TrackId track, BMessenger target,
+                                     BMessenger status)
     : ThemedGroupView("pluginbrowserview", B_VERTICAL, 0.0f), fTarget(target),
-      fTrack(track) {
+      fStatus(status), fTrack(track) {
     // The field and the list, laid out the way the window used to place them:
     // inside a real window the group's own layout does the work, inside the
     // dock the dock's. The window host hands this view the whole frame. The
@@ -146,9 +147,13 @@ void PluginBrowserView::PostChoice(int32 index) {
     const Entry& e = fShown[(size_t)sel];
 
     // No track selected (the dock's page before the user picks one): the rows
-    // are inert rather than inserting into whatever track happened to be first.
-    if (fTrack == kInvalidTrackId)
+    // are inert rather than inserting into whatever track happened to be first
+    // -- and the click is ANSWERED, on the status line, instead of doing
+    // nothing in silence (a page that ignores a double-click reads as broken).
+    if (fTrack == kInvalidTrackId) {
+        if (fStatus.IsValid()) fStatus.SendMessage(new BMessage(kMsgPluginNoTrack));
         return;
+    }
 
     BMessage m(kMsgPluginChosen);
     m.AddInt64("track", (int64)fTrack);
@@ -182,7 +187,7 @@ PluginBrowser::PluginBrowser(BRect frame, TrackId track, BMessenger target,
     : BWindow(frame, "Add Effect", B_TITLED_WINDOW,
               B_NOT_ZOOMABLE | B_ASYNCHRONOUS_CONTROLS),
       fMain(main) {
-    fView = new PluginBrowserView(track, target);
+    fView = new PluginBrowserView(track, target, main);
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0.0f).Add(fView).End();
 }
 
