@@ -7085,28 +7085,65 @@ static void TestInputMonitor(MainWindow* win, Project& project,
     CHECK(e != nullptr);
     if (e == nullptr) return;
 
+    // A track of its own first: the monitored input is also the reading its
+    // meter gets, and that is what a user watches while talking (the reported
+    // bug: record and input on, and every meter sat at zero while the take
+    // itself was fine -- the mix went to the master and the track's meter read
+    // its own bus, which carries no input).
+    Track probe;
+    probe.id = project.NextTrackId();
+    probe.type = TrackType::Audio;
+    probe.name = "mon-probe";
+    probe.armed = true;      // what the user's case looks like, and what gives
+                             // the track a bus in the graph to meter on
+    probe.input.kind = InputSource::kAudioDefault;
+    CHECK(LockedAddTrack(win, project, probe));
+
     const Frame ph = project.transport.playhead;
     const Frame end = ph + (Frame)(project.sampleRate * 60.0);
     e->SetMonitorOnly(true);
     CHECK(e->Load(project, ph, end) == B_OK);
     if (e->LastLoadStatus() == B_OK) {
         FakeMonitorSource src(0.4f, (float)project.sampleRate);
-        e->SetMonitorSource(&src);
-        e->SetInputMonitor(true);
+        // Attached through the engine's own API, and RE-asserted on every poll:
+        // the app raises its own idle monitor on any arm/I change (the suite's
+        // earlier tests leave both behind), and its raise takes the track id
+        // back for itself. What is under test is the RT's mix, not who wrote
+        // last -- so the foreign session this test drives keeps re-stating what
+        // it is while the checks run.
+        auto attach = [&] {
+            e->SetMonitorSource(&src);
+            e->SetInputMonitor(true);
+            e->SetMonitorTrack(probe.id);   // whose meter the input belongs to
+        };
+        attach();
         e->Start();
-        CHECK(WaitFor([&] { return win->MasterPeakL() > 0.3f; }, 8000000));
+        CHECK(WaitFor([&] { attach(); return win->MasterPeakL() > 0.3f; },
+                      8000000));
         // ... and it is the SOURCE's level: monitor-only plays no clips, so the
         // meter is the monitored input and nothing else.
         CHECK(std::fabs(win->MasterPeakL() - 0.4f) < 0.06f);
+        // The TRACK's meter carries the same level: that is the reading an
+        // armed, monitoring track is for.
+        CHECK(WaitFor([&] {
+            attach();
+            return std::fabs(e->TrackPeakL(probe.id) - 0.4f) < 0.06f;
+        }, 8000000));
 
         // A source at another rate is resampled, not dropped — a 44.1 kHz
         // interface under a 48 kHz project is the common case.
         FakeMonitorSource half(0.5f, (float)project.sampleRate / 2.0f);
-        e->SetInputMonitor(false);
-        e->SetMonitorSource(&half);
-        e->SetInputMonitor(true);
+        auto attachHalf = [&] {
+            e->SetInputMonitor(false);
+            e->SetMonitorSource(&half);
+            e->SetInputMonitor(true);
+            e->SetMonitorTrack(probe.id);
+        };
+        attachHalf();
         CHECK(WaitFor([&] {
-            return std::fabs(win->MasterPeakL() - 0.5f) < 0.06f;
+            attachHalf();
+            return std::fabs(win->MasterPeakL() - 0.5f) < 0.06f
+                && std::fabs(e->TrackPeakL(probe.id) - 0.5f) < 0.06f;
         }, 8000000));
 
         // The flag is the switch, not the source being attached: detaching the
@@ -7114,6 +7151,7 @@ static void TestInputMonitor(MainWindow* win, Project& project,
         e->SetInputMonitor(false);
         CHECK(WaitFor([&] { return win->MasterPeakL() < 0.02f; }, 8000000));
         e->SetMonitorSource(nullptr);
+        e->SetMonitorTrack(kInvalidTrackId);
         e->Stop();
     }
     e->SetMonitorOnly(false);
@@ -7122,13 +7160,6 @@ static void TestInputMonitor(MainWindow* win, Project& project,
     // capture (the same rule as a take's), so a machine with an input opens it
     // here; a machine without one — this VM — must simply not monitor, and say
     // so honestly.
-    Track probe;
-    probe.id = project.NextTrackId();
-    probe.type = TrackType::Audio;
-    probe.name = "mon-probe";
-    probe.input.kind = InputSource::kAudioDefault;
-    CHECK(LockedAddTrack(win, project, probe));
-
     auto setMonitorFlag = [&](bool on) {
         if (win->LockWithTimeout(1000000) != B_OK) return;
         if (Track* t = project.FindTrack(probe.id)) t->inputMonitor = on;

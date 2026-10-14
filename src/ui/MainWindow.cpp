@@ -4797,8 +4797,14 @@ void MainWindow::StopAuditionEngine() {
     // ONLY an engine the clicks own may be stopped: a play, a take and the
     // armed-track monitor are all the SAME engine object (M4.1 keeps one
     // player), and stopping it there would freeze the transport with its lamp
-    // still lit and no way back except a manual Stop.
-    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring)
+    // still lit and no way back except a manual Stop. A monitor source ON the
+    // engine counts the same way: that is an input monitor session, and this
+    // idle timer (armed by an earlier audition) is not its owner. The suite
+    // drives a monitor session exactly that way, and the timer used to stop it
+    // mid-check.
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring
+        || (fTransportCtl.fEngine
+            && fTransportCtl.fEngine->InputMonitorAttached()))
         return;
     if (fTransportCtl.fEngine) {
         fTransportCtl.fEngine->Stop();

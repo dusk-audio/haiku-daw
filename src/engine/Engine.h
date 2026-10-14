@@ -1057,6 +1057,22 @@ public:
     // resampling). Both are RT-safe atomic stores.
     void SetMonitorSource(IMonitorSource* src) { fMonSource.store(src); }
     void SetInputMonitor(bool on) { fInputMonitor.store(on); }
+    // WHICH track that input belongs to, so its meter can show the level: the
+    // monitor mix goes straight to the master (the strip has no say in a
+    // monitored level), so a meter reading the strip's own bus would sit at zero
+    // while the user talks into an armed, monitoring track -- which is exactly
+    // what it did. The RT publishes the monitored input's peak on this track's
+    // bus meter. kInvalidTrackId = nobody (the master still shows it).
+    void SetMonitorTrack(TrackId id) { fMonTrack.store(id); }
+    TrackId MonitorTrack() const { return fMonTrack.load(); }
+    // Is somebody's input monitor on this engine right now? A source attached
+    // AND the flag on. Whoever wants to STOP the player asks this first: the
+    // engine is one object for playback, takes, the clicks and the monitor
+    // (M4.1), and an idle timer that stops a session it does not own takes the
+    // device away from it.
+    bool InputMonitorAttached() const {
+        return fInputMonitor.load() && fMonSource.load() != nullptr;
+    }
 
     // Live MIDI monitoring: while recording, incoming events from this input are
     // synthesized in real time through each armed MIDI track's instrument, so
@@ -1375,6 +1391,7 @@ private:
     std::atomic<bool>  fMonitorMono{false};
     std::atomic<IMonitorSource*> fMonSource{nullptr};
     std::atomic<bool>  fInputMonitor{false};
+    std::atomic<TrackId> fMonTrack{kInvalidTrackId};   // whose meter the input is
     std::atomic<IMidiInput*> fLiveMidi{nullptr};  // live-monitor input
     std::atomic<bool>  fMonitorOnly{false};       // idle monitor mode
     // The piano roll's audition (package 51): which track the clicks render

@@ -389,7 +389,12 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   the state line were all correct). `Graph::MixMonitorInput` is now shared;
   `TestInputMonitor` drives it with a fake `IMonitorSource` and reads the master
   peak, which is the only way to check the mix on a machine with no input
-  device.
+  device. The same rule caught the METERS next: the mix goes to the master, so
+  an armed, monitoring track's own meter (lane header, inspector VU, mixer
+  strip — all `Engine::TrackPeakL`) sat at zero while the user talked into it.
+  `SetMonitorTrack` names the track the input belongs to, and both render paths
+  publish the input's peak on that bus, which is why the report after the fix
+  was "no levels on the meters" and not "no sound".
 - **A gesture's modifiers belong on the EVENT — never `BView::modifiers()`.**
   The kit's global `modifiers()` asks the input server what is held *right
   now*: it is neither the modifiers the gesture was made with (a Shift released

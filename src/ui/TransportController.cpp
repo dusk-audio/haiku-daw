@@ -209,8 +209,14 @@ bool TransportController::StartRecordEngine(Frame engineStart) {
     e->SetMonitorMono(fMonMono);
     // Re-attach input monitoring across an engine restart (loop-record seam).
     if (fWin->fRecCtl.fRecorder) {
+        const bool audMon = fWin->AudioMonitorOn();
         e->SetMonitorSource(fWin->fRecCtl.fRecorder.get());
-        e->SetInputMonitor(fWin->AudioMonitorOn());
+        e->SetInputMonitor(audMon);
+        // ... and the track whose meter carries the input (the take's first
+        // armed track: the capture's channels are that track's pair).
+        e->SetMonitorTrack(audMon && !fWin->fRecCtl.fTakeTracks.empty()
+                               ? fWin->fRecCtl.fTakeTracks[0]
+                               : kInvalidTrackId);
     }
     if (fWin->fRecCtl.fMidiIn) e->SetLiveMidi(fWin->fRecCtl.fMidiIn->MonitorInput());
     // Routes live on the Engine and survive a graph swap, but re-pushing costs

@@ -96,6 +96,7 @@ void RecordController::StopRecording() {
     if (fWin->fTransportCtl.fEngine) {
         fWin->fTransportCtl.fEngine->SetInputMonitor(false);
         fWin->fTransportCtl.fEngine->SetMonitorSource(nullptr);
+        fWin->fTransportCtl.fEngine->SetMonitorTrack(kInvalidTrackId);
         fWin->fTransportCtl.fEngine->Stop();
     }
     fRecMode = false;
@@ -289,6 +290,12 @@ void RecordController::StartCapture() {
             if (fWin->fTransportCtl.fEngine) {
                 fWin->fTransportCtl.fEngine->SetMonitorSource(fRecorder.get());
                 fWin->fTransportCtl.fEngine->SetInputMonitor(audMon);
+                // ... and WHOSE meter the input is: the take's first armed
+                // track, so its header meter shows the level being captured
+                // (the capture's channels are that track's pair).
+                fWin->fTransportCtl.fEngine->SetMonitorTrack(
+                    audMon && !fTakeTracks.empty() ? fTakeTracks[0]
+                                                   : kInvalidTrackId);
             }
         }
     }
@@ -470,13 +477,16 @@ void RecordController::UpdateIdleMonitor() {
         audioMon = &t;
         break;
     }
+    TrackId liveTrack = kInvalidTrackId;
     if (audioMon != nullptr) {
         const InputSource& in = audioMon->input;
         const bool stereo = audioMon->channels == TrackChannels::Stereo;
         const int l = in.channelL < 0 ? 0 : in.channelL;
         const int r = stereo ? (in.channelR < 0 ? l : in.channelR) : l;
         fLiveIn.reset(new Recorder());
-        if (fLiveIn->StartMonitor(in.device, l, r) != B_OK)
+        if (fLiveIn->StartMonitor(in.device, l, r) == B_OK)
+            liveTrack = audioMon->id;   // whose meter the input is
+        else
             fLiveIn.reset();     // no input device: the app goes on, silently
     }
 
@@ -519,6 +529,10 @@ void RecordController::UpdateIdleMonitor() {
         e->SetMonitorSource(fLiveIn.get());
         e->SetInputMonitor(true);
     }
+    // Which track shows the input on its meter (kInvalidTrackId = nobody: the
+    // master still carries it). Set on every raise, so a track that stopped
+    // monitoring does not keep the next session's peak on its meter.
+    e->SetMonitorTrack(liveTrack);
     e->Start();
     fWin->ReapplyFxWatches();   // the watch slots live on the engine, re-addressed
     fWin->fTransportCtl.fMonitoring = true;
@@ -536,6 +550,7 @@ void RecordController::StopIdleMonitor() {
         // the take's recorder, in StopRecording).
         e->SetInputMonitor(false);
         e->SetMonitorSource(nullptr);
+        e->SetMonitorTrack(kInvalidTrackId);
         e->Stop();
         // The engine — and with it the open device — is KEPT (M4.1: the player
         // outlives every rebuild). A play or a take re-arms it with
