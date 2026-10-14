@@ -45,7 +45,7 @@ Frame TransportController::PlayRangeEnd(bool looping) const {
 void TransportController::StartPlayback() {
     if (fWin->fRecCtl.fRecMode)
         return;   // recording runs its own engine (overdub)
-    fWin->fRecCtl.StopMidiMonitor();   // playback owns the engine + MIDI input
+    fWin->fRecCtl.StopIdleMonitor();   // playback owns the engine + the inputs
     // The graph is rebuilt from the current model (RT-safe: the running one is
     // never mutated) — on the engine's worker thread now. Playback begins at
     // the current playhead; if it's already at/after the end (and not looping),
@@ -139,7 +139,7 @@ void TransportController::StopPlayback(bool resumeMonitor) {
     fWin->PushRollPlayhead(-1);   // hide the roll playhead when stopped
     // Leave the playhead where it stopped; the readout keeps its last value.
     if (resumeMonitor)
-        fWin->fRecCtl.UpdateMidiMonitor();   // resume idle monitoring if a MIDI track is armed
+        fWin->fRecCtl.UpdateIdleMonitor();   // resume idle monitoring (a track still asks for it)
 }
 
 void TransportController::ReloadActiveEngine() {
@@ -162,7 +162,7 @@ void TransportController::ReloadActiveEngine() {
         fEngine->RequestLoad(*fWin->fProject, ph, PlayRangeEnd(looping),
                              Engine::LoadMode::InPlace);
     } else if (fMonitoring) {
-        fWin->fRecCtl.UpdateMidiMonitor();      // rebuilds the idle monitor engine
+        fWin->fRecCtl.UpdateIdleMonitor();      // rebuilds the idle monitor engine
     }
     // Stopped / recording: the change applies on the next Play / take.
 }
@@ -209,8 +209,14 @@ bool TransportController::StartRecordEngine(Frame engineStart) {
     e->SetMonitorMono(fMonMono);
     // Re-attach input monitoring across an engine restart (loop-record seam).
     if (fWin->fRecCtl.fRecorder) {
+        const bool audMon = fWin->AudioMonitorOn();
         e->SetMonitorSource(fWin->fRecCtl.fRecorder.get());
-        e->SetInputMonitor(fWin->AudioMonitorOn());
+        e->SetInputMonitor(audMon);
+        // ... and the track whose meter carries the input (the take's first
+        // armed track: the capture's channels are that track's pair).
+        e->SetMonitorTrack(audMon && !fWin->fRecCtl.fTakeTracks.empty()
+                               ? fWin->fRecCtl.fTakeTracks[0]
+                               : kInvalidTrackId);
     }
     if (fWin->fRecCtl.fMidiIn) e->SetLiveMidi(fWin->fRecCtl.fMidiIn->MonitorInput());
     // Routes live on the Engine and survive a graph swap, but re-pushing costs

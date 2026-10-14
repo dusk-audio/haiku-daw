@@ -595,6 +595,10 @@ public:
         // fWrapsAtRequest: the pass count the in-place join needs.
         void RenderSegment(Engine& e, float* out, size_t frames, Frame blockStart,
                            uint64_t wraps);
+        // The monitored input, on top of `out` — shared by RenderSegment (a
+        // take, or playback) and RenderMonitorOnly (an idle I lamp), because
+        // monitor-only is the ONLY path rendering while it is up.
+        void MixMonitorInput(Engine& e, float* out, size_t frames);
 
         // Drop every live voice, so a note held at Stop can't sustain (up to
         // kHeld) or re-sound if the same engine restarts. Safe once the player
@@ -1053,6 +1057,22 @@ public:
     // resampling). Both are RT-safe atomic stores.
     void SetMonitorSource(IMonitorSource* src) { fMonSource.store(src); }
     void SetInputMonitor(bool on) { fInputMonitor.store(on); }
+    // WHICH track that input belongs to, so its meter can show the level: the
+    // monitor mix goes straight to the master (the strip has no say in a
+    // monitored level), so a meter reading the strip's own bus would sit at zero
+    // while the user talks into an armed, monitoring track -- which is exactly
+    // what it did. The RT publishes the monitored input's peak on this track's
+    // bus meter. kInvalidTrackId = nobody (the master still shows it).
+    void SetMonitorTrack(TrackId id) { fMonTrack.store(id); }
+    TrackId MonitorTrack() const { return fMonTrack.load(); }
+    // Is somebody's input monitor on this engine right now? A source attached
+    // AND the flag on. Whoever wants to STOP the player asks this first: the
+    // engine is one object for playback, takes, the clicks and the monitor
+    // (M4.1), and an idle timer that stops a session it does not own takes the
+    // device away from it.
+    bool InputMonitorAttached() const {
+        return fInputMonitor.load() && fMonSource.load() != nullptr;
+    }
 
     // Live MIDI monitoring: while recording, incoming events from this input are
     // synthesized in real time through each armed MIDI track's instrument, so
@@ -1100,10 +1120,12 @@ public:
     // Closes the teardown-ordering use-after-free window on those raw pointers.
     bool QuiesceMonitorInput();
 
-    // Monitor-only: run the output for live MIDI monitoring WITHOUT playing the
-    // project (no clips, no playhead advance) — used to hear an armed MIDI track
-    // while idle. Set before Load()/Start(). The RT callback renders only the
-    // live voices through each armed MIDI track's instrument + fader.
+    // Monitor-only: run the output for live monitoring WITHOUT playing the
+    // project (no clips, no playhead advance) — what hears an armed MIDI track
+    // and an audio track's monitored input while idle. Set before
+    // Load()/Start(). The RT callback renders only the live voices through each
+    // armed MIDI track's instrument + fader, plus the monitor source's live
+    // input when SetInputMonitor is on.
     void SetMonitorOnly(bool on) { fMonitorOnly.store(on); }
 
     // Output buffer size in frames (per channel); applied when the player is
@@ -1369,6 +1391,7 @@ private:
     std::atomic<bool>  fMonitorMono{false};
     std::atomic<IMonitorSource*> fMonSource{nullptr};
     std::atomic<bool>  fInputMonitor{false};
+    std::atomic<TrackId> fMonTrack{kInvalidTrackId};   // whose meter the input is
     std::atomic<IMidiInput*> fLiveMidi{nullptr};  // live-monitor input
     std::atomic<bool>  fMonitorOnly{false};       // idle monitor mode
     // The piano roll's audition (package 51): which track the clicks render

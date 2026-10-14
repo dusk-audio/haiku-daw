@@ -47,16 +47,23 @@ public:
     }
 
     // The click opens the menu from the VIEW, because the view is what draws
-    // the field now (see HideStockBar).
-    void MouseDown(BPoint) override { OpenMenu(); }
+    // the field now (see HideStockBar). A DISABLED field opens nothing: the
+    // stock field's guard was the hidden bar's enabled state, and the bar is
+    // never asked here -- the placeholder row (Preferences' output device) is
+    // the one that made this visible.
+    void MouseDown(BPoint) override {
+        if (IsEnabled()) OpenMenu();
+    }
 
     void KeyDown(const char* bytes, int32 numBytes) override {
-        for (int32 i = 0; i < numBytes; i++)
-            if (bytes[i] == B_SPACE || bytes[i] == B_RETURN
-                || bytes[i] == B_DOWN_ARROW) {
-                OpenMenu();
-                return;
-            }
+        if (IsEnabled()) {
+            for (int32 i = 0; i < numBytes; i++)
+                if (bytes[i] == B_SPACE || bytes[i] == B_RETURN
+                    || bytes[i] == B_DOWN_ARROW) {
+                    OpenMenu();
+                    return;
+                }
+        }
         BMenuField::KeyDown(bytes, numBytes);
     }
 

@@ -322,6 +322,10 @@ public:
     Frame Playhead() const { return fPlayhead; }
     void SetFollow(bool on) { fFollow = on; }   // chase the playhead in view
     void SetMonitorInput(bool on) { fMonitorInput = on; Invalidate(); }  // lane "I" lamp
+    // ... and what the lamp is lit from: the Preferences row sets this through
+    // MainWindow, so the test reads it back here rather than trusting the
+    // message that was sent (M3.5).
+    bool MonitorInputOn() const { return fMonitorInput; }
     void CycleAuto(TrackId id);                 // inspector Auto button
     // The track's automation-lane mode (0 Off / 1 Gain / 2 Pan / 3+ an fx lane).
     // Read by the mixer's strip payload, so its Auto button's lamp is lit from

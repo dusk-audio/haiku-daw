@@ -829,7 +829,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             UpdateTransportReadouts();
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             break;
         case kMsgTrackSelected: {  // point the inspector at the clicked track
             int64 tid = 0;
@@ -1341,7 +1341,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgMixArm: {
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid)) t->armed = !t->armed;
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             if (fInspector) fInspector->Invalidate();
             fTimeline->Invalidate();
             break;
@@ -1350,7 +1350,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid))
                 t->inputMonitor = !t->inputMonitor;
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             if (fInspector) fInspector->Invalidate();
             fTimeline->Invalidate();
             break;
@@ -1550,6 +1550,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
             msg->FindInt32("op", &op);
+            // The base the roll committed against -- the declaration above has
+            // always been here, but this handler was the one that never read
+            // it, so a transform recorded base 0 in the gate (see the events
+            // handler below for what that cost).
+            msg->FindInt64("base", &base);
             if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
                 RefreshRolls(true);   // the same gate as above
                 break;
@@ -4753,7 +4758,7 @@ Engine* MainWindow::EnsureAuditionEngine(TrackId track) {
             // then the tracks that already carry notes still sound.
             if (fTransportCtl.fMonitoring && !fTransportCtl.fPlaying
                 && !fRecCtl.fRecMode)
-                fRecCtl.UpdateMidiMonitor();
+                fRecCtl.UpdateIdleMonitor();
         }
         return e;
     }
@@ -4792,8 +4797,14 @@ void MainWindow::StopAuditionEngine() {
     // ONLY an engine the clicks own may be stopped: a play, a take and the
     // armed-track monitor are all the SAME engine object (M4.1 keeps one
     // player), and stopping it there would freeze the transport with its lamp
-    // still lit and no way back except a manual Stop.
-    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring)
+    // still lit and no way back except a manual Stop. A monitor source ON the
+    // engine counts the same way: that is an input monitor session, and this
+    // idle timer (armed by an earlier audition) is not its owner. The suite
+    // drives a monitor session exactly that way, and the timer used to stop it
+    // mid-check.
+    if (fTransportCtl.fPlaying || fRecCtl.fRecMode || fTransportCtl.fMonitoring
+        || (fTransportCtl.fEngine
+            && fTransportCtl.fEngine->InputMonitorAttached()))
         return;
     if (fTransportCtl.fEngine) {
         fTransportCtl.fEngine->Stop();

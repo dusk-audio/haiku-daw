@@ -32,8 +32,13 @@ public:
     void StartCapture();                                   // open the Recorder
     void StartMidiCapture();                               // connect armed inputs
     void StopMidiCapture(Frame endFrame);                  // end take, drop clips
-    void UpdateMidiMonitor();                              // arm-driven monitor
-    void StopMidiMonitor();
+    // The IDLE monitor: what a track hears when it is not a take -- its input
+    // monitored live (MIDI: armed OR the I button; audio: the I button, no
+    // arm needed). Raised on every arm/monitor change from the timeline, the
+    // inspector or the mixer (kMsgMonitorRefresh) and torn down by play and
+    // record, which own the engine and the input.
+    void UpdateIdleMonitor();
+    void StopIdleMonitor();
     void ResolveMidiRoutes(const std::vector<MidiEndpointInfo>& eps);
     void FeedMidiEvent(const MidiEvent& e, Frame at);
 
@@ -69,6 +74,10 @@ public:
     // endpoints, feeding a note-pairing recorder. One recorder per armed track,
     // not one shared: inputs are demuxed, so each track pairs only the events
     // its own route accepts.
+    // The idle audio monitor's capture: the input open for the I button, with
+    // no take behind it (Recorder's monitor-only mode). Holds the device open
+    // while monitoring, so it is stopped whenever a take or playback wants it.
+    std::unique_ptr<Recorder> fLiveIn;
     std::unique_ptr<MidiInputPort> fMidiIn;   // active while recording MIDI
     std::map<TrackId, MidiRecorder> fMidiRecs;
     std::vector<TrackId>      fMidiRecTracks;  // armed MIDI targets for the take

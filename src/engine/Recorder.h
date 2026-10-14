@@ -52,6 +52,17 @@ public:
     // channels (prototypes/record_clip, and any caller that wants one file).
     status_t Start(const std::string& path);
 
+    // Monitor-only capture: open `device` ("" = the system default input) and
+    // push what it hears into the monitor ring, with NO take files and no disk
+    // thread — the source the per-track I button needs OUTSIDE a take (the pre-M5
+    // design had the take's recorder as the only IMonitorSource, so monitoring
+    // an armed-from-idle track did nothing). It is the same capture a take
+    // makes: the same device resolution, the same negotiated format, and
+    // `channelL`/`channelR` are the channels the monitor follows (a mono pair
+    // sends that channel to both sides), so what is monitored is what a take
+    // would record. Stop() ends it like any other capture.
+    status_t StartMonitor(const std::string& device, int channelL, int channelR);
+
     // The disk thread's last failure: 0 = none, 1 = a take file could not be
     // created, 2 = a write failed (disk full, device error). The UI polls this
     // (the disk thread must not touch the UI), reports once and stops the take,
@@ -126,6 +137,9 @@ private:
                            size_t size, const media_format& format);
     void HandleBuffer(void* data, size_t size, const media_format& format);
     void DiskLoop();
+    // The part every capture shares: find the input, connect a BMediaRecorder
+    // to it with a wildcard format (the device negotiates its native one).
+    status_t OpenInput(const std::string& device);
 
     BMediaRoster*                   fRoster = nullptr;
     std::unique_ptr<BMediaRecorder> fRec;
@@ -139,6 +153,7 @@ private:
     std::thread fDiskThread;
 
     std::atomic<bool>  fRunning{false};
+    std::atomic<bool>  fTakeMode{true};   // false: monitor-only (no ring/disk)
     std::atomic<bool>  fMonitor{false};
     std::atomic<bool>  fFormatReady{false};
     std::atomic<float> fRate{0.0f};
