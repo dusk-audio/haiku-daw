@@ -1550,6 +1550,11 @@ void MainWindow::MessageReceived(BMessage* msg) {
             msg->FindInt64("track", &tid);
             msg->FindInt64("clip", &cid);
             msg->FindInt32("op", &op);
+            // The base the roll committed against -- the declaration above has
+            // always been here, but this handler was the one that never read
+            // it, so a transform recorded base 0 in the gate (see the events
+            // handler below for what that cost).
+            msg->FindInt64("base", &base);
             if (!RollCommitOk(msg, (TrackId)tid, (ClipId)cid)) {
                 RefreshRolls(true);   // the same gate as above
                 break;

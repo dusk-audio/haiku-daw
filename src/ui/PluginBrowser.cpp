@@ -151,7 +151,7 @@ void PluginBrowserView::PostChoice(int32 index) {
     // -- and the click is ANSWERED, on the status line, instead of doing
     // nothing in silence (a page that ignores a double-click reads as broken).
     if (fTrack == kInvalidTrackId) {
-        if (fStatus.IsValid()) fStatus.SendMessage(new BMessage(kMsgPluginNoTrack));
+        if (fStatus.IsValid()) fStatus.SendMessage(kMsgPluginNoTrack);
         return;
     }
 

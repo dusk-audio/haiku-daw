@@ -361,6 +361,19 @@ static bool WaitQuiet(bigtime_t timeoutUs = 30000000) {
 // Shared by the tests below and by the dialog tests further down, so they live
 // with the other helpers.
 
+// The directory the app keeps its settings and its recovery copy in
+// (~/config/settings/HaikuDAW). ProjectDocument::SettingsPath names the settings
+// FILE, and BPath::Append does not replace a leaf: appending "recovery.dawproj"
+// to it gives ".../settings/recovery.dawproj", a path that never exists — so a
+// removal built that way (this suite had two) had been a no-op since the day it
+// was written, and a run still inherited whatever the last one left.
+static BPath SettingsDirForTest() {
+    BPath dir;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &dir) == B_OK)
+        dir.Append("HaikuDAW");
+    return dir;
+}
+
 // The status line as the transport bar last set it.
 static std::string TransportStatus(MainWindow* win) {
     std::string s;
@@ -2010,6 +2023,15 @@ static void TestKeyboardFocus(MainWindow* win, Project& project) {
 static void TestThemeScale(MainWindow* win, Project& project) {
     std::printf("theme scale ...\n");
 
+    // The scale override is PROCESS-wide state (Theme.h) and the app has its own
+    // copy of it (the stored preference, applied at startup and on every
+    // reload), so this test has to leave the override exactly as it found it: a
+    // hard-coded "back to the real font" 0 leaves the process at the font ratio
+    // while the app still says 125%, and the next test that applies the scale
+    // (the Preferences test) then has nothing to apply and reads the wrong
+    // number.
+    const float wasOverride = ThemeScaleOverride();
+
     // Two empty audio lanes at the end, so selection can be read back.
     Track a, b;
     a.id = project.NextTrackId(); a.type = TrackType::Audio;
@@ -2121,7 +2143,7 @@ static void TestThemeScale(MainWindow* win, Project& project) {
     snooze(200000);
     CHECK(playhead() == 0);
 
-    SetThemeScaleOverride(0.0f);   // back to the real font
+    SetThemeScaleOverride(wasOverride);   // whatever this run arrived with
 }
 
 // M2.1-2.3: the arrange window's feel. The tool palette and its keys, the snap
@@ -4359,9 +4381,9 @@ static void TestArrangeTracks(MainWindow* win, Project& project,
             // the pass: the marker lane was behind one). Clear it first; the
             // suite deletes it at start-up for the same reason.
             {
-                BPath settings;
-                if (ProjectDocument::SettingsPath(settings) == B_OK) {
-                    BPath recovery(settings);
+                BPath dir = SettingsDirForTest();
+                if (dir.InitCheck() == B_OK) {
+                    BPath recovery(dir);
                     if (recovery.Append("recovery.dawproj") == B_OK)
                         BEntry(recovery.Path()).Remove();
                 }
@@ -4898,7 +4920,8 @@ static void TestDialogVocabulary(MainWindow* win, Project& project) {
 // and either way the message is TRANSIENT -- after a few seconds the transport
 // state takes the row back, so a stale "Export cancelled" is not still there
 // ten minutes later.
-static void TestRenderFeedback(MainWindow* win, Project& project) {
+static void TestRenderFeedback(MainWindow* win, Project& project,
+                                CommandStack& stack) {
     HideOtherWindows(win);
     CHECK(WaitQuiet());
     std::printf("ux shell: render feedback ...\n");
@@ -4934,11 +4957,13 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     // chord -- the cost is per note-sample, not per second of material, which
     // is why one note was not enough), and the cancel below stops every one of
     // them within a chunk.
+    std::vector<TrackId> fixtureTracks;
     for (int i = 0; i < 12; i++) {
         char name[32];
         std::snprintf(name, sizeof(name), "status-synth-%d", i);
         Track t = MakeMidiTrack(project, { { 60, 100, 0, 48000 * 120 } }, name);
         CHECK(LockedAddTrack(win, project, t));
+        fixtureTracks.push_back(t.id);
     }
     // What the bounce will walk, in the log: the exporter's own rule (nothing
     // is soloed now, so audible = unmuted) over the same fields it reads. A
@@ -5069,6 +5094,25 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
 
     std::remove(pathA);
     std::remove(pathB);
+
+    // Put the session back: the twelve fixture tracks go (twelve 120-second
+    // notes are render cost the tests after this one would pay for), and every
+    // track gets the mute/solo it had before the fixture -- the tests after
+    // this one share the project.
+    {
+        if (win->LockWithTimeout(2000000) == B_OK) {
+            for (TrackId id : fixtureTracks)
+                stack.Execute(std::make_unique<RemoveTrackCommand>(id), project);
+            for (const auto& e : saved) {
+                if (Track* t = project.FindTrack((TrackId)std::get<0>(e))) {
+                    t->muted  = std::get<1>(e);
+                    t->soloed = std::get<2>(e);
+                }
+            }
+            win->Unlock();
+        }
+        win->PostMessage(kMsgUiRefresh);
+    }
 }
 
 // M1.4: the docked MIDI editor. The timeline posts kMsgOpenEditor (it no
@@ -6745,15 +6789,24 @@ static bool PlayMeterFixture(MainWindow* win, Project& project,
     // What is changed is recorded here so RestoreMeterFixture undoes it
     // exactly, rather than assuming what the values were.
     if (win->LockWithTimeout(1000000) == B_OK) {
-        gMeterSaved.clear();
+        // Record each track's state ONCE, before the fixture touches it (the
+        // loop records before it mutes, and the fixture track is in the list
+        // like any other). TestMetering plays the fixture TWICE, and a
+        // snapshot that cleared itself and re-recorded on the second pass
+        // recorded the MUTED state as if it were the original -- so the
+        // restore at the end put every track back muted, which is the leak
+        // this recording exists to prevent.
         for (Track& other : project.Tracks()) {
-            gMeterSaved.push_back({ other.id, other.muted, other.soloed });
+            bool known = false;
+            for (const auto& e : gMeterSaved)
+                if (std::get<0>(e) == (uint64_t)other.id) { known = true; break; }
+            if (!known)
+                gMeterSaved.push_back({ other.id, other.muted, other.soloed });
             if (other.id == t.id) continue;
             other.soloed = false;
             other.muted  = true;
         }
         if (Track* mine = project.FindTrack(t.id)) mine->soloed = true;
-        gMeterSaved.push_back({ t.id, false, true });   // what t holds now
         project.transport.playhead = 0;
         win->Unlock();
     }
@@ -9187,8 +9240,13 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(pickRow(fRate, 0) == 0);
     // The click's sound: the third row, "Wood block" (kMetronomeSoundCount).
     CHECK(pickRow(fSound, 2) == 2);
-    // The look: 125% (kUiScaleChoices[2]), applied process-wide on Apply.
-    CHECK(pickRow(fScale, 2) == 2);
+    // The look: a scale row that is NOT the one the run inherited, so Apply has
+    // something to apply — the app skips a scale it already holds, and a check
+    // that leans on the skip is checking nothing (a run that inherited 125%
+    // proved it: the row marked fine and the screen never moved).
+    const int scaleRow = before.uiScale == kUiScaleChoices[2] ? 3 : 2;
+    const float wantScale = kUiScaleChoices[scaleRow];
+    CHECK(pickRow(fScale, scaleRow) == scaleRow);
     // Autosave: "Off" (kAutosaveChoices[0]) -- the runner itself is checked
     // after Apply, which is what the row really controls.
     CHECK(pickRow(fAutosave, 0) == 0);
@@ -9333,8 +9391,10 @@ static void TestPreferences(MainWindow* win, Project& project) {
     // The UI scale: applied process-wide (Theme.h), and the app's own record of
     // it moves with it -- a record that disagreed with the screen is how a 125%
     // row ended up over a 100% layout.
-    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
-    CHECK(shownValues().uiScale == 1.25f);
+    CHECK(WaitFor([&] {
+        return std::fabs(ThemeScale() - wantScale) < 1e-3f;
+    }));
+    CHECK(shownValues().uiScale == wantScale);
     {
         const PrefsView v = shownValues();
         CHECK(v.defaultSampleRate == 44100);
@@ -9364,7 +9424,7 @@ static void TestPreferences(MainWindow* win, Project& project) {
         const PrefsView v = shownValues();
         CHECK(v.countInBars == wantCountIn);   // the row's own choice came
         CHECK(v.bufferFrames == 1024);         // back out of the settings file
-        CHECK(v.uiScale == 1.25f);
+        CHECK(v.uiScale == wantScale);
         CHECK(v.defaultSampleRate == 44100);
         CHECK(v.metronomeSound == 2);
         CHECK(v.autosaveSeconds == 0);
@@ -9372,7 +9432,7 @@ static void TestPreferences(MainWindow* win, Project& project) {
         CHECK(v.previewNotes == wantPreview);
         CHECK(v.darkMode == (ActiveThemeMode() == ThemeMode::Dark));
     }
-    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
+    CHECK(WaitFor([&] { return std::fabs(ThemeScale() - wantScale) < 1e-3f; }));
 
     // Put the run's own state back -- every row of the window, by VALUE, in the
     // window's own shape (SetValues is the push the app itself uses to show
@@ -10081,12 +10141,12 @@ int main() {
     // with the inspector hidden made the next run's docked-editor checks come
     // out inverted). One run must not decide the next one's result.
     {
-        BPath settings;
-        if (ProjectDocument::SettingsPath(settings) == B_OK) {
-            BPath recovery(settings);
+        BPath dir = SettingsDirForTest();
+        if (dir.InitCheck() == B_OK) {
+            BPath recovery(dir);
             if (recovery.Append("recovery.dawproj") == B_OK)
                 BEntry(recovery.Path()).Remove();
-            BPath cfg(settings);
+            BPath cfg(dir);
             if (cfg.Append("settings") == B_OK)
                 BEntry(cfg.Path()).Remove();
         }
