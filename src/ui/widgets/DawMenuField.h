@@ -8,6 +8,7 @@
 
 #include "DawControl.h"   // AdoptPanelColors + the look's flag helpers
 
+#include "../Theme.h"   // ThemedMenuItem (the popup's own rows)
 #include <MenuBar.h>
 #include <PopUpMenu.h>   // Go(): the popup every field in this app is built from
 #include <MenuField.h>
@@ -121,29 +122,51 @@ private:
     void OpenMenu() {
         BMenu* menu = Menu();
         if (menu == nullptr) return;
-        // The app's own pop-up idiom (see InspectorView's Input picker): the
-        // menu opens over the window and the choice is whatever is under the
-        // pointer when the button comes up.
+
+        // A FRESH, unparented pop-up, built from this menu's rows -- never the
+        // field's own menu, which is attached to the field's inner (hidden)
+        // BMenuBar. BPopUpMenu::Go() runs the tracking on its own thread, and
+        // the attached path has that thread touch views owned by this window's
+        // looper: picking an item stops the app in the debugger ("Looper must
+        // be locked"), which is what a user reported as "selecting a different
+        // option crashes". Every other pop-up in this app is standalone
+        // (InspectorView's input picker, the clip/lane/grid menus), which is
+        // exactly why they are fine. The pick is mapped back by index.
+        BPopUpMenu* popup = new BPopUpMenu("pick", false, false);
+        for (int32 i = 0; i < menu->CountItems(); i++) {
+            if (BMenuItem* src = menu->ItemAt(i)) {
+                BMenuItem* it = new ThemedMenuItem(src->Label(), nullptr);
+                it->SetMarked(src->IsMarked());
+                it->SetEnabled(src->IsEnabled());
+                popup->AddItem(it);
+            } else {
+                popup->AddItem(new BSeparatorItem());
+            }
+        }
         const BPoint at = ConvertToScreen(BPoint(0.0f, Bounds().bottom + 1.0f));
-        // Every menu a DawMenuField is given in this app is a BPopUpMenu
-        // (PickMenu, the export dialog, the preferences rows), which is what
-        // Go() lives on; a plain BMenu has no pop-up of its own.
-        BPopUpMenu* popup = dynamic_cast<BPopUpMenu*>(menu);
-        if (popup == nullptr) return;
         BMenuItem* chosen = popup->Go(at, false, true);
-        if (chosen == nullptr) return;
-        // What the stock field does with the choice: exactly one marked item,
-        // and its message delivered. Invoke() is protected, so the message goes
-        // to the item's own target -- the window, for every field in this app.
+        int32 picked = -1;
+        for (int32 i = 0; chosen != nullptr && i < popup->CountItems(); i++)
+            if (popup->ItemAt(i) == chosen) { picked = i; break; }
+        delete popup;
+        if (picked < 0) return;
+
+        // What the stock field does with a choice: exactly one marked row, and
+        // the row's own message delivered to its own target (the window, for
+        // every field in this app). The setting rows carry no message at all --
+        // the Preferences and Project Settings windows read their controls on
+        // Apply -- so for them this is the marking and nothing else.
         for (int32 i = 0; i < menu->CountItems(); i++)
-            if (BMenuItem* it = menu->ItemAt(i)) it->SetMarked(it == chosen);
-        if (BMessage* msg = chosen->Message()) {
-            BMessage send(*msg);
-            BLooper* looper = nullptr;
-            BHandler* handler = chosen->Target(&looper);
-            BMessenger target(handler, looper);
-            if (target.IsValid())      target.SendMessage(&send);
-            else if (Window() != nullptr) Window()->PostMessage(&send);
+            if (BMenuItem* it = menu->ItemAt(i)) it->SetMarked(i == picked);
+        if (BMenuItem* real = menu->ItemAt(picked)) {
+            if (BMessage* msg = real->Message()) {
+                BMessage send(*msg);
+                BLooper* looper = nullptr;
+                BHandler* handler = real->Target(&looper);
+                BMessenger target(handler, looper);
+                if (target.IsValid())         target.SendMessage(&send);
+                else if (Window() != nullptr) Window()->PostMessage(&send);
+            }
         }
         Invalidate();
     }
