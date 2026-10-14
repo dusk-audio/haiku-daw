@@ -18,7 +18,7 @@ void RecordController::StartRecording() {
     if (fRecMode || (fRecorder && fRecorder->IsRecording()))
         return;
     if (fWin->fTransportCtl.fPlaying) fWin->fTransportCtl.StopPlayback(false);   // don't spin up a monitor we replace
-    StopMidiMonitor();   // the record engine takes over monitoring
+    StopIdleMonitor();   // the record engine takes over monitoring
 
     // Record onto every armed audio track (one input take, dropped on each),
     // and capture live MIDI onto every armed MIDI track that has a MIDI input.
@@ -116,7 +116,7 @@ void RecordController::StopRecording() {
     StopMidiCapture(endPh);
     // Resume idle monitoring if a MIDI track is still armed (runs on every
     // StopRecording exit path, since the clip-drop code below may early-return).
-    UpdateMidiMonitor();
+    UpdateIdleMonitor();
 
     if (!captured || frames <= 0 || targets.empty()) {
         if (fRecorder) std::fprintf(stderr, "MainWindow: empty take, no clip added\n");
@@ -419,8 +419,15 @@ void RecordController::StopMidiCapture(Frame endFrame) {
     if (any) fWin->fTimeline->ZoomToFit();   // show the whole take after recording
 }
 
-void RecordController::UpdateMidiMonitor() {
-    StopMidiMonitor();
+// The idle monitor: a monitor-only engine that renders live input with no take
+// and no transport — what the per-track I button promises ("hear the input live
+// w/o record-enable"). MIDI goes through live voices (armed OR input-monitor,
+// the pre-existing rule); AUDIO goes through a monitor-only capture of the
+// track's own input, which is what this pass added: until now the only
+// IMonitorSource was the take's recorder, so the I button on an audio track did
+// nothing outside a take.
+void RecordController::UpdateIdleMonitor() {
+    StopIdleMonitor();
     if (fWin->fTransportCtl.fPlaying || fRecMode) return;   // playback / record own the engine + input
 
     std::vector<TrackId> armed;   // MIDI tracks to monitor: armed OR input-monitor
@@ -428,27 +435,58 @@ void RecordController::UpdateMidiMonitor() {
         if (t.type == TrackType::Midi && (t.armed || t.inputMonitor)
             && t.input.kind == InputSource::kMidi)
             armed.push_back(t.id);
-    if (armed.empty()) return;
 
-    // Open a consumer and connect each armed track's endpoint by name.
-    fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
-    if (fMidiIn->Register() != B_OK) { fMidiIn.reset(); return; }
-    const std::vector<MidiEndpointInfo> eps = EnumerateMidiEndpoints();
-    std::set<int32> connected;   // dedupe: two armed tracks may share an endpoint
-    for (TrackId id : armed) {
-        const Track* t = fWin->fProject->FindTrack(id);
-        if (!t) continue;
-        for (const MidiEndpointInfo& e : eps)
-            if (e.isProducer && e.name == t->input.name) {
-                if (connected.insert(e.id).second) fMidiIn->ConnectFrom(e.id);
-                break;
+    std::vector<MidiEndpointInfo> eps;
+    if (!armed.empty()) {
+        // Open a consumer and connect each armed track's endpoint by name.
+        fMidiIn.reset(new MidiInputPort("HaikuDAW In"));
+        if (fMidiIn->Register() != B_OK) {
+            fMidiIn.reset();
+        } else {
+            eps = EnumerateMidiEndpoints();
+            std::set<int32> connected;   // dedupe: two tracks may share an endpoint
+            for (TrackId id : armed) {
+                const Track* t = fWin->fProject->FindTrack(id);
+                if (!t) continue;
+                for (const MidiEndpointInfo& e : eps)
+                    if (e.isProducer && e.name == t->input.name) {
+                        if (connected.insert(e.id).second)
+                            fMidiIn->ConnectFrom(e.id);
+                        break;
+                    }
             }
+        }
     }
 
-    // A monitor-only engine: renders live voices through the armed instruments,
-    // no clip playback, no playhead advance. The engine object is reused (M4.1
-    // keeps the device open across every rebuild); the monitor-only flag says
-    // what this graph is for, and the playback paths clear it again.
+    // Audio: the I button ALONE is the switch (the "Monitor the input while
+    // recording" preference is exactly that — while recording; a take consults
+    // it through AudioMonitorOn()). The monitor path is one stereo stream, like
+    // a take's capture, so it follows the FIRST audio track that asks for it —
+    // the same rule as "the first armed track names the device".
+    const Track* audioMon = nullptr;
+    for (const Track& t : fWin->fProject->Tracks()) {
+        if (t.type != TrackType::Audio || !t.inputMonitor) continue;
+        if (t.input.kind == InputSource::kNone) continue;
+        audioMon = &t;
+        break;
+    }
+    if (audioMon != nullptr) {
+        const InputSource& in = audioMon->input;
+        const bool stereo = audioMon->channels == TrackChannels::Stereo;
+        const int l = in.channelL < 0 ? 0 : in.channelL;
+        const int r = stereo ? (in.channelR < 0 ? l : in.channelR) : l;
+        fLiveIn.reset(new Recorder());
+        if (fLiveIn->StartMonitor(in.device, l, r) != B_OK)
+            fLiveIn.reset();     // no input device: the app goes on, silently
+    }
+
+    if (fMidiIn == nullptr && fLiveIn == nullptr) return;
+
+    // A monitor-only engine: renders live voices through the armed instruments
+    // and mixes the monitored input, no clip playback, no playhead advance. The
+    // engine object is reused (M4.1 keeps the device open across every rebuild);
+    // the monitor-only flag says what this graph is for, and the playback paths
+    // clear it again.
     const Frame ph = fWin->fProject->transport.playhead;
     const Frame tenMin = (Frame)(fWin->fProject->sampleRate * 600.0);
     Engine* e = fWin->fTransportCtl.EnsureEngine();
@@ -468,28 +506,43 @@ void RecordController::UpdateMidiMonitor() {
                         "monitoring is off.");
         e->SetMonitorOnly(false);
         fMidiIn.reset();
+        fLiveIn.reset();
         return;
     }
-    ResolveMidiRoutes(eps);   // demux: each track hears only its own endpoint
-    MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
-    while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
-    e->SetLiveMidi(fMidiIn->MonitorInput());
+    if (fMidiIn != nullptr) {
+        ResolveMidiRoutes(eps);   // demux: each track hears only its own endpoint
+        MidiEvent tmp[64];   // drop stale pre-connect events before monitoring
+        while (fMidiIn->MonitorInput()->ReadEvents(tmp, 64) > 0) {}
+        e->SetLiveMidi(fMidiIn->MonitorInput());
+    }
+    if (fLiveIn != nullptr) {
+        e->SetMonitorSource(fLiveIn.get());
+        e->SetInputMonitor(true);
+    }
     e->Start();
     fWin->ReapplyFxWatches();   // the watch slots live on the engine, re-addressed
     fWin->fTransportCtl.fMonitoring = true;
     fWin->UpdatePulse();   // poll the meters while monitoring
 }
 
-void RecordController::StopMidiMonitor() {
+void RecordController::StopIdleMonitor() {
     if (!fWin->fTransportCtl.fMonitoring) return;
     if (fWin->fTransportCtl.fEngine) {
-        fWin->fTransportCtl.fEngine->SetLiveMidi(nullptr);
-        fWin->fTransportCtl.fEngine->Stop();
+        Engine* e = fWin->fTransportCtl.fEngine.get();
+        e->SetLiveMidi(nullptr);
+        // The audio monitor is detached BEFORE the capture behind it is freed.
+        // Stop() blocks until the last callback has exited, so the free below
+        // cannot race the RT thread that reads that pointer (the same rule as
+        // the take's recorder, in StopRecording).
+        e->SetInputMonitor(false);
+        e->SetMonitorSource(nullptr);
+        e->Stop();
         // The engine — and with it the open device — is KEPT (M4.1: the player
         // outlives every rebuild). A play or a take re-arms it with
         // SetMonitorOnly(false) and loads its own graph.
     }
     fMidiIn.reset();
+    fLiveIn.reset();
     fWin->fTransportCtl.fMonitoring = false;
     fWin->UpdatePulse();
 }

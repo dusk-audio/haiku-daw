@@ -773,8 +773,17 @@ void Engine::Graph::RenderMonitorOnly(Engine& e, float* out, size_t frames) {
     for (size_t i = 0; i < nfloats; i++) {
         if (mg != 1.0f) out[i] *= mg;
         if (!std::isfinite(out[i])) out[i] = 0.0f;   // never blast the DAC
-        const float a = std::fabs(out[i]);
-        if (i & 1) { if (a > pr) pr = a; } else { if (a > pl) pl = a; }
+    }
+    // The monitored input rides on top, outside the gain -- the same place it
+    // takes in the playing path (RenderSegment) and for the same reason: the I
+    // button hears the interface's own level. The peak below covers both, so
+    // the meters show what leaves the engine.
+    MixMonitorInput(e, out, frames);
+    for (size_t i = 0; i < frames; i++) {
+        const float l = std::fabs(out[i * 2 + 0]);
+        const float r = std::fabs(out[i * 2 + 1]);
+        if (l > pl) pl = l;
+        if (r > pr) pr = r;
     }
     // Watched inserts publish here too, or an editor open while monitoring
     // would stop hearing about the generic panel: this branch is the only
@@ -838,6 +847,49 @@ void Engine::Graph::Render(Engine& e, float* out, size_t frames) {
         pos += static_cast<Frame>(n);
     }
     e.fPlayhead.store(pos);
+}
+
+// The monitored input, on top of whatever `out` already holds. Shared by the
+// playing/recording path and by the idle monitor-only one: an audio track's I
+// button raises a monitor-only graph (no clips, no playhead), and that graph is
+// the ONLY thing rendering while it is up -- so a mix that lived in the
+// playback path alone would leave the button silent, which is exactly what it
+// did. Equal rate is a direct copy; otherwise a linear resampler (carried
+// across blocks) brings the source to the output rate. It rides OUTSIDE the
+// master gain, at the interface's own level. RT-safe: no allocation, no locks.
+void Engine::Graph::MixMonitorInput(Engine& e, float* out, size_t frames) {
+    if (!e.fInputMonitor.load(std::memory_order_relaxed))
+        return;
+    const size_t nfloats = frames * 2;
+    IMonitorSource* src = e.fMonSource.load(std::memory_order_relaxed);
+    const float mr = src ? src->MonitorRate() : 0.0f;
+    if (src && std::fabs(mr - fOutputRate) < 1.0f && fMonBuf.size() >= nfloats) {
+        const size_t got = src->ReadMonitor(fMonBuf.data(), nfloats);
+        for (size_t i = 0; i < got; i++)
+            out[i] += fMonBuf[i];
+    } else if (src && mr > 0.0f && !fMonSrc.empty()) {
+        const double step = (double)mr / fOutputRate;   // src frames / out
+        size_t need = (size_t)(fMonPhase + step * frames);
+        const size_t cap = fMonSrc.size() / 2;
+        if (need > cap) need = cap;
+        const size_t gotF = src->ReadMonitor(fMonSrc.data(), need * 2) / 2;
+        size_t si = 0;
+        for (size_t i = 0; i < frames; i++) {
+            float nL, nR;
+            if (si < gotF) { nL = fMonSrc[si * 2]; nR = fMonSrc[si * 2 + 1]; }
+            else           { nL = fMonPrevL;       nR = fMonPrevR; }
+            out[i * 2 + 0] += fMonPrevL + (nL - fMonPrevL) * (float)fMonPhase;
+            out[i * 2 + 1] += fMonPrevR + (nR - fMonPrevR) * (float)fMonPhase;
+            fMonPhase += step;
+            while (fMonPhase >= 1.0) {
+                fMonPhase -= 1.0;
+                if (si < gotF) {
+                    fMonPrevL = fMonSrc[si * 2]; fMonPrevR = fMonSrc[si * 2 + 1];
+                    si++;
+                } else { fMonPhase = 0.0; break; }   // underrun: hold
+            }
+        }
+    }
 }
 
 void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
@@ -1084,41 +1136,7 @@ void Engine::Graph::RenderSegment(Engine& e, float* out, size_t frames,
                           e.fMetronomeGain.load(std::memory_order_relaxed),
                           e.fMetronomeSound.load(std::memory_order_relaxed));
 
-    // Input monitoring: mix the live input into the output. Equal rate is a
-    // direct copy; otherwise a linear resampler (carried across blocks) brings
-    // the source to the output rate. RT-safe: no allocation, no locks.
-    if (e.fInputMonitor.load(std::memory_order_relaxed)) {
-        IMonitorSource* src = e.fMonSource.load(std::memory_order_relaxed);
-        const float mr = src ? src->MonitorRate() : 0.0f;
-        if (src && std::fabs(mr - fOutputRate) < 1.0f
-            && fMonBuf.size() >= nfloats) {
-            const size_t got = src->ReadMonitor(fMonBuf.data(), nfloats);
-            for (size_t i = 0; i < got; i++)
-                out[i] += fMonBuf[i];
-        } else if (src && mr > 0.0f && !fMonSrc.empty()) {
-            const double step = (double)mr / fOutputRate;   // src frames / out
-            size_t need = (size_t)(fMonPhase + step * frames);
-            const size_t cap = fMonSrc.size() / 2;
-            if (need > cap) need = cap;
-            const size_t gotF = src->ReadMonitor(fMonSrc.data(), need * 2) / 2;
-            size_t si = 0;
-            for (size_t i = 0; i < frames; i++) {
-                float nL, nR;
-                if (si < gotF) { nL = fMonSrc[si * 2]; nR = fMonSrc[si * 2 + 1]; }
-                else           { nL = fMonPrevL;       nR = fMonPrevR; }
-                out[i * 2 + 0] += fMonPrevL + (nL - fMonPrevL) * (float)fMonPhase;
-                out[i * 2 + 1] += fMonPrevR + (nR - fMonPrevR) * (float)fMonPhase;
-                fMonPhase += step;
-                while (fMonPhase >= 1.0) {
-                    fMonPhase -= 1.0;
-                    if (si < gotF) {
-                        fMonPrevL = fMonSrc[si * 2]; fMonPrevR = fMonSrc[si * 2 + 1];
-                        si++;
-                    } else { fMonPhase = 0.0; break; }   // underrun: hold
-                }
-            }
-        }
-    }
+    MixMonitorInput(e, out, frames);
 
     // Final safety pass: a single NaN/Inf from any effect or a torn gain write
     // would otherwise blast the DAC at full scale and poison the meters/LUFS

@@ -4910,11 +4910,18 @@ static void TestRenderFeedback(MainWindow* win, Project& project) {
     // computes BOTH its project end and the material it walks from the AUDIBLE
     // tracks only (`anySolo` -> only soloed ones). So the bounce rendered that
     // one short clip -- tens of milliseconds -- and the progress bar it raised
-    // was gone before the test could look. The solo goes, the rest stays muted,
-    // and the fixture is the only audible thing.
+    // was gone before the test could look. The solo goes, the rest stays muted
+    // for the length of THIS test, and the fixture is the only audible thing.
+    // What was here before the fixture is recorded, and put back at the end:
+    // every test after this one shares the project, and a session left with
+    // every earlier track muted (plus twelve 120-second synth tracks) is a
+    // silent cross-test leak -- the one this file's own comments keep warning
+    // about.
+    std::vector<std::tuple<uint64_t, bool, bool>> saved;
     {
         win->Lock();
         for (Track& other : project.Tracks()) {
+            saved.push_back({ other.id, other.muted, other.soloed });
             other.soloed = false;   // a solo, not a mute, is what silenced us
             other.muted  = true;
         }
@@ -5213,8 +5220,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     const Frame   origLen = t.midiClips.front().lengthFrames;
     CHECK(LockedAddTrack(win, project, t));
 
-    {
-        win->LockWithTimeout(1000000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
         project.transport.playhead = 0;
         win->Unlock();
     }
@@ -5523,10 +5529,11 @@ static void TestRollModelSync(MainWindow* win, Project& project,
                 e.value = 40 + i * 60;
                 ev.push_back(e);
             }
-            win->LockWithTimeout(1000000);
-            stack->Execute(std::make_unique<SetMidiClipEventsCommand>(
-                               tid, cid, std::move(ev)), project);
-            win->Unlock();
+            if (win->LockWithTimeout(1000000) == B_OK) {
+                stack->Execute(std::make_unique<SetMidiClipEventsCommand>(
+                                   tid, cid, std::move(ev)), project);
+                win->Unlock();
+            }
         }
         win->PostMessage(kMsgReloadEngine);
         CHECK(WaitFor([&] {
@@ -5602,8 +5609,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     // (its notes are clip-relative) and its next gesture must not write the old
     // absolute position back into the model.
     const Frame newStart = 48000;
-    {
-        win->LockWithTimeout(1000000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
         stack->Execute(std::make_unique<MoveMidiClipCommand>(tid, cid, newStart),
                        project);
         win->Unlock();
@@ -5632,8 +5638,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
         preSplitLen = c.lengthFrames;
     }
     CHECK(preSplitLen > halfLen);
-    {
-        win->LockWithTimeout(1000000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
         stack->Execute(std::make_unique<SplitMidiClipCommand>(tid, cid,
                                                               newStart + halfLen),
                        project);
@@ -5880,8 +5885,7 @@ static void TestRollModelSync(MainWindow* win, Project& project,
     }
 
     // --- The region is gone: the editor closes -----------------------------
-    {
-        win->LockWithTimeout(1000000);
+    if (win->LockWithTimeout(1000000) == B_OK) {
         stack->Execute(std::make_unique<RemoveMidiClipCommand>(tid, cid), project);
         win->Unlock();
     }
@@ -6974,6 +6978,142 @@ static void CheckViewColor(MainWindow* win, const char* parent, const char* name
 // callback load and the xrun count. Every click goes to the BAR at the rect
 // the bar itself reports (`TransportButtonRect`), so a control that moved
 // cannot still pass through an offset a test remembered (docs/HANDOFF.md).
+// --- input monitoring: the half of it a machine without an input can check ---
+//
+// The per-track I button monitors a track's live input: a capture the app
+// opens (Recorder's monitor-only mode, or the take's own recorder) and the mix
+// the engine makes of it. The capture half needs an input DEVICE, which neither
+// the host nor this VM has (docs/HANDOFF.md — the multichannel package shipped
+// with a click list for exactly this reason). The mix half is here, driven
+// through the app's own engine API: monitor-only (no clips, so what is on the
+// meter IS the monitored input), a source of the test's own pouring a known
+// level, and the flag. The same four calls are what UpdateIdleMonitor's audio
+// branch and a take's StartCapture make, so a regression in the mix — or in the
+// resampler that carries a 44.1 kHz interface under a 48 kHz project — fails
+// here rather than on someone's speakers.
+//
+// The UI half is driven the way a user drives it too: the I flag on an audio
+// track, through the message the timeline and inspector buttons post. Where
+// there IS an input that monitors; here the capture cannot open, and what the
+// check holds to is that the app comes out of it alive, with the status line
+// and the monitor state agreeing — never a transport that says "Monitoring
+// input" over silence.
+namespace {
+class FakeMonitorSource : public IMonitorSource {
+public:
+    FakeMonitorSource(float level, float rate) : fLevel(level), fRate(rate) {}
+    std::size_t ReadMonitor(float* dst, std::size_t maxFloats) override {
+        for (std::size_t i = 0; i < maxFloats; i++) dst[i] = fLevel;
+        return maxFloats;
+    }
+    float MonitorRate() const override { return fRate; }
+
+private:
+    float fLevel;
+    float fRate;
+};
+} // namespace
+
+static void TestInputMonitor(MainWindow* win, Project& project,
+                             CommandStack& stack) {
+    HideOtherWindows(win);
+    CHECK(WaitQuiet());
+    std::printf("input monitor ...\n");
+
+    // The monitor graph is its own session. The engine has to exist first:
+    // Play builds it and Stop leaves it standing (M4.1 keeps the player across
+    // every rebuild), which is also what the idle monitor relies on.
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->EngineBufferFramesForTest() > 0; }));
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
+
+    Engine* e = win->EngineForTest();
+    CHECK(e != nullptr);
+    if (e == nullptr) return;
+
+    const Frame ph = project.transport.playhead;
+    const Frame end = ph + (Frame)(project.sampleRate * 60.0);
+    e->SetMonitorOnly(true);
+    CHECK(e->Load(project, ph, end) == B_OK);
+    if (e->LastLoadStatus() == B_OK) {
+        FakeMonitorSource src(0.4f, (float)project.sampleRate);
+        e->SetMonitorSource(&src);
+        e->SetInputMonitor(true);
+        e->Start();
+        CHECK(WaitFor([&] { return win->MasterPeakL() > 0.3f; }, 8000000));
+        // ... and it is the SOURCE's level: monitor-only plays no clips, so the
+        // meter is the monitored input and nothing else.
+        CHECK(std::fabs(win->MasterPeakL() - 0.4f) < 0.06f);
+
+        // A source at another rate is resampled, not dropped — a 44.1 kHz
+        // interface under a 48 kHz project is the common case.
+        FakeMonitorSource half(0.5f, (float)project.sampleRate / 2.0f);
+        e->SetInputMonitor(false);
+        e->SetMonitorSource(&half);
+        e->SetInputMonitor(true);
+        CHECK(WaitFor([&] {
+            return std::fabs(win->MasterPeakL() - 0.5f) < 0.06f;
+        }, 8000000));
+
+        // The flag is the switch, not the source being attached: detaching the
+        // source without clearing it would be the bug this checks for.
+        e->SetInputMonitor(false);
+        CHECK(WaitFor([&] { return win->MasterPeakL() < 0.02f; }, 8000000));
+        e->SetMonitorSource(nullptr);
+        e->Stop();
+    }
+    e->SetMonitorOnly(false);
+
+    // The UI half: an audio track whose I button goes on. One device per
+    // capture (the same rule as a take's), so a machine with an input opens it
+    // here; a machine without one — this VM — must simply not monitor, and say
+    // so honestly.
+    Track probe;
+    probe.id = project.NextTrackId();
+    probe.type = TrackType::Audio;
+    probe.name = "mon-probe";
+    probe.input.kind = InputSource::kAudioDefault;
+    CHECK(LockedAddTrack(win, project, probe));
+
+    auto setMonitorFlag = [&](bool on) {
+        if (win->LockWithTimeout(1000000) != B_OK) return;
+        if (Track* t = project.FindTrack(probe.id)) t->inputMonitor = on;
+        win->Unlock();
+        win->PostMessage(kMsgMonitorRefresh);   // what the I buttons post
+    };
+    setMonitorFlag(true);
+    snooze(700000);
+    const bool monitoring = win->MonitoringForTest();
+    const std::string status = TransportStatus(win);
+    std::printf("  idle audio monitor: %s (status \"%s\")\n",
+                monitoring ? "engine up" : "no input device here",
+                status.c_str());
+    CHECK((status == "Monitoring input") == monitoring);
+    CHECK(win->LockWithTimeout(1000000) == B_OK);   // still alive and answering
+    win->Unlock();
+    setMonitorFlag(false);
+    snooze(500000);
+    // Whatever the session still asks to be monitored decides the state after
+    // the flag comes off: the suite leaves armed MIDI tracks with their I lamps
+    // on, and those legitimately keep the monitor up. What must hold either way
+    // is that the transport never claims to monitor what it is not doing.
+    CHECK((TransportStatus(win) == "Monitoring input") == win->MonitoringForTest());
+
+    // Put the probe track back: the tests after this one share the project.
+    if (win->LockWithTimeout(1000000) == B_OK) {
+        stack.Execute(std::make_unique<RemoveTrackCommand>(probe.id), project);
+        win->Unlock();
+    }
+    win->PostMessage(kMsgUiRefresh);
+    // ... and let the app re-establish whatever monitor the session wants: the
+    // engine the RT checks above drove was stopped by them, and the idle
+    // monitor is the app's own path back.
+    win->PostMessage(kMsgMonitorRefresh);
+    snooze(400000);
+    CHECK(WaitQuiet());
+}
+
 static void TestTransportBar(MainWindow* win, Project& project) {
     HideOtherWindows(win);
     CHECK(WaitQuiet());
@@ -9890,9 +10030,10 @@ static int32 TestThread(void*) {
     TestProjectSettings(win, project, stack);   // M3.6: applies and undoes
     TestKeyMap(win, project, stack);
     TestMetering(win, project, stack);
+    TestInputMonitor(win, project, stack);
     TestTransportBar(win, project);
     TestRegionJob(win, project);
-    TestRenderFeedback(win, project);   // the status line's job messages
+    TestRenderFeedback(win, project, stack);   // the status line's job messages
     TestMixerStripExtras(win, project);
     TestDockPages(win, project, &stack);
     TestFxRetargetFlush(win, project);
@@ -9919,8 +10060,11 @@ static int32 TestThread(void*) {
     std::printf("\nui_functional_tests: %d checks, %d failures\n", g_checks,
                 g_fails);
     std::fflush(stdout);
-    win->LockWithTimeout(1000000);
-    win->Quit();   // and with it the application
+    // Quit() needs the lock like any other looper call: taking it without
+    // checking is the "assert on a looper this thread does not own" the rest
+    // of this file guards against (and main() returns either way).
+    if (win->LockWithTimeout(1000000) == B_OK)
+        win->Quit();   // and with it the application
     return 0;
 }
 

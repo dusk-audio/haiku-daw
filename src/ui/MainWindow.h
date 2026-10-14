@@ -294,6 +294,12 @@ public:
                                      : -1.0f;
     }
     bool MonitorInputForTest() const { return fTransportCtl.fMonitorInput; }
+    // The IDLE monitor (the per-track I button, no take): whether a monitor
+    // graph is up, and the engine itself, so the functional test can drive the
+    // RT mix with a source of its own -- the capture that normally feeds it
+    // needs an input device, and no machine this suite runs on has one.
+    bool MonitoringForTest() const { return fTransportCtl.fMonitoring; }
+    Engine* EngineForTest() { return fTransportCtl.fEngine.get(); }
     bool PreviewNotesForTest() const { return fRollPreview; }
     bool AutosaveArmedForTest() const { return fAutosave != nullptr; }
     // The transport bar's own state (M3.1), for the functional tests: which

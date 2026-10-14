@@ -829,7 +829,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             UpdateTransportReadouts();
             break;
         case kMsgMonitorRefresh:   // arming / input changed in the timeline
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             break;
         case kMsgTrackSelected: {  // point the inspector at the clicked track
             int64 tid = 0;
@@ -1341,7 +1341,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
         case kMsgMixArm: {
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid)) t->armed = !t->armed;
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             if (fInspector) fInspector->Invalidate();
             fTimeline->Invalidate();
             break;
@@ -1350,7 +1350,7 @@ void MainWindow::MessageReceived(BMessage* msg) {
             int64 tid = 0; msg->FindInt64("track", &tid);
             if (Track* t = fProject->FindTrack((TrackId)tid))
                 t->inputMonitor = !t->inputMonitor;
-            fRecCtl.UpdateMidiMonitor();
+            fRecCtl.UpdateIdleMonitor();
             if (fInspector) fInspector->Invalidate();
             fTimeline->Invalidate();
             break;
@@ -4753,7 +4753,7 @@ Engine* MainWindow::EnsureAuditionEngine(TrackId track) {
             // then the tracks that already carry notes still sound.
             if (fTransportCtl.fMonitoring && !fTransportCtl.fPlaying
                 && !fRecCtl.fRecMode)
-                fRecCtl.UpdateMidiMonitor();
+                fRecCtl.UpdateIdleMonitor();
         }
         return e;
     }

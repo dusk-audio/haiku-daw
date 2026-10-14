@@ -595,6 +595,10 @@ public:
         // fWrapsAtRequest: the pass count the in-place join needs.
         void RenderSegment(Engine& e, float* out, size_t frames, Frame blockStart,
                            uint64_t wraps);
+        // The monitored input, on top of `out` — shared by RenderSegment (a
+        // take, or playback) and RenderMonitorOnly (an idle I lamp), because
+        // monitor-only is the ONLY path rendering while it is up.
+        void MixMonitorInput(Engine& e, float* out, size_t frames);
 
         // Drop every live voice, so a note held at Stop can't sustain (up to
         // kHeld) or re-sound if the same engine restarts. Safe once the player
@@ -1100,10 +1104,12 @@ public:
     // Closes the teardown-ordering use-after-free window on those raw pointers.
     bool QuiesceMonitorInput();
 
-    // Monitor-only: run the output for live MIDI monitoring WITHOUT playing the
-    // project (no clips, no playhead advance) — used to hear an armed MIDI track
-    // while idle. Set before Load()/Start(). The RT callback renders only the
-    // live voices through each armed MIDI track's instrument + fader.
+    // Monitor-only: run the output for live monitoring WITHOUT playing the
+    // project (no clips, no playhead advance) — what hears an armed MIDI track
+    // and an audio track's monitored input while idle. Set before
+    // Load()/Start(). The RT callback renders only the live voices through each
+    // armed MIDI track's instrument + fader, plus the monitor source's live
+    // input when SetInputMonitor is on.
     void SetMonitorOnly(bool on) { fMonitorOnly.store(on); }
 
     // Output buffer size in frames (per channel); applied when the player is

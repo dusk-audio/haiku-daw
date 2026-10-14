@@ -286,7 +286,13 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   removes the file BEFORE the application object exists (the window reads it
   while it is being built) and answers a Recover? prompt that still appears
   with Discard, so the run keeps its own project and the screenshots keep the
-  suite's fixtures.
+  suite's fixtures. **And keep an eye on the PATH**: both removals were built by
+  appending a leaf to `ProjectDocument::SettingsPath`, which names the settings
+  FILE — `BPath::Append` appends, it does not replace a leaf, so they removed
+  `…/HaikuDAW/settings/recovery.dawproj` and had been no-ops since the day they
+  were written. A run therefore inherited the last one's scale, panes and window
+  frame, which is how a "clean slate" run failed three scale checks and a
+  piano-roll click that the run before it passed (2026-10-13).
 - **…and so does the SETTINGS file (`~/config/settings/HaikuDAW/settings`).**
   It persists the panes (`uiinsp`, `uidockpage`), so a run that ended with the
   inspector hidden makes every later run start with it hidden: the pane tests
@@ -372,6 +378,18 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   the precedent. Older comments in `tests/ui_functional_tests.cpp` that say a
   popup cannot be driven predate this and are about the pickers that never got
   converted.
+- **A monitor-only graph is the ONLY thing rendering while it is up.** The
+  engine has two RT bodies: `RenderSegment` (playing, recording, the in-place
+  join) and `RenderMonitorOnly` (the idle monitor — live MIDI voices for an
+  armed track's I lamp, and the roll's audition). Anything shared between them
+  has to live in both: the input monitor's mix was written into the playback
+  path alone, so an audio track's I lamp raised a monitor-only graph that
+  rendered the live voices and NOTHING of the input it was raised for — the
+  button was silent, and no state check could see it (the flag, the source and
+  the state line were all correct). `Graph::MixMonitorInput` is now shared;
+  `TestInputMonitor` drives it with a fake `IMonitorSource` and reads the master
+  peak, which is the only way to check the mix on a machine with no input
+  device.
 - **A gesture's modifiers belong on the EVENT — never `BView::modifiers()`.**
   The kit's global `modifiers()` asks the input server what is held *right
   now*: it is neither the modifiers the gesture was made with (a Shift released

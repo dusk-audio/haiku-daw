@@ -74,15 +74,21 @@ void Recorder::HandleBuffer(void* data, size_t size, const media_format& fmt) {
     if (monR < 0 || monR >= ch) monR = monL;
 
     const bool monitor = fMonitor.load(std::memory_order_relaxed);
+    // A monitor-only capture has no disk thread: the take ring would fill and
+    // every write would latch an xrun that means nothing. Skip it there.
+    const bool take = fTakeMode.load(std::memory_order_relaxed);
     auto flush = [&](size_t n) {
-        const size_t wrote = fRing.Write(tmp, n);
-        if (wrote < n) {
-            fXrun.store(true, std::memory_order_relaxed);   // disk fell behind
-            // Record how many samples we dropped so the disk thread can pad the
-            // take with silence and keep its total length == real elapsed time
-            // (else everything after the xrun shifts earlier on the timeline).
-            fDroppedFloats.fetch_add((int64_t)(n - wrote),
-                                     std::memory_order_relaxed);
+        if (take) {
+            const size_t wrote = fRing.Write(tmp, n);
+            if (wrote < n) {
+                fXrun.store(true, std::memory_order_relaxed);   // disk fell behind
+                // Record how many samples we dropped so the disk thread can pad
+                // the take with silence and keep its total length == real
+                // elapsed time (else everything after the xrun shifts earlier
+                // on the timeline).
+                fDroppedFloats.fetch_add((int64_t)(n - wrote),
+                                         std::memory_order_relaxed);
+            }
         }
         if (monitor) {
             // The engine's monitor path is stereo-interleaved, so the capture
@@ -312,13 +318,7 @@ status_t Recorder::Start(const std::string& path) {
     return Start(std::vector<TakeSpec>{one}, std::string());
 }
 
-status_t Recorder::Start(const std::vector<TakeSpec>& takes,
-                         const std::string& device) {
-    if (fRunning.load())
-        return B_BUSY;
-    if (takes.empty())
-        return B_BAD_VALUE;
-
+status_t Recorder::OpenInput(const std::string& device) {
     fRoster = BMediaRoster::Roster();
     if (!fRoster) {
         fprintf(stderr, "Recorder: no media roster\n");
@@ -366,6 +366,24 @@ status_t Recorder::Start(const std::vector<TakeSpec>& takes,
         fRec.reset();
         return err;
     }
+    return B_OK;
+}
+
+status_t Recorder::Start(const std::vector<TakeSpec>& takes,
+                         const std::string& device) {
+    if (fRunning.load())
+        return B_BUSY;
+    if (takes.empty())
+        return B_BAD_VALUE;
+
+    status_t err = OpenInput(device);
+    if (err != B_OK)
+        return err;
+
+    // A take: the capture feeds the disk ring, and the caller decides
+    // afterwards whether it also feeds the monitor ring (SetMonitor).
+    fTakeMode.store(true, std::memory_order_relaxed);
+    fMonitor.store(false, std::memory_order_relaxed);
 
     // Reset per-take state and start the drain thread before the recorder,
     // so no buffer is missed.
@@ -400,6 +418,43 @@ status_t Recorder::Start(const std::vector<TakeSpec>& takes,
 
     if ((err = fRec->Start()) != B_OK) {
         fprintf(stderr, "Recorder: Start failed: %s\n", strerror(err));
+        Stop();
+        return err;
+    }
+    return B_OK;
+}
+
+status_t Recorder::StartMonitor(const std::string& device, int channelL,
+                                int channelR) {
+    if (fRunning.load())
+        return B_BUSY;
+
+    status_t err = OpenInput(device);
+    if (err != B_OK)
+        return err;
+
+    // No takes: nothing to write, so no writers, no envelopes and no disk
+    // thread -- the capture's only consumer is the monitor ring, which is why
+    // SetMonitor is on from the first buffer (the per-track I button is the
+    // reason this capture exists at all).
+    fTakeMode.store(false, std::memory_order_relaxed);
+    fTakes.clear();
+    fWriters.clear();
+    fEnvMin.clear();
+    fEnvMax.clear();
+    fEnvCount.reset();
+    fMonL.store(channelL < 0 ? 0 : channelL, std::memory_order_relaxed);
+    fMonR.store(channelR < 0 ? (channelL < 0 ? 0 : channelL) : channelR,
+                std::memory_order_relaxed);
+    fFormatReady.store(false);
+    fXrun.store(false);
+    fError.store(0, std::memory_order_relaxed);
+    fClipFlags.store(0, std::memory_order_relaxed);
+    fMonitor.store(true, std::memory_order_relaxed);
+    fRunning.store(true);
+
+    if ((err = fRec->Start()) != B_OK) {
+        fprintf(stderr, "Recorder: monitor Start failed: %s\n", strerror(err));
         Stop();
         return err;
     }

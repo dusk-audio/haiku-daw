@@ -52,7 +52,11 @@ comes from the file's header, not its extension, so a renamed file still opens.
 
 **Record:** click `R` on a track to arm it (and `I` to hear it while
 monitoring, if your input would otherwise be silent), then the Record button in
-the transport. Count-in bars are in **Preferences** now (the Audio menu keeps
+the transport. `I` works on its own too: with no transport running it monitors
+that track's input live — arm nothing, record nothing, just listen (one input
+device at a time, the first track whose `I` is on; a MIDI track's `I` plays its
+instrument's live input the same way). **Preferences ▸ Monitor the input while
+recording** is the session-wide version for takes. Count-in bars are in **Preferences** now (the Audio menu keeps
 the metronome toggle); **drag on the ruler** to set the loop, and **Ctrl-drag**
 there to set a punch range. A plain click on the ruler just moves the playhead —
 **Clear Loop** and **Clear Punch** are entries of the ruler's right-click menu
