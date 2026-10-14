@@ -280,7 +280,13 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   the app with unsaved changes leaves
   `~/config/settings/HaikuDAW/recovery.dawproj`; the next start opens a modal
   Recover? alert on the window thread and every locked check times out. Delete
-  it before a run.
+  it before a run — and note that the USER'S OWN app recreates it every 30 s
+  (its autosave), so a suite run on a machine where someone is working can lose
+  the race no matter what is deleted first: since `feature/ux-pass` the suite
+  removes the file BEFORE the application object exists (the window reads it
+  while it is being built) and answers a Recover? prompt that still appears
+  with Discard, so the run keeps its own project and the screenshots keep the
+  suite's fixtures.
 - **…and so does the SETTINGS file (`~/config/settings/HaikuDAW/settings`).**
   It persists the panes (`uiinsp`, `uidockpage`), so a run that ended with the
   inspector hidden makes every later run start with it hidden: the pane tests
@@ -343,6 +349,29 @@ The repository **does have** a GitHub remote: `dusk-audio/haiku-daw` (created
   what a real app-server event carries; `TestRollModelSync`'s `postKey` is the
   precedent. (For a view's own KeyDown, posting to the VIEW works too — that is
   `BMessenger(view)` and `BView::MessageReceived` translates it.)
+- **A pop-up menu CAN be driven by a test — this is the recipe.** The suite
+  long said "a popup a test cannot open" and worked around every picker by
+  calling the method behind the menu item, which left the pick itself (and the
+  crash that lived in it) untested. It works like this: a posted mouse-down on
+  the FIELD opens the pop-up (`BPopUpMenu::Go` runs the tracking on a thread of
+  its own, so the window's thread sits in `Go()` until the menu closes); the
+  pop-up's window is a `BMenuWindow`, which `be_app->CountWindows()` filters
+  OUT, so it is found through its looper instead — `get_next_thread_info(0, …)`
+  plus `BLooper::LooperForThread`, matched on the thread name a `BWindow`
+  derives from its title (`"w>" + title`; every `DawMenuField` pop-up is
+  `"pick"`); and the row is taken with the kit's own keyboard navigation (Down
+  moves the selection, Return takes it: `BMenu::KeyDown` → `fChosenItem` → the
+  item `Go()` returns), posted with the FOCUS token as above. Two traps, both
+  from the same fact — the tracking loop reads the POINTER and the BUTTONS from
+  the input server, never from messages: (a) a pick made within
+  `get_click_speed()` of the open is read as the click that opened the menu,
+  which then re-tracks and throws the pick away — wait the click speed out; and
+  (b) the selection starts on the row under the real pointer, so ask the menu
+  where its pointer is (`BMenu::GetMouse` + `BMenuItem::Frame`) and count the
+  Downs from there instead of assuming none. `TestPreferences`'s `pickRow` is
+  the precedent. Older comments in `tests/ui_functional_tests.cpp` that say a
+  popup cannot be driven predate this and are about the pickers that never got
+  converted.
 - **A gesture's modifiers belong on the EVENT — never `BView::modifiers()`.**
   The kit's global `modifiers()` asks the input server what is held *right
   now*: it is neither the modifiers the gesture was made with (a Shift released

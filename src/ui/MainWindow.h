@@ -279,6 +279,23 @@ public:
         return fTransportCtl.fEngine ? (int)fTransportCtl.fEngine->BufferFrames()
                                      : 0;
     }
+    // The preferences whose effect is heard or lives in another view, so the
+    // Preferences test can still check that the app took the row: the click's
+    // sound and level as the running ENGINE holds them (-1 = no engine yet),
+    // the input monitor, the MIDI editor's audition, and whether the
+    // crash-recovery runner is armed (the Autosave row's own effect: "Off"
+    // removes it).
+    int EngineMetronomeSoundForTest() const {
+        return fTransportCtl.fEngine ? fTransportCtl.fEngine->MetronomeSound()
+                                     : -1;
+    }
+    float EngineMetronomeGainForTest() const {
+        return fTransportCtl.fEngine ? fTransportCtl.fEngine->MetronomeGain()
+                                     : -1.0f;
+    }
+    bool MonitorInputForTest() const { return fTransportCtl.fMonitorInput; }
+    bool PreviewNotesForTest() const { return fRollPreview; }
+    bool AutosaveArmedForTest() const { return fAutosave != nullptr; }
     // The transport bar's own state (M3.1), for the functional tests: which
     // format the big display is showing, and the two text lines it draws.
     int TransportTimeMode() const { return (int)fTimeMode; }

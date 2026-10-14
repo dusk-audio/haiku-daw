@@ -8689,9 +8689,15 @@ static void TestNewProjectTemplates(MainWindow* win, Project& project,
 // M3.5: the Preferences window. It opens from the File menu item, it is single
 // instance, it SHOWS the app's own values, and a change made in it reaches the
 // app, is pushed back to the window, and survives a reload of the settings
-// file. (The Audio menu's radio items and View's Dark Mode live here now; the
-// window is driven the way a user drives it, minus the menus that would block
-// in BPopUpMenu::Go.)
+// file. (The Audio menu's radio items and View's Dark Mode live here now.)
+//
+// EVERY row of the window is driven, each the way a user drives it: a menu row
+// through the pop-up a click opens (see the block below -- it is where the
+// "choosing a different option crashes the app" bug lived), the slider through
+// its own keys, the ticks through a click, the folder row through the message
+// its panel posts. What each takes is then held to the app's own state, to the
+// running engine, to the view that shows it (the timeline's monitor lamp), and
+// to a reload of the settings file.
 static void TestPreferences(MainWindow* win, Project& project) {
     HideOtherWindows(win);
     CHECK(WaitQuiet());
@@ -8747,25 +8753,6 @@ static void TestPreferences(MainWindow* win, Project& project) {
     const int beforeCountIn = (int)win->CountInBarsForTest();
     const ThemeMode beforeMode = ActiveThemeMode();
     const float beforeScaleLive = ThemeScale();
-    const float beforeScalePref = shownValues().uiScale;
-
-    // Mark the menu item whose label carries this number ("1024 frames",
-    // "125%", "4 bars", "Off" = 0). Restoring by VALUE, not by index, is what
-    // makes the test indifferent to the settings file it inherits: a run that
-    // crashed mid-way leaves one behind, and a hard-coded restore then makes a
-    // different change than the one it is undoing.
-    auto markValue = [](BMenu* m, int value) {
-        if (m == nullptr) return false;
-        for (int32 i = 0; i < m->CountItems(); i++) {
-            BMenuItem* it = m->ItemAt(i);
-            if (it == nullptr || it->Label() == nullptr) continue;
-            if (std::atoi(it->Label()) == value) {
-                it->SetMarked(true);
-                return true;
-            }
-        }
-        return false;
-    };
 
     win->PostMessage(MSG_PREFERENCES);
     CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
@@ -8830,39 +8817,6 @@ static void TestPreferences(MainWindow* win, Project& project) {
     snooze(400000);
     CHECK(countPrefs() == 1);
 
-    // A SETTING is not a commit (the UX-shell pass): changing a control in the
-    // window changes nothing outside it until Apply -- this used to apply on
-    // every pick, so there was no way to look at a choice before taking it.
-    // (A menu row is marked here the way the existing edits do it, but WITHOUT
-    // the window's change path: marking is what a user's click does.)
-    const int uncommitted = beforeCountIn == 4 ? 2 : 4;
-    {
-        BWindow* w = findPrefs();
-        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
-            BMenu* m = static_cast<PreferencesWindow*>(w)->CountInField()->Menu();
-            for (int32 i = 0; i < m->CountItems(); i++)
-                if (BMenuItem* it = m->ItemAt(i))
-                    it->SetMarked(it->Label() != nullptr
-                                  && std::atoi(it->Label()) == uncommitted);
-            w->Unlock();
-        }
-    }
-    snooze(300000);
-    CHECK((int)win->CountInBarsForTest() == beforeCountIn);   // the app is untouched
-    CHECK(shownValues().countInBars == uncommitted);          // the window shows it
-
-    // Apply is a real button of the window: invoking it is what a click does,
-    // and it commits the whole view.
-    {
-        BWindow* w = findPrefs();
-        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
-            if (DawButton* apply = dynamic_cast<DawButton*>(w->FindView("ap")))
-                apply->Invoke();
-            w->Unlock();
-        }
-    }
-    CHECK(WaitFor([&] { return (int)win->CountInBarsForTest() == uncommitted; }));
-
     // Cancel -- and Escape, which posts the same B_QUIT_REQUESTED -- leaves
     // WITHOUT applying what the window was holding. Checked on the dark-mode
     // box: flipping it and cancelling must not switch the look.
@@ -8884,49 +8838,380 @@ static void TestPreferences(MainWindow* win, Project& project) {
     CHECK(WaitFor([&] { return findPrefs() != nullptr; }));
     snooze(200000);
 
-    // Count-in: pick "4 bars" in the window's menu and take its change path.
-    CHECK(edit([](PreferencesWindow* w) {
-        BMenu* m = w->CountInField()->Menu();
-        for (int32 i = 0; i < m->CountItems(); i++)
-            m->ItemAt(i)->SetMarked(i == 3);      // kCountInChoices[3] = 4
-    }));
-    CHECK(WaitFor([&] { return win->CountInBarsForTest() == 4; }));
+    // Every row of the window as the app holds it now, so the test can put the
+    // whole set back at the end: the settings file is inherited by the next
+    // run, and a run that crashed mid-way leaves the values it had reached.
+    const PrefsView before = shownValues();
 
-    // Buffer size: what the row PROMISES is "applied at the next Play" — the
-    // device is not re-opened under a running transport — so BOTH halves are
-    // checked: the value the app now holds, and the engine that the next Play
-    // builds with it. (The check the row makes is honest only if the Play
-    // really uses it; a value nothing reads would pass a state check and still
-    // be a dead control.)
-    CHECK(edit([](PreferencesWindow* w) {
-        BMenu* m = w->BufferField()->Menu();
-        for (int32 i = 0; i < m->CountItems(); i++)
-            m->ItemAt(i)->SetMarked(i == 3);      // kBufferFrameChoices[3] = 1024
-    }));
+    // --- every row of the window, driven the way a user drives it ----------
+    //
+    // A menu field's row used to be taken by marking the item directly, which
+    // is a pick that never happened: the pop-up, the path into it and the
+    // marking that comes back out of it all went untested, and "choosing a
+    // different option crashes the app" lived in exactly that gap (the field
+    // Go()ed its OWN menu, whose supermenu is attached to the window the
+    // pop-up's tracking thread may not touch: "Looper must be locked"). So a
+    // menu field is driven here the way a click drives it -- a mouse-down on
+    // the FIELD opens the pop-up, and the row is taken with the kit's own
+    // keyboard navigation (Down moves the selection, Return takes it:
+    // BMenu::KeyDown -> fChosenItem -> the item Go() returns). The keyboard is
+    // the only way in for a test: the tracking loop reads the pointer and the
+    // buttons from the INPUT SERVER, never from messages, so a posted click can
+    // never land on a row. Everything else about the pick is the real path:
+    // Show(), the tracking thread, the row's own message, and the marking
+    // OpenMenu does when Go() returns.
+    auto findPopup = [&]() -> BWindow* {
+        // The pop-up's window is a BMenuWindow, which be_app->CountWindows()
+        // filters out -- so it is found through its looper thread instead:
+        // BWindow names its thread "w>" + the title, and every menu field in
+        // this app opens one named "pick" (DawMenuField::OpenMenu). Only one
+        // pop-up can be open at a time (the window whose field opened it is
+        // inside Go() until it closes), so the name cannot be ambiguous.
+        int32 cookie = 0;
+        thread_info info;
+        while (get_next_thread_info(0, &cookie, &info) == B_OK) {
+            BWindow* w = dynamic_cast<BWindow*>(
+                BLooper::LooperForThread(info.thread));
+            if (w != nullptr && std::strcmp(WindowTitle(w), "pick") == 0)
+                return w;
+        }
+        return nullptr;
+    };
+    auto postPopupKey = [&](BWindow* popup, uint8 key) {
+        char bytes[2] = { (char)key, 0 };
+        BMessage m(B_KEY_DOWN);
+        m.AddString("bytes", bytes);
+        m.AddInt32("modifiers", 0);
+        // Through the FOCUS token: only a message the window takes as its own
+        // focus event reaches the view that has focus, which is the menu
+        // (docs/HANDOFF.md; the window keeps the preferred handler equal to it).
+        BMessenger((const BHandler*)nullptr, popup).SendMessage(&m);
+    };
+    // A key for ONE view, posted with the view's own token: BView's own
+    // MessageReceived hands it to KeyDown (the pop-up above needs the other
+    // token, the focus one, because the menu is reached through the window).
+    auto postViewKey = [](BView* view, uint8 key) {
+        char bytes[2] = { (char)key, 0 };
+        BMessage m(B_KEY_DOWN);
+        m.AddString("bytes", bytes);
+        m.AddInt32("modifiers", 0);
+        BMessenger(view).SendMessage(&m);
+    };
+    // A click on `view`. The message goes to the VIEW -- a real event carries
+    // the view's token, and a message addressed to the window has none (BWindow
+    // then falls back to the last view the mouse moved over, which is none
+    // here) -- with both the view-local point and the screen point, because the
+    // kit converts the SCREEN one into the be:view_where the view reads.
+    auto clickView = [](BWindow* owner, BView* view) {
+        BPoint local, screen;
+        if (owner == nullptr || view == nullptr) return false;
+        if (owner->LockWithTimeout(1000000) != B_OK) return false;
+        local = view->Bounds().LeftTop()
+              + BPoint(view->Bounds().Width() * 0.5f,
+                       view->Bounds().Height() * 0.5f);
+        screen = view->ConvertToScreen(local);
+        owner->Unlock();
+        const uint32 whats[2] = { B_MOUSE_DOWN, B_MOUSE_UP };
+        for (uint32 what : whats) {
+            BMessage m(what);
+            m.AddInt32("buttons", what == B_MOUSE_DOWN ? 1 : 0);
+            m.AddInt32("clicks", 1);
+            m.AddInt32("modifiers", 0);
+            m.AddPoint("where", local);
+            m.AddPoint("screen_where", screen);
+            BMessenger(view).SendMessage(&m);
+        }
+        return true;
+    };
+    // The row a field's own menu marks, read under the window's lock.
+    auto markedRow = [&](BMenuField* field) -> int {
+        BWindow* w = findPrefs();
+        int out = -1;
+        if (w == nullptr || field == nullptr) return -1;
+        if (w->LockWithTimeout(1000000) != B_OK) return -1;
+        if (BMenu* m = field->Menu()) {
+            if (BMenuItem* marked = m->FindMarked()) out = m->IndexOf(marked);
+        }
+        w->Unlock();
+        return out;
+    };
+    // Click a menu field and take row `row` from the pop-up that opens. Returns
+    // the row the field ends up showing; -1 means no pop-up opened at all.
+    auto pickRow = [&](BMenuField* field, int row) -> int {
+        if (!clickView(findPrefs(), field)) return -1;
+        BWindow* popup = nullptr;
+        for (int i = 0; i < 150 && popup == nullptr; i++) {   // up to 3 s
+            snooze(20000);
+            popup = findPopup();
+        }
+        if (popup == nullptr) return -1;
+        Shot("preferences-popup");     // the pop-up is up: this is where it shows
+        // BPopUpMenu::_StartTrack reads a pick made inside the click speed as
+        // the click that OPENED the menu: it tracks a second time and throws
+        // that pick away. The keys wait that window out, so what they take is
+        // what Go() returns.
+        bigtime_t clickSpeed = 0;
+        if (get_click_speed(&clickSpeed) != B_OK) clickSpeed = 500000;
+        snooze(clickSpeed + 250000);
+        // Down counts from wherever the tracking loop has the selection: it
+        // takes the row under the REAL pointer (the input server again), which
+        // is no row at all on a machine nobody is touching, but the test asks
+        // the menu where its pointer is rather than assuming. -1 = outside.
+        int32 startRow = -1, rows = 0;
+        if (popup->LockWithTimeout(1000000) == B_OK) {
+            if (BMenu* menu = dynamic_cast<BMenu*>(popup->FindView("pick"))) {
+                rows = menu->CountItems();
+                BPoint where;
+                uint32 buttons = 0;
+                menu->GetMouse(&where, &buttons);
+                for (int32 i = 0; i < rows; i++) {
+                    BMenuItem* it = menu->ItemAt(i);
+                    if (it != nullptr && it->Frame().Contains(where)) {
+                        startRow = i;
+                        break;
+                    }
+                }
+            }
+            popup->Unlock();
+        }
+        int presses = row + 1;                       // out of no selection
+        if (startRow >= 0 && rows > 0)
+            presses = (row - startRow + rows) % rows;
+        for (int i = 0; i < presses; i++) {
+            postPopupKey(popup, B_DOWN_ARROW);
+            snooze(60000);
+        }
+        postPopupKey(popup, B_ENTER);
+        for (int i = 0; i < 150 && findPopup() != nullptr; i++) snooze(20000);
+        if (findPopup() != nullptr) {      // a stuck menu: close it, and say so
+            postPopupKey(popup, B_ESCAPE);
+            snooze(300000);
+            return -1;
+        }
+        for (int i = 0; i < 100; i++) {
+            const int marked = markedRow(field);
+            if (marked == row) return marked;
+            snooze(20000);
+        }
+        return markedRow(field);
+    };
+
+    // The controls, taken under the lock (the window is not rebuilt from here
+    // on, so the pointers stay good).
+    BMenuField* fBuffer = nullptr;
+    BMenuField* fRate = nullptr;
+    BMenuField* fCountIn = nullptr;
+    BMenuField* fSound = nullptr;
+    BMenuField* fScale = nullptr;
+    BMenuField* fAutosave = nullptr;
+    BMenuField* fDevice = nullptr;
+    BCheckBox*  fMonitor = nullptr;
+    BCheckBox*  fPreview = nullptr;
+    BCheckBox*  fDark = nullptr;
+    BSlider*    fLevel = nullptr;
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            PreferencesWindow* p = static_cast<PreferencesWindow*>(w);
+            fBuffer = p->BufferField();     fRate = p->RateField();
+            fCountIn = p->CountInField();   fSound = p->SoundField();
+            fScale = p->ScaleField();       fAutosave = p->AutosaveField();
+            fDevice = p->DeviceField();
+            fMonitor = p->MonitorCheck();   fPreview = p->PreviewCheck();
+            fDark = p->DarkCheck();         fLevel = p->LevelSlider();
+            w->Unlock();
+        }
+    }
+    CHECK(fBuffer != nullptr && fRate != nullptr && fCountIn != nullptr
+          && fSound != nullptr && fScale != nullptr && fAutosave != nullptr
+          && fDevice != nullptr && fMonitor != nullptr && fPreview != nullptr
+          && fDark != nullptr && fLevel != nullptr);
+
+    // Count-in first, as a REAL pick, for the rule the vocabulary pass fixed:
+    // a setting is not a commit. What the test takes is whatever the run did
+    // not inherit (2 bars or 4), so the check cannot be satisfied by a window
+    // that applies on the pick.
+    const int countInRow = before.countInBars == 4 ? 2 : 3;   // kCountInChoices
+    const int wantCountIn = kCountInChoices[countInRow];
+    CHECK(pickRow(fCountIn, countInRow) == countInRow);
+    snooze(200000);
+    CHECK((int)win->CountInBarsForTest() == before.countInBars);  // app untouched
+    CHECK(shownValues().countInBars == wantCountIn);              // window shows it
+
+    // Buffer size: "1024 frames". What the row PROMISES is "applied at the next
+    // Play" -- the device is not re-opened under a running transport -- so both
+    // halves are checked below: the value the app now holds, and the engine the
+    // next Play builds with it.
+    CHECK(pickRow(fBuffer, 3) == 3);              // kBufferFrameChoices[3] = 1024
+    // The rate a NEW project starts at (kSampleRateChoices[0] = 44100).
+    CHECK(pickRow(fRate, 0) == 0);
+    // The click's sound: the third row, "Wood block" (kMetronomeSoundCount).
+    CHECK(pickRow(fSound, 2) == 2);
+    // The look: 125% (kUiScaleChoices[2]), applied process-wide on Apply.
+    CHECK(pickRow(fScale, 2) == 2);
+    // Autosave: "Off" (kAutosaveChoices[0]) -- the runner itself is checked
+    // after Apply, which is what the row really controls.
+    CHECK(pickRow(fAutosave, 0) == 0);
+
+    // The level: the slider is driven with its own keys -- Home puts the thumb
+    // at 0 and each Right takes it one step (BSlider::KeyDown, which posts the
+    // widget's own modification message, the readout's only source). A CLICK is
+    // the wrong instrument here: BSlider::MouseDown takes its value from
+    // wherever the REAL pointer is (it reads the input server, not the message),
+    // and that is exactly what a test does not control. The readout beside the
+    // slider is a cached label rather than a live read, so it is held to the
+    // widget's own value here, to the app's gain after Apply, and to the
+    // engine's -- three places a wrong number would show.
+    const int wantLevelPct = 65;
+    auto levelReadoutNow = [&]() {
+        int pct = -1;
+        char text[32] = { 0 };
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            pct = (int)fLevel->Value();
+            if (BStringView* label =
+                    dynamic_cast<BStringView*>(w->FindView("mlv")))
+                std::snprintf(text, sizeof(text), "%s", label->Text());
+            w->Unlock();
+        }
+        return std::make_pair(pct, std::string(text));
+    };
+    postViewKey(fLevel, B_HOME);
+    snooze(200000);
+    CHECK(levelReadoutNow() == std::make_pair(0, std::string("0%")));
+    for (int i = 0; i < wantLevelPct; i++) {
+        postViewKey(fLevel, B_RIGHT_ARROW);
+        if ((i % 16) == 15) snooze(40000);   // let the window keep up
+    }
+    snooze(250000);
+    char wantReadout[32];
+    std::snprintf(wantReadout, sizeof(wantReadout), "%d%%", wantLevelPct);
+    CHECK(levelReadoutNow() == std::make_pair(wantLevelPct,
+                                              std::string(wantReadout)));
+    const int levelPct = wantLevelPct;
+
+    // The ticks, clicked the way a user clicks them (down AND up: the box
+    // toggles on the release). Each flips what it shows, so the test does not
+    // care what the run inherited -- and dark mode is checked on its effect
+    // (the whole look) after Apply.
+    const bool wantMonitor = !before.monitorInput;
+    const bool wantPreview = !before.previewNotes;
+    const bool wantDark = !before.darkMode;
+    CHECK(clickView(findPrefs(), fMonitor));
+    snooze(200000);
+    CHECK(clickView(findPrefs(), fPreview));
+    snooze(200000);
+    CHECK(clickView(findPrefs(), fDark));
+    snooze(200000);
+    CHECK(shownValues().monitorInput == wantMonitor);
+    CHECK(shownValues().previewNotes == wantPreview);
+    CHECK(shownValues().darkMode == wantDark);
+
+    // The default project folder: the button opens the folder panel (a user
+    // cannot see that from the row), and what comes back from it is an
+    // entry_ref -- so the test posts the message the panel itself posts.
+    const char* kPrefsDir = "/tmp/haiku_daw_ui_prefsdir";
+    create_directory(kPrefsDir, 0755);         // (it may already exist)
+    {
+        // FindView is a BView call: it needs the window's lock like any other.
+        BWindow* w = findPrefs();
+        BView* choose = nullptr;
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            choose = w->FindView("cd");
+            w->Unlock();
+        }
+        CHECK(choose != nullptr);
+        CHECK(clickView(w, choose));
+    }
+    CHECK(WaitFor([&] { return WindowUp("Default Project Folder"); }));
+    {
+        BEntry entry(kPrefsDir);
+        entry_ref ref;
+        CHECK(entry.GetRef(&ref) == B_OK);
+        BMessage m(kMsgPrefsDirRef);
+        m.AddRef("refs", &ref);
+        BMessenger(findPrefs()).SendMessage(&m);
+        snooze(300000);
+        // What the app makes of the ref is the resolved path (a folder panel
+        // hands back a ref; the row shows where it points), so the test resolves
+        // it the same way rather than assuming the spelling it wrote.
+        BPath resolved(&ref);
+        CHECK(shownValues().projectDir == resolved.Path());
+    }
+    // The folder panel goes away the way its Cancel does -- HIDE it, never
+    // Quit: the window keeps it for the next time, the way MainWindow keeps
+    // its own panels. (HideOtherWindows(prefs) would take the MAIN window with
+    // it, which every later test needs on screen.)
+    if (BWindow* panel = FindVisibleWindow("Default Project Folder")) {
+        if (panel->LockWithTimeout(1000000) == B_OK) {
+            panel->Hide();
+            panel->Unlock();
+        }
+    }
+    snooze(200000);
+
+    // The output-device row is a DISABLED placeholder (M5.3 owns the picker and
+    // has not landed), and a disabled control that does what it says it cannot
+    // do is worse than no control: a click on it must open nothing.
+    CHECK(clickView(findPrefs(), fDevice));
+    snooze(400000);
+    CHECK(findPopup() == nullptr);
+
+    // Apply is a real button of the window: invoking it is what a click does,
+    // and it commits the whole view.
+    {
+        BWindow* w = findPrefs();
+        if (w != nullptr && w->LockWithTimeout(1000000) == B_OK) {
+            if (DawButton* apply = dynamic_cast<DawButton*>(w->FindView("ap")))
+                apply->Invoke();
+            w->Unlock();
+        }
+    }
+
+    // What the app took, row by row. The window's own push-back is the first
+    // witness for every row (it is what the app says it now holds).
+    CHECK(WaitFor([&] { return (int)win->CountInBarsForTest() == wantCountIn; }));
     CHECK(WaitFor([&] { return win->BufferFramesForTest() == 1024; }));
-    win->PostMessage(MSG_PLAY);
-    CHECK(WaitFor([&] { return win->EngineBufferFramesForTest() == 1024; }));
-    win->PostMessage(MSG_STOP);
-    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
-
-    // The UI scale: applied NOW, process-wide (Theme.h), and the app's own
-    // record of it moves with it — a record that disagreed with the screen is
-    // how a 125% row ended up over a 100% layout.
-    CHECK(edit([](PreferencesWindow* w) {
-        BMenu* m = w->ScaleField()->Menu();
-        for (int32 i = 0; i < m->CountItems(); i++)
-            m->ItemAt(i)->SetMarked(i == 2);      // kUiScaleChoices[2] = 1.25
-    }));
+    CHECK(WaitFor([&] { return win->MonitorInputForTest() == wantMonitor; }));
+    CHECK(WaitFor([&] { return win->PreviewNotesForTest() == wantPreview; }));
+    CHECK(WaitFor([&] { return win->AutosaveArmedForTest() == false; }));
+    CHECK(WaitFor([&] { return ActiveThemeMode()
+                               == (wantDark ? ThemeMode::Dark
+                                            : ThemeMode::System); }));
+    // The input monitor is not only a transport flag: it is the timeline's own
+    // "I" lamp, so the row is checked where a user sees it.
+    {
+        bool lamp = false;
+        if (win->LockWithTimeout(1000000) == B_OK) {
+            if (TimelineView* tv = dynamic_cast<TimelineView*>(
+                    win->FindView("timeline")))
+                lamp = tv->MonitorInputOn();
+            win->Unlock();
+        }
+        CHECK(lamp == wantMonitor);
+    }
+    // The UI scale: applied process-wide (Theme.h), and the app's own record of
+    // it moves with it -- a record that disagreed with the screen is how a 125%
+    // row ended up over a 100% layout.
     CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
     CHECK(shownValues().uiScale == 1.25f);
-
-    // Dark mode: the control that moved out of the View menu still flips the
-    // whole look (TestThemeMode covers the mode switch itself).
-    CHECK(edit([&](PreferencesWindow* w) {
-        w->DarkCheck()->SetValue(ActiveThemeMode() == ThemeMode::Dark
-                                 ? B_CONTROL_OFF : B_CONTROL_ON);
-    }));
-    CHECK(WaitFor([&] { return ActiveThemeMode() != beforeMode; }));
+    {
+        const PrefsView v = shownValues();
+        CHECK(v.defaultSampleRate == 44100);
+        CHECK(v.metronomeSound == 2);
+        CHECK(v.autosaveSeconds == 0);
+        CHECK(std::fabs(v.metronomeLevel - (float)levelPct / 100.0f) < 0.02f);
+    }
+    // ... and the engine the next Play builds carries the buffer size AND the
+    // click's own sound and level (a row whose value nothing reads would pass a
+    // state check and still be a dead control).
+    win->PostMessage(MSG_PLAY);
+    CHECK(WaitFor([&] { return win->EngineBufferFramesForTest() == 1024; }));
+    CHECK(win->EngineMetronomeSoundForTest() == 2);
+    CHECK(std::fabs(win->EngineMetronomeGainForTest()
+                    - (float)levelPct / 100.0f) < 0.02f);
+    win->PostMessage(MSG_STOP);
+    CHECK(WaitFor([&] { return !win->IsPlaying(); }));
 
     // Everything the window did is in the settings file: reload it the way a
     // restart would and read the values back out of the window. The SCALE is
@@ -8937,36 +9222,44 @@ static void TestPreferences(MainWindow* win, Project& project) {
     snooze(400000);
     {
         const PrefsView v = shownValues();
-        CHECK(v.countInBars == 4);        // the choices the window made came
-        CHECK(v.bufferFrames == 1024);    // back out of the settings file
+        CHECK(v.countInBars == wantCountIn);   // the row's own choice came
+        CHECK(v.bufferFrames == 1024);         // back out of the settings file
         CHECK(v.uiScale == 1.25f);
+        CHECK(v.defaultSampleRate == 44100);
+        CHECK(v.metronomeSound == 2);
+        CHECK(v.autosaveSeconds == 0);
+        CHECK(v.monitorInput == wantMonitor);
+        CHECK(v.previewNotes == wantPreview);
+        CHECK(v.darkMode == (ActiveThemeMode() == ThemeMode::Dark));
     }
     CHECK(WaitFor([&] { return std::fabs(ThemeScale() - 1.25f) < 1e-3f; }));
 
-    // Put the run's own state back, by value: the settings file is one of the
-    // files the next test run inherits, and a run that crashed before this
-    // point leaves the values it had reached.
-    CHECK(edit([&](PreferencesWindow* w) {
-        return markValue(w->BufferField()->Menu(), beforeBuffer);
-    }));
-    CHECK(WaitFor([&] { return win->BufferFramesForTest() == beforeBuffer; }));
-    CHECK(edit([&](PreferencesWindow* w) {
-        return markValue(w->CountInField()->Menu(), beforeCountIn);
-    }));
-    CHECK(WaitFor([&] { return win->CountInBarsForTest() == beforeCountIn; }));
-    CHECK(edit([&](PreferencesWindow* w) {
-        return markValue(w->ScaleField()->Menu(),
-                         (int)(beforeScalePref * 100.0f + 0.5f));
+    // Put the run's own state back -- every row of the window, by VALUE, in the
+    // window's own shape (SetValues is the push the app itself uses to show
+    // what it took), committed through the same button a user presses.
+    CHECK(edit([&](PreferencesWindow* w) { w->SetValues(before); }));
+    CHECK(WaitFor([&] {
+        return win->BufferFramesForTest() == before.bufferFrames
+            && (int)win->CountInBarsForTest() == before.countInBars
+            && win->MonitorInputForTest() == before.monitorInput
+            && win->PreviewNotesForTest() == before.previewNotes
+            && win->AutosaveArmedForTest() == (before.autosaveSeconds > 0);
     }));
     CHECK(WaitFor([&] {
         return std::fabs(ThemeScale()
-                         - (beforeScalePref > 0.0f ? beforeScalePref
-                                                   : beforeScaleLive)) < 1e-3f;
+                         - (before.uiScale > 0.0f ? before.uiScale
+                                                  : beforeScaleLive)) < 1e-3f;
     }));
+    if (win->EngineMetronomeSoundForTest() >= 0) {   // a stopped engine stays
+        CHECK(WaitFor([&] {
+            return win->EngineMetronomeSoundForTest() == before.metronomeSound;
+        }));
+    }
     if (ActiveThemeMode() != beforeMode) {
         win->PostMessage(MSG_THEME_MODE);
         CHECK(WaitFor([&] { return ActiveThemeMode() == beforeMode; }));
     }
+    std::remove(kPrefsDir);      // the folder the test made
 
     HideOtherWindows(win);   // the window is ours; put it away
     CHECK(WaitQuiet());
@@ -9535,32 +9828,18 @@ static void TestLv2InsertPresets(MainWindow* win, Project& project) {
 #endif
 
 static int32 TestThread(void*) {
-    // A leftover recovery file makes the window open its "Recover?" alert at
-    // startup, and that alert BLOCKS the window thread until someone answers
-    // it -- every check that needs the lock then times out, which reads
-    // exactly like a hang (the same shape as M1.1's crash-dialog lesson).
-    // The recovery prompt has its own coverage elsewhere; a test run starts
-    // from a clean slate.
-    {
-        BPath settings;
-        if (ProjectDocument::SettingsPath(settings) == B_OK) {
-            BPath recovery(settings);
-            if (recovery.Append("recovery.dawproj") == B_OK)
-                BEntry(recovery.Path()).Remove();
-            // ... and the SETTINGS file itself. It persists the panes (M1.4:
-            // `uiinsp`, `uidockpage`), so a run that ended with the inspector
-            // hidden makes every LATER run start with it hidden -- and
-            // TestDockedEditor's two checks assume it starts visible, so the
-            // toggle sequence comes out inverted and the run that follows
-            // leaves it detached (which then breaks TestDockPages' plugin
-            // pick, whose message targets the inspector). One run's pane state
-            // must not decide the next run's result: same rule as the recovery
-            // file above, and the same wedge the HANDOFF records.
-            BPath cfg(settings);
-            if (cfg.Append("settings") == B_OK)
-                BEntry(cfg.Path()).Remove();
-        }
-    }
+    // A leftover recovery file makes the window open its "Recover?" alert when
+    // the window is built, and that alert BLOCKS the window thread until
+    // someone answers it -- every check that needs the lock then times out,
+    // which reads exactly like a hang (the same shape as M1.1's crash-dialog
+    // lesson). main() removes the file before the application object exists
+    // (see there); this is the belt for the braces: the file can come back
+    // between that removal and the window's read of it, because ANOTHER
+    // instance of the app may be running on this machine (the user's own, which
+    // rewrites its recovery file on every autosave). The answer is DISCARD --
+    // the button that leaves this run's own project alone, which is what the
+    // first test, and every screenshot after it, expects to see.
+    AnswerAlertWhenUp("Recover", 0, 4000000);
 
     // One project for the whole run: windows come and go, the model stays, and
     // nothing is freed while a looper could still be reading it.
@@ -9649,6 +9928,25 @@ int main() {
     // Line-buffer stdout: with a pipe (ctest) the progress lines would sit in
     // the buffer until exit, and a hung run would show nothing at all.
     setvbuf(stdout, nullptr, _IOLBF, 0);
+
+    // The run starts from a clean slate, and it does so BEFORE the application
+    // object exists, because the window reads the recovery file while it is
+    // being built: a leftover recovery file makes it open a "Recover?" alert
+    // that blocks its thread, and a leftover SETTINGS file decides the panes
+    // this run starts with (M1.4: `uiinsp`, `uidockpage` -- a run that ended
+    // with the inspector hidden made the next run's docked-editor checks come
+    // out inverted). One run must not decide the next one's result.
+    {
+        BPath settings;
+        if (ProjectDocument::SettingsPath(settings) == B_OK) {
+            BPath recovery(settings);
+            if (recovery.Append("recovery.dawproj") == B_OK)
+                BEntry(recovery.Path()).Remove();
+            BPath cfg(settings);
+            if (cfg.Append("settings") == B_OK)
+                BEntry(cfg.Path()).Remove();
+        }
+    }
 
     BApplication app("application/x-haiku-daw-uitests");
     if (app.InitCheck() != B_OK) {
